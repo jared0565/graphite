@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from graphite.review import Change, ReviewError, discover_git_changes, normalize_explicit_changes
+from graphite.review import (
+    Change,
+    ReviewError,
+    _parse_porcelain,
+    discover_git_changes,
+    normalize_explicit_changes,
+)
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -93,3 +99,7 @@ def test_discover_git_changes_rejects_non_git_directory(tmp_path: Path) -> None:
 def test_discover_git_changes_rejects_non_positive_timeout(tmp_path: Path) -> None:
     with pytest.raises(ReviewError, match="timeout"):
         discover_git_changes(tmp_path, timeout_seconds=0)
+
+
+def test_parse_porcelain_maps_type_change_to_modified() -> None:
+    assert _parse_porcelain(b"T  changed.bin\0") == [Change("changed.bin", "modified")]

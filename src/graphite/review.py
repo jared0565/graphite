@@ -93,7 +93,7 @@ def _parse_porcelain(output: bytes) -> list[Change]:
             raise ReviewError("malformed Git status output")
 
         status_bytes = record[:2]
-        if any(value not in b" MADRCU?!" for value in status_bytes):
+        if any(value not in b" MADRCUT?!" for value in status_bytes):
             raise ReviewError("malformed Git status output: invalid status")
 
         is_rename = b"R" in status_bytes or b"C" in status_bytes
