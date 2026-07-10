@@ -168,6 +168,26 @@ def test_stats_includes_breakdowns_and_top_degree_nodes(tmp_path: Path) -> None:
     assert "community_count" in stats
 
 
+def test_query_reports_match_type_and_alternates(tmp_path: Path) -> None:
+    """How a token matched must be visible, so fuzzy/ambiguous picks aren't silent."""
+    _write(tmp_path / "src" / "a.ts", "export function dupe() { return 1; }\n")
+    _write(tmp_path / "src" / "b.ts", "export function dupe() { return 2; }\n")
+    result = _extract(tmp_path, "disabled")
+    g = build_graph(result.nodes, result.edges)
+
+    exact = query(g, "calls src_a_dupe")
+    assert exact["match"] == {"input": "src_a_dupe", "node": "src_a_dupe", "type": "exact-id"}
+
+    by_name = query(g, "calls dupe")
+    assert by_name["match"]["type"] == "name"
+    assert by_name["match"]["alternates"], "second same-named fn must be reported"
+    assert {by_name["node"], *by_name["match"]["alternates"]} == {"src_a_dupe", "src_b_dupe"}
+
+    by_path = query(g, "depends-on src/a.ts")
+    assert by_path["match"]["type"] == "path-suffix"
+    assert by_path["node"] == "src_a"
+
+
 def test_not_found_error_suggests_close_candidates(tmp_path: Path) -> None:
     """Agents pass slightly-wrong node refs; the error must offer corrections."""
     _ts_fixture(tmp_path)

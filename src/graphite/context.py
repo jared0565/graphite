@@ -6,7 +6,7 @@ from typing import Any
 
 import networkx as nx
 
-from .query import _find_node
+from .query import _find_node_detail
 
 _TEST_SUFFIXES = (
     ".test.ts",
@@ -37,10 +37,14 @@ def build_context(
     missing: list[str] = []
     start_nodes: list[str] = []
     for item in inputs:
-        node = _find_node(g, item)
-        if node:
+        detail = _find_node_detail(g, item)
+        if detail:
+            node, match_type, alternates = detail
             start_nodes.append(node)
-            matched.append({"input": item, "node": _node_summary(g, node)})
+            entry: dict[str, Any] = {"input": item, "node": _node_summary(g, node), "match_type": match_type}
+            if alternates:
+                entry["alternates"] = alternates
+            matched.append(entry)
         else:
             missing.append(item)
 

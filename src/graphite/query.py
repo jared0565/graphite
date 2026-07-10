@@ -31,26 +31,30 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
     verb = tokens[0]
 
     if verb in ("callers", "called-by", "called_by"):
-        node_id = _find_node(g, " ".join(tokens[1:]))
-        if not node_id:
-            return _not_found(g, " ".join(tokens[1:]))
+        token = " ".join(tokens[1:])
+        detail = _find_node_detail(g, token)
+        if not detail:
+            return _not_found(g, token)
+        node_id = detail[0]
         callers = [
             _node_view(g, p)
             for p in sorted(g.predecessors(node_id))
             if g[p][node_id].get("relation") in _CALL_RELATIONS
         ]
-        return {"node": node_id, "count": len(callers), "callers": callers}
+        return {"node": node_id, "match": _match_meta(token, detail), "count": len(callers), "callers": callers}
 
     if verb in ("calls", "callees"):
-        node_id = _find_node(g, " ".join(tokens[1:]))
-        if not node_id:
-            return _not_found(g, " ".join(tokens[1:]))
+        token = " ".join(tokens[1:])
+        detail = _find_node_detail(g, token)
+        if not detail:
+            return _not_found(g, token)
+        node_id = detail[0]
         callees = [
             _node_view(g, s)
             for s in sorted(g.successors(node_id))
             if g[node_id][s].get("relation") in _CALL_RELATIONS
         ]
-        return {"node": node_id, "count": len(callees), "calls": callees}
+        return {"node": node_id, "match": _match_meta(token, detail), "count": len(callees), "calls": callees}
 
     if verb == "reaches":
         # reaches <a> -> <b> over call/reference edges only.
@@ -60,18 +64,20 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
             b = " ".join(tokens[arrow + 1 :])
         except ValueError:
             return {"error": "reaches query format: reaches <a> -> <b>"}
-        src = _find_node(g, a)
-        dst = _find_node(g, b)
-        if not src:
+        src_detail = _find_node_detail(g, a)
+        dst_detail = _find_node_detail(g, b)
+        if not src_detail:
             return _not_found(g, a, label="source")
-        if not dst:
+        if not dst_detail:
             return _not_found(g, b, label="target")
+        src, dst = src_detail[0], dst_detail[0]
         p = _restricted_call_path(g, src, dst)
         if p is None:
             return {"error": f"no call path from {src} to {dst}"}
         return {
             "source": src,
             "target": dst,
+            "match": {"source": _match_meta(a, src_detail), "target": _match_meta(b, dst_detail)},
             "length": len(p) - 1,
             "path": [_node_view(g, n) for n in p],
         }
@@ -102,12 +108,15 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
         }
 
     if verb in ("depends-on", "depends_on", "out"):
-        node_id = _find_node(g, " ".join(tokens[1:]))
-        if not node_id:
-            return _not_found(g, " ".join(tokens[1:]))
+        token = " ".join(tokens[1:])
+        detail = _find_node_detail(g, token)
+        if not detail:
+            return _not_found(g, token)
+        node_id = detail[0]
         neighbors = sorted(g.successors(node_id))
         return {
             "node": node_id,
+            "match": _match_meta(token, detail),
             "count": len(neighbors),
             "depends_on": [
                 {"id": n, "name": g.nodes[n].get("name", n), "kind": g.nodes[n].get("kind", "unknown")}
@@ -116,12 +125,15 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
         }
 
     if verb in ("imported-by", "imported_by", "in"):
-        node_id = _find_node(g, " ".join(tokens[1:]))
-        if not node_id:
-            return _not_found(g, " ".join(tokens[1:]))
+        token = " ".join(tokens[1:])
+        detail = _find_node_detail(g, token)
+        if not detail:
+            return _not_found(g, token)
+        node_id = detail[0]
         neighbors = sorted(g.predecessors(node_id))
         return {
             "node": node_id,
+            "match": _match_meta(token, detail),
             "count": len(neighbors),
             "imported_by": [
                 {"id": n, "name": g.nodes[n].get("name", n), "kind": g.nodes[n].get("kind", "unknown")}
@@ -137,12 +149,13 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
             b = " ".join(tokens[arrow + 1 :])
         except ValueError:
             return {"error": "path query format: path <a> -> <b>"}
-        src = _find_node(g, a)
-        dst = _find_node(g, b)
-        if not src:
+        src_detail = _find_node_detail(g, a)
+        dst_detail = _find_node_detail(g, b)
+        if not src_detail:
             return _not_found(g, a, label="source")
-        if not dst:
+        if not dst_detail:
             return _not_found(g, b, label="target")
+        src, dst = src_detail[0], dst_detail[0]
         try:
             p = nx.shortest_path(g, src, dst)
         except nx.NetworkXNoPath:
@@ -150,6 +163,7 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
         return {
             "source": src,
             "target": dst,
+            "match": {"source": _match_meta(a, src_detail), "target": _match_meta(b, dst_detail)},
             "length": len(p) - 1,
             "path": [
                 {"id": n, "name": g.nodes[n].get("name", n), "kind": g.nodes[n].get("kind", "unknown")}
@@ -158,11 +172,14 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
         }
 
     if verb in ("community-of", "community_of"):
-        node_id = _find_node(g, " ".join(tokens[1:]))
-        if not node_id:
-            return _not_found(g, " ".join(tokens[1:]))
+        token = " ".join(tokens[1:])
+        detail = _find_node_detail(g, token)
+        if not detail:
+            return _not_found(g, token)
+        node_id = detail[0]
         return {
             "node": node_id,
+            "match": _match_meta(token, detail),
             "community": g.nodes[node_id].get("community"),
             "name": g.nodes[node_id].get("name", node_id),
         }
@@ -196,26 +213,53 @@ def _candidates(g: nx.DiGraph, token: str, limit: int = 5) -> list[dict[str, Any
     return [_node_view(g, n) for _score, n in scored[:limit]]
 
 
+def _find_node_detail(g: nx.DiGraph, token: str) -> tuple[str, str, list[str]] | None:
+    """Match a node and report HOW it matched.
+
+    Returns (node_id, match_type, alternates) where match_type is one of
+    "exact-id", "name", "path-suffix", or "fuzzy", and alternates lists other
+    nodes that matched equally well (so a silently-wrong pick is visible to the
+    caller). Ties are broken deterministically instead of by insertion order.
+    """
+    token = token.strip().lower().strip("`")
+    if token in g:
+        return token, "exact-id", []
+
+    name_hits = sorted(n for n in g.nodes() if g.nodes[n].get("name", "").lower() == token)
+    if name_hits:
+        return name_hits[0], "name", name_hits[1:4]
+
+    normalized = token.replace("\\", "/")
+    path_hits = sorted(
+        n
+        for n in g.nodes()
+        if (sf := g.nodes[n].get("source_file", "")) and sf.lower().replace("\\", "/").endswith(normalized)
+    )
+    if path_hits:
+        # Prefer the file node itself over symbols defined in the file.
+        file_hits = [n for n in path_hits if g.nodes[n].get("kind") == "file"]
+        chosen = file_hits[0] if file_hits else path_hits[0]
+        return chosen, "path-suffix", [n for n in path_hits if n != chosen][:4]
+
+    fuzzy_hits = sorted((n for n in g.nodes() if token in n), key=lambda n: (len(n), n))
+    if fuzzy_hits:
+        return fuzzy_hits[0], "fuzzy", fuzzy_hits[1:4]
+    return None
+
+
 def _find_node(g: nx.DiGraph, token: str) -> str | None:
     """Match a node by exact id, name, or file path."""
-    token = token.strip().lower().strip("`")
-    # Exact id.
-    if token in g:
-        return token
-    # Match by name.
-    for n in g.nodes():
-        if g.nodes[n].get("name", "").lower() == token:
-            return n
-    # Match by source_file suffix.
-    for n in g.nodes():
-        sf = g.nodes[n].get("source_file", "")
-        if sf and sf.lower().endswith(token):
-            return n
-    # Fuzzy contains.
-    for n in g.nodes():
-        if token in n:
-            return n
-    return None
+    detail = _find_node_detail(g, token)
+    return detail[0] if detail else None
+
+
+def _match_meta(token: str, detail: tuple[str, str, list[str]]) -> dict[str, Any]:
+    """Query-response metadata describing how an input token was matched."""
+    node_id, match_type, alternates = detail
+    meta: dict[str, Any] = {"input": token, "node": node_id, "type": match_type}
+    if alternates:
+        meta["alternates"] = alternates
+    return meta
 
 
 def _node_view(g: nx.DiGraph, n: str) -> dict[str, Any]:
