@@ -7,6 +7,22 @@ from pathlib import Path
 from typing import Any
 
 
+def default_projects_root() -> Path:
+    """Base folder for daemon/init defaults.
+
+    `GRAPHITE_PROJECTS_ROOT` overrides everything so the tool is not welded to
+    this machine's layout; `F:/Projects` remains the legacy fallback when it
+    exists, and the current directory is the portable last resort.
+    """
+    env = os.environ.get("GRAPHITE_PROJECTS_ROOT")
+    if env:
+        return Path(env)
+    legacy = Path("F:/Projects")
+    if legacy.exists():
+        return legacy
+    return Path(".")
+
+
 @dataclass
 class Config:
     """Immutable runtime configuration."""

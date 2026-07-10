@@ -48,6 +48,17 @@ def test_bootstrap_preserves_existing_agents_content(tmp_path: Path) -> None:
     assert "## Automatic Graphite Consult" in text
 
 
+def test_projects_root_env_overrides_defaults(tmp_path: Path, monkeypatch) -> None:
+    from graphite.bootstrap import _default_daemon_base
+    from graphite.config import default_projects_root
+
+    root = tmp_path / "Workspace"
+    monkeypatch.setenv("GRAPHITE_PROJECTS_ROOT", str(root))
+
+    assert default_projects_root() == root
+    assert _default_daemon_base(tmp_path / "some" / "app") == root
+
+
 def test_bootstrap_reports_daemon_visibility(tmp_path: Path) -> None:
     base = tmp_path / "Projects"
     project = base / "app"

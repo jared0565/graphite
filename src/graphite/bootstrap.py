@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -166,6 +167,9 @@ def daemon_visibility(project_root: Path, *, daemon_base: Path | None = None) ->
 
 
 def _default_daemon_base(project_root: Path) -> Path:
+    env = os.environ.get("GRAPHITE_PROJECTS_ROOT")
+    if env:
+        return Path(env)
     resolved = project_root.resolve()
     for parent in (resolved, *resolved.parents):
         if parent.as_posix().lower().rstrip("/") == "f:/projects":

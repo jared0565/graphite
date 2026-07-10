@@ -15,7 +15,7 @@ from .analyze import analyze
 from .cache import Cache
 from .bootstrap import bootstrap_project
 from .cluster import detect_communities
-from .config import Config
+from .config import Config, default_projects_root
 from .context import build_context, format_context_markdown
 from .daemon import DaemonOptions, read_daemon_status, run_daemon
 from .daemon_health import HealthOptions, evaluate_daemon_health, format_health_text
@@ -889,9 +889,9 @@ def main(argv: list[str] | None = None) -> int:
     p_watch.add_argument("--max-cycles", type=int, default=None, help="Stop after this many poll cycles")
     p_watch.set_defaults(func=cmd_watch)
 
-    default_projects_root = "F:/Projects" if Path("F:/Projects").exists() else "."
+    default_root = str(default_projects_root())
     p_daemon = sub.add_parser("daemon", help="Watch all discovered projects under a base folder")
-    p_daemon.add_argument("base_path", nargs="?", default=default_projects_root, help="Base folder to discover projects under")
+    p_daemon.add_argument("base_path", nargs="?", default=default_root, help="Base folder to discover projects under")
     p_daemon.add_argument("--scan-interval", type=float, default=10.0, help="Polling interval in seconds")
     p_daemon.add_argument("--discover-interval", type=float, default=60.0, help="Project rediscovery interval in seconds")
     p_daemon.add_argument("--debounce", type=float, default=1.0, help="Stable-change debounce seconds")
@@ -908,13 +908,13 @@ def main(argv: list[str] | None = None) -> int:
     p_daemon.set_defaults(func=cmd_daemon)
 
     p_daemon_status = sub.add_parser("daemon-status", help="Read the latest Graphite daemon status")
-    p_daemon_status.add_argument("base_path", nargs="?", default=default_projects_root, help="Base folder used by the daemon")
+    p_daemon_status.add_argument("base_path", nargs="?", default=default_root, help="Base folder used by the daemon")
     p_daemon_status.add_argument("--state-dir", default=None, help="Daemon state directory (default: <base>/.graphite-daemon)")
     p_daemon_status.add_argument("--json", action="store_true", help="Emit status as JSON")
     p_daemon_status.set_defaults(func=cmd_daemon_status)
 
     p_daemon_health = sub.add_parser("daemon-health", help="Run operational health checks for the Graphite daemon")
-    p_daemon_health.add_argument("base_path", nargs="?", default=default_projects_root, help="Base folder used by the daemon")
+    p_daemon_health.add_argument("base_path", nargs="?", default=default_root, help="Base folder used by the daemon")
     p_daemon_health.add_argument("--state-dir", default=None, help="Daemon state directory (default: <base>/.graphite-daemon)")
     p_daemon_health.add_argument("--max-status-age", type=float, default=180.0, help="Maximum acceptable status age in seconds")
     p_daemon_health.add_argument("--max-project-success-age", type=float, default=86400.0, help="Warn when a project has not built successfully within this many seconds")
@@ -926,7 +926,7 @@ def main(argv: list[str] | None = None) -> int:
     p_daemon_health.set_defaults(func=cmd_daemon_health)
 
     p_daemon_install = sub.add_parser("daemon-install-windows", help="Install the Graphite daemon as a Windows Scheduled Task")
-    p_daemon_install.add_argument("base_path", nargs="?", default=default_projects_root, help="Base folder to supervise")
+    p_daemon_install.add_argument("base_path", nargs="?", default=default_root, help="Base folder to supervise")
     p_daemon_install.add_argument("--task-name", default=DEFAULT_TASK_NAME, help="Windows Scheduled Task name")
     p_daemon_install.add_argument("--graphite-executable", default=None, help="Path to graphite executable or shim")
     p_daemon_install.add_argument("--scan-interval", type=float, default=15.0, help="Polling interval in seconds")
@@ -952,7 +952,7 @@ def main(argv: list[str] | None = None) -> int:
     p_daemon_uninstall.set_defaults(func=cmd_daemon_uninstall_windows)
 
     p_startup_install = sub.add_parser("daemon-install-startup-windows", help="Install hidden Windows Startup-folder launcher for Graphite daemon")
-    p_startup_install.add_argument("base_path", nargs="?", default=default_projects_root, help="Base folder to supervise")
+    p_startup_install.add_argument("base_path", nargs="?", default=default_root, help="Base folder to supervise")
     p_startup_install.add_argument("--name", default=DEFAULT_TASK_NAME, help="Startup launcher name")
     p_startup_install.add_argument("--graphite-executable", default=None, help="Path to graphite executable or shim")
     p_startup_install.add_argument("--scan-interval", type=float, default=15.0, help="Polling interval in seconds")
@@ -966,13 +966,13 @@ def main(argv: list[str] | None = None) -> int:
     p_startup_install.set_defaults(func=cmd_daemon_install_startup_windows)
 
     p_startup_status = sub.add_parser("daemon-startup-status", help="Read Windows Startup-folder launcher status for Graphite daemon")
-    p_startup_status.add_argument("base_path", nargs="?", default=default_projects_root, help="Base folder supervised by the launcher")
+    p_startup_status.add_argument("base_path", nargs="?", default=default_root, help="Base folder supervised by the launcher")
     p_startup_status.add_argument("--name", default=DEFAULT_TASK_NAME, help="Startup launcher name")
     p_startup_status.add_argument("--json", action="store_true", help="Emit startup status as JSON")
     p_startup_status.set_defaults(func=cmd_daemon_startup_status)
 
     p_startup_uninstall = sub.add_parser("daemon-uninstall-startup-windows", help="Remove hidden Windows Startup-folder launcher for Graphite daemon")
-    p_startup_uninstall.add_argument("base_path", nargs="?", default=default_projects_root, help="Base folder supervised by the launcher")
+    p_startup_uninstall.add_argument("base_path", nargs="?", default=default_root, help="Base folder supervised by the launcher")
     p_startup_uninstall.add_argument("--name", default=DEFAULT_TASK_NAME, help="Startup launcher name")
     p_startup_uninstall.add_argument("--json", action="store_true", help="Emit removal result as JSON")
     p_startup_uninstall.set_defaults(func=cmd_daemon_uninstall_startup_windows)
