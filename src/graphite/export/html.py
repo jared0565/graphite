@@ -1,6 +1,7 @@
 """Self-contained interactive HTML graph viewer."""
 from __future__ import annotations
 
+import html
 import json
 from pathlib import Path
 from typing import Any
@@ -184,7 +185,16 @@ function updateSelection() {
   const incoming = edges.filter(e => e.target === hovered.id).length;
   const outgoing = edges.filter(e => e.source === hovered.id).length;
   const cluster = clusters[hovered.cluster];
-  el.innerHTML = `<b>${hovered.label}</b> (${hovered.kind})<br/>cluster: ${cluster ? cluster.labels.join(', ') : 'none'}<br/>in: ${incoming} / out: ${outgoing}`;
+  const label = document.createElement('b');
+  label.textContent = hovered.label;
+  el.replaceChildren(
+    label,
+    document.createTextNode(` (${hovered.kind})`),
+    document.createElement('br'),
+    document.createTextNode(`cluster: ${cluster ? cluster.labels.join(', ') : 'none'}`),
+    document.createElement('br'),
+    document.createTextNode(`in: ${incoming} / out: ${outgoing}`)
+  );
 }
 
 step();
@@ -192,6 +202,15 @@ step();
 </body>
 </html>
 """
+
+
+def _json_for_script(value: Any) -> str:
+    return (
+        json.dumps(value, ensure_ascii=False)
+        .replace("&", r"\u0026")
+        .replace("<", r"\u003c")
+        .replace(">", r"\u003e")
+    )
 
 
 def to_html(
@@ -208,17 +227,15 @@ def to_html(
         "clusters": clusters.get("clusters", []),
         "analysis": analysis,
     }
-    data_json = json.dumps(bundle, ensure_ascii=False)
-    html = (
+    data_json = _json_for_script(bundle)
+    document = (
         _HTML_TEMPLATE
         .replace("{{data}}", data_json)
-        .replace("{{title}}", manifest.get("root", "codebase"))
+        .replace("{{title}}", html.escape(str(manifest.get("root", "codebase"))))
         .replace("{{node_count}}", str(graph_data.get("metadata", {}).get("node_count", 0)))
         .replace("{{edge_count}}", str(graph_data.get("metadata", {}).get("edge_count", 0)))
         .replace("{{cluster_count}}", str(clusters.get("count", 0)))
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html)
-
+    atomic_write_text(output_path, document)
 
