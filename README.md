@@ -10,6 +10,7 @@ Local-first, deterministic knowledge graph extraction for codebases. A safer, fa
 - **Deterministic graph** — same commit produces the same structural graph.
 - **Safe output** — no absolute paths or system metadata leak into artifacts.
 - **Incremental** — content-addressed cache means only changed files are re-parsed.
+- **Multi-language** — structural extraction for TypeScript/JavaScript, Python, Go, and Rust.
 - **TypeScript-aware** — uses the local TypeScript compiler API when available, with heuristic fallback.
 
 ## Installation
@@ -33,6 +34,8 @@ python -m graphite bootstrap F:/Projects/MyApp   # minimal variant: gitignore + 
 
 The machine-wide daemon (`graphite daemon F:\Projects`) auto-discovers any project with standard markers (`.git`, `package.json`, `pyproject.toml`, `wrangler.toml`, `go.mod`, `Cargo.toml`) and keeps its graph fresh, so `init` is about wiring agent instructions, not registration.
 
+Set `GRAPHITE_PROJECTS_ROOT` to change the default base folder used by `daemon`, `daemon-status`, `daemon-health`, the Windows startup installers, and init/bootstrap daemon-visibility checks (falls back to `F:/Projects` when it exists, else the current directory).
+
 ## Usage
 
 ```bash
@@ -48,6 +51,9 @@ graphite report .
 # Query the graph
 # Verbs: depends-on, imported-by, callers, calls, path <a> -> <b>,
 #        reaches <a> -> <b> (call/reference edges only), community-of, stats
+# Responses include `match` metadata (exact-id | name | path-suffix | fuzzy,
+# plus alternates when a token was ambiguous); not-found errors include a
+# `candidates` list of close matches.
 graphite query "depends-on src/lib/db.ts"
 graphite query "callers calculateCommissionPence"
 

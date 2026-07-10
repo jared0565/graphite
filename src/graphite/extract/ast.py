@@ -38,6 +38,12 @@ _LANGUAGE_BUILTIN_GLOBALS: frozenset[str] = frozenset({
     "print", "open", "isinstance", "type", "super", "sorted", "reversed",
     "any", "all", "abs", "round", "next", "iter", "hash", "id", "repr",
     "callable", "getattr", "setattr", "hasattr", "delattr", "vars", "dir",
+    # Go builtins
+    "append", "cap", "make", "copy", "delete", "panic", "recover", "close",
+    "new", "println", "clear",
+    # Rust prelude constructors/functions (macros like println! never reach
+    # call extraction; these are the plain-call noise sources)
+    "Some", "None", "Ok", "Err", "Box", "drop", "Default",
 })
 
 
@@ -129,6 +135,8 @@ class _TreeSitterLoader:
             "tsx": ("tree_sitter_typescript", "language_tsx"),
             "jsx": ("tree_sitter_javascript", "language"),
             "python": ("tree_sitter_python", "language"),
+            "go": ("tree_sitter_go", "language"),
+            "rust": ("tree_sitter_rust", "language"),
         }
         item = mapping.get(language)
         if not item:
@@ -545,6 +553,199 @@ def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any) -> Ex
     return result
 
 
+def _extract_go(file_id: str, rel_path: str, source: bytes, tree: Any) -> ExtractionResult:
+    """Heuristic Go extraction: functions, methods, types, imports, calls.
+
+    Same fidelity tier as the Python path — no package-level import resolution.
+    `recv.Method()` selector calls carry `_member` so the global method-dispatch
+    post-pass links them to `method_declaration` definitions (tagged is_method);
+    selector calls that resolve to no known method (fmt.Println, http.Get, ...)
+    are dropped by the phantom filter. Known limitation: cross-file calls to
+    plain package FUNCTIONS via selector (`utils.Helper()`) resolve only when
+    the name matches a method; the file-level import edge still records the
+    package dependency.
+    """
+    result = ExtractionResult()
+    root = tree.root_node
+
+    def _line(node: Any) -> int:
+        return (node.start_point[0] + 1) if node.start_point else 1
+
+    def _text(node: Any) -> str | None:
+        return node.text.decode("utf-8", errors="ignore") if node is not None and node.text else None
+
+    result.nodes.append(_node(file_id, "file", Path(rel_path).name, rel_path))
+
+    def _emit_import(spec: Any) -> None:
+        path_node = spec.child_by_field_name("path")
+        mod = (_text(path_node) or "").strip("'\"`")
+        if mod:
+            result.edges.append(_edge(file_id, _make_id(mod), "imports", rel_path, _line(spec), confidence="EXTERNAL_IMPORT"))
+
+    def walk(node: Any, parent_id: str | None, scope_id: str) -> None:
+        t = node.type
+        if t in ("function_declaration", "method_declaration"):
+            name = _short_name(_text(node.child_by_field_name("name")))
+            if name:
+                mid = _make_id(file_id, name)
+                extra = {"is_method": True} if t == "method_declaration" else None
+                result.nodes.append(_node(mid, "function", name, rel_path, _line(node), extra=extra))
+                if parent_id:
+                    result.edges.append(_edge(parent_id, mid, "contains", rel_path, _line(node)))
+                walk_children(node, mid, mid)
+            else:
+                walk_children(node, parent_id, scope_id)
+        elif t == "type_declaration":
+            for spec in node.children:
+                if spec.type == "type_spec":
+                    name = _short_name(_text(spec.child_by_field_name("name")))
+                    if name:
+                        tid = _make_id(file_id, name)
+                        result.nodes.append(_node(tid, "class", name, rel_path, _line(spec)))
+                        if parent_id:
+                            result.edges.append(_edge(parent_id, tid, "contains", rel_path, _line(spec)))
+            walk_children(node, parent_id, scope_id)
+        elif t == "import_declaration":
+            for child in node.children:
+                if child.type == "import_spec":
+                    _emit_import(child)
+                elif child.type == "import_spec_list":
+                    for spec in child.children:
+                        if spec.type == "import_spec":
+                            _emit_import(spec)
+        elif t == "call_expression":
+            func = node.child_by_field_name("function")
+            if func is not None:
+                member: str | None = None
+                if func.type == "selector_expression":
+                    operand = _text(func.child_by_field_name("operand"))
+                    field = _text(func.child_by_field_name("field"))
+                    called = _short_name(f"{operand}.{field}" if operand and field else field)
+                    member = field
+                else:
+                    called = _call_target_name(func, source)
+                if called and called not in _LANGUAGE_BUILTIN_GLOBALS and should_keep_call_target(called):
+                    edge = _edge(scope_id, _resolve_call(file_id, called), "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+                    if member:
+                        edge["_member"] = member
+                    result.edges.append(edge)
+            walk_children(node, parent_id, scope_id)
+        else:
+            walk_children(node, parent_id, scope_id)
+
+    def walk_children(node: Any, parent_id: str | None, scope_id: str) -> None:
+        for child in node.children:
+            walk(child, parent_id, scope_id)
+
+    walk(root, file_id, file_id)
+    return result
+
+
+def _extract_rust(file_id: str, rel_path: str, source: bytes, tree: Any) -> ExtractionResult:
+    """Heuristic Rust extraction: fns, impl methods, types, use decls, calls.
+
+    `x.method()` (field_expression) and `Type::assoc()` (scoped_identifier)
+    calls carry `_member` so the method-dispatch post-pass links them to impl
+    functions (tagged is_method); unresolved ones (.clone(), String::from, ...)
+    are dropped by the phantom filter. Macro invocations (println!, vec!) are a
+    different node type and are never extracted as calls.
+    """
+    result = ExtractionResult()
+    root = tree.root_node
+
+    def _line(node: Any) -> int:
+        return (node.start_point[0] + 1) if node.start_point else 1
+
+    def _text(node: Any) -> str | None:
+        return node.text.decode("utf-8", errors="ignore") if node is not None and node.text else None
+
+    result.nodes.append(_node(file_id, "file", Path(rel_path).name, rel_path))
+
+    def _use_target(node: Any) -> str | None:
+        # `use a::b::{c, d};` -> record the common prefix `a::b`; `use x as y` -> `x`.
+        raw = _text(node.child_by_field_name("argument"))
+        if not raw:
+            return None
+        raw = raw.split("{")[0].split(" as ")[0].strip().rstrip(":").strip()
+        return raw or None
+
+    def walk(node: Any, parent_id: str | None, scope_id: str, in_impl: bool) -> None:
+        t = node.type
+        if t == "function_item":
+            name = _short_name(_text(node.child_by_field_name("name")))
+            if name:
+                mid = _make_id(file_id, name)
+                extra = {"is_method": True} if in_impl else None
+                result.nodes.append(_node(mid, "function", name, rel_path, _line(node), extra=extra))
+                if parent_id:
+                    result.edges.append(_edge(parent_id, mid, "contains", rel_path, _line(node)))
+                walk_children(node, mid, mid, in_impl)
+            else:
+                walk_children(node, parent_id, scope_id, in_impl)
+        elif t in ("struct_item", "enum_item", "trait_item"):
+            name = _short_name(_text(node.child_by_field_name("name")))
+            if name:
+                cid = _make_id(file_id, name)
+                result.nodes.append(_node(cid, "class", name, rel_path, _line(node)))
+                if parent_id:
+                    result.edges.append(_edge(parent_id, cid, "contains", rel_path, _line(node)))
+                walk_children(node, cid, scope_id, in_impl)
+            else:
+                walk_children(node, parent_id, scope_id, in_impl)
+        elif t == "impl_item":
+            impl_type = _text(node.child_by_field_name("type"))
+            impl_parent = _make_id(file_id, impl_type.split("<")[0]) if impl_type else parent_id
+            walk_children(node, impl_parent, scope_id, True)
+        elif t == "use_declaration":
+            target = _use_target(node)
+            if target:
+                result.edges.append(_edge(file_id, _make_id(target), "imports", rel_path, _line(node), confidence="EXTERNAL_IMPORT"))
+        elif t == "call_expression":
+            func = node.child_by_field_name("function")
+            if func is not None:
+                called: str | None
+                member: str | None = None
+                if func.type == "field_expression":
+                    value = _simple_rust_value(func.child_by_field_name("value"), _text)
+                    field = _text(func.child_by_field_name("field"))
+                    called = _short_name(f"{value}.{field}" if value and field else field)
+                    member = field
+                elif func.type == "scoped_identifier":
+                    name = _text(func.child_by_field_name("name"))
+                    called = _short_name((_text(func) or "").replace("::", "."))
+                    member = name
+                elif func.type == "generic_function":
+                    inner = func.child_by_field_name("function")
+                    called = _short_name((_text(inner) or "").replace("::", "."))
+                    member = _text(inner.child_by_field_name("name")) if inner is not None and inner.type == "scoped_identifier" else None
+                else:
+                    called = _call_target_name(func, source)
+                if called and called not in _LANGUAGE_BUILTIN_GLOBALS and should_keep_call_target(called):
+                    edge = _edge(scope_id, _resolve_call(file_id, called), "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+                    if member:
+                        edge["_member"] = member
+                    result.edges.append(edge)
+            walk_children(node, parent_id, scope_id, in_impl)
+        else:
+            walk_children(node, parent_id, scope_id, in_impl)
+
+    def walk_children(node: Any, parent_id: str | None, scope_id: str, in_impl: bool) -> None:
+        for child in node.children:
+            walk(child, parent_id, scope_id, in_impl)
+
+    walk(root, file_id, file_id, False)
+    return result
+
+
+def _simple_rust_value(node: Any, _text: Any) -> str | None:
+    """Short receiver name for a Rust field_expression value, or None if complex."""
+    if node is None:
+        return None
+    if node.type in ("identifier", "self"):
+        return _text(node)
+    return None
+
+
 def _resolve_import(rel_path: str, source_lit: str, source_index: SourceIndex | None = None) -> Any | None:
     """Best-effort resolve relative/local imports to a known project file path."""
     if source_index is not None:
@@ -609,7 +810,7 @@ def extract_file(entry: FileEntry, cfg: Config, cache: Cache | None = None, sour
         except Exception as e:
             return ExtractionResult(error=f"parse_error: {e}")
         result = _extract_ts_js(file_id, rel_path, source, tree, source_index)
-    elif entry.language == "python":
+    elif entry.language in ("python", "go", "rust"):
         parser = _LOADER.parser(entry.language)
         if parser is None:
             return _extract_generic(file_id, rel_path, source, entry.language)
@@ -617,7 +818,8 @@ def extract_file(entry: FileEntry, cfg: Config, cache: Cache | None = None, sour
             tree = parser.parse(source)
         except Exception as e:
             return ExtractionResult(error=f"parse_error: {e}")
-        result = _extract_python(file_id, rel_path, source, tree)
+        extractor = {"python": _extract_python, "go": _extract_go, "rust": _extract_rust}[entry.language]
+        result = extractor(file_id, rel_path, source, tree)
     else:
         result = _extract_generic(file_id, rel_path, source, entry.language or "unknown")
 

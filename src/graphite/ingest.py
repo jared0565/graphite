@@ -29,6 +29,8 @@ LANGUAGE_BY_EXT: dict[str, str] = {
     ".mjs": "javascript",
     ".cjs": "javascript",
     ".py": "python",
+    ".go": "go",
+    ".rs": "rust",
     ".json": "json",
     ".md": "markdown",
     ".mdx": "markdown",
@@ -44,6 +46,7 @@ LANGUAGE_BY_EXT: dict[str, str] = {
 SKIP_DIRS: frozenset[str] = frozenset({
     "node_modules", ".git", ".next", ".wrangler", ".open-next", "dist", "build",
     "out", "coverage", ".cache", ".claude", ".pytest_cache", ".mypy_cache", ".ruff_cache", "__pycache__", "graph-out", "graphify-out", "tools", "vendor", ".venv", "venv",
+    "target",  # Rust/Maven build output
 })
 
 SKIP_SUFFIXES: frozenset[str] = frozenset({
