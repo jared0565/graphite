@@ -15,14 +15,23 @@ Local-first, deterministic knowledge graph extraction for codebases. A safer, fa
 ## Installation
 
 ```bash
-pip install -e F:/Projects/_tools/graphite
+pip install -e F:/Projects/graphite
 ```
 
 No model SDK is required for optional LLM enrichment; Graphite uses standard-library HTTP adapters.
 
 ## Global F:/Projects usage
 
-This package is installed centrally at `F:\Projects\_tools\graphite` and exposed through `graphite` / `graphite-mcp` shims, so any project under `F:\Projects` can run it from that project root.
+This repository lives at `F:\Projects\graphite` (its own git repo) and is pip-installed editable, so `python -m graphite` works from any project in any shell. The `graphite` / `graphite-mcp` console-script shims are equivalent where they are on PATH (on this machine: PowerShell/cmd via `C:\Users\fbmac\.local\bin\graphite.cmd`, but not Git Bash — prefer `python -m graphite` in scripts and agent instructions).
+
+To onboard a new or existing project, run one command from anywhere:
+
+```bash
+python -m graphite init F:/Projects/MyApp        # agent instructions + gitignore + first build + validation
+python -m graphite bootstrap F:/Projects/MyApp   # minimal variant: gitignore + AGENTS.md + build
+```
+
+The machine-wide daemon (`graphite daemon F:\Projects`) auto-discovers any project with standard markers (`.git`, `package.json`, `pyproject.toml`, `wrangler.toml`, `go.mod`, `Cargo.toml`) and keeps its graph fresh, so `init` is about wiring agent instructions, not registration.
 
 ## Usage
 
@@ -37,7 +46,10 @@ graphite build .
 graphite report .
 
 # Query the graph
+# Verbs: depends-on, imported-by, callers, calls, path <a> -> <b>,
+#        reaches <a> -> <b> (call/reference edges only), community-of, stats
 graphite query "depends-on src/lib/db.ts"
+graphite query "callers calculateCommissionPence"
 
 # Check whether graph-out is current
 graphite check .
@@ -319,11 +331,11 @@ Artifacts are written to `graph-out/`:
 
 ## Claude Code skill
 
-A skill template lives at `F:\Projects\_tools\graphite\skill\SKILL.md`. To install:
+A skill template lives at `F:\Projects\graphite\skill\SKILL.md`. To install:
 
 ```bash
 mkdir -p ~/.claude/skills/graphite
-cp /f/Projects/_tools/graphite/skill/SKILL.md ~/.claude/skills/graphite/SKILL.md
+cp /f/Projects/graphite/skill/SKILL.md ~/.claude/skills/graphite/SKILL.md
 ```
 
 Then use `/graphite [path]` inside Claude Code. The skill defaults to zero-LLM mode.
@@ -333,7 +345,7 @@ Then use `/graphite [path]` inside Claude Code. The skill defaults to zero-LLM m
 Install the optional MCP dependency:
 
 ```bash
-pip install -e "F:/Projects/_tools/graphite[mcp]"
+pip install -e "F:/Projects/graphite[mcp]"
 ```
 
 Then configure Claude Code (Desktop) to use the local server. Add this to your `claude_desktop_config.json`:

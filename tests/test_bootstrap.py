@@ -28,9 +28,13 @@ def test_bootstrap_creates_gitignore_and_agents_idempotently(tmp_path: Path) -> 
     assert second["agents"]["changed"] is False
     assert "node_modules/" in gitignore
     assert "graph-out/" in gitignore
-    assert ".cache/graphite/" in gitignore
+    # unanchored form so nested workspace caches are ignored too
+    assert "**/.cache/graphite/" in gitignore
     assert "## Automatic Graphite Consult" in agents
-    assert "graphite context <likely-changed-file>" in agents
+    # `python -m graphite` is the shell- and agent-agnostic invocation form.
+    assert "python -m graphite context <likely-changed-file>" in agents
+    # No machine-specific install path may leak into project files.
+    assert "_tools" not in agents
 
 
 def test_bootstrap_preserves_existing_agents_content(tmp_path: Path) -> None:

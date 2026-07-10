@@ -158,8 +158,14 @@ Use this during non-trivial development to identify direct dependencies, direct 
 Query the existing `graph-out/graph.json`. Supported queries:
 - `depends-on <node>` — direct dependencies of a node.
 - `imported-by <node>` — direct consumers of a node.
-- `path <a> -> <b>` — shortest directed path.
-- `stats` — graph statistics.
+- `callers <symbol>` — functions that call the symbol (call/reference in-edges).
+- `calls <symbol>` — what the symbol calls (call/reference out-edges).
+- `path <a> -> <b>` — shortest directed path over any edges.
+- `reaches <a> -> <b>` — directed path over call/reference edges only.
+- `community-of <node>` — cluster label for a node.
+- `stats` — graph statistics: counts, density, nodes by kind, edges by relation, top-degree nodes.
+
+When a node is not found, the error JSON includes a `candidates` list of close matches — retry with one of those ids.
 
 Examples:
 - `/graphite query "depends-on db.ts"`
@@ -193,10 +199,10 @@ To configure, install the MCP dependency and add to `claude_desktop_config.json`
 
 ## Implementation
 
-This skill calls the central `graphite` Python package installed from `F:\Projects\_tools\graphite`.
+This skill calls the central `graphite` Python package installed from `F:\Projects\graphite` (its own git repo).
 
 ```bash
-pip install -e F:\Projects\_tools\graphite
+pip install -e F:\Projects\graphite
 python -m graphite -v build .
 ```
 

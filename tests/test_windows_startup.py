@@ -31,6 +31,10 @@ def test_install_startup_launcher_writes_hidden_vbs_and_idempotent_script(
     assert "Start-Process" in script
     assert "WindowStyle Hidden" in script
     assert str(base.resolve()) in script
+    # The already-running guard must only match daemon host processes, not any
+    # shell whose command line merely mentions graphite/daemon (self-match bug).
+    assert "$hosts -contains $_.Name" in script
+    assert "'python.exe'" in script
     assert "WScript.Shell" in launcher
     assert ", 0, False" in launcher
 

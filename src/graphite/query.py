@@ -1,6 +1,7 @@
 """Simple query engine over the graph."""
 from __future__ import annotations
 
+import re
 from collections import deque
 from typing import Any
 
@@ -32,7 +33,7 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
     if verb in ("callers", "called-by", "called_by"):
         node_id = _find_node(g, " ".join(tokens[1:]))
         if not node_id:
-            return {"error": f"node not found: {' '.join(tokens[1:])}"}
+            return _not_found(g, " ".join(tokens[1:]))
         callers = [
             _node_view(g, p)
             for p in sorted(g.predecessors(node_id))
@@ -43,7 +44,7 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
     if verb in ("calls", "callees"):
         node_id = _find_node(g, " ".join(tokens[1:]))
         if not node_id:
-            return {"error": f"node not found: {' '.join(tokens[1:])}"}
+            return _not_found(g, " ".join(tokens[1:]))
         callees = [
             _node_view(g, s)
             for s in sorted(g.successors(node_id))
@@ -62,9 +63,9 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
         src = _find_node(g, a)
         dst = _find_node(g, b)
         if not src:
-            return {"error": f"source not found: {a}"}
+            return _not_found(g, a, label="source")
         if not dst:
-            return {"error": f"target not found: {b}"}
+            return _not_found(g, b, label="target")
         p = _restricted_call_path(g, src, dst)
         if p is None:
             return {"error": f"no call path from {src} to {dst}"}
@@ -76,16 +77,34 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
         }
 
     if verb == "stats":
+        kinds: dict[str, int] = {}
+        for _n, data in g.nodes(data=True):
+            kind = data.get("kind", "unknown")
+            kinds[kind] = kinds.get(kind, 0) + 1
+        relations: dict[str, int] = {}
+        for _u, _v, data in g.edges(data=True):
+            relation = data.get("relation", "unknown")
+            relations[relation] = relations.get(relation, 0) + 1
+        communities = {
+            data.get("community") for _n, data in g.nodes(data=True) if data.get("community") is not None
+        }
+        top_in = sorted(g.in_degree(), key=lambda item: item[1], reverse=True)[:5]
+        top_out = sorted(g.out_degree(), key=lambda item: item[1], reverse=True)[:5]
         return {
             "node_count": g.number_of_nodes(),
             "edge_count": g.number_of_edges(),
             "density": nx.density(g),
+            "community_count": len(communities),
+            "nodes_by_kind": dict(sorted(kinds.items(), key=lambda item: item[1], reverse=True)),
+            "edges_by_relation": dict(sorted(relations.items(), key=lambda item: item[1], reverse=True)),
+            "top_incoming": [{**_node_view(g, n), "in_degree": d} for n, d in top_in],
+            "top_outgoing": [{**_node_view(g, n), "out_degree": d} for n, d in top_out],
         }
 
     if verb in ("depends-on", "depends_on", "out"):
         node_id = _find_node(g, " ".join(tokens[1:]))
         if not node_id:
-            return {"error": f"node not found: {' '.join(tokens[1:])}"}
+            return _not_found(g, " ".join(tokens[1:]))
         neighbors = sorted(g.successors(node_id))
         return {
             "node": node_id,
@@ -99,7 +118,7 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
     if verb in ("imported-by", "imported_by", "in"):
         node_id = _find_node(g, " ".join(tokens[1:]))
         if not node_id:
-            return {"error": f"node not found: {' '.join(tokens[1:])}"}
+            return _not_found(g, " ".join(tokens[1:]))
         neighbors = sorted(g.predecessors(node_id))
         return {
             "node": node_id,
@@ -121,9 +140,9 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
         src = _find_node(g, a)
         dst = _find_node(g, b)
         if not src:
-            return {"error": f"source not found: {a}"}
+            return _not_found(g, a, label="source")
         if not dst:
-            return {"error": f"target not found: {b}"}
+            return _not_found(g, b, label="target")
         try:
             p = nx.shortest_path(g, src, dst)
         except nx.NetworkXNoPath:
@@ -141,7 +160,7 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
     if verb in ("community-of", "community_of"):
         node_id = _find_node(g, " ".join(tokens[1:]))
         if not node_id:
-            return {"error": f"node not found: {' '.join(tokens[1:])}"}
+            return _not_found(g, " ".join(tokens[1:]))
         return {
             "node": node_id,
             "community": g.nodes[node_id].get("community"),
@@ -149,6 +168,32 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
         }
 
     return {"error": f"unknown query verb: {verb}"}
+
+
+def _not_found(g: nx.DiGraph, token: str, *, label: str = "node") -> dict[str, Any]:
+    """Not-found error with close candidates so agents can self-correct."""
+    return {
+        "error": f"{label} not found: {token}",
+        "candidates": _candidates(g, token),
+    }
+
+
+def _candidates(g: nx.DiGraph, token: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Nodes whose id, name, or source file loosely matches any part of token."""
+    token = token.strip().lower().strip("`")
+    parts = [p for p in re.split(r"[^a-z0-9]+", token) if len(p) >= 3]
+    if not parts:
+        return []
+    scored: list[tuple[int, str]] = []
+    for n in g.nodes():
+        haystack = " ".join(
+            (n, g.nodes[n].get("name", ""), g.nodes[n].get("source_file", ""))
+        ).lower().replace("\\", "/")
+        score = sum(1 for p in parts if p in haystack)
+        if score:
+            scored.append((score, n))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [_node_view(g, n) for _score, n in scored[:limit]]
 
 
 def _find_node(g: nx.DiGraph, token: str) -> str | None:

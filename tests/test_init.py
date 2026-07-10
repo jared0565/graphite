@@ -50,6 +50,26 @@ def test_init_project_preserves_existing_instruction_content(tmp_path: Path) -> 
 def test_resolve_platform_selection_accepts_aliases_numbers_and_all() -> None:
     assert resolve_platform_selection(["1, claude-code, copilot"]) == ("codex", "claude", "visual-studio")
     assert "windsurf" in resolve_platform_selection(["all"])
+    assert resolve_platform_selection(["gemini-cli"]) == ("gemini",)
+
+
+def test_init_gemini_platform_writes_gemini_md(tmp_path: Path) -> None:
+    result = init_project(tmp_path, platforms=["gemini"]).to_dict()
+
+    text = (tmp_path / "GEMINI.md").read_text(encoding="utf-8")
+    assert result["platforms"] == ["gemini"]
+    assert "Follow `GRAPHITE.md`" in text
+
+
+def test_graphite_doc_uses_shell_agnostic_invocation(tmp_path: Path) -> None:
+    init_project(tmp_path, platforms=["claude"])
+    doc = (tmp_path / "GRAPHITE.md").read_text(encoding="utf-8")
+
+    assert "python -m graphite check ." in doc
+    assert "python -m graphite context <target-file>" in doc
+    # No machine-specific install path may leak into project files.
+    assert "_tools" not in doc
+    assert "F:\\Projects" not in doc
 
 
 def test_init_cli_json_no_build(tmp_path: Path, capsys) -> None:

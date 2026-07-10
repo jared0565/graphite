@@ -119,8 +119,14 @@ def uninstall_startup_launcher(base_path: Path, *, name: str = DEFAULT_TASK_NAME
 def _powershell_script(executable: Path, arguments: tuple[str, ...], working_dir: Path) -> str:
     args_literal = ", ".join(_ps_quote(arg) for arg in arguments)
     escaped_marker = str(working_dir)
+    # The already-running guard only inspects processes that can actually host
+    # the daemon (python/cmd). Matching every process command line caused false
+    # positives: a PowerShell command that merely mentioned
+    # "graphite ... daemon ... <base>" (e.g. a restart command) matched itself
+    # and the launcher exited without starting anything.
     return f"""$ErrorActionPreference = 'Stop'
-$existing = Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*graphite*daemon*{escaped_marker}*' }}
+$hosts = @('python.exe', 'pythonw.exe', 'cmd.exe', 'graphite.exe')
+$existing = Get-CimInstance Win32_Process | Where-Object {{ $hosts -contains $_.Name -and $_.CommandLine -like '*graphite*daemon*{escaped_marker}*' }}
 if ($existing) {{ exit 0 }}
 Start-Process -FilePath {_ps_quote(str(executable))} -ArgumentList @({args_literal}) -WorkingDirectory {_ps_quote(str(working_dir))} -WindowStyle Hidden
 """

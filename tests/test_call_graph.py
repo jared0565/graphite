@@ -149,6 +149,48 @@ def test_existing_query_verbs_unchanged(tmp_path: Path) -> None:
     assert "error" not in query(g, "imported-by src/mod.ts")
 
 
+def test_stats_includes_breakdowns_and_top_degree_nodes(tmp_path: Path) -> None:
+    _ts_fixture(tmp_path)
+    result = _extract(tmp_path, "disabled")
+    g = build_graph(result.nodes, result.edges)
+
+    stats = query(g, "stats")
+    assert stats["nodes_by_kind"].get("function", 0) >= 5
+    assert stats["nodes_by_kind"].get("file", 0) == 2
+    assert stats["edges_by_relation"].get("calls", 0) >= 4
+    assert 1 <= len(stats["top_incoming"]) <= 5
+    assert 1 <= len(stats["top_outgoing"]) <= 5
+    # target is the most-called symbol in the fixture.
+    top_ids = {n["id"] for n in stats["top_incoming"]}
+    assert "src_mod_target" in top_ids
+    for entry in stats["top_incoming"]:
+        assert {"id", "name", "kind", "source_file", "in_degree"} <= set(entry)
+    assert "community_count" in stats
+
+
+def test_not_found_error_suggests_close_candidates(tmp_path: Path) -> None:
+    """Agents pass slightly-wrong node refs; the error must offer corrections."""
+    _ts_fixture(tmp_path)
+    result = _extract(tmp_path, "disabled")
+    g = build_graph(result.nodes, result.edges)
+
+    # `alpha()` (with call parens) matches no node id/name/path exactly.
+    res = query(g, "callers src/consumer.ts:nosuchfn alpha()")
+    assert "error" in res
+    candidate_ids = {c["id"] for c in res["candidates"]}
+    assert "src_consumer_alpha" in candidate_ids
+
+    # path variant reports candidates for the missing endpoint too.
+    res = query(g, "path src/consumer.ts -> mod.zz")
+    assert "error" in res
+    assert isinstance(res.get("candidates"), list)
+
+    # Complete gibberish yields an empty (but present) candidate list.
+    res = query(g, "callers zzz_qqq_www")
+    assert "error" in res
+    assert res["candidates"] == []
+
+
 def test_safe_label_strips_non_ascii_and_collapses_whitespace() -> None:
     # Synthetic names come from arbitrary source strings; the node label must
     # stay console-safe (this is what broke `query` printing on cp1252 Windows).
