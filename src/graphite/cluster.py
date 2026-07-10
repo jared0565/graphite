@@ -1,0 +1,100 @@
+"""Community detection using Louvain (and optional Leiden)."""
+from __future__ import annotations
+
+import random
+from collections import defaultdict
+from typing import Any
+
+import community as community_louvain
+import networkx as nx
+from pathlib import Path
+
+
+def detect_communities(g: nx.DiGraph, seed: int = 42, weight: str = "weight") -> dict[str, Any]:
+    """Run Louvain on an undirected projection of the graph."""
+    # Build deterministic undirected projection manually.
+    ug = nx.Graph()
+    for n in sorted(g.nodes()):
+        ug.add_node(n)
+    # Aggregate weights for both directions deterministically.
+    edge_weights: dict[tuple[str, str], float] = {}
+    for u, v, d in sorted(g.edges(data=True), key=lambda e: (e[0], e[1], e[2].get("relation", ""))):
+        key = tuple(sorted((u, v)))
+        edge_weights[key] = edge_weights.get(key, 0.0) + d.get("weight", 1.0)
+    for (u, v), w in sorted(edge_weights.items()):
+        ug.add_edge(u, v, weight=w)
+
+    partition = community_louvain.best_partition(ug, random_state=seed, weight=weight)
+
+    communities: dict[int, set[str]] = defaultdict(set)
+    for node, comm in partition.items():
+        communities[comm].add(node)
+
+    # Build cluster metadata.
+    clusters = []
+    for cid, members in sorted(communities.items()):
+        file_nodes = [n for n in members if g.nodes[n].get("kind") == "file"]
+        func_nodes = [n for n in members if g.nodes[n].get("kind") in ("function", "method")]
+        class_nodes = [n for n in members if g.nodes[n].get("kind") == "class"]
+        labels = _label_cluster(g, members)
+        clusters.append({
+            "id": cid,
+            "members": sorted(members),
+            "size": len(members),
+            "file_count": len(file_nodes),
+            "function_count": len(func_nodes),
+            "class_count": len(class_nodes),
+            "labels": labels,
+        })
+
+    return {
+        "node_to_community": {k: partition[k] for k in sorted(partition)},
+        "clusters": sorted(clusters, key=lambda c: c["size"], reverse=True),
+        "count": len(clusters),
+    }
+
+
+def _label_cluster(g: nx.DiGraph, members: set[str]) -> list[str]:
+    """Generate zero-LLM cluster labels from shared directory and common node kinds."""
+    labels: list[str] = []
+
+    # Shared parent directory from file nodes.
+    dirs: list[str] = []
+    for n in members:
+        sf = g.nodes[n].get("source_file")
+        if sf:
+            dirs.append(Path(sf).parent.as_posix())
+    if dirs:
+        common = _common_prefix(dirs)
+        if common and common != ".":
+            labels.append(common)
+
+    # Most common kind.
+    kinds: dict[str, int] = defaultdict(int)
+    for n in members:
+        kinds[g.nodes[n].get("kind", "unknown")] += 1
+    top_kind = max(kinds.items(), key=lambda kv: kv[1])[0]
+    if top_kind != "unknown":
+        labels.append(f"{top_kind}s")
+
+    # Dedupe while preserving order.
+    seen = set()
+    out = []
+    for label in labels:
+        if label not in seen:
+            out.append(label)
+            seen.add(label)
+    return out
+
+
+def _common_prefix(paths: list[str]) -> str:
+    if not paths:
+        return ""
+    parts = [p.split("/") for p in paths]
+    prefix = []
+    for segments in zip(*parts):
+        if len(set(segments)) == 1:
+            prefix.append(segments[0])
+        else:
+            break
+    return "/".join(prefix)

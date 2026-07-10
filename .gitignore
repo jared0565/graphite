@@ -1,0 +1,13 @@
+# Graphite artifacts (this tool graphs itself via the F:\Projects daemon)
+graph-out/
+**/.cache/graphite/
+.graphite-daemon/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/
+.venv/

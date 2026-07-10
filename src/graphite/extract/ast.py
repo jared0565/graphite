@@ -1,0 +1,777 @@
+"""Deterministic structural extraction via tree-sitter."""
+from __future__ import annotations
+
+import importlib
+import re
+import sys
+import unicodedata
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from ..cache import Cache, content_hash
+from ..config import Config
+from ..ingest import FileEntry
+from ..resolve import SourceIndex, should_keep_call_target
+
+
+@dataclass
+class ExtractionResult:
+    nodes: list[dict[str, Any]] = field(default_factory=list)
+    edges: list[dict[str, Any]] = field(default_factory=list)
+    error: str | None = None
+
+
+_LANGUAGE_BUILTIN_GLOBALS: frozenset[str] = frozenset({
+    "String", "Number", "Boolean", "Object", "Array", "Symbol", "BigInt",
+    "Date", "RegExp", "Error", "TypeError", "RangeError", "SyntaxError",
+    "ReferenceError", "EvalError", "URIError",
+    "Promise", "Map", "Set", "WeakMap", "WeakSet", "JSON", "Math",
+    "Reflect", "Proxy", "Intl",
+    "parseInt", "parseFloat", "isNaN", "isFinite",
+    "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI",
+    "URL", "URLSearchParams", "FormData", "Blob", "File",
+    "Headers", "Request", "Response", "AbortController", "AbortSignal",
+    "TextEncoder", "TextDecoder", "console",
+    "str", "int", "float", "bool", "list", "dict", "set", "tuple", "bytes",
+    "len", "range", "enumerate", "zip", "map", "filter", "sum", "min", "max",
+    "print", "open", "isinstance", "type", "super", "sorted", "reversed",
+    "any", "all", "abs", "round", "next", "iter", "hash", "id", "repr",
+    "callable", "getattr", "setattr", "hasattr", "delattr", "vars", "dir",
+})
+
+
+_MAX_ID_LEN = 120
+
+
+def _make_id(*parts: str) -> str:
+    combined = "_".join(p.strip("_.") for p in parts if p)
+    combined = unicodedata.normalize("NFKC", combined)
+    cleaned = re.sub(r"[^\w]+", "_", combined, flags=re.UNICODE)
+    cleaned = re.sub(r"_+", "_", cleaned)
+    cleaned = cleaned.strip("_").casefold()
+    if len(cleaned) > _MAX_ID_LEN:
+        cleaned = cleaned[:_MAX_ID_LEN]
+    return cleaned
+
+
+def _file_node_id(rel_path: str) -> str:
+    """Stable node id for a file: a slug of the FULL repo-relative path.
+
+    Using only the parent dir + stem (the pre-v4 scheme) silently merged any
+    two files sharing that tail — a monorepo with `apps/worker/src/db/queries.ts`
+    and `apps/workers/booking/src/db/queries.ts` got ONE `db_queries` node and
+    every symbol in both files collided. Full-path ids keep every file (and
+    therefore every symbol id derived from the file id) distinct.
+    """
+    path = Path(rel_path)
+    parts = [*path.parts[:-1], path.stem]
+    return _make_id(".".join(p for p in parts if p not in (".", "")))
+
+
+def _node(
+    id_: str,
+    kind: str,
+    name: str,
+    rel_path: str,
+    line: int | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    n: dict[str, Any] = {
+        "id": id_,
+        "kind": kind,
+        "name": name,
+        "source_file": rel_path,
+    }
+    if line is not None:
+        n["source_location"] = f"L{line}"
+    if extra:
+        n.update(extra)
+    return n
+
+
+def _edge(
+    source: str,
+    target: str,
+    relation: str,
+    rel_path: str,
+    line: int | None = None,
+    context: str | None = None,
+    confidence: str = "EXTRACTED",
+) -> dict[str, Any]:
+    e: dict[str, Any] = {
+        "source": source,
+        "target": target,
+        "relation": relation,
+        "source_file": rel_path,
+        "confidence": confidence,
+        "weight": 1.0,
+    }
+    if line is not None:
+        e["source_location"] = f"L{line}"
+    if context:
+        e["context"] = context
+    return e
+
+
+class _TreeSitterLoader:
+    """Lazy parser cache per language."""
+
+    def __init__(self) -> None:
+        self._parsers: dict[str, Any] = {}
+
+    def parser(self, language: str) -> Any | None:
+        if language in self._parsers:
+            return self._parsers[language]
+        mapping = {
+            "javascript": ("tree_sitter_javascript", "language"),
+            "typescript": ("tree_sitter_typescript", "language_typescript"),
+            "tsx": ("tree_sitter_typescript", "language_tsx"),
+            "jsx": ("tree_sitter_javascript", "language"),
+            "python": ("tree_sitter_python", "language"),
+        }
+        item = mapping.get(language)
+        if not item:
+            return None
+        pkg, attr = item
+        try:
+            mod = importlib.import_module(pkg)
+            lang_fn = getattr(mod, attr)
+            lang_mod = importlib.import_module("tree_sitter")
+            parser = lang_mod.Parser(lang_mod.Language(lang_fn()))
+            self._parsers[language] = parser
+            return parser
+        except Exception as e:
+            if sys.stderr:
+                print(f"[graphite] parser load failed for {language}: {e}", file=sys.stderr)
+            return None
+
+
+_LOADER = _TreeSitterLoader()
+
+
+class _Scope:
+    """A call-attribution scope (the nearest enclosing function/method/arrow).
+
+    ``pending`` holds a node dict that is emitted lazily the first time the scope
+    is used as the source of an edge. Named functions are materialized eagerly
+    (``pending is None``); anonymous arrows/functions are only materialized if
+    they actually emit a call, so trivial callbacks never bloat the graph.
+    """
+
+    __slots__ = ("id", "pending")
+
+    def __init__(self, node_id: str, pending: dict[str, Any] | None = None) -> None:
+        self.id = node_id
+        self.pending = pending
+
+
+def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source_index: SourceIndex | None = None) -> ExtractionResult:
+    result = ExtractionResult()
+    root = tree.root_node
+
+    def _line(node: Any) -> int:
+        return (node.start_point[0] + 1) if node.start_point else 1
+
+    def _name(node: Any) -> str | None:
+        # identifiers, property_identifier, type_identifier, etc.
+        for child in node.children:
+            if child.type.endswith("identifier"):
+                text = child.text.decode("utf-8", errors="ignore") if child.text else None
+                return _short_name(text)
+        return None
+
+    # Add file node.
+    result.nodes.append(_node(file_id, "file", Path(rel_path).name, rel_path))
+
+    # Pre-pass: map locally-bound imported names to the definition node id in
+    # the file that defines them, so cross-file calls resolve to the real target
+    # instead of a same-file phantom.
+    import_symbols = _collect_ts_import_symbols(root, rel_path, source_index)
+
+    def _materialize(scope: _Scope) -> None:
+        if scope.pending is not None:
+            result.nodes.append(scope.pending)
+            scope.pending = None
+
+    file_scope = _Scope(file_id)  # file node already emitted above
+
+    def _anon_scope(node: Any) -> _Scope:
+        syn = _safe_label(_synthetic_fn_name(node, source))
+        line = _line(node)
+        col = (node.start_point[1] + 1) if node.start_point else 1
+        mid = _make_id(file_id, syn, f"l{line}", f"c{col}")
+        pending = _node(mid, "function", syn, rel_path, line, extra={"anonymous": True})
+        return _Scope(mid, pending=pending)
+
+    # Walk for declarations and calls. ``parent_id`` is the nearest named
+    # container (for ``contains`` edges); ``scope`` is the nearest function-like
+    # scope (for ``calls`` attribution).
+    def walk(node: Any, parent_id: str | None, scope: _Scope) -> None:
+        t = node.type
+        if t in ("function_declaration", "generator_function_declaration", "function", "generator_function", "method_definition"):
+            name = _name(node)
+            if name:
+                mid = _make_id(file_id, name)
+                # Tag class methods so the global method-dispatch post-pass can
+                # resolve `recv.method()` member calls to this definition (_merge).
+                extra = {"is_method": True} if t == "method_definition" else None
+                result.nodes.append(_node(mid, "function", name, rel_path, _line(node), extra=extra))
+                if parent_id:
+                    result.edges.append(_edge(parent_id, mid, "contains", rel_path, _line(node)))
+                walk_children(node, mid, _Scope(mid))
+            else:
+                walk_children(node, parent_id, _anon_scope(node))
+        elif t == "arrow_function":
+            # Arrows carry no name of their own; _name would misread a bare
+            # single parameter as the name, so always treat them as anonymous.
+            walk_children(node, parent_id, _anon_scope(node))
+        elif t == "class_declaration":
+            name = _name(node)
+            if name:
+                cid = _make_id(file_id, name)
+                result.nodes.append(_node(cid, "class", name, rel_path, _line(node)))
+                if parent_id:
+                    result.edges.append(_edge(parent_id, cid, "contains", rel_path, _line(node)))
+                walk_children(node, cid, scope)
+            else:
+                walk_children(node, parent_id, scope)
+        elif t == "import_statement":
+            # import ... from 'module' or import 'module'
+            source_lit = None
+            for child in node.children:
+                if child.type == "string":
+                    source_lit = child.text.decode("utf-8", errors="ignore").strip("'\"")
+                elif child.type == "import_clause":
+                    pass
+            if source_lit:
+                resolved = _resolve_import(rel_path, source_lit, source_index)
+                if resolved:
+                    result.edges.append(
+                        _edge(
+                            file_id,
+                            _file_node_id(resolved.rel_path),
+                            "imports",
+                            rel_path,
+                            _line(node),
+                            confidence=resolved.confidence,
+                        )
+                    )
+                else:
+                    result.edges.append(_edge(file_id, _make_id(source_lit), "imports", rel_path, _line(node), confidence="EXTERNAL_IMPORT"))
+            walk_children(node, parent_id, scope)
+        elif t in ("call_expression", "new_expression"):
+            func = node.child_by_field_name("function")
+            if func:
+                called = _call_target_name(func, source)
+                if called and called not in _LANGUAGE_BUILTIN_GLOBALS and should_keep_call_target(called):
+                    target_id = _resolve_call(file_id, called, import_symbols)
+                    _materialize(scope)
+                    edge = _edge(scope.id, target_id, "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+                    # Method dispatch: for `recv.method(...)` the callee is a
+                    # member_expression and target_id above is only a file-scoped
+                    # phantom. Stash the bare method name so the global post-pass
+                    # can re-point this edge to the real class method definition
+                    # (see _resolve_method_dispatch). `new x.Foo()` is construction,
+                    # not dispatch, so restrict to call_expression.
+                    if t == "call_expression" and func.type == "member_expression":
+                        prop = func.child_by_field_name("property")
+                        method = prop.text.decode("utf-8", errors="ignore") if prop is not None and prop.text else None
+                        if method:
+                            edge["_member"] = method
+                    result.edges.append(edge)
+            walk_children(node, parent_id, scope)
+        else:
+            walk_children(node, parent_id, scope)
+
+    def walk_children(node: Any, parent_id: str | None, scope: _Scope) -> None:
+        for child in node.children:
+            walk(child, parent_id, scope)
+
+    walk(root, file_id, file_scope)
+    if source_index is not None:
+        for edge in source_index.supplemental_ts_edges(rel_path):
+            result.edges.append(
+                _edge(
+                    file_id,
+                    _file_node_id(edge.target),
+                    edge.relation,
+                    rel_path,
+                    edge.line,
+                    context=edge.specifier,
+                    confidence=edge.confidence,
+                )
+            )
+    return result
+
+
+def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceIndex | None) -> dict[str, str]:
+    """Map locally-bound imported names to their definition node id.
+
+    Only *named* imports are mapped: ``import { foo }`` / ``import { foo as bar }``.
+    The value is ``<defining-file-id>_<original-export-name>`` so a call to the
+    local name links to the real definition node in the file that exports it.
+    Default and namespace imports are skipped (they can't be tied to a single
+    named definition), so those calls fall back to same-file resolution.
+    """
+    symbols: dict[str, str] = {}
+    if source_index is None:
+        return symbols
+    for node in root.children:
+        if node.type != "import_statement":
+            continue
+        source_lit = None
+        clause = None
+        for child in node.children:
+            if child.type == "string":
+                source_lit = child.text.decode("utf-8", errors="ignore").strip("'\"")
+            elif child.type == "import_clause":
+                clause = child
+        if not source_lit or clause is None:
+            continue
+        resolved = _resolve_import(rel_path, source_lit, source_index)
+        if resolved is None:
+            continue
+        target_file_id = _file_node_id(resolved.rel_path)
+        for local, original in _iter_named_imports(clause):
+            symbols[local] = _make_id(target_file_id, original)
+    return symbols
+
+
+def _iter_named_imports(clause: Any):
+    """Yield (local_name, original_export_name) for each named import in a clause."""
+    for child in clause.children:
+        if child.type != "named_imports":
+            continue
+        for spec in child.children:
+            if spec.type != "import_specifier":
+                continue
+            name_node = spec.child_by_field_name("name")
+            if name_node is None or not name_node.text:
+                continue
+            original = name_node.text.decode("utf-8", errors="ignore")
+            alias_node = spec.child_by_field_name("alias")
+            local = (
+                alias_node.text.decode("utf-8", errors="ignore")
+                if alias_node is not None and alias_node.text
+                else original
+            )
+            yield local, original
+
+
+def _synthetic_fn_name(node: Any, source: bytes) -> str | None:
+    """Derive a stable, human-ish name for an anonymous function from its context.
+
+    Handles the common shapes: object property value (``run: () => ...``),
+    variable binding (``const f = () => ...``), assignment, class field, and
+    callback arguments (``app.post('/x', () => ...)`` -> ``app.post /x``).
+    Returns None when no context is available (caller falls back to ``anon``).
+    """
+    parent = node.parent
+    if parent is None:
+        return None
+    pt = parent.type
+    if pt == "pair":
+        key = parent.child_by_field_name("key")
+        if key is not None and key.text:
+            return _short_name(key.text.decode("utf-8", errors="ignore"))
+    elif pt == "variable_declarator":
+        nm = parent.child_by_field_name("name")
+        if nm is not None and nm.text:
+            return _short_name(nm.text.decode("utf-8", errors="ignore"))
+    elif pt == "assignment_expression":
+        left = parent.child_by_field_name("left")
+        if left is not None:
+            nm = _simple_object_name(left)
+            if nm:
+                return _short_name(nm)
+            if left.text:
+                return _short_name(left.text.decode("utf-8", errors="ignore"))
+    elif pt in ("public_field_definition", "field_definition", "property_signature"):
+        nm = parent.child_by_field_name("name")
+        if nm is not None and nm.text:
+            return _short_name(nm.text.decode("utf-8", errors="ignore"))
+    elif pt == "arguments":
+        gp = parent.parent
+        if gp is not None and gp.type in ("call_expression", "new_expression"):
+            callee = gp.child_by_field_name("function")
+            callee_name = _call_target_name(callee, source) if callee is not None else None
+            str_arg = None
+            for arg in parent.children:
+                if arg.type == "string":
+                    str_arg = arg.text.decode("utf-8", errors="ignore").strip("'\"`")
+                    break
+            if callee_name and str_arg:
+                return _short_name(f"{callee_name} {str_arg}")
+            if callee_name:
+                return _short_name(callee_name)
+    return None
+
+
+_MAX_NAME_LEN = 80
+
+
+def _short_name(text: str | None) -> str | None:
+    if not text:
+        return None
+    text = text.strip()
+    if len(text) > _MAX_NAME_LEN:
+        # For chained/long names keep the final segment.
+        return text.split(".")[-1][: _MAX_NAME_LEN]
+    return text
+
+
+def _safe_label(text: str | None) -> str:
+    """Normalize a synthetic label into a compact, console-safe display name.
+
+    Synthetic names are derived from arbitrary source strings (route paths, test
+    descriptions, i18n literals) which may contain newlines, emoji, or other
+    non-ASCII characters. Collapse whitespace and drop anything outside printable
+    ASCII so labels stay short and render on any terminal/encoding.
+    """
+    if not text:
+        return "anon"
+    # Replace control/non-ASCII with spaces, then collapse, so a stripped
+    # character between words doesn't leave a double space.
+    text = "".join(ch if 32 <= ord(ch) < 127 else " " for ch in text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:_MAX_NAME_LEN] if text else "anon"
+
+
+def _simple_object_name(node: Any) -> str | None:
+    """Return a short name for the object of a member_expression, or None if too complex."""
+    if node.type.endswith("identifier"):
+        return node.text.decode("utf-8", errors="ignore") if node.text else None
+    if node.type == "member_expression":
+        obj = node.child_by_field_name("object")
+        prop = node.child_by_field_name("property")
+        if obj and prop:
+            obj_name = _simple_object_name(obj)
+            prop_name = prop.text.decode("utf-8", errors="ignore") if prop.text else None
+            if obj_name and prop_name:
+                combined = f"{obj_name}.{prop_name}"
+                return _short_name(combined)
+        return None
+    # Complex literals (array, object, parenthesized, call) — don't stringify.
+    return None
+
+
+def _call_target_name(node: Any, source: bytes) -> str | None:
+    """Best-effort name for a call target."""
+    if node.type.endswith("identifier"):
+        return _short_name(node.text.decode("utf-8", errors="ignore") if node.text else None)
+    if node.type == "member_expression":
+        obj = node.child_by_field_name("object")
+        prop = node.child_by_field_name("property")
+        prop_name = prop.text.decode("utf-8", errors="ignore") if prop and prop.text else None
+        obj_name = _simple_object_name(obj) if obj else None
+        if prop_name:
+            return _short_name(f"{obj_name}.{prop_name}" if obj_name else prop_name)
+        return _short_name(prop_name)
+    # Fallback: first identifier child.
+    for child in node.children:
+        if child.type.endswith("identifier"):
+            return _short_name(child.text.decode("utf-8", errors="ignore") if child.text else None)
+    return None
+
+
+def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any) -> ExtractionResult:
+    result = ExtractionResult()
+    root = tree.root_node
+
+    def _line(node: Any) -> int:
+        return (node.start_point[0] + 1) if node.start_point else 1
+
+    result.nodes.append(_node(file_id, "file", Path(rel_path).name, rel_path))
+
+    # ``parent_id`` is the nearest named container (for ``contains`` edges);
+    # ``scope_id`` is the nearest enclosing function (for ``calls`` attribution).
+    def walk(node: Any, parent_id: str | None, scope_id: str) -> None:
+        if node.type == "function_definition":
+            name_node = node.child_by_field_name("name")
+            name = _short_name(name_node.text.decode("utf-8", errors="ignore")) if name_node and name_node.text else None
+            if name:
+                mid = _make_id(file_id, name)
+                result.nodes.append(_node(mid, "function", name, rel_path, _line(node)))
+                if parent_id:
+                    result.edges.append(_edge(parent_id, mid, "contains", rel_path, _line(node)))
+                walk_children(node, mid, mid)
+            else:
+                walk_children(node, parent_id, scope_id)
+        elif node.type == "class_definition":
+            name_node = node.child_by_field_name("name")
+            name = _short_name(name_node.text.decode("utf-8", errors="ignore")) if name_node and name_node.text else None
+            if name:
+                cid = _make_id(file_id, name)
+                result.nodes.append(_node(cid, "class", name, rel_path, _line(node)))
+                if parent_id:
+                    result.edges.append(_edge(parent_id, cid, "contains", rel_path, _line(node)))
+                # Inheritance
+                for base in node.children:
+                    if base.type == "argument_list":
+                        for arg in base.children:
+                            if arg.type.endswith("identifier") and arg.text:
+                                base_name = arg.text.decode("utf-8", errors="ignore")
+                                result.edges.append(_edge(cid, _make_id(base_name), "inherits", rel_path, _line(arg)))
+                walk_children(node, cid, scope_id)
+            else:
+                walk_children(node, parent_id, scope_id)
+        elif node.type == "import_statement" or node.type == "import_from_statement":
+            # Collect module names from dotted_name children.
+            for child in node.children:
+                if child.type == "dotted_name":
+                    mod = child.text.decode("utf-8", errors="ignore") if child.text else None
+                    if mod:
+                        result.edges.append(_edge(file_id, _make_id(mod), "imports", rel_path, _line(node)))
+                elif child.type == "string" and node.type == "import_from_statement":
+                    mod = child.text.decode("utf-8", errors="ignore").strip("'\"")
+                    if mod:
+                        result.edges.append(_edge(file_id, _make_id(mod), "imports", rel_path, _line(node)))
+            walk_children(node, parent_id, scope_id)
+        elif node.type == "call":
+            func = node.child_by_field_name("function")
+            called = _call_target_name(func, source) if func else None
+            if called and called not in _LANGUAGE_BUILTIN_GLOBALS:
+                result.edges.append(_edge(scope_id, _resolve_call(file_id, called), "calls", rel_path, _line(node)))
+            walk_children(node, parent_id, scope_id)
+        else:
+            walk_children(node, parent_id, scope_id)
+
+    def walk_children(node: Any, parent_id: str | None, scope_id: str) -> None:
+        for child in node.children:
+            walk(child, parent_id, scope_id)
+
+    walk(root, file_id, file_id)
+    return result
+
+
+def _resolve_import(rel_path: str, source_lit: str, source_index: SourceIndex | None = None) -> Any | None:
+    """Best-effort resolve relative/local imports to a known project file path."""
+    if source_index is not None:
+        return source_index.resolve_ts_import_detail(rel_path, source_lit)
+    return None
+
+
+def _resolve_call(file_id: str, called: str, import_symbols: dict[str, str] | None = None) -> str:
+    """Convert a call target string into a node id.
+
+    A plain identifier that was imported into this file resolves to the
+    definition node in the file that exports it (cross-file). Otherwise the call
+    is attached to the current file's namespace (same-file resolution).
+    """
+    if import_symbols and called and "." not in called:
+        mapped = import_symbols.get(called)
+        if mapped:
+            return mapped
+    # Local call: if called starts with lowercase or is relative, attach to file namespace.
+    if called and not called.startswith(".") and not called.startswith("node_modules"):
+        # Try namespaced under file first; fallback to bare id.
+        return _make_id(file_id, called)
+    return _make_id(called)
+
+
+def _extract_generic(file_id: str, rel_path: str, source: bytes, language: str) -> ExtractionResult:
+    """Fallback for languages we can't parse structurally yet."""
+    result = ExtractionResult()
+    result.nodes.append(_node(file_id, "file", Path(rel_path).name, rel_path))
+    # TODO: add comment extraction, markdown headings, JSON keys, etc.
+    return result
+
+
+def extract_file(entry: FileEntry, cfg: Config, cache: Cache | None = None, source_index: SourceIndex | None = None) -> ExtractionResult:
+    """Extract nodes and edges from a single file, using cache if available."""
+    compiler_resolver_active = bool(
+        source_index
+        and source_index.typescript.available
+        and entry.language in ("javascript", "typescript", "tsx", "jsx")
+    )
+    cache_language = f"{entry.language or 'unknown'}:{'tsc' if compiler_resolver_active else 'ast'}"
+    if cache is not None and not compiler_resolver_active:
+        cached = cache.read("ast", entry.content_hash, cache_language)
+        if cached is not None:
+            return _result_from_dict(cached)
+
+    rel_path = entry.rel_path
+    file_id = _file_node_id(rel_path)
+
+    try:
+        with open(entry.abs_path, "rb") as f:
+            source = f.read()
+    except Exception as e:
+        return ExtractionResult(error=f"read_error: {e}")
+
+    if entry.language in ("javascript", "typescript", "tsx", "jsx"):
+        parser = _LOADER.parser(entry.language)
+        if parser is None:
+            return _extract_generic(file_id, rel_path, source, entry.language)
+        try:
+            tree = parser.parse(source)
+        except Exception as e:
+            return ExtractionResult(error=f"parse_error: {e}")
+        result = _extract_ts_js(file_id, rel_path, source, tree, source_index)
+    elif entry.language == "python":
+        parser = _LOADER.parser(entry.language)
+        if parser is None:
+            return _extract_generic(file_id, rel_path, source, entry.language)
+        try:
+            tree = parser.parse(source)
+        except Exception as e:
+            return ExtractionResult(error=f"parse_error: {e}")
+        result = _extract_python(file_id, rel_path, source, tree)
+    else:
+        result = _extract_generic(file_id, rel_path, source, entry.language or "unknown")
+
+    if cache is not None:
+        cache.write(_result_to_dict(result), "ast", entry.content_hash, cache_language)
+
+    return result
+
+
+def _result_to_dict(result: ExtractionResult) -> dict[str, Any]:
+    return {"nodes": result.nodes, "edges": result.edges, "error": result.error}
+
+
+def _result_from_dict(data: dict[str, Any]) -> ExtractionResult:
+    return ExtractionResult(
+        nodes=data.get("nodes", []),
+        edges=data.get("edges", []),
+        error=data.get("error"),
+    )
+
+
+def extract_all(entries: list[FileEntry], cfg: Config, cache: Cache | None = None) -> ExtractionResult:
+    """Extract all files, optionally in parallel."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    results: list[ExtractionResult] = []
+    source_index = SourceIndex.from_entries(entries, cfg)
+    if cfg.workers <= 1:
+        for entry in entries:
+            results.append(extract_file(entry, cfg, cache, source_index))
+        return _merge(results)
+
+    with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
+        futures = {pool.submit(extract_file, entry, cfg, cache, source_index): entry for entry in entries}
+        for future in as_completed(futures):
+            try:
+                results.append(future.result())
+            except Exception as e:
+                entry = futures[future]
+                results.append(ExtractionResult(error=f"worker_error: {entry.rel_path}: {e}", nodes=[], edges=[]))
+    return _merge(results)
+
+
+# Cap on how many same-named class methods one `recv.method()` call may link to.
+# Method names in real codebases are almost always globally unique, so the common
+# path is a 1:1 re-point. A small ambiguous set (2..cap) links to every candidate
+# (bounded fan-out that keeps reachability useful). Above the cap the name is too
+# generic to guess, so resolution is skipped and the original file-scoped phantom
+# edge is left untouched (pre-fix behavior).
+_MAX_METHOD_DISPATCH_CANDIDATES = 3
+
+
+def _resolve_method_dispatch(
+    nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Re-point `recv.method(...)` member-call edges to class method definitions.
+
+    NAME-BASED heuristic (full TS type inference is out of scope). Each member call
+    carries the bare method name in ``_member`` (set during the TS/JS walk); the
+    call target as extracted is only a file-scoped phantom (``<file>_<recv>_<method>``).
+    Here we map the method name to every class-method definition node (tagged
+    ``is_method``) sharing that name and re-point the edge accordingly, which is what
+    makes ``store.X()`` / ``cj.X()`` / ``this.X()`` dispatch visible to callers/calls/
+    reaches, including across files.
+
+    Ambiguity policy (``_MAX_METHOD_DISPATCH_CANDIDATES``): a unique name re-points to
+    the single definition; 2..cap candidates each get an edge; more than cap (or zero)
+    candidates leaves the original phantom edge unchanged. Known limitation: methods
+    written as arrow-valued class fields (``foo = () => {}``) parse as
+    ``public_field_definition``, not ``method_definition``, so they are not indexed and
+    won't resolve.
+
+    ``_member`` is stripped from every returned edge so it never leaks into the graph.
+    """
+    # method name (casefolded) -> set of definition node ids. A set collapses the
+    # same method appearing twice in the pre-dedup node list, so the cap counts
+    # distinct definitions.
+    methods_by_name: dict[str, set[str]] = {}
+    for n in nodes:
+        if n.get("is_method") and n.get("name"):
+            methods_by_name.setdefault(n["name"].casefold(), set()).add(n["id"])
+    known_ids = {n["id"] for n in nodes}
+
+    out: list[dict[str, Any]] = []
+    for e in edges:
+        method = e.pop("_member", None)  # strip from every edge, resolved or not
+        if not method or e.get("relation") != "calls":
+            out.append(e)
+            continue
+        candidates = methods_by_name.get(method.casefold())
+        if not candidates or len(candidates) > _MAX_METHOD_DISPATCH_CANDIDATES:
+            # Member call that resolves to no known definition: if its target
+            # is a real node keep it, otherwise DROP it. These unresolved
+            # phantoms (`c.json()`, `db.prepare()`, `stmt.bind()`, ...) are
+            # framework/runtime API calls, not project symbols — in a real
+            # worker codebase they outnumbered genuine nodes and dominated
+            # every degree/god-node statistic while asserting nothing true
+            # about the project.
+            if e.get("target") in known_ids:
+                out.append(e)
+            continue
+        # Unique -> single re-point; small set -> one edge per candidate (sorted
+        # for determinism). Duplicates are absorbed by the dedup in _merge.
+        for target in sorted(candidates):
+            re_pointed = dict(e)
+            re_pointed["target"] = target
+            out.append(re_pointed)
+    return out
+
+
+def _merge(results: list[ExtractionResult]) -> ExtractionResult:
+    merged = ExtractionResult()
+    # Collect all nodes/edges, then sort deterministically before dedup.
+    all_nodes: list[dict[str, Any]] = []
+    all_edges: list[dict[str, Any]] = []
+    for r in results:
+        all_nodes.extend(r.nodes)
+        all_edges.extend(r.edges)
+        if r.error:
+            merged.error = r.error
+
+    # Resolve `recv.method()` member calls against the global set of class-method
+    # definitions. Done here (post-merge, pre-dedup) because it needs every file's
+    # methods at once, and because re-pointing can create duplicate edges (e.g.
+    # `a.foo()` and `b.foo()` both -> the real `foo`) that the dedup below absorbs.
+    all_edges = _resolve_method_dispatch(all_nodes, all_edges)
+
+    all_nodes.sort(key=lambda n: (n.get("id", ""), n.get("source_file", "")))
+    seen_nodes: set[str] = set()
+    for n in all_nodes:
+        if n["id"] not in seen_nodes:
+            merged.nodes.append(n)
+            seen_nodes.add(n["id"])
+
+    all_edges.sort(
+        key=lambda e: (
+            e.get("source", ""),
+            e.get("target", ""),
+            e.get("relation", ""),
+            e.get("source_file", ""),
+            e.get("source_location", ""),
+        )
+    )
+    seen_edges: set[tuple[str, str, str]] = set()
+    for e in all_edges:
+        key = (e["source"], e["target"], e["relation"])
+        if key not in seen_edges:
+            merged.edges.append(e)
+            seen_edges.add(key)
+    return merged
+
+
+
+
+
+
+
