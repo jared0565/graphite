@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from graphite.export import html as html_export
@@ -48,3 +49,24 @@ def test_html_is_published_atomically(monkeypatch, tmp_path: Path) -> None:
     assert target == output_path
     assert document.startswith("<!DOCTYPE html>")
     assert document.endswith("</html>\n")
+
+
+def test_html_preserves_template_tokens_inside_graph_data(tmp_path: Path) -> None:
+    output_path = tmp_path / "graph.html"
+    repository_label = "{{title}} / {{node_count}}"
+
+    _export_graph(output_path, node_name=repository_label)
+
+    document = output_path.read_text(encoding="utf-8")
+    assert f'"name": "{repository_label}"' in document
+
+
+def test_json_for_script_escapes_html_characters_and_round_trips() -> None:
+    value = {"label": "repository &<>"}
+
+    encoded = html_export._json_for_script(value)
+
+    assert r"\u0026" in encoded
+    assert r"\u003c" in encoded
+    assert r"\u003e" in encoded
+    assert json.loads(encoded) == value

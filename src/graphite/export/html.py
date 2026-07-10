@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -227,15 +228,17 @@ def to_html(
         "clusters": clusters.get("clusters", []),
         "analysis": analysis,
     }
-    data_json = _json_for_script(bundle)
-    document = (
-        _HTML_TEMPLATE
-        .replace("{{data}}", data_json)
-        .replace("{{title}}", html.escape(str(manifest.get("root", "codebase"))))
-        .replace("{{node_count}}", str(graph_data.get("metadata", {}).get("node_count", 0)))
-        .replace("{{edge_count}}", str(graph_data.get("metadata", {}).get("edge_count", 0)))
-        .replace("{{cluster_count}}", str(clusters.get("count", 0)))
+    substitutions = {
+        "data": _json_for_script(bundle),
+        "title": html.escape(str(manifest.get("root", "codebase"))),
+        "node_count": str(graph_data.get("metadata", {}).get("node_count", 0)),
+        "edge_count": str(graph_data.get("metadata", {}).get("edge_count", 0)),
+        "cluster_count": str(clusters.get("count", 0)),
+    }
+    document = re.sub(
+        r"\{\{(data|title|node_count|edge_count|cluster_count)\}\}",
+        lambda match: substitutions[match.group(1)],
+        _HTML_TEMPLATE,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(output_path, document)
-
