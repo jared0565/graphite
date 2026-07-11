@@ -145,6 +145,35 @@ graphite query "stats"
 
 Use `graphite context` first when you know the likely file. It returns matched nodes, direct dependencies, direct dependents, impacted files, likely tests, community peers, and coupling risk signals without dumping the full graph.
 
+## Deterministic change review
+
+Use `review-changes` to turn a change set into a deterministic review packet before accepting or merging it:
+
+```bash
+# Discover all current Git changes and render a Markdown packet
+graphite review-changes .
+
+# Emit stable, machine-readable evidence
+graphite review-changes . --json
+
+# Opt in to a non-zero exit only when the packet contains a blocker
+graphite review-changes . --json --fail-on-blocker
+
+# Review an explicitly selected scope instead of Git discovery
+graphite review-changes . src/lib/db.py tests/test_db.py --json
+
+# Use a graph contained within the project root
+graphite review-changes . src/lib/db.py --graph-json artifacts/graph.json --json
+```
+
+With no selected files, Git discovery covers staged, unstaged, untracked, deleted, and renamed paths. With selected files, the packet uses exactly that explicit scope. The command checks graph freshness and validates the packet graph, derives reverse-dependency impact and likely tests, reports risk signals transparently, and emits concrete acceptance criteria. A custom graph uses the `.graphite_manifest.json` beside that graph for freshness checks.
+
+`review-changes` is zero-LLM, local, deterministic, and model-, vendor-, and agent-agnostic. It makes no network calls and sends no source code or repository metadata anywhere. Its risk level is advisory: even `high` risk does not fail the command. Exit status `1` is available only with `--fail-on-blocker` and only when blockers such as missing or invalid graph evidence exist.
+
+For containment and resource safety, a custom `--graph-json` must resolve inside the reviewed project root and may be at most 128 MiB. Graph and path evidence is validated before it enters the packet, and low-level parser, filesystem, and Git errors are not copied into review output.
+
+The workflow is informed by the pinned [Karpathy-inspired Think Before Coding, Simplicity, Surgical Changes, and Goal-Driven Execution principles](https://github.com/multica-ai/andrej-karpathy-skills/blob/2c606141936f1eeef17fa3043a72095b4765b9c2/README.md) and the [Superpowers spec-to-plan, TDD, and review philosophy](https://github.com/obra/superpowers/blob/d884ae04edebef577e82ff7c4e143debd0bbec99/README.md). Graphite implements those ideas as local evidence and acceptance packets; it does not impose or require any agent vendor.
+
 ## Artifact validation
 
 Every successful build validates the public `graph-out/graph.json` bundle before publishing reports and writes `graph-out/.graphite_validation.json`.
@@ -374,7 +403,6 @@ Once configured, Claude can call these tools automatically:
 - `graphite_community` — list the community around a node
 - `graphite_summary` — stats, god nodes, entry points, surprising connections
 - `graphite_refresh` — rebuild and reload the graph
-
 
 
 
