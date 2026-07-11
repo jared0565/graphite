@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import unicodedata
 from dataclasses import asdict, dataclass
@@ -61,8 +62,16 @@ def discover_git_changes(root: Path, *, timeout_seconds: float = 5.0) -> list[Ch
     except OSError as exc:
         raise ReviewError("unable to resolve project path") from exc
 
+    git_executable = _resolve_trusted_git_executable()
     top_level_result = _run_git(
-        ["git", "rev-parse", "--show-toplevel"],
+        [
+            str(git_executable),
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "rev-parse",
+            "--show-toplevel",
+        ],
         cwd=resolved_root,
         timeout_seconds=timeout_seconds,
     )
@@ -81,7 +90,16 @@ def discover_git_changes(root: Path, *, timeout_seconds: float = 5.0) -> list[Ch
         raise ReviewError("project path must be the Git worktree root")
 
     status_result = _run_git(
-        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        [
+            str(git_executable),
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        ],
         cwd=resolved_root,
         timeout_seconds=timeout_seconds,
     )
@@ -89,6 +107,33 @@ def discover_git_changes(root: Path, *, timeout_seconds: float = 5.0) -> list[Ch
         raise ReviewError("not a Git worktree")
 
     return _parse_porcelain(status_result.stdout)
+
+
+def _resolve_trusted_git_executable(*, platform_name: str | None = None) -> Path:
+    """Resolve Git only from absolute PATH directories, never the current directory."""
+    selected_platform = os.name if platform_name is None else platform_name
+    executable_name = "git.exe" if selected_platform == "nt" else "git"
+
+    for raw_directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not raw_directory:
+            continue
+        directory = Path(raw_directory)
+        if not directory.is_absolute():
+            continue
+        candidate = directory / executable_name
+        try:
+            if not candidate.is_file():
+                continue
+            resolved_candidate = candidate.resolve(strict=True)
+            if not resolved_candidate.is_file():
+                continue
+            if selected_platform != "nt" and not os.access(resolved_candidate, os.X_OK):
+                continue
+        except OSError:
+            continue
+        return resolved_candidate
+
+    raise ReviewError("Git executable was not found")
 
 
 def _run_git(

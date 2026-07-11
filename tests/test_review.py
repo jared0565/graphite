@@ -214,6 +214,78 @@ def test_discover_git_changes_collects_and_classifies_worktree_evidence(tmp_path
     ]
 
 
+def test_resolve_trusted_git_ignores_unsafe_path_entries_and_cwd_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "untrusted repository"
+    trusted_bin = tmp_path / "trusted tools"
+    repository.mkdir()
+    trusted_bin.mkdir()
+    _write(repository / "git.exe", "malicious")
+    _write(trusted_bin / "git.exe", "trusted")
+    monkeypatch.chdir(repository)
+    monkeypatch.setenv(
+        "PATH",
+        os.pathsep.join(("", ".", "relative tools", str(trusted_bin))),
+    )
+
+    executable = review_module._resolve_trusted_git_executable(platform_name="nt")
+
+    assert executable == trusted_bin.resolve() / "git.exe"
+    assert executable.is_absolute()
+    assert executable.name == "git.exe"
+    assert executable.parent != repository.resolve()
+
+
+def test_resolve_trusted_git_failure_is_sanitized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private_path = tmp_path / ("private-" + "x" * 80)
+    monkeypatch.setenv("PATH", os.pathsep.join(("", ".", "relative", str(private_path))))
+
+    with pytest.raises(ReviewError) as error:
+        review_module._resolve_trusted_git_executable(platform_name="nt")
+
+    assert str(error.value) == "Git executable was not found"
+    assert str(private_path) not in str(error.value)
+
+
+def test_discover_git_changes_uses_hardened_absolute_git_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted_git = (tmp_path / "trusted tools" / "git.exe").resolve()
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append((command, kwargs))
+        if command[-2:] == ["rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(command, 0, f"{tmp_path.resolve()}\n".encode(), b"")
+        return subprocess.CompletedProcess(command, 0, b"?? path with spaces.py\0", b"")
+
+    monkeypatch.setattr(
+        review_module,
+        "_resolve_trusted_git_executable",
+        lambda: trusted_git,
+    )
+    monkeypatch.setattr(review_module.subprocess, "run", fake_run)
+
+    assert discover_git_changes(tmp_path) == [Change("path with spaces.py", "untracked")]
+    assert len(calls) == 2
+    for command, kwargs in calls:
+        assert command[0] == str(trusted_git)
+        assert command[1:4] == ["--no-optional-locks", "-c", "core.fsmonitor=false"]
+        assert kwargs["shell"] is False
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        assert "env" not in kwargs
+    assert calls[0][0][4:] == ["rev-parse", "--show-toplevel"]
+    assert calls[1][0][4:] == [
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    ]
+
+
 def test_discover_git_changes_rejects_non_git_directory(tmp_path: Path) -> None:
     with pytest.raises(ReviewError, match="not a Git worktree"):
         discover_git_changes(tmp_path)
