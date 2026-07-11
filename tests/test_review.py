@@ -306,7 +306,7 @@ def test_build_review_packet_derives_deterministic_graph_evidence() -> None:
 
     assert first == second
     assert first["schema_version"] == 1
-    assert first["project"] == {"root_name": "sample"}
+    assert first["project"] == "sample"
     assert first["changes"] == [{"path": "src/store.py", "status": "modified"}]
     assert first["impact"] == {
         "matched_nodes": ["store"],
@@ -368,10 +368,18 @@ def test_build_review_packet_blocks_missing_graph_without_exposing_error() -> No
     assert [item["code"] for item in packet["blockers"]] == ["MISSING_GRAPH"]
     assert packet["impact"] == {
         "matched_nodes": [],
-        "missing": ["src/store.py"],
+        "missing": [],
         "impacted_files": [],
         "likely_tests": [],
     }
+    assert packet["risk"] == {"level": "low", "signals": []}
+    assert packet["warnings"] == []
+    assert packet["blockers"] == [
+        {
+            "code": "MISSING_GRAPH",
+            "message": "Dependency graph evidence is unavailable; build the graph before review.",
+        }
+    ]
     assert "private" not in repr(packet)
     assert "INJECTED" not in repr(packet)
 
@@ -392,6 +400,20 @@ def test_build_review_packet_blocks_invalid_graph_with_safe_validation_summary()
     assert packet["graph"]["validation"]["error_codes"] == ["edge_target_unknown"]
     assert "edge target does not exist" not in repr(packet["graph"]["validation"])
     assert "'target': 'unknown'" not in repr(packet["graph"]["validation"])
+    assert packet["impact"] == {
+        "matched_nodes": [],
+        "missing": [],
+        "impacted_files": [],
+        "likely_tests": [],
+    }
+    assert packet["risk"] == {"level": "low", "signals": []}
+    assert packet["warnings"] == []
+    assert packet["blockers"] == [
+        {
+            "code": "INVALID_GRAPH",
+            "message": "Dependency graph validation failed; rebuild a valid graph before review.",
+        }
+    ]
 
 
 def test_build_review_packet_empty_changes_only_confirms_clean_state() -> None:
@@ -486,20 +508,22 @@ def test_build_review_packet_sanitizes_graph_status() -> None:
 
 
 def test_format_review_markdown_renders_packet_evidence() -> None:
-    packet = _packet(
-        [Change("src/missing.py", "deleted")], graph_status={"stale": True}
-    )
+    packet = _packet([Change("src/store.py", "modified")])
 
     markdown = format_review_markdown(packet)
 
     assert markdown.startswith("# Graphite Change Review\n")
     assert "## Changes" in markdown
-    assert "`src/missing.py`" in markdown
+    assert "`src/store.py`" in markdown
     assert "## Impact" in markdown
+    assert "`src/api.py`" in markdown
+    assert "`tests/test_store.py`" in markdown
     assert "## Risk Signals" in markdown
     assert "## Acceptance Criteria" in markdown
-    assert "- [ ] **REFRESH_GRAPH**" in markdown
-    assert "## Warnings" in markdown
+    assert "- [ ] **REVIEW_SCOPE**" in markdown
+    assert "- [ ] **REVIEW_IMPACT**" in markdown
+    assert "- [ ] **RUN_LIKELY_TESTS**" in markdown
+    assert "## Warnings" not in markdown
     assert "## Blockers" not in markdown
     assert markdown.endswith("\n")
 

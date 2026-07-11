@@ -244,9 +244,10 @@ def build_review_packet(
     safe_status = _sanitize_graph_status(graph_status)
     blockers: list[dict[str, str]] = []
     validation: dict[str, Any]
+    graph_usable = False
     impact = {
         "matched_nodes": [],
-        "missing": list(change_paths),
+        "missing": [],
         "impacted_files": [],
         "likely_tests": [],
     }
@@ -270,6 +271,7 @@ def build_review_packet(
                 }
             )
         else:
+            graph_usable = True
             context = build_context(graph_from_json(graph_bundle), change_paths, depth=depth)
             context_impact = context["impact"]
             impact = {
@@ -287,8 +289,8 @@ def build_review_packet(
         "DELETED_FILES": deleted,
         "SENSITIVE_CONFIG": sensitive,
         "BROAD_IMPACT": len(impact["impacted_files"]) >= 10,
-        "MISSING_GRAPH_MATCHES": bool(impact["missing"]),
-        "NO_LIKELY_TESTS": bool(ordered_changes) and not impact["likely_tests"],
+        "MISSING_GRAPH_MATCHES": graph_usable and bool(impact["missing"]),
+        "NO_LIKELY_TESTS": graph_usable and bool(ordered_changes) and not impact["likely_tests"],
     }
     signals = [signal for signal in _RISK_ORDER if risk_flags[signal]]
     high_signals = set(_RISK_ORDER[:4])
@@ -327,7 +329,7 @@ def build_review_packet(
 
     return {
         "schema_version": 1,
-        "project": {"root_name": root_name},
+        "project": root_name,
         "discovery": discovery,
         "changes": [change.to_dict() for change in ordered_changes],
         "graph": {"status": safe_status, "validation": validation},
@@ -343,7 +345,6 @@ def build_review_packet(
 
 def format_review_markdown(packet: dict[str, Any]) -> str:
     """Render a review packet as bounded, control-character-free Markdown."""
-    project = packet.get("project", {})
     graph = packet.get("graph", {})
     status = graph.get("status", {})
     validation = graph.get("validation", {})
@@ -351,7 +352,7 @@ def format_review_markdown(packet: dict[str, Any]) -> str:
         "# Graphite Change Review",
         "",
         f"- Schema: {_safe_markdown_text(packet.get('schema_version', 'unknown'))}",
-        f"- Project: {_safe_markdown_text(project.get('root_name', 'unknown'))}",
+        f"- Project: {_safe_markdown_text(packet.get('project', 'unknown'))}",
         f"- Discovery: {_safe_markdown_text(packet.get('discovery', 'unknown'))}",
         f"- Graph stale: {_safe_markdown_text(status.get('stale', False))}",
         f"- Graph valid: {_safe_markdown_text(validation.get('ok', False))}",
