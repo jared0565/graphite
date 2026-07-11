@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -184,6 +185,11 @@ _RISK_ORDER = (
     "NO_LIKELY_TESTS",
 )
 
+_CHANGE_STATUSES = frozenset(
+    {"explicit", "untracked", "deleted", "added", "renamed", "modified"}
+)
+_DISCOVERY_MODES = frozenset({"explicit", "git"})
+
 _CRITERIA = {
     "CONFIRM_CLEAN": {
         "description": "Confirm that there are no changes in the requested review scope.",
@@ -235,22 +241,15 @@ def build_review_packet(
     if depth < 0:
         raise ReviewError("review depth must be zero or greater")
 
-    ordered_changes = sorted(changes, key=lambda item: (item.path, item.status))
-    for change in ordered_changes:
-        if _has_control_character(change.path):
-            raise ReviewError("change path contains unsafe characters")
+    _validate_review_inputs(root_name, changes, discovery, graph_status)
 
+    ordered_changes = sorted(changes, key=lambda item: (item.path, item.status))
     change_paths = sorted({change.path for change in ordered_changes})
     safe_status = _sanitize_graph_status(graph_status)
     blockers: list[dict[str, str]] = []
     validation: dict[str, Any]
     graph_usable = False
-    impact = {
-        "matched_nodes": [],
-        "missing": [],
-        "impacted_files": [],
-        "likely_tests": [],
-    }
+    impact = _empty_impact()
 
     if graph_bundle is None:
         validation = _empty_validation_summary()
@@ -261,25 +260,16 @@ def build_review_packet(
             }
         )
     else:
-        report = validate_graph_bundle(graph_bundle)
-        validation = _validation_summary(report)
-        if not report["ok"]:
+        validation, impact, graph_usable = _derive_graph_evidence(
+            graph_bundle, change_paths, depth
+        )
+        if not graph_usable:
             blockers.append(
                 {
                     "code": "INVALID_GRAPH",
                     "message": "Dependency graph validation failed; rebuild a valid graph before review.",
                 }
             )
-        else:
-            graph_usable = True
-            context = build_context(graph_from_json(graph_bundle), change_paths, depth=depth)
-            context_impact = context["impact"]
-            impact = {
-                "matched_nodes": _sorted_strings(context_impact.get("matched_nodes", [])),
-                "missing": _sorted_strings(context.get("missing", [])),
-                "impacted_files": _sorted_strings(context_impact.get("impacted_files", [])),
-                "likely_tests": _sorted_strings(context_impact.get("likely_tests", [])),
-            }
 
     stale = safe_status.get("stale") is True
     deleted = any(change.status.casefold() == "deleted" for change in ordered_changes)
@@ -345,6 +335,7 @@ def build_review_packet(
 
 def format_review_markdown(packet: dict[str, Any]) -> str:
     """Render a review packet as bounded, control-character-free Markdown."""
+    _validate_formatter_packet(packet)
     graph = packet.get("graph", {})
     status = graph.get("status", {})
     validation = graph.get("validation", {})
@@ -405,6 +396,159 @@ def format_review_markdown(packet: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _validate_review_inputs(
+    root_name: Any,
+    changes: Any,
+    discovery: Any,
+    graph_status: Any,
+) -> None:
+    if (
+        not isinstance(root_name, str)
+        or not root_name.strip()
+        or "/" in root_name
+        or "\\" in root_name
+        or _contains_unicode_category_c(root_name)
+    ):
+        raise ReviewError("project label is invalid")
+    if not isinstance(discovery, str) or discovery not in _DISCOVERY_MODES:
+        raise ReviewError("review discovery is invalid")
+    if not isinstance(changes, list) or not all(isinstance(change, Change) for change in changes):
+        raise ReviewError("review changes are invalid")
+    for change in changes:
+        if _normalize_safe_relative_path(change.path) is None:
+            raise ReviewError("change path is invalid")
+        if not isinstance(change.status, str) or change.status not in _CHANGE_STATUSES:
+            raise ReviewError("change status is invalid")
+    if not isinstance(graph_status, dict):
+        raise ReviewError("graph status is invalid")
+
+
+def _derive_graph_evidence(
+    graph_bundle: Any,
+    change_paths: list[str],
+    depth: int,
+) -> tuple[dict[str, Any], dict[str, list[str]], bool]:
+    empty_impact = _empty_impact()
+    if not isinstance(graph_bundle, dict):
+        return _invalid_graph_summary("bundle_type"), empty_impact, False
+
+    validation: dict[str, Any] | None = None
+    try:
+        report = validate_graph_bundle(graph_bundle)
+        validation = _validation_summary(report)
+        if not report["ok"]:
+            return validation, empty_impact, False
+        if _bundle_has_unsafe_source_file(graph_bundle):
+            return _invalid_graph_summary("graph_processing_error", validation), empty_impact, False
+
+        context = build_context(graph_from_json(graph_bundle), change_paths, depth=depth)
+        impact = _validated_context_impact(context)
+        return validation, impact, True
+    except Exception:
+        return _invalid_graph_summary("graph_processing_error", validation), empty_impact, False
+
+
+def _validated_context_impact(context: Any) -> dict[str, list[str]]:
+    if not isinstance(context, dict) or not isinstance(context.get("impact"), dict):
+        raise ValueError("invalid graph context")
+    context_impact = context["impact"]
+    matched_nodes = context_impact.get("matched_nodes")
+    if (
+        not isinstance(matched_nodes, list)
+        or not all(
+            isinstance(node, str) and node and not _contains_unicode_category_c(node)
+            for node in matched_nodes
+        )
+    ):
+        raise ValueError("invalid graph context")
+
+    return {
+        "matched_nodes": sorted(set(matched_nodes)),
+        "missing": _validated_graph_paths(context.get("missing")),
+        "impacted_files": _validated_graph_paths(context_impact.get("impacted_files")),
+        "likely_tests": _validated_graph_paths(context_impact.get("likely_tests")),
+    }
+
+
+def _validated_graph_paths(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        raise ValueError("invalid graph paths")
+    normalized: set[str] = set()
+    for value in values:
+        safe_path = _normalize_safe_relative_path(value)
+        if safe_path is None:
+            raise ValueError("invalid graph paths")
+        normalized.add(safe_path)
+    return sorted(normalized)
+
+
+def _bundle_has_unsafe_source_file(bundle: dict[str, Any]) -> bool:
+    nodes = bundle.get("nodes", [])
+    if not isinstance(nodes, list):
+        return True
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        source_file = node.get("source_file")
+        if source_file is None or source_file == "":
+            continue
+        if _normalize_safe_relative_path(source_file) is None:
+            return True
+    return False
+
+
+def _empty_impact() -> dict[str, list[str]]:
+    return {
+        "matched_nodes": [],
+        "missing": [],
+        "impacted_files": [],
+        "likely_tests": [],
+    }
+
+
+def _invalid_graph_summary(
+    code: str, base: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error_count": 1,
+        "warning_count": _safe_count(base.get("warning_count")) if base else 0,
+        "node_count": _safe_count(base.get("node_count")) if base else 0,
+        "edge_count": _safe_count(base.get("edge_count")) if base else 0,
+        "error_codes": [code],
+        "warning_codes": list(base.get("warning_codes", [])) if base else [],
+    }
+
+
+def _validate_formatter_packet(packet: Any) -> None:
+    if not isinstance(packet, dict):
+        raise ReviewError("review packet is invalid")
+
+    mapping_fields = ("graph", "impact", "risk")
+    for field in mapping_fields:
+        if field in packet and not isinstance(packet[field], dict):
+            raise ReviewError("review packet is invalid")
+    graph = packet.get("graph", {})
+    for field in ("status", "validation"):
+        if field in graph and not isinstance(graph[field], dict):
+            raise ReviewError("review packet is invalid")
+
+    object_list_fields = ("changes", "acceptance_criteria", "blockers", "warnings")
+    for field in object_list_fields:
+        values = packet.get(field, [])
+        if not isinstance(values, list) or not all(isinstance(value, dict) for value in values):
+            raise ReviewError("review packet is invalid")
+    impact = packet.get("impact", {})
+    for field in ("impacted_files", "likely_tests", "missing"):
+        values = impact.get(field, [])
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            raise ReviewError("review packet is invalid")
+    risk = packet.get("risk", {})
+    signals = risk.get("signals", [])
+    if not isinstance(signals, list) or not all(isinstance(signal, str) for signal in signals):
+        raise ReviewError("review packet is invalid")
+
+
 def _validation_summary(report: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": bool(report.get("ok", False)),
@@ -453,7 +597,7 @@ def _sanitize_graph_status(status: dict[str, Any]) -> dict[str, Any]:
                     normalized
                     for value in values
                     if isinstance(value, str)
-                    for normalized in [_safe_relative_path(value)]
+                    for normalized in [_normalize_safe_relative_path(value)]
                     if normalized is not None
                 }
             )
@@ -471,8 +615,8 @@ def _sanitize_graph_status(status: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
-def _safe_relative_path(value: str) -> str | None:
-    if _has_control_character(value):
+def _normalize_safe_relative_path(value: Any) -> str | None:
+    if not isinstance(value, str) or _contains_unicode_category_c(value):
         return None
     normalized = value.replace("\\", "/")
     if not normalized or normalized.startswith("/"):
@@ -510,10 +654,6 @@ def _is_sensitive_path(path: str) -> bool:
     return name in sensitive_names or normalized.startswith(".github/workflows/")
 
 
-def _sorted_strings(values: Iterable[Any]) -> list[str]:
-    return sorted({value for value in values if isinstance(value, str)})
-
-
 def _sorted_issue_codes(issues: Any) -> list[str]:
     if not isinstance(issues, list):
         return []
@@ -523,7 +663,7 @@ def _sorted_issue_codes(issues: Any) -> list[str]:
             for issue in issues
             if isinstance(issue, dict)
             for code in [issue.get("code")]
-            if isinstance(code, str) and not _has_control_character(code)
+            if isinstance(code, str) and not _contains_unicode_category_c(code)
         }
     )
 
@@ -532,13 +672,16 @@ def _safe_count(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def _has_control_character(value: str) -> bool:
-    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+def _contains_unicode_category_c(value: str) -> bool:
+    return any(unicodedata.category(character).startswith("C") for character in value)
 
 
 def _safe_markdown_text(value: Any) -> str:
     text = str(value)
-    text = "".join(character if ord(character) >= 32 and ord(character) != 127 else " " for character in text)
+    text = "".join(
+        character if not unicodedata.category(character).startswith("C") else " "
+        for character in text
+    )
     for character in "\\`*_{}[]<>#|":
         text = text.replace(character, f"\\{character}")
     return text
@@ -548,13 +691,16 @@ def _safe_markdown_identifier(value: Any) -> str:
     return "".join(
         character if character.isalnum() or character in "_-" else "_"
         for character in str(value)
-        if ord(character) >= 32 and ord(character) != 127
+        if not unicodedata.category(character).startswith("C")
     )
 
 
 def _inline_code(value: Any) -> str:
     text = str(value)
-    text = "".join(character if ord(character) >= 32 and ord(character) != 127 else " " for character in text)
+    text = "".join(
+        character if not unicodedata.category(character).startswith("C") else " "
+        for character in text
+    )
     longest_run = 0
     current_run = 0
     for character in text:

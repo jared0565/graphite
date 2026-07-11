@@ -416,6 +416,60 @@ def test_build_review_packet_blocks_invalid_graph_with_safe_validation_summary()
     ]
 
 
+def test_build_review_packet_blocks_non_object_graph_bundle() -> None:
+    packet = build_review_packet(
+        root_name="sample",
+        changes=[Change("src/store.py", "modified")],
+        discovery="git",
+        graph_bundle=[],  # type: ignore[arg-type]
+        graph_status={},
+        depth=2,
+    )
+
+    assert packet["impact"] == {
+        "matched_nodes": [],
+        "missing": [],
+        "impacted_files": [],
+        "likely_tests": [],
+    }
+    assert packet["graph"]["validation"] == {
+        "ok": False,
+        "error_count": 1,
+        "warning_count": 0,
+        "node_count": 0,
+        "edge_count": 0,
+        "error_codes": ["bundle_type"],
+        "warning_codes": [],
+    }
+    assert [item["code"] for item in packet["blockers"]] == ["INVALID_GRAPH"]
+
+
+@pytest.mark.parametrize("unsafe_source_file", [123, "src/api.py\u202e"])
+def test_build_review_packet_blocks_unsafe_graph_source_files(
+    unsafe_source_file: object,
+) -> None:
+    bundle = _review_bundle()
+    assert isinstance(bundle["nodes"], list)
+    target = "store" if isinstance(unsafe_source_file, int) else "api_0"
+    for node in bundle["nodes"]:
+        if isinstance(node, dict) and node.get("id") == target:
+            node["source_file"] = unsafe_source_file
+
+    packet = _packet([Change("src/store.py", "modified")], bundle=bundle)
+
+    assert packet["impact"] == {
+        "matched_nodes": [],
+        "missing": [],
+        "impacted_files": [],
+        "likely_tests": [],
+    }
+    assert packet["graph"]["validation"]["ok"] is False
+    assert packet["graph"]["validation"]["error_codes"] == ["graph_processing_error"]
+    assert [item["code"] for item in packet["blockers"]] == ["INVALID_GRAPH"]
+    assert "\u202e" not in repr(packet)
+    assert "AttributeError" not in repr(packet)
+
+
 def test_build_review_packet_empty_changes_only_confirms_clean_state() -> None:
     packet = _packet([])
 
@@ -462,13 +516,73 @@ def test_build_review_packet_rejects_negative_depth() -> None:
         )
 
 
-@pytest.mark.parametrize("path", ["src/bad\nname.py", "src/bad\x1b[31m.py", "src/bad\x00.py"])
-def test_build_review_packet_rejects_control_characters_in_change_paths(path: str) -> None:
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/absolute.py",
+        "C:\\private\\absolute.py",
+        "../escape.py",
+        "src/../escape.py",
+        "src/bad\nname.py",
+        "src/bad\x1b[31m.py",
+        "src/bad\x85name.py",
+        "src/bad\u202ename.py",
+        "src/bad\x00.py",
+    ],
+)
+def test_build_review_packet_rejects_unsafe_change_paths(path: str) -> None:
     with pytest.raises(ReviewError) as error:
         _packet([Change(path, "modified")])
 
-    assert str(error.value) == "change path contains unsafe characters"
+    assert str(error.value) == "change path is invalid"
     assert path not in str(error.value)
+
+
+@pytest.mark.parametrize("status", ["copied", None, []])
+def test_build_review_packet_rejects_unknown_change_status(status: object) -> None:
+    with pytest.raises(ReviewError, match="^change status is invalid$"):
+        _packet([Change("src/store.py", status)])  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("discovery", ["automatic", None, []])
+def test_build_review_packet_rejects_unknown_discovery_mode(discovery: object) -> None:
+    with pytest.raises(ReviewError, match="^review discovery is invalid$"):
+        build_review_packet(
+            root_name="sample",
+            changes=[],
+            discovery=discovery,  # type: ignore[arg-type]
+            graph_bundle=_review_bundle(),
+            graph_status={},
+            depth=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "root_name", ["", "   ", "nested/project", "nested\\project", "bad\nname", "bad\u202ename"]
+)
+def test_build_review_packet_rejects_unsafe_project_label(root_name: str) -> None:
+    with pytest.raises(ReviewError, match="^project label is invalid$"):
+        build_review_packet(
+            root_name=root_name,
+            changes=[],
+            discovery="git",
+            graph_bundle=_review_bundle(),
+            graph_status={},
+            depth=1,
+        )
+
+
+@pytest.mark.parametrize("graph_status", [None, []])
+def test_build_review_packet_rejects_malformed_graph_status(graph_status: object) -> None:
+    with pytest.raises(ReviewError, match="^graph status is invalid$"):
+        build_review_packet(
+            root_name="sample",
+            changes=[],
+            discovery="git",
+            graph_bundle=_review_bundle(),
+            graph_status=graph_status,  # type: ignore[arg-type]
+            depth=1,
+        )
 
 
 def test_build_review_packet_sanitizes_graph_status() -> None:
@@ -565,3 +679,27 @@ def test_format_review_markdown_bounds_inline_code_containing_backticks() -> Non
     markdown = format_review_markdown(packet)
 
     assert "```src/a``b.py```" in markdown
+
+
+@pytest.mark.parametrize(
+    "packet",
+    [
+        None,
+        [],
+        {"graph": []},
+        {"changes": [None]},
+        {"impact": []},
+        {"risk": []},
+    ],
+)
+def test_format_review_markdown_rejects_malformed_packets(packet: object) -> None:
+    with pytest.raises(ReviewError) as error:
+        format_review_markdown(packet)  # type: ignore[arg-type]
+
+    assert str(error.value) == "review packet is invalid"
+
+
+def test_format_review_markdown_drops_unicode_format_characters_defensively() -> None:
+    markdown = format_review_markdown({"project": "safe\u202eunsafe"})
+
+    assert "\u202e" not in markdown
