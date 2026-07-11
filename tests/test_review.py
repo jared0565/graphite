@@ -544,6 +544,21 @@ def test_format_review_markdown_includes_optional_blockers() -> None:
     assert "MISSING_GRAPH" in markdown
 
 
+def test_format_review_markdown_includes_only_applicable_warning_section() -> None:
+    warning_packet = _packet(
+        [Change("src/store.py", "modified")], graph_status={"stale": True}
+    )
+    no_warning_packet = _packet([Change("src/store.py", "modified")])
+
+    warning_markdown = format_review_markdown(warning_packet)
+    no_warning_markdown = format_review_markdown(no_warning_packet)
+
+    assert "## Warnings" in warning_markdown
+    assert "GRAPH_STALE" in warning_markdown
+    assert "Dependency graph evidence may be stale and should be refreshed." in warning_markdown
+    assert "## Warnings" not in no_warning_markdown
+
+
 def test_format_review_markdown_bounds_inline_code_containing_backticks() -> None:
     packet = _packet([Change("src/a``b.py", "modified")])
 
