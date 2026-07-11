@@ -931,7 +931,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p_review = sub.add_parser(
         "review-changes",
-        help="Build deterministic review evidence for explicit or Git changes",
+        help="Produce deterministic review evidence and acceptance criteria",
+        description="Produce deterministic review evidence and acceptance criteria",
     )
     p_review.add_argument(
         "path", nargs="?", default=".", help="Project path (default: current directory)"
@@ -1084,7 +1085,6 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 
 
 

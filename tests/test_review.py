@@ -81,6 +81,21 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _collect_keys(value: object) -> set[str]:
+    if isinstance(value, dict):
+        return {
+            str(key).casefold()
+            for key in value
+        } | {
+            nested_key
+            for nested_value in value.values()
+            for nested_key in _collect_keys(nested_value)
+        }
+    if isinstance(value, list):
+        return {key for item in value for key in _collect_keys(item)}
+    return set()
+
+
 def _write_review_project(
     root: Path,
     *,
@@ -774,9 +789,9 @@ def test_review_changes_cli_explicit_json_is_deterministic(tmp_path: Path, capsy
     assert packet["discovery"] == "explicit"
     assert packet["impact"]["impacted_files"] == ["src/api.py"]
     assert packet["impact"]["likely_tests"] == ["tests/test_store.py"]
+    forbidden_keys = {"llm", "model", "timestamp", "created_at", "generated_at", "datetime"}
+    assert _collect_keys(packet).isdisjoint(forbidden_keys)
     serialized = json.dumps(packet)
-    assert "llm" not in serialized.casefold()
-    assert "timestamp" not in serialized.casefold()
     assert str(root.resolve()) not in serialized
 
 
@@ -891,6 +906,7 @@ def test_review_changes_cli_help_documents_options(capsys: pytest.CaptureFixture
         main(["review-changes", "--help"])
 
     output = capsys.readouterr().out
+    assert "Produce deterministic review evidence and acceptance criteria" in output
     for option in ("--graph-json", "--depth", "--git-timeout", "--fail-on-blocker", "--json"):
         assert option in output
     assert "relative to the project root" in output
