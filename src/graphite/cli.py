@@ -30,9 +30,22 @@ from .io import atomic_write_json
 from .llm import enrich_report
 from .query import _find_node, annotate_communities, query
 from .replacement_audit import audit_replacement, format_replacement_audit
+from .review import (
+    ReviewError,
+    build_review_packet,
+    discover_git_changes,
+    format_review_markdown,
+    normalize_explicit_changes,
+)
 from .validation import assert_valid_graph_bundle, validate_graph_bundle
 from .watch import WatchChange, WatchOptions, watch_loop
-from .windows_task import DEFAULT_TASK_NAME, create_daemon_task, daemon_task_command, delete_daemon_task, query_daemon_task, start_daemon_task
+from .windows_task import (
+    DEFAULT_TASK_NAME,
+    create_daemon_task,
+    daemon_task_command,
+    delete_daemon_task,
+    query_daemon_task,
+)
 from .windows_startup import install_startup_launcher, startup_status, uninstall_startup_launcher
 
 _TEST_SUFFIXES = (
@@ -542,6 +555,52 @@ def cmd_impact(args: argparse.Namespace) -> int:
     return 0 if not result["missing"] else 1
 
 
+def cmd_review_changes(args: argparse.Namespace) -> int:
+    """Build deterministic change-review evidence without invoking an LLM."""
+    root = Path(args.path).resolve()
+    if not root.is_dir():
+        raise ReviewError("project path is not a directory")
+    if args.depth < 0:
+        raise ReviewError("review depth must be zero or greater")
+    if args.git_timeout <= 0:
+        raise ReviewError("Git status timeout must be greater than zero")
+
+    if args.files:
+        changes = normalize_explicit_changes(root, args.files)
+        discovery = "explicit"
+    else:
+        changes = discover_git_changes(root, timeout_seconds=args.git_timeout)
+        discovery = "git"
+
+    cfg = _project_scoped_config(args, root)
+    graph_path = Path(args.graph_json) if args.graph_json is not None else cfg.output_dir / "graph.json"
+    if not graph_path.is_absolute():
+        graph_path = root / graph_path
+
+    graph_bundle: Any = None
+    graph_error: str | None = None
+    try:
+        with open(graph_path, "r", encoding="utf-8") as graph_file:
+            graph_bundle = json.load(graph_file)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        graph_error = "dependency graph is unavailable"
+
+    packet = build_review_packet(
+        root_name=root.name,
+        changes=changes,
+        discovery=discovery,
+        graph_bundle=graph_bundle,
+        graph_status=_check_status(root, cfg),
+        depth=args.depth,
+        graph_error=graph_error,
+    )
+    if args.json:
+        print(json.dumps(packet, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(format_review_markdown(packet), end="")
+    return 1 if args.fail_on_blocker and packet["blockers"] else 0
+
+
 def cmd_context(args: argparse.Namespace) -> int:
     g = _load_graph(Path(args.graph_json))
     result = build_context(g, args.files, depth=args.depth, neighbor_limit=args.neighbor_limit)
@@ -870,6 +929,37 @@ def main(argv: list[str] | None = None) -> int:
     p_impact.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_impact.set_defaults(func=cmd_impact)
 
+    p_review = sub.add_parser(
+        "review-changes",
+        help="Build deterministic review evidence for explicit or Git changes",
+    )
+    p_review.add_argument(
+        "path", nargs="?", default=".", help="Project path (default: current directory)"
+    )
+    p_review.add_argument(
+        "files",
+        nargs="*",
+        help="Changed paths; omit to discover changes from Git",
+    )
+    p_review.add_argument(
+        "--graph-json",
+        default=None,
+        help="Graph JSON path; relative to the project root",
+    )
+    p_review.add_argument(
+        "--depth", type=int, default=2, help="Reverse dependency traversal depth"
+    )
+    p_review.add_argument(
+        "--git-timeout", type=float, default=5.0, help="Git discovery timeout in seconds"
+    )
+    p_review.add_argument(
+        "--fail-on-blocker",
+        action="store_true",
+        help="Return non-zero when review blockers are found",
+    )
+    p_review.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_review.set_defaults(func=cmd_review_changes)
+
     p_context = sub.add_parser("context", help="Print compact graph context for files or nodes")
     p_context.add_argument("files", nargs="+", help="File paths, node ids, or graph node fragments")
     p_context.add_argument("--graph-json", default="graph-out/graph.json", help="Path to graph.json")
@@ -994,7 +1084,6 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 
 
 

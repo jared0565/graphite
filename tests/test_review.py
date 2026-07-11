@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -7,6 +8,8 @@ from pathlib import Path
 import pytest
 import graphite.review as review_module
 
+from graphite.cache import file_hash
+from graphite.cli import main
 from graphite.review import (
     Change,
     ReviewError,
@@ -74,7 +77,34 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _write_review_project(
+    root: Path,
+    *,
+    bundle: object | None = None,
+    graph_path: str = "graph-out/graph.json",
+) -> None:
+    _write(root / "src/store.py", "value = 1\n")
+    _write(root / "tests/test_store.py", "def test_store(): pass\n")
+    selected_bundle = _review_bundle() if bundle is None else bundle
+    _write(root / graph_path, json.dumps(selected_bundle))
+    manifest = {
+        "root": root.name,
+        "file_count": 2,
+        "files": [
+            {
+                "rel_path": relative,
+                "language": "python",
+                "size": (root / relative).stat().st_size,
+                "hash": file_hash(root / relative),
+            }
+            for relative in ("src/store.py", "tests/test_store.py")
+        ],
+    }
+    _write(root / "graph-out/.graphite_manifest.json", json.dumps(manifest))
 
 
 def test_change_is_ordered_and_serializes_to_a_dictionary() -> None:
@@ -724,3 +754,170 @@ def test_private_use_filename_is_preserved_in_packet_and_markdown() -> None:
 
     assert packet["changes"] == [{"path": path, "status": "modified"}]
     assert path in markdown
+
+
+def test_review_changes_cli_explicit_json_is_deterministic(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_path / "sample-project"
+    _write_review_project(root)
+    argv = ["review-changes", str(root), str(root / "src/store.py"), "--json"]
+
+    assert main(argv) == 0
+    first = capsys.readouterr()
+    assert main(argv) == 0
+    second = capsys.readouterr()
+
+    assert first.out == second.out
+    assert first.err == second.err == ""
+    packet = json.loads(first.out)
+    assert packet["schema_version"] == 1
+    assert packet["project"] == root.name
+    assert packet["discovery"] == "explicit"
+    assert packet["impact"]["impacted_files"] == ["src/api.py"]
+    assert packet["impact"]["likely_tests"] == ["tests/test_store.py"]
+    serialized = json.dumps(packet)
+    assert "llm" not in serialized.casefold()
+    assert "timestamp" not in serialized.casefold()
+    assert str(root.resolve()) not in serialized
+
+
+def test_review_changes_cli_markdown_contains_evidence(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_path / "markdown-project"
+    _write_review_project(root)
+
+    assert main(["review-changes", str(root), "src/store.py"]) == 0
+
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert "# Graphite Change Review" in output.out
+    assert "## Changes" in output.out
+    assert "## Impact" in output.out
+    assert "`src/store.py`" in output.out
+    assert "`tests/test_store.py`" in output.out
+
+
+def test_review_changes_cli_missing_graph_only_fails_when_requested(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_path / "missing-graph"
+    root.mkdir()
+
+    assert main(["review-changes", str(root), "src/store.py", "--json"]) == 0
+    packet = json.loads(capsys.readouterr().out)
+    assert [item["code"] for item in packet["blockers"]] == ["MISSING_GRAPH"]
+
+    assert main(["review-changes", str(root), "src/store.py", "--json", "--fail-on-blocker"]) == 1
+    packet = json.loads(capsys.readouterr().out)
+    assert [item["code"] for item in packet["blockers"]] == ["MISSING_GRAPH"]
+
+
+@pytest.mark.parametrize("graph_content, expected", [("{not-json", "MISSING_GRAPH"), ("[]", "INVALID_GRAPH")])
+def test_review_changes_cli_invalid_graph_is_safe(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    graph_content: str,
+    expected: str,
+) -> None:
+    root = tmp_path / ("private-" + "x" * 40)
+    _write(root / "graph-out/graph.json", graph_content)
+
+    assert main(["review-changes", str(root), "src/store.py", "--json"]) == 0
+
+    output = capsys.readouterr()
+    packet = json.loads(output.out)
+    assert [item["code"] for item in packet["blockers"]] == [expected]
+    assert output.err == ""
+    assert str(root) not in output.out
+    assert "JSONDecodeError" not in output.out
+
+
+def test_review_changes_cli_high_risk_without_blocker_does_not_fail(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_path / "broad-impact"
+    _write_review_project(root, bundle=_review_bundle(dependent_count=10))
+
+    assert main(["review-changes", str(root), "src/store.py", "--json", "--fail-on-blocker"]) == 0
+
+    packet = json.loads(capsys.readouterr().out)
+    assert packet["risk"]["level"] == "high"
+    assert packet["blockers"] == []
+
+
+def test_review_changes_cli_discovers_real_git_changes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_path / "git-project"
+    _write_review_project(root)
+    _git(root, "init")
+    _git(root, "config", "user.email", "review@example.test")
+    _git(root, "config", "user.name", "Review Tests")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "initial")
+    _write(root / "src/store.py", "value = 2\n")
+
+    assert main(["review-changes", str(root), "--json"]) == 0
+
+    packet = json.loads(capsys.readouterr().out)
+    assert packet["discovery"] == "git"
+    assert packet["changes"] == [{"path": "src/store.py", "status": "modified"}]
+
+
+def test_review_changes_cli_non_git_failure_is_sanitized(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_path / ("secret-" + "x" * 80)
+    root.mkdir()
+
+    assert main(["review-changes", str(root), "--json"]) == 1
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "[graphite] error: not a Git worktree\n"
+    assert str(root) not in output.err
+
+
+def test_review_changes_cli_relative_graph_is_project_scoped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "project"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _write_review_project(root, graph_path="custom/graph.json")
+    monkeypatch.chdir(elsewhere)
+
+    assert main(["review-changes", str(root), "src/store.py", "--graph-json", "custom/graph.json", "--json"]) == 0
+
+    packet = json.loads(capsys.readouterr().out)
+    assert packet["blockers"] == []
+    assert packet["impact"]["likely_tests"] == ["tests/test_store.py"]
+
+
+def test_review_changes_cli_help_documents_options(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit, match="0"):
+        main(["review-changes", "--help"])
+
+    output = capsys.readouterr().out
+    for option in ("--graph-json", "--depth", "--git-timeout", "--fail-on-blocker", "--json"):
+        assert option in output
+    assert "relative to the project root" in output
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["review-changes", "{root}", "src/store.py", "--depth", "-1", "--json"],
+        ["review-changes", "{root}", "--git-timeout", "0", "--json"],
+        ["review-changes", "{missing}", "src/store.py", "--json"],
+    ],
+)
+def test_review_changes_cli_rejects_invalid_limits_and_root_safely(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    missing = tmp_path / ("missing-secret-" + "x" * 80)
+    expanded = [item.format(root=root, missing=missing) for item in argv]
+
+    assert main(expanded) == 1
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert str(root) not in output.err
+    assert str(missing) not in output.err
+    assert len(output.err) < 200
