@@ -527,6 +527,8 @@ def test_build_review_packet_rejects_negative_depth() -> None:
         "src/bad\x1b[31m.py",
         "src/bad\x85name.py",
         "src/bad\u202ename.py",
+        "src/bad\u2028name.py",
+        "src/bad\u2029name.py",
         "src/bad\x00.py",
     ],
 )
@@ -703,3 +705,22 @@ def test_format_review_markdown_drops_unicode_format_characters_defensively() ->
     markdown = format_review_markdown({"project": "safe\u202eunsafe"})
 
     assert "\u202e" not in markdown
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
+def test_format_review_markdown_drops_unicode_line_separators(separator: str) -> None:
+    markdown = format_review_markdown(
+        {"changes": [{"path": f"src/safe{separator}unsafe.py", "status": "modified"}]}
+    )
+
+    assert separator not in markdown
+
+
+def test_private_use_filename_is_preserved_in_packet_and_markdown() -> None:
+    path = "src/private\ue000.py"
+
+    packet = _packet([Change(path, "modified")])
+    markdown = format_review_markdown(packet)
+
+    assert packet["changes"] == [{"path": path, "status": "modified"}]
+    assert path in markdown

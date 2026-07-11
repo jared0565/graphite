@@ -189,6 +189,7 @@ _CHANGE_STATUSES = frozenset(
     {"explicit", "untracked", "deleted", "added", "renamed", "modified"}
 )
 _DISCOVERY_MODES = frozenset({"explicit", "git"})
+_UNSAFE_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
 _CRITERIA = {
     "CONFIRM_CLEAN": {
@@ -407,7 +408,7 @@ def _validate_review_inputs(
         or not root_name.strip()
         or "/" in root_name
         or "\\" in root_name
-        or _contains_unicode_category_c(root_name)
+        or _contains_unsafe_unicode(root_name)
     ):
         raise ReviewError("project label is invalid")
     if not isinstance(discovery, str) or discovery not in _DISCOVERY_MODES:
@@ -456,7 +457,7 @@ def _validated_context_impact(context: Any) -> dict[str, list[str]]:
     if (
         not isinstance(matched_nodes, list)
         or not all(
-            isinstance(node, str) and node and not _contains_unicode_category_c(node)
+            isinstance(node, str) and node and not _contains_unsafe_unicode(node)
             for node in matched_nodes
         )
     ):
@@ -616,7 +617,7 @@ def _sanitize_graph_status(status: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_safe_relative_path(value: Any) -> str | None:
-    if not isinstance(value, str) or _contains_unicode_category_c(value):
+    if not isinstance(value, str) or _contains_unsafe_unicode(value):
         return None
     normalized = value.replace("\\", "/")
     if not normalized or normalized.startswith("/"):
@@ -663,7 +664,7 @@ def _sorted_issue_codes(issues: Any) -> list[str]:
             for issue in issues
             if isinstance(issue, dict)
             for code in [issue.get("code")]
-            if isinstance(code, str) and not _contains_unicode_category_c(code)
+            if isinstance(code, str) and not _contains_unsafe_unicode(code)
         }
     )
 
@@ -672,14 +673,18 @@ def _safe_count(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def _contains_unicode_category_c(value: str) -> bool:
-    return any(unicodedata.category(character).startswith("C") for character in value)
+def _contains_unsafe_unicode(value: str) -> bool:
+    return any(_is_unsafe_unicode_character(character) for character in value)
+
+
+def _is_unsafe_unicode_character(character: str) -> bool:
+    return unicodedata.category(character) in _UNSAFE_UNICODE_CATEGORIES
 
 
 def _safe_markdown_text(value: Any) -> str:
     text = str(value)
     text = "".join(
-        character if not unicodedata.category(character).startswith("C") else " "
+        character if not _is_unsafe_unicode_character(character) else " "
         for character in text
     )
     for character in "\\`*_{}[]<>#|":
@@ -691,14 +696,14 @@ def _safe_markdown_identifier(value: Any) -> str:
     return "".join(
         character if character.isalnum() or character in "_-" else "_"
         for character in str(value)
-        if not unicodedata.category(character).startswith("C")
+        if not _is_unsafe_unicode_character(character)
     )
 
 
 def _inline_code(value: Any) -> str:
     text = str(value)
     text = "".join(
-        character if not unicodedata.category(character).startswith("C") else " "
+        character if not _is_unsafe_unicode_character(character) else " "
         for character in text
     )
     longest_run = 0
