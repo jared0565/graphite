@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import graphite.cli as cli_module
 import graphite.review as review_module
 
 from graphite.cache import file_hash
@@ -120,6 +121,23 @@ def _write_review_project(
         ],
     }
     _write(root / "graph-out/.graphite_manifest.json", json.dumps(manifest))
+
+
+def _write_review_manifest(root: Path, output_dir: str, relative_files: tuple[str, ...]) -> None:
+    manifest = {
+        "root": root.name,
+        "file_count": len(relative_files),
+        "files": [
+            {
+                "rel_path": relative,
+                "language": "python",
+                "size": (root / relative).stat().st_size,
+                "hash": file_hash(root / relative),
+            }
+            for relative in relative_files
+        ],
+    }
+    _write(root / output_dir / ".graphite_manifest.json", json.dumps(manifest))
 
 
 def test_change_is_ordered_and_serializes_to_a_dictionary() -> None:
@@ -843,6 +861,120 @@ def test_review_changes_cli_invalid_graph_is_safe(
     assert "JSONDecodeError" not in output.out
 
 
+@pytest.mark.parametrize("graph_argument", ["../outside.json", "{outside}"])
+def test_review_changes_cli_rejects_graph_paths_outside_project(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    graph_argument: str,
+) -> None:
+    root = tmp_path / "project"
+    outside = tmp_path / ("private-" + "x" * 60 + ".json")
+    _write_review_project(root)
+    _write(outside, json.dumps(_review_bundle()))
+    argument = graph_argument.format(outside=outside)
+
+    assert main(["review-changes", str(root), "src/store.py", "--graph-json", argument, "--json"]) == 1
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "[graphite] error: graph path must be within project root\n"
+    assert str(outside) not in output.err
+
+
+def test_review_changes_cli_rejects_graph_symlink_escape(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "project"
+    outside = tmp_path / "outside.json"
+    link = root / "custom/graph.json"
+    _write_review_project(root)
+    _write(outside, json.dumps(_review_bundle()))
+    link.parent.mkdir(parents=True)
+    try:
+        link.symlink_to(outside)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    assert main(["review-changes", str(root), "src/store.py", "--graph-json", "custom/graph.json", "--json"]) == 1
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "[graphite] error: graph path must be within project root\n"
+    assert str(outside) not in output.err
+
+
+def test_review_changes_cli_bounds_graph_input_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "oversize-private-project"
+    _write_review_project(root)
+    monkeypatch.setattr(cli_module, "_MAX_REVIEW_GRAPH_BYTES", 32, raising=False)
+
+    assert main(["review-changes", str(root), "src/store.py", "--json"]) == 0
+
+    output = capsys.readouterr()
+    packet = json.loads(output.out)
+    assert [item["code"] for item in packet["blockers"]] == ["MISSING_GRAPH"]
+    assert output.err == ""
+    assert str(root) not in output.out
+    assert "too large" not in output.out.casefold()
+
+
+@pytest.mark.parametrize(
+    ("graph_bytes", "raw_error", "expected_blockers"),
+    [
+        (b"\xff\xfeprivate", "UnicodeDecodeError", {"MISSING_GRAPH"}),
+        (
+            b"[" * 2000 + b"0" + b"]" * 2000,
+            "RecursionError",
+            {"MISSING_GRAPH", "INVALID_GRAPH"},
+        ),
+        (b'{"nodes":', "JSONDecodeError", {"MISSING_GRAPH"}),
+    ],
+)
+def test_review_changes_cli_sanitizes_unreadable_graph_inputs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    graph_bytes: bytes,
+    raw_error: str,
+    expected_blockers: set[str],
+) -> None:
+    root = tmp_path / "unreadable-private-project"
+    _write_review_project(root)
+    (root / "graph-out/graph.json").write_bytes(graph_bytes)
+
+    assert main(["review-changes", str(root), "src/store.py", "--json"]) == 0
+
+    output = capsys.readouterr()
+    packet = json.loads(output.out)
+    assert len(packet["blockers"]) == 1
+    assert packet["blockers"][0]["code"] in expected_blockers
+    assert output.err == ""
+    assert str(root) not in output.out
+    assert raw_error not in output.out
+
+
+def test_review_changes_cli_sanitizes_graph_parser_recursion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "recursion-private-project"
+    _write_review_project(root)
+
+    def recursive_loads(_value: object) -> object:
+        raise RecursionError("private parser detail")
+
+    monkeypatch.setattr(cli_module.json, "loads", recursive_loads)
+
+    bundle, error = cli_module._load_review_graph(root / "graph-out/graph.json")
+
+    assert bundle is None
+    assert error == "dependency graph is unavailable"
+    assert "private parser detail" not in error
+
+
 def test_review_changes_cli_high_risk_without_blocker_does_not_fail(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root = tmp_path / "broad-impact"
     _write_review_project(root, bundle=_review_bundle(dependent_count=10))
@@ -901,6 +1033,47 @@ def test_review_changes_cli_relative_graph_is_project_scoped(
     assert packet["impact"]["likely_tests"] == ["tests/test_store.py"]
 
 
+def test_review_changes_cli_custom_graph_uses_sibling_manifest_for_freshness(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "custom-freshness"
+    _write_review_project(root, graph_path="custom/graph.json")
+    _write_review_manifest(root, "graph-out", ())
+    _write_review_manifest(
+        root,
+        "custom",
+        ("custom/graph.json", "src/store.py", "tests/test_store.py"),
+    )
+
+    assert main(["review-changes", str(root), "src/store.py", "--graph-json", "custom/graph.json", "--json"]) == 0
+
+    packet = json.loads(capsys.readouterr().out)
+    assert packet["graph"]["status"]["stale"] is False
+
+
+def test_review_changes_cli_missing_custom_manifest_is_stale(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "custom-missing-manifest"
+    _write_review_project(root, graph_path="custom/graph.json")
+    _write_review_manifest(
+        root,
+        "graph-out",
+        ("custom/graph.json", "src/store.py", "tests/test_store.py"),
+    )
+
+    assert main(["review-changes", str(root), "src/store.py", "--graph-json", "custom/graph.json", "--json"]) == 0
+
+    packet = json.loads(capsys.readouterr().out)
+    assert packet["graph"]["status"] == {
+        "added": [],
+        "changed": [],
+        "reason": "missing",
+        "removed": [],
+        "stale": True,
+    }
+
+
 def test_review_changes_cli_help_documents_options(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit, match="0"):
         main(["review-changes", "--help"])
@@ -913,27 +1086,43 @@ def test_review_changes_cli_help_documents_options(capsys: pytest.CaptureFixture
 
 
 @pytest.mark.parametrize(
-    "argv",
+    ("option", "value", "message"),
     [
-        ["review-changes", "{root}", "src/store.py", "--depth", "-1", "--json"],
-        ["review-changes", "{root}", "--git-timeout", "0", "--json"],
-        ["review-changes", "{missing}", "src/store.py", "--json"],
+        ("--depth", "-1", "must be zero or greater"),
+        ("--git-timeout", "0", "must be finite and greater than zero"),
+        ("--git-timeout", "-1", "must be finite and greater than zero"),
+        ("--git-timeout", "nan", "must be finite and greater than zero"),
+        ("--git-timeout", "inf", "must be finite and greater than zero"),
+        ("--git-timeout", "-inf", "must be finite and greater than zero"),
     ],
 )
-def test_review_changes_cli_rejects_invalid_limits_and_root_safely(
+def test_review_changes_cli_rejects_invalid_limits_with_argparse(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    argv: list[str],
+    option: str,
+    value: str,
+    message: str,
 ) -> None:
     root = tmp_path / "project"
     root.mkdir()
-    missing = tmp_path / ("missing-secret-" + "x" * 80)
-    expanded = [item.format(root=root, missing=missing) for item in argv]
 
-    assert main(expanded) == 1
+    with pytest.raises(SystemExit) as error:
+        main(["review-changes", str(root), "src/store.py", f"{option}={value}", "--json"])
+
+    assert error.value.code == 2
+    output = capsys.readouterr().err
+    assert f"argument {option}" in output
+    assert message in output
+
+
+def test_review_changes_cli_rejects_nonexistent_root_safely(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / ("missing-secret-" + "x" * 80)
+
+    assert main(["review-changes", str(missing), "src/store.py", "--json"]) == 1
 
     output = capsys.readouterr()
     assert output.out == ""
-    assert str(root) not in output.err
     assert str(missing) not in output.err
     assert len(output.err) < 200

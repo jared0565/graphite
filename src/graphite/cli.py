@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import sys
 import time
@@ -58,6 +59,9 @@ _TEST_SUFFIXES = (
     ".test.py",
     ".spec.py",
 )
+
+# Review graph reads are bounded to prevent untrusted artifacts exhausting memory.
+_MAX_REVIEW_GRAPH_BYTES = 128 * 1024 * 1024
 
 
 def _config_from_args(args: argparse.Namespace) -> Config:
@@ -555,16 +559,76 @@ def cmd_impact(args: argparse.Namespace) -> int:
     return 0 if not result["missing"] else 1
 
 
+def _review_depth(value: str) -> int:
+    try:
+        depth = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be zero or greater") from None
+    if depth < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return depth
+
+
+def _review_git_timeout(value: str) -> float:
+    try:
+        timeout = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be finite and greater than zero") from None
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise argparse.ArgumentTypeError("must be finite and greater than zero")
+    return timeout
+
+
+def _resolve_review_graph_path(
+    root: Path, cfg: Config, explicit_path: str | None
+) -> Path:
+    candidate = Path(explicit_path) if explicit_path is not None else cfg.output_dir / "graph.json"
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        raise ReviewError("graph path must be within project root") from None
+    return resolved
+
+
+def _load_review_graph(path: Path) -> tuple[Any, str | None]:
+    try:
+        with path.open("rb") as graph_file:
+            raw_graph = graph_file.read(_MAX_REVIEW_GRAPH_BYTES + 1)
+        if len(raw_graph) > _MAX_REVIEW_GRAPH_BYTES:
+            raise ValueError("review graph exceeds size limit")
+        return json.loads(raw_graph.decode("utf-8")), None
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        ValueError,
+    ):
+        return None, "dependency graph is unavailable"
+
+
+def _review_graph_status(
+    root: Path,
+    cfg: Config,
+    graph_path: Path,
+    *,
+    custom_graph: bool,
+) -> dict[str, Any]:
+    if not custom_graph:
+        return _check_status(root, cfg)
+    data = cfg.to_dict()
+    data["output_dir"] = graph_path.parent
+    return _check_status(root, Config(**data))
+
+
 def cmd_review_changes(args: argparse.Namespace) -> int:
     """Build deterministic change-review evidence without invoking an LLM."""
     root = Path(args.path).resolve()
     if not root.is_dir():
         raise ReviewError("project path is not a directory")
-    if args.depth < 0:
-        raise ReviewError("review depth must be zero or greater")
-    if args.git_timeout <= 0:
-        raise ReviewError("Git status timeout must be greater than zero")
-
     if args.files:
         changes = normalize_explicit_changes(root, args.files)
         discovery = "explicit"
@@ -573,24 +637,18 @@ def cmd_review_changes(args: argparse.Namespace) -> int:
         discovery = "git"
 
     cfg = _project_scoped_config(args, root)
-    graph_path = Path(args.graph_json) if args.graph_json is not None else cfg.output_dir / "graph.json"
-    if not graph_path.is_absolute():
-        graph_path = root / graph_path
-
-    graph_bundle: Any = None
-    graph_error: str | None = None
-    try:
-        with open(graph_path, "r", encoding="utf-8") as graph_file:
-            graph_bundle = json.load(graph_file)
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        graph_error = "dependency graph is unavailable"
+    custom_graph = args.graph_json is not None
+    graph_path = _resolve_review_graph_path(root, cfg, args.graph_json)
+    graph_bundle, graph_error = _load_review_graph(graph_path)
 
     packet = build_review_packet(
         root_name=root.name,
         changes=changes,
         discovery=discovery,
         graph_bundle=graph_bundle,
-        graph_status=_check_status(root, cfg),
+        graph_status=_review_graph_status(
+            root, cfg, graph_path, custom_graph=custom_graph
+        ),
         depth=args.depth,
         graph_error=graph_error,
     )
@@ -948,10 +1006,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Graph JSON path; relative to the project root",
     )
     p_review.add_argument(
-        "--depth", type=int, default=2, help="Reverse dependency traversal depth"
+        "--depth", type=_review_depth, default=2, help="Reverse dependency traversal depth"
     )
     p_review.add_argument(
-        "--git-timeout", type=float, default=5.0, help="Git discovery timeout in seconds"
+        "--git-timeout",
+        type=_review_git_timeout,
+        default=5.0,
+        help="Git discovery timeout in seconds",
     )
     p_review.add_argument(
         "--fail-on-blocker",
@@ -1085,9 +1146,6 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-
 
 
 
