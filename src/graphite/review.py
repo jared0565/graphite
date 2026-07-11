@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 
@@ -66,7 +65,11 @@ def discover_git_changes(root: Path, *, timeout_seconds: float = 5.0) -> list[Ch
         raise ReviewError("not a Git worktree")
 
     try:
-        git_root = Path(os.fsdecode(top_level_result.stdout).rstrip("\r\n")).resolve()
+        decoded_git_root = top_level_result.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ReviewError("unable to decode Git worktree root") from exc
+    try:
+        git_root = Path(decoded_git_root.rstrip("\r\n")).resolve()
     except OSError as exc:
         raise ReviewError("unable to resolve Git worktree root") from exc
     if not top_level_result.stdout or git_root != resolved_root:
@@ -120,7 +123,9 @@ def _parse_porcelain(output: bytes) -> list[Change]:
             raise ReviewError("malformed Git status output")
 
         status_bytes = record[:2]
-        if any(value not in b" MADRCUT?!" for value in status_bytes):
+        if status_bytes != b"??" and (
+            status_bytes == b"  " or any(value not in b" MADRCUT" for value in status_bytes)
+        ):
             raise ReviewError("malformed Git status output: invalid status")
 
         is_rename = b"R" in status_bytes or b"C" in status_bytes
@@ -128,6 +133,7 @@ def _parse_porcelain(output: bytes) -> list[Change]:
             index += 1
             if index >= len(records) or not records[index]:
                 raise ReviewError("malformed Git status output: missing rename source")
+            _decode_git_path(records[index])
 
         path = _decode_git_path(record[3:])
         status = _normalize_status(status_bytes)
@@ -154,4 +160,12 @@ def _normalize_status(status: bytes) -> str:
 
 
 def _decode_git_path(value: bytes) -> str:
-    return os.fsdecode(value)
+    try:
+        path = value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ReviewError("malformed Git status output: invalid path encoding") from exc
+
+    posix_path = PurePosixPath(path)
+    if not path or path == "." or posix_path.is_absolute() or ".." in posix_path.parts:
+        raise ReviewError("unsafe path in Git status output")
+    return path

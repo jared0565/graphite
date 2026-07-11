@@ -156,6 +156,21 @@ def test_discover_git_changes_sanitizes_os_errors(
     assert "\n" not in str(error.value)
 
 
+def test_discover_git_changes_rejects_invalid_utf8_worktree_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def invalid_root(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(["git"], 0, stdout=b"\xff\n", stderr=b"")
+
+    monkeypatch.setattr(review_module.subprocess, "run", invalid_root)
+
+    with pytest.raises(ReviewError) as error:
+        discover_git_changes(tmp_path)
+
+    assert str(error.value) == "unable to decode Git worktree root"
+    assert "\\udc" not in str(error.value)
+
+
 def test_discover_git_changes_rejects_non_positive_timeout(tmp_path: Path) -> None:
     with pytest.raises(ReviewError, match="timeout"):
         discover_git_changes(tmp_path, timeout_seconds=0)
@@ -178,6 +193,29 @@ def test_parse_porcelain_preserves_literal_backslashes() -> None:
     assert _parse_porcelain(b"?? " + os.fsencode(path) + b"\0") == [Change(path, "untracked")]
 
 
+def test_parse_porcelain_rejects_invalid_utf8_path() -> None:
+    with pytest.raises(ReviewError) as error:
+        _parse_porcelain(b"?? invalid-\xff.py\0")
+
+    assert str(error.value) == "malformed Git status output: invalid path encoding"
+    assert "\\udc" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        b"?? ../escape.py\0",
+        b"?? nested/../../escape.py\0",
+        b"?? /absolute.py\0",
+        b"?? .\0",
+        b"?? \0",
+    ],
+)
+def test_parse_porcelain_rejects_unsafe_paths(output: bytes) -> None:
+    with pytest.raises(ReviewError, match="Git status output"):
+        _parse_porcelain(output)
+
+
 def test_parse_porcelain_deduplicates_identical_status_data() -> None:
     assert _parse_porcelain(b" M same.py\0 M same.py\0") == [Change("same.py", "modified")]
 
@@ -194,6 +232,20 @@ def test_parse_porcelain_rejects_conflicting_status_data(output: bytes) -> None:
 def test_parse_porcelain_rejects_malformed_status() -> None:
     with pytest.raises(ReviewError, match="malformed Git status output"):
         _parse_porcelain(b"Z  bad.py\0")
+
+
+@pytest.mark.parametrize("status", [b"?M", b"!!", b"  "])
+def test_parse_porcelain_rejects_invalid_xy_grammar(status: bytes) -> None:
+    with pytest.raises(ReviewError, match="invalid status"):
+        _parse_porcelain(status + b" invalid.py\0")
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [(b"UU", "modified"), (b"AA", "added"), (b"UD", "deleted")],
+)
+def test_parse_porcelain_accepts_valid_unmerged_states(status: bytes, expected: str) -> None:
+    assert _parse_porcelain(status + b" conflict.py\0") == [Change("conflict.py", expected)]
 
 
 def test_parse_porcelain_rejects_incomplete_rename() -> None:
