@@ -168,9 +168,9 @@ graphite review-changes . src/lib/db.py --graph-json artifacts/graph.json --json
 
 With no selected files, Git discovery covers staged, unstaged, untracked, deleted, and renamed paths. With selected files, the packet uses exactly that explicit scope. The command checks graph freshness and validates the packet graph, derives reverse-dependency impact and likely tests, reports risk signals transparently, and emits concrete acceptance criteria. A custom graph uses the `.graphite_manifest.json` beside that graph for freshness checks.
 
-`review-changes` is zero-LLM, local, deterministic, and model-, vendor-, and agent-agnostic. It makes no network calls and sends no source code or repository metadata anywhere. For a successfully constructed packet, risk does not affect exit status; `--fail-on-blocker` makes evidence blockers return `1`. Invalid inputs and operational errors return `1` independently.
+`review-changes` is zero-LLM, local, deterministic, and model-, vendor-, and agent-agnostic. The command itself makes no network requests and transmits nothing. Its local output intentionally contains repository, project, path, graph, and dependency metadata, so callers must protect logs, pipes, and uploaded output. For a successfully constructed packet, risk does not affect exit status; `--fail-on-blocker` makes evidence blockers return `1`. Invalid inputs and operational errors return `1` independently.
 
-For containment and resource safety, a custom `--graph-json` must resolve inside the reviewed project root and may be at most 128 MiB. Graph and path evidence is validated before it enters the packet, and low-level parser, filesystem, and Git errors are not copied into review output.
+For containment and resource safety, a custom `--graph-json` must resolve inside the reviewed project root and may be at most 128 MiB. Evidence strings and paths are validated before they enter the packet, and low-level parser, filesystem, and Git errors are not copied into review output. Git status size and packet/output cardinality are not yet capped; see the audit's residual recommendations.
 
 The workflow is informed by the pinned [Karpathy-inspired Think Before Coding, Simplicity, Surgical Changes, and Goal-Driven Execution principles](https://github.com/multica-ai/andrej-karpathy-skills/blob/2c606141936f1eeef17fa3043a72095b4765b9c2/README.md) and the [Superpowers spec-to-plan, TDD, and review philosophy](https://github.com/obra/superpowers/blob/d884ae04edebef577e82ff7c4e143debd0bbec99/README.md). Graphite implements those ideas as local evidence and acceptance packets; it does not impose or require any agent vendor.
 
@@ -309,7 +309,7 @@ The fallback writes a hidden VBS launcher in the current user's Startup folder a
 
 ## Optional LLM enrichment
 
-LLM enrichment is off by default. When enabled, Graphite sends bounded graph metadata and analysis summaries, not source code, to the configured provider. Use `--llm auto` when you want Graphite to decide whether the graph is complex/risky enough to justify the extra LLM call.
+LLM enrichment is off by default. When enabled, its prompt does not intentionally include source-file contents, but it transmits graph metadata, filenames, identifiers, labels, and analysis summaries to the configured provider. Use `--llm auto` when you want Graphite to decide whether the graph is complex/risky enough to justify the extra LLM call.
 
 ```bash
 # Native Ollama, local only
@@ -403,7 +403,6 @@ Once configured, Claude can call these tools automatically:
 - `graphite_community` — list the community around a node
 - `graphite_summary` — stats, god nodes, entry points, surprising connections
 - `graphite_refresh` — rebuild and reload the graph
-
 
 
 
