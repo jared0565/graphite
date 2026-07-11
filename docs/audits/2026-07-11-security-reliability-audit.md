@@ -4,7 +4,7 @@
 
 This audit reviewed Graphite's generated HTML trust boundary, artifact publication, and repository-level change-review evidence. One high-severity security issue and one medium-severity reliability issue were confirmed and fixed; one informational capability gap with medium operational priority was also closed. The new review path is deterministic, local, zero-LLM, and independent of model, vendor, and agent. It validates evidence strings and paths, and caps custom graph input at 128 MiB, before producing impact, likely-test, risk, and acceptance-criteria output.
 
-The changes materially reduce exposure; they do not make Graphite perfectly secure. Residual recommendations remain for optional LLM endpoint governance and response bounds, Git/packet/output resource limits, dependency/CI controls, existing lint debt, artifact authenticity when artifacts cross trust boundaries, injected atomic-write failure tests, and descriptor-based no-follow reads in hostile shared workspaces. The explicit release gates in this report remain pending.
+The changes materially reduce exposure; they do not make Graphite perfectly secure. Residual recommendations remain for optional LLM endpoint governance and response bounds, Git/packet/output resource limits, dependency/CI controls, existing lint debt, artifact authenticity when artifacts cross trust boundaries, injected atomic-write failure tests, and descriptor-based no-follow reads in hostile shared workspaces. The explicit release gates recorded below passed on 2026-07-11.
 
 ## Scope and threat model
 
@@ -121,7 +121,22 @@ The atomic helper contains cleanup logic for write, flush, `fsync`, and replace 
 - **Ruff provenance:** on Windows with Python 3.14.5, `python -m ruff check . --output-format concise` reported **13 findings** before the feature changes and **11 pre-existing findings** after them, outside the touched implementation files.
 - Documentation checks used CLI help, real-line-reference/token inspection, Markdown link inspection, and `git diff --check`.
 
-These historical observations do not satisfy the pending release gates below, and this report does not claim a post-integration full-suite, build, validation, or live-review result.
+These historical observations are retained for provenance but are not used as final release evidence; the fresh post-integration results follow.
+
+### Final release verification — 2026-07-11
+
+Fresh release verification was run from tested pre-recording commit `a5bbed9` on Windows with Python 3.14.5. Relevant commands used `$env:PYTHONPATH = "src"` and `$env:GRAPHITE_LLM = "none"`; pytest used fresh writable base directories under `F:\tmp`.
+
+- `python -m pytest -q tests/test_html_security.py tests/test_review.py --basetemp F:\tmp\graphite-focused-final` exited `0`: **118 passed in 8.60s**.
+- `python -m pytest -q --basetemp F:\tmp\graphite-full-final` exited `0`: **210 passed, 3 skipped in 26.19s**.
+- `python -m ruff check src/graphite/export/html.py src/graphite/review.py src/graphite/cli.py tests/test_html_security.py tests/test_review.py` exited `0`: **All checks passed**.
+- `git diff --check 3718a7b..HEAD` exited `0` with no output.
+- `python -m graphite build .` exited `0` and wrote `graph-out/GRAPH_REPORT.md`, `graph-out/graph.json`, and `graph-out/graph.html`.
+- `python -m graphite validate` exited `0`: **graph valid (1764 nodes / 3217 edges, 0 warnings)**.
+- `python -m graphite review-changes . --json --fail-on-blocker` exited `0`. The saved output parsed as valid JSON, contained **0 blockers**, selected `CONFIRM_CLEAN`, did not contain the absolute worktree root, and had none of the forbidden `llm`, `model`, `timestamp`, `created_at`, `generated_at`, or `datetime` keys.
+- `git status --short` exited `0` with no output; ignored `graph-out/` artifacts did not dirty the worktree.
+
+All release-gate commands above passed. The residual recommendations remain open hardening work and retain their stated deployment conditions and priorities.
 
 ## Acceptance checklist and recommendation
 
@@ -133,13 +148,13 @@ These historical observations do not satisfy the pending release gates below, an
 - [x] For a successfully constructed packet, high risk remains advisory; evidence-blocker failure is explicit opt-in behavior. Invalid inputs and operational errors fail independently.
 - [x] Custom graph reads are project-contained, capped at 128 MiB, sanitized, and checked against a sibling manifest.
 - [x] Local review output is documented as sensitive repository metadata that callers must protect.
-- [ ] Run focused tests with a writable base: `python -m pytest -q tests/test_html_security.py tests/test_review.py --basetemp F:/tmp/graphite-focused`.
-- [ ] Run the full suite with a writable base: `python -m pytest -q --basetemp F:/tmp/graphite-full`.
-- [ ] Run Ruff on touched implementation and test files: `python -m ruff check src/graphite/export/html.py src/graphite/io.py src/graphite/review.py src/graphite/cli.py tests/test_html_security.py tests/test_reliability.py tests/test_review.py`.
-- [ ] Build the graph from this worktree: `$env:PYTHONPATH = "src"; python -m graphite build .`.
-- [ ] Validate the generated graph: `$env:PYTHONPATH = "src"; python -m graphite validate`.
-- [ ] Run a live blocking review: `$env:PYTHONPATH = "src"; python -m graphite review-changes . --json --fail-on-blocker`.
-- [ ] Confirm the final patch and worktree: `git diff --check` and `git status --short`.
+- [x] Focused tests passed with a fresh writable base: `python -m pytest -q tests/test_html_security.py tests/test_review.py --basetemp F:\tmp\graphite-focused-final`.
+- [x] The full suite passed with a fresh writable base: `python -m pytest -q --basetemp F:\tmp\graphite-full-final`.
+- [x] Ruff passed on the release-gate implementation and test files: `python -m ruff check src/graphite/export/html.py src/graphite/review.py src/graphite/cli.py tests/test_html_security.py tests/test_review.py`.
+- [x] The graph built from this worktree with LLM use disabled: `$env:PYTHONPATH = "src"; $env:GRAPHITE_LLM = "none"; python -m graphite build .`.
+- [x] The generated graph validated: `$env:PYTHONPATH = "src"; $env:GRAPHITE_LLM = "none"; python -m graphite validate`.
+- [x] The live blocking review produced the inspected clean packet: `$env:PYTHONPATH = "src"; $env:GRAPHITE_LLM = "none"; python -m graphite review-changes . --json --fail-on-blocker`.
+- [x] The pre-recording patch and worktree were clean: `git diff --check 3718a7b..HEAD` and `git status --short`.
 - [ ] Triage residual P1 recommendations before managed or multi-tenant deployment.
 
-**Recommendation:** Accept the fixed findings for integration only after every pending release gate above passes. Track the residual items as hardening work, with LLM egress governance, LLM and review resource bounds, and CI/dependency assurance prioritized before broader managed deployment.
+**Recommendation:** Accept the fixed findings for integration based on the passed release gates above. This acceptance does not claim perfect security. Track the residual items as hardening work, with LLM egress governance, LLM and review resource bounds, and CI/dependency assurance prioritized before broader managed deployment.
