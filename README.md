@@ -168,7 +168,7 @@ graphite review-changes . src/lib/db.py --graph-json artifacts/graph.json --json
 
 With no selected files, Git discovery covers staged, unstaged, untracked, deleted, and renamed paths. With selected files, the packet uses exactly that explicit scope. The command checks graph freshness and validates the packet graph, derives reverse-dependency impact and likely tests, reports risk signals transparently, and emits concrete acceptance criteria. A custom graph uses the `.graphite_manifest.json` beside that graph for freshness checks.
 
-`review-changes` is zero-LLM, local, deterministic, and model-, vendor-, and agent-agnostic. It makes no network calls and sends no source code or repository metadata anywhere. Its risk level is advisory: even `high` risk does not fail the command. Exit status `1` is available only with `--fail-on-blocker` and only when blockers such as missing or invalid graph evidence exist.
+`review-changes` is zero-LLM, local, deterministic, and model-, vendor-, and agent-agnostic. It makes no network calls and sends no source code or repository metadata anywhere. For a successfully constructed packet, risk does not affect exit status; `--fail-on-blocker` makes evidence blockers return `1`. Invalid inputs and operational errors return `1` independently.
 
 For containment and resource safety, a custom `--graph-json` must resolve inside the reviewed project root and may be at most 128 MiB. Graph and path evidence is validated before it enters the packet, and low-level parser, filesystem, and Git errors are not copied into review output.
 
@@ -403,7 +403,6 @@ Once configured, Claude can call these tools automatically:
 - `graphite_community` — list the community around a node
 - `graphite_summary` — stats, god nodes, entry points, surprising connections
 - `graphite_refresh` — rebuild and reload the graph
-
 
 
 
