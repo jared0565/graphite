@@ -11,9 +11,54 @@ from graphite.review import (
     Change,
     ReviewError,
     _parse_porcelain,
+    build_review_packet,
     discover_git_changes,
+    format_review_markdown,
     normalize_explicit_changes,
 )
+
+
+def _review_bundle(*, dependent_count: int = 1) -> dict[str, object]:
+    nodes: list[dict[str, str]] = [
+        {"id": "store", "kind": "module", "name": "store", "source_file": "src/store.py"},
+        {
+            "id": "store_test",
+            "kind": "module",
+            "name": "test_store",
+            "source_file": "tests/test_store.py",
+        },
+    ]
+    edges: list[dict[str, str]] = [
+        {"source": "store_test", "target": "store", "relation": "imports"}
+    ]
+    for index in range(dependent_count):
+        node_id = f"api_{index}"
+        source_file = "src/api.py" if index == 0 else f"src/api_{index}.py"
+        nodes.append(
+            {"id": node_id, "kind": "module", "name": node_id, "source_file": source_file}
+        )
+        edges.append({"source": node_id, "target": "store", "relation": "imports"})
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "metadata": {"node_count": len(nodes), "edge_count": len(edges)},
+    }
+
+
+def _packet(
+    changes: list[Change],
+    *,
+    bundle: dict[str, object] | None = None,
+    graph_status: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return build_review_packet(
+        root_name="sample",
+        changes=changes,
+        discovery="git",
+        graph_bundle=_review_bundle() if bundle is None else bundle,
+        graph_status={} if graph_status is None else graph_status,
+        depth=2,
+    )
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -251,3 +296,233 @@ def test_parse_porcelain_accepts_valid_unmerged_states(status: bytes, expected: 
 def test_parse_porcelain_rejects_incomplete_rename() -> None:
     with pytest.raises(ReviewError, match="missing rename source"):
         _parse_porcelain(b"R  renamed.py\0")
+
+
+def test_build_review_packet_derives_deterministic_graph_evidence() -> None:
+    changes = [Change("src/store.py", "modified")]
+
+    first = _packet(changes)
+    second = _packet(changes)
+
+    assert first == second
+    assert first["schema_version"] == 1
+    assert first["project"] == {"root_name": "sample"}
+    assert first["changes"] == [{"path": "src/store.py", "status": "modified"}]
+    assert first["impact"] == {
+        "matched_nodes": ["store"],
+        "missing": [],
+        "impacted_files": ["src/api.py"],
+        "likely_tests": ["tests/test_store.py"],
+    }
+    assert first["risk"] == {"level": "low", "signals": []}
+    assert [item["id"] for item in first["acceptance_criteria"]] == [
+        "REVIEW_SCOPE",
+        "REVIEW_IMPACT",
+        "RUN_LIKELY_TESTS",
+    ]
+
+
+def test_build_review_packet_combines_stale_deleted_sensitive_and_missing_risks() -> None:
+    packet = _packet(
+        [
+            Change("pyproject.toml", "modified"),
+            Change("src/missing.py", "deleted"),
+        ],
+        graph_status={"stale": True},
+    )
+
+    assert packet["risk"] == {
+        "level": "high",
+        "signals": [
+            "GRAPH_STALE",
+            "DELETED_FILES",
+            "SENSITIVE_CONFIG",
+            "MISSING_GRAPH_MATCHES",
+            "NO_LIKELY_TESTS",
+        ],
+    }
+    assert [item["id"] for item in packet["acceptance_criteria"]] == [
+        "REVIEW_SCOPE",
+        "REFRESH_GRAPH",
+        "ADD_TEST_PLAN",
+        "REVIEW_DELETIONS",
+        "VERIFY_CONFIG",
+    ]
+    assert [item["code"] for item in packet["warnings"]] == [
+        "GRAPH_STALE",
+        "MISSING_GRAPH_MATCHES",
+    ]
+
+
+def test_build_review_packet_blocks_missing_graph_without_exposing_error() -> None:
+    packet = build_review_packet(
+        root_name="sample",
+        changes=[Change("src/store.py", "modified")],
+        discovery="git",
+        graph_bundle=None,
+        graph_status={},
+        depth=2,
+        graph_error="C:\\private\\graph.json\nINJECTED",
+    )
+
+    assert [item["code"] for item in packet["blockers"]] == ["MISSING_GRAPH"]
+    assert packet["impact"] == {
+        "matched_nodes": [],
+        "missing": ["src/store.py"],
+        "impacted_files": [],
+        "likely_tests": [],
+    }
+    assert "private" not in repr(packet)
+    assert "INJECTED" not in repr(packet)
+
+
+def test_build_review_packet_blocks_invalid_graph_with_safe_validation_summary() -> None:
+    bundle = _review_bundle()
+    assert isinstance(bundle["edges"], list)
+    bundle["edges"].append(
+        {"source": "store", "target": "unknown", "relation": "imports"}
+    )
+    assert isinstance(bundle["metadata"], dict)
+    bundle["metadata"]["edge_count"] = len(bundle["edges"])
+
+    packet = _packet([Change("src/store.py", "modified")], bundle=bundle)
+
+    assert [item["code"] for item in packet["blockers"]] == ["INVALID_GRAPH"]
+    assert packet["graph"]["validation"]["ok"] is False
+    assert packet["graph"]["validation"]["error_codes"] == ["edge_target_unknown"]
+    assert "edge target does not exist" not in repr(packet["graph"]["validation"])
+    assert "'target': 'unknown'" not in repr(packet["graph"]["validation"])
+
+
+def test_build_review_packet_empty_changes_only_confirms_clean_state() -> None:
+    packet = _packet([])
+
+    assert packet["risk"] == {"level": "low", "signals": []}
+    assert [item["id"] for item in packet["acceptance_criteria"]] == ["CONFIRM_CLEAN"]
+
+
+@pytest.mark.parametrize(
+    ("dependent_count", "has_broad_impact"),
+    [(9, False), (10, True)],
+)
+def test_build_review_packet_broad_impact_threshold(
+    dependent_count: int, has_broad_impact: bool
+) -> None:
+    packet = _packet(
+        [Change("src/store.py", "modified")],
+        bundle=_review_bundle(dependent_count=dependent_count),
+    )
+
+    assert ("BROAD_IMPACT" in packet["risk"]["signals"]) is has_broad_impact
+    assert packet["risk"]["level"] == ("high" if has_broad_impact else "low")
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["PYPROJECT.TOML", "Package-Lock.JSON", "DOCKERFILE", ".GITHUB/WORKFLOWS/CI.YML"],
+)
+def test_build_review_packet_sensitive_paths_are_case_insensitive(path: str) -> None:
+    packet = _packet([Change(path, "modified")])
+
+    assert "SENSITIVE_CONFIG" in packet["risk"]["signals"]
+    assert "VERIFY_CONFIG" in [item["id"] for item in packet["acceptance_criteria"]]
+
+
+def test_build_review_packet_rejects_negative_depth() -> None:
+    with pytest.raises(ReviewError, match="depth"):
+        build_review_packet(
+            root_name="sample",
+            changes=[],
+            discovery="git",
+            graph_bundle=_review_bundle(),
+            graph_status={},
+            depth=-1,
+        )
+
+
+@pytest.mark.parametrize("path", ["src/bad\nname.py", "src/bad\x1b[31m.py", "src/bad\x00.py"])
+def test_build_review_packet_rejects_control_characters_in_change_paths(path: str) -> None:
+    with pytest.raises(ReviewError) as error:
+        _packet([Change(path, "modified")])
+
+    assert str(error.value) == "change path contains unsafe characters"
+    assert path not in str(error.value)
+
+
+def test_build_review_packet_sanitizes_graph_status() -> None:
+    packet = _packet(
+        [Change("src/store.py", "modified")],
+        graph_status={
+            "stale": True,
+            "node_count": 3,
+            "edge_count": 2,
+            "file_count": 8,
+            "manifest_file_count": 7,
+            "added": ["src/z.py", "src/a.py", "src/a.py"],
+            "changed": ["src/c.py"],
+            "removed": ["src/r.py"],
+            "manifest": "C:\\private\\manifest.json",
+            "error": "RuntimeError: C:\\private\\repo\nINJECTED\x1b[31m",
+            "reason": "manifest missing at C:\\private\\manifest.json\nINJECTED",
+        },
+    )
+
+    assert packet["graph"]["status"] == {
+        "stale": True,
+        "node_count": 3,
+        "edge_count": 2,
+        "file_count": 8,
+        "manifest_file_count": 7,
+        "added": ["src/a.py", "src/z.py"],
+        "changed": ["src/c.py"],
+        "removed": ["src/r.py"],
+        "reason": "missing",
+    }
+    serialized = repr(packet)
+    assert "private" not in serialized
+    assert "INJECTED" not in serialized
+    assert "RuntimeError" not in serialized
+    assert "\x1b" not in serialized
+
+
+def test_format_review_markdown_renders_packet_evidence() -> None:
+    packet = _packet(
+        [Change("src/missing.py", "deleted")], graph_status={"stale": True}
+    )
+
+    markdown = format_review_markdown(packet)
+
+    assert markdown.startswith("# Graphite Change Review\n")
+    assert "## Changes" in markdown
+    assert "`src/missing.py`" in markdown
+    assert "## Impact" in markdown
+    assert "## Risk Signals" in markdown
+    assert "## Acceptance Criteria" in markdown
+    assert "- [ ] **REFRESH_GRAPH**" in markdown
+    assert "## Warnings" in markdown
+    assert "## Blockers" not in markdown
+    assert markdown.endswith("\n")
+
+
+def test_format_review_markdown_includes_optional_blockers() -> None:
+    packet = build_review_packet(
+        root_name="sample",
+        changes=[Change("src/store.py", "modified")],
+        discovery="explicit",
+        graph_bundle=None,
+        graph_status={},
+        depth=1,
+    )
+
+    markdown = format_review_markdown(packet)
+
+    assert "## Blockers" in markdown
+    assert "MISSING_GRAPH" in markdown
+
+
+def test_format_review_markdown_bounds_inline_code_containing_backticks() -> None:
+    packet = _packet([Change("src/a``b.py", "modified")])
+
+    markdown = format_review_markdown(packet)
+
+    assert "```src/a``b.py```" in markdown

@@ -5,7 +5,11 @@ from __future__ import annotations
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import Any, Iterable
+
+from .context import build_context
+from .graph import graph_from_json
+from .validation import validate_graph_bundle
 
 
 class ReviewError(ValueError):
@@ -169,3 +173,410 @@ def _decode_git_path(value: bytes) -> str:
     if not path or path == "." or posix_path.is_absolute() or ".." in posix_path.parts:
         raise ReviewError("unsafe path in Git status output")
     return path
+
+
+_RISK_ORDER = (
+    "GRAPH_STALE",
+    "DELETED_FILES",
+    "SENSITIVE_CONFIG",
+    "BROAD_IMPACT",
+    "MISSING_GRAPH_MATCHES",
+    "NO_LIKELY_TESTS",
+)
+
+_CRITERIA = {
+    "CONFIRM_CLEAN": {
+        "description": "Confirm that there are no changes in the requested review scope.",
+        "verify": "Re-run change discovery and confirm the result is empty.",
+    },
+    "REVIEW_SCOPE": {
+        "description": "Review every changed path in the requested scope.",
+        "verify": "Confirm each listed change has been inspected.",
+    },
+    "REFRESH_GRAPH": {
+        "description": "Refresh the stale dependency graph before relying on graph evidence.",
+        "verify": "Rebuild the graph and confirm its status is current.",
+    },
+    "REVIEW_IMPACT": {
+        "description": "Review the files identified as potentially impacted.",
+        "verify": "Confirm the impacted files remain compatible with the changes.",
+    },
+    "RUN_LIKELY_TESTS": {
+        "description": "Run the tests identified by dependency evidence.",
+        "verify": "Record successful results for every listed likely test.",
+    },
+    "ADD_TEST_PLAN": {
+        "description": "Define test coverage because no likely tests were identified.",
+        "verify": "Document and execute an appropriate test plan for the changes.",
+    },
+    "REVIEW_DELETIONS": {
+        "description": "Review deleted files and their consumers for intentional removal.",
+        "verify": "Confirm each deletion is intentional and leaves no broken references.",
+    },
+    "VERIFY_CONFIG": {
+        "description": "Verify changes to sensitive build, package, or workflow configuration.",
+        "verify": "Validate configuration and dependency integrity in a clean environment.",
+    },
+}
+
+
+def build_review_packet(
+    *,
+    root_name: str,
+    changes: list[Change],
+    discovery: str,
+    graph_bundle: dict[str, Any] | None,
+    graph_status: dict[str, Any],
+    depth: int,
+    graph_error: str | None = None,
+) -> dict[str, Any]:
+    """Build deterministic, bounded evidence for a change review."""
+    del graph_error  # Exception details are deliberately never copied into review evidence.
+    if depth < 0:
+        raise ReviewError("review depth must be zero or greater")
+
+    ordered_changes = sorted(changes, key=lambda item: (item.path, item.status))
+    for change in ordered_changes:
+        if _has_control_character(change.path):
+            raise ReviewError("change path contains unsafe characters")
+
+    change_paths = sorted({change.path for change in ordered_changes})
+    safe_status = _sanitize_graph_status(graph_status)
+    blockers: list[dict[str, str]] = []
+    validation: dict[str, Any]
+    impact = {
+        "matched_nodes": [],
+        "missing": list(change_paths),
+        "impacted_files": [],
+        "likely_tests": [],
+    }
+
+    if graph_bundle is None:
+        validation = _empty_validation_summary()
+        blockers.append(
+            {
+                "code": "MISSING_GRAPH",
+                "message": "Dependency graph evidence is unavailable; build the graph before review.",
+            }
+        )
+    else:
+        report = validate_graph_bundle(graph_bundle)
+        validation = _validation_summary(report)
+        if not report["ok"]:
+            blockers.append(
+                {
+                    "code": "INVALID_GRAPH",
+                    "message": "Dependency graph validation failed; rebuild a valid graph before review.",
+                }
+            )
+        else:
+            context = build_context(graph_from_json(graph_bundle), change_paths, depth=depth)
+            context_impact = context["impact"]
+            impact = {
+                "matched_nodes": _sorted_strings(context_impact.get("matched_nodes", [])),
+                "missing": _sorted_strings(context.get("missing", [])),
+                "impacted_files": _sorted_strings(context_impact.get("impacted_files", [])),
+                "likely_tests": _sorted_strings(context_impact.get("likely_tests", [])),
+            }
+
+    stale = safe_status.get("stale") is True
+    deleted = any(change.status.casefold() == "deleted" for change in ordered_changes)
+    sensitive = any(_is_sensitive_path(change.path) for change in ordered_changes)
+    risk_flags = {
+        "GRAPH_STALE": stale,
+        "DELETED_FILES": deleted,
+        "SENSITIVE_CONFIG": sensitive,
+        "BROAD_IMPACT": len(impact["impacted_files"]) >= 10,
+        "MISSING_GRAPH_MATCHES": bool(impact["missing"]),
+        "NO_LIKELY_TESTS": bool(ordered_changes) and not impact["likely_tests"],
+    }
+    signals = [signal for signal in _RISK_ORDER if risk_flags[signal]]
+    high_signals = set(_RISK_ORDER[:4])
+    level = "high" if high_signals.intersection(signals) else "medium" if signals else "low"
+
+    criterion_ids: list[str]
+    if not ordered_changes:
+        criterion_ids = ["CONFIRM_CLEAN"]
+    else:
+        criterion_ids = ["REVIEW_SCOPE"]
+        if stale:
+            criterion_ids.append("REFRESH_GRAPH")
+        if impact["impacted_files"]:
+            criterion_ids.append("REVIEW_IMPACT")
+        criterion_ids.append("RUN_LIKELY_TESTS" if impact["likely_tests"] else "ADD_TEST_PLAN")
+        if deleted:
+            criterion_ids.append("REVIEW_DELETIONS")
+        if sensitive:
+            criterion_ids.append("VERIFY_CONFIG")
+
+    warnings: list[dict[str, str]] = []
+    if stale:
+        warnings.append(
+            {
+                "code": "GRAPH_STALE",
+                "message": "Dependency graph evidence may be stale and should be refreshed.",
+            }
+        )
+    if impact["missing"]:
+        warnings.append(
+            {
+                "code": "MISSING_GRAPH_MATCHES",
+                "message": "Some changed paths were not matched in the dependency graph.",
+            }
+        )
+
+    return {
+        "schema_version": 1,
+        "project": {"root_name": root_name},
+        "discovery": discovery,
+        "changes": [change.to_dict() for change in ordered_changes],
+        "graph": {"status": safe_status, "validation": validation},
+        "impact": impact,
+        "risk": {"level": level, "signals": signals},
+        "acceptance_criteria": [
+            {"id": criterion_id, **_CRITERIA[criterion_id]} for criterion_id in criterion_ids
+        ],
+        "warnings": warnings,
+        "blockers": blockers,
+    }
+
+
+def format_review_markdown(packet: dict[str, Any]) -> str:
+    """Render a review packet as bounded, control-character-free Markdown."""
+    project = packet.get("project", {})
+    graph = packet.get("graph", {})
+    status = graph.get("status", {})
+    validation = graph.get("validation", {})
+    lines = [
+        "# Graphite Change Review",
+        "",
+        f"- Schema: {_safe_markdown_text(packet.get('schema_version', 'unknown'))}",
+        f"- Project: {_safe_markdown_text(project.get('root_name', 'unknown'))}",
+        f"- Discovery: {_safe_markdown_text(packet.get('discovery', 'unknown'))}",
+        f"- Graph stale: {_safe_markdown_text(status.get('stale', False))}",
+        f"- Graph valid: {_safe_markdown_text(validation.get('ok', False))}",
+        "",
+        "## Changes",
+    ]
+    changes = packet.get("changes", [])
+    if changes:
+        for change in changes:
+            lines.append(
+                f"- {_inline_code(change.get('path', ''))} — "
+                f"{_safe_markdown_text(change.get('status', 'unknown'))}"
+            )
+    else:
+        lines.append("- None")
+
+    impact = packet.get("impact", {})
+    lines.extend(["", "## Impact", "", "Impacted files:"])
+    _append_code_items(lines, impact.get("impacted_files", []))
+    lines.extend(["", "Likely tests:"])
+    _append_code_items(lines, impact.get("likely_tests", []))
+    if impact.get("missing"):
+        lines.extend(["", "Unmatched changes:"])
+        _append_code_items(lines, impact["missing"])
+
+    risk = packet.get("risk", {})
+    lines.extend(
+        [
+            "",
+            "## Risk Signals",
+            "",
+            f"Level: **{_safe_markdown_text(risk.get('level', 'unknown'))}**",
+        ]
+    )
+    signals = risk.get("signals", [])
+    lines.extend(f"- {_safe_markdown_identifier(signal)}" for signal in signals)
+    if not signals:
+        lines.append("- None")
+
+    lines.extend(["", "## Acceptance Criteria"])
+    for criterion in packet.get("acceptance_criteria", []):
+        lines.append(
+            f"- [ ] **{_safe_markdown_identifier(criterion.get('id', ''))}** — "
+            f"{_safe_markdown_text(criterion.get('description', ''))}"
+        )
+        lines.append(f"  - Verify: {_safe_markdown_text(criterion.get('verify', ''))}")
+
+    _append_notice_section(lines, "Blockers", packet.get("blockers", []))
+    _append_notice_section(lines, "Warnings", packet.get("warnings", []))
+    return "\n".join(lines) + "\n"
+
+
+def _validation_summary(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": bool(report.get("ok", False)),
+        "error_count": _safe_count(report.get("error_count")),
+        "warning_count": _safe_count(report.get("warning_count")),
+        "node_count": _safe_count(report.get("node_count")),
+        "edge_count": _safe_count(report.get("edge_count")),
+        "error_codes": _sorted_issue_codes(report.get("errors", [])),
+        "warning_codes": _sorted_issue_codes(report.get("warnings", [])),
+    }
+
+
+def _empty_validation_summary() -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error_count": 0,
+        "warning_count": 0,
+        "node_count": 0,
+        "edge_count": 0,
+        "error_codes": [],
+        "warning_codes": [],
+    }
+
+
+def _sanitize_graph_status(status: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    if isinstance(status.get("stale"), bool):
+        safe["stale"] = status["stale"]
+    for key in (
+        "node_count",
+        "edge_count",
+        "file_count",
+        "manifest_file_count",
+        "added_count",
+        "changed_count",
+        "removed_count",
+    ):
+        value = status.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            safe[key] = value
+    for key in ("added", "changed", "removed"):
+        values = status.get(key)
+        if isinstance(values, list):
+            safe[key] = sorted(
+                {
+                    normalized
+                    for value in values
+                    if isinstance(value, str)
+                    for normalized in [_safe_relative_path(value)]
+                    if normalized is not None
+                }
+            )
+    reason = status.get("reason")
+    if isinstance(reason, str):
+        lowered = reason.casefold()
+        safe["reason"] = next(
+            (
+                category
+                for category in ("missing", "changed", "stale", "invalid", "error")
+                if category in lowered
+            ),
+            "unknown",
+        )
+    return safe
+
+
+def _safe_relative_path(value: str) -> str | None:
+    if _has_control_character(value):
+        return None
+    normalized = value.replace("\\", "/")
+    if not normalized or normalized.startswith("/"):
+        return None
+    if len(normalized) >= 2 and normalized[0].isalpha() and normalized[1] == ":":
+        return None
+    path = PurePosixPath(normalized)
+    if path == PurePosixPath(".") or ".." in path.parts:
+        return None
+    return path.as_posix()
+
+
+def _is_sensitive_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").casefold()
+    name = normalized.rsplit("/", 1)[-1]
+    sensitive_names = {
+        "pyproject.toml",
+        "package.json",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "bun.lock",
+        "bun.lockb",
+        "requirements.txt",
+        "uv.lock",
+        "pipfile.lock",
+        "poetry.lock",
+        "cargo.toml",
+        "cargo.lock",
+        "go.mod",
+        "go.sum",
+        "dockerfile",
+    }
+    return name in sensitive_names or normalized.startswith(".github/workflows/")
+
+
+def _sorted_strings(values: Iterable[Any]) -> list[str]:
+    return sorted({value for value in values if isinstance(value, str)})
+
+
+def _sorted_issue_codes(issues: Any) -> list[str]:
+    if not isinstance(issues, list):
+        return []
+    return sorted(
+        {
+            code
+            for issue in issues
+            if isinstance(issue, dict)
+            for code in [issue.get("code")]
+            if isinstance(code, str) and not _has_control_character(code)
+        }
+    )
+
+
+def _safe_count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _has_control_character(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+
+
+def _safe_markdown_text(value: Any) -> str:
+    text = str(value)
+    text = "".join(character if ord(character) >= 32 and ord(character) != 127 else " " for character in text)
+    for character in "\\`*_{}[]<>#|":
+        text = text.replace(character, f"\\{character}")
+    return text
+
+
+def _safe_markdown_identifier(value: Any) -> str:
+    return "".join(
+        character if character.isalnum() or character in "_-" else "_"
+        for character in str(value)
+        if ord(character) >= 32 and ord(character) != 127
+    )
+
+
+def _inline_code(value: Any) -> str:
+    text = str(value)
+    text = "".join(character if ord(character) >= 32 and ord(character) != 127 else " " for character in text)
+    longest_run = 0
+    current_run = 0
+    for character in text:
+        current_run = current_run + 1 if character == "`" else 0
+        longest_run = max(longest_run, current_run)
+    delimiter = "`" * (longest_run + 1)
+    padding = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{delimiter}{padding}{text}{padding}{delimiter}"
+
+
+def _append_code_items(lines: list[str], values: Any) -> None:
+    if values:
+        lines.extend(f"- {_inline_code(value)}" for value in values)
+    else:
+        lines.append("- None")
+
+
+def _append_notice_section(lines: list[str], heading: str, notices: Any) -> None:
+    if not notices:
+        return
+    lines.extend(["", f"## {heading}"])
+    for notice in notices:
+        lines.append(
+            f"- **{_safe_markdown_identifier(notice.get('code', ''))}** — "
+            f"{_safe_markdown_text(notice.get('message', ''))}"
+        )
