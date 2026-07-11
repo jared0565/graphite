@@ -62,7 +62,8 @@ def discover_git_changes(root: Path, *, timeout_seconds: float = 5.0) -> list[Ch
     except OSError as exc:
         raise ReviewError("unable to resolve project path") from exc
 
-    git_executable = _resolve_trusted_git_executable()
+    git_executable = _resolve_trusted_git_executable(resolved_root)
+    git_environment = _isolated_git_environment()
     top_level_result = _run_git(
         [
             str(git_executable),
@@ -74,6 +75,7 @@ def discover_git_changes(root: Path, *, timeout_seconds: float = 5.0) -> list[Ch
         ],
         cwd=resolved_root,
         timeout_seconds=timeout_seconds,
+        environment=git_environment,
     )
     if top_level_result.returncode != 0:
         raise ReviewError("not a Git worktree")
@@ -102,6 +104,7 @@ def discover_git_changes(root: Path, *, timeout_seconds: float = 5.0) -> list[Ch
         ],
         cwd=resolved_root,
         timeout_seconds=timeout_seconds,
+        environment=git_environment,
     )
     if status_result.returncode != 0:
         raise ReviewError("not a Git worktree")
@@ -109,7 +112,9 @@ def discover_git_changes(root: Path, *, timeout_seconds: float = 5.0) -> list[Ch
     return _parse_porcelain(status_result.stdout)
 
 
-def _resolve_trusted_git_executable(*, platform_name: str | None = None) -> Path:
+def _resolve_trusted_git_executable(
+    resolved_project_root: Path, *, platform_name: str | None = None
+) -> Path:
     """Resolve Git only from absolute PATH directories, never the current directory."""
     selected_platform = os.name if platform_name is None else platform_name
     executable_name = "git.exe" if selected_platform == "nt" else "git"
@@ -129,15 +134,38 @@ def _resolve_trusted_git_executable(*, platform_name: str | None = None) -> Path
                 continue
             if selected_platform != "nt" and not os.access(resolved_candidate, os.X_OK):
                 continue
+            try:
+                resolved_candidate.relative_to(resolved_project_root)
+            except ValueError:
+                pass
+            else:
+                continue
         except OSError:
             continue
+        # PATH outside the project is the user/environment trust boundary. Windows ACL
+        # enforcement and post-resolution TOCTOU remain residual OS-level concerns.
         return resolved_candidate
 
     raise ReviewError("Git executable was not found")
 
 
+def _isolated_git_environment() -> dict[str, str]:
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.casefold().startswith("git_")
+    }
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    return environment
+
+
 def _run_git(
-    command: list[str], *, cwd: Path, timeout_seconds: float
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout_seconds: float,
+    environment: dict[str, str],
 ) -> subprocess.CompletedProcess[bytes]:
     try:
         return subprocess.run(
@@ -149,6 +177,7 @@ def _run_git(
             stderr=subprocess.PIPE,
             timeout=timeout_seconds,
             shell=False,
+            env=environment,
         )
     except FileNotFoundError as exc:
         raise ReviewError("Git executable was not found") from exc

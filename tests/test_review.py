@@ -218,18 +218,24 @@ def test_resolve_trusted_git_ignores_unsafe_path_entries_and_cwd_on_windows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repository = tmp_path / "untrusted repository"
+    repository_tools = repository / "tools"
     trusted_bin = tmp_path / "trusted tools"
-    repository.mkdir()
+    repository_tools.mkdir(parents=True)
     trusted_bin.mkdir()
     _write(repository / "git.exe", "malicious")
+    _write(repository_tools / "git.exe", "also malicious")
     _write(trusted_bin / "git.exe", "trusted")
     monkeypatch.chdir(repository)
     monkeypatch.setenv(
         "PATH",
-        os.pathsep.join(("", ".", "relative tools", str(trusted_bin))),
+        os.pathsep.join(
+            ("", ".", "relative tools", str(repository_tools), str(trusted_bin))
+        ),
     )
 
-    executable = review_module._resolve_trusted_git_executable(platform_name="nt")
+    executable = review_module._resolve_trusted_git_executable(
+        repository.resolve(), platform_name="nt"
+    )
 
     assert executable == trusted_bin.resolve() / "git.exe"
     assert executable.is_absolute()
@@ -237,17 +243,62 @@ def test_resolve_trusted_git_ignores_unsafe_path_entries_and_cwd_on_windows(
     assert executable.parent != repository.resolve()
 
 
+def test_resolve_trusted_git_rejects_only_project_contained_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "private repository"
+    repository_tools = repository / "nested tools"
+    repository_tools.mkdir(parents=True)
+    _write(repository_tools / "git.exe", "malicious")
+    monkeypatch.setenv("PATH", str(repository_tools))
+
+    with pytest.raises(ReviewError) as error:
+        review_module._resolve_trusted_git_executable(
+            repository.resolve(), platform_name="nt"
+        )
+
+    assert str(error.value) == "Git executable was not found"
+    assert str(repository) not in str(error.value)
+
+
 def test_resolve_trusted_git_failure_is_sanitized(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
     private_path = tmp_path / ("private-" + "x" * 80)
     monkeypatch.setenv("PATH", os.pathsep.join(("", ".", "relative", str(private_path))))
 
     with pytest.raises(ReviewError) as error:
-        review_module._resolve_trusted_git_executable(platform_name="nt")
+        review_module._resolve_trusted_git_executable(
+            repository.resolve(), platform_name="nt"
+        )
 
     assert str(error.value) == "Git executable was not found"
     assert str(private_path) not in str(error.value)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable permission contract")
+def test_resolve_trusted_git_skips_non_executable_posix_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    first_bin = tmp_path / "first bin"
+    trusted_bin = tmp_path / "trusted bin"
+    repository.mkdir()
+    first_bin.mkdir()
+    trusted_bin.mkdir()
+    _write(first_bin / "git", "not executable")
+    _write(trusted_bin / "git", "#!/bin/sh\nexit 0\n")
+    (first_bin / "git").chmod(0o600)
+    (trusted_bin / "git").chmod(0o700)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(first_bin), str(trusted_bin))))
+
+    executable = review_module._resolve_trusted_git_executable(
+        repository.resolve(), platform_name="posix"
+    )
+
+    assert executable == (trusted_bin / "git").resolve()
 
 
 def test_discover_git_changes_uses_hardened_absolute_git_commands(
@@ -255,6 +306,20 @@ def test_discover_git_changes_uses_hardened_absolute_git_commands(
 ) -> None:
     trusted_git = (tmp_path / "trusted tools" / "git.exe").resolve()
     calls: list[tuple[list[str], dict[str, object]]] = []
+    hostile_git_environment = {
+        "GiT_DiR": "private-dir",
+        "git_work_tree": "private-tree",
+        "GIT_INDEX_FILE": "private-index",
+        "Git_Common_Dir": "private-common",
+        "GIT_OBJECT_DIRECTORY": "private-objects",
+        "git_exec_path": "private-exec",
+        "GIT_CONFIG_COUNT": "99",
+        "Git_Trace": "private-trace",
+    }
+    for name, value in hostile_git_environment.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("GRAPHITE_REVIEW_TEST", "retained")
+    source_environment = dict(os.environ)
 
     def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         calls.append((command, kwargs))
@@ -265,7 +330,7 @@ def test_discover_git_changes_uses_hardened_absolute_git_commands(
     monkeypatch.setattr(
         review_module,
         "_resolve_trusted_git_executable",
-        lambda: trusted_git,
+        lambda _root: trusted_git,
     )
     monkeypatch.setattr(review_module.subprocess, "run", fake_run)
 
@@ -276,7 +341,16 @@ def test_discover_git_changes_uses_hardened_absolute_git_commands(
         assert command[1:4] == ["--no-optional-locks", "-c", "core.fsmonitor=false"]
         assert kwargs["shell"] is False
         assert kwargs["stdin"] is subprocess.DEVNULL
-        assert "env" not in kwargs
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        assert environment["PATH"] == source_environment["PATH"]
+        assert environment["GRAPHITE_REVIEW_TEST"] == "retained"
+        assert environment["GIT_OPTIONAL_LOCKS"] == "0"
+        assert environment["GIT_TERMINAL_PROMPT"] == "0"
+        assert {
+            name for name in environment if name.casefold().startswith("git_")
+        } == {"GIT_OPTIONAL_LOCKS", "GIT_TERMINAL_PROMPT"}
+    assert dict(os.environ) == source_environment
     assert calls[0][0][4:] == ["rev-parse", "--show-toplevel"]
     assert calls[1][0][4:] == [
         "status",
