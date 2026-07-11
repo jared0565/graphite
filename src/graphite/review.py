@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -37,7 +38,7 @@ def normalize_explicit_changes(root: Path, paths: Iterable[str]) -> list[Change]
         try:
             relative_path = resolved_path.relative_to(resolved_root)
         except ValueError as exc:
-            raise ReviewError(f"path is outside project root: {raw_path!r}") from exc
+            raise ReviewError("path is outside project root") from exc
 
         if relative_path == Path("."):
             raise ReviewError("a change path cannot be the project root")
@@ -51,31 +52,57 @@ def discover_git_changes(root: Path, *, timeout_seconds: float = 5.0) -> list[Ch
     if timeout_seconds <= 0:
         raise ReviewError("Git status timeout must be greater than zero")
 
-    resolved_root = root.resolve()
-    command = ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"]
     try:
-        result = subprocess.run(
+        resolved_root = root.resolve()
+    except OSError as exc:
+        raise ReviewError("unable to resolve project path") from exc
+
+    top_level_result = _run_git(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=resolved_root,
+        timeout_seconds=timeout_seconds,
+    )
+    if top_level_result.returncode != 0:
+        raise ReviewError("not a Git worktree")
+
+    try:
+        git_root = Path(os.fsdecode(top_level_result.stdout).rstrip("\r\n")).resolve()
+    except OSError as exc:
+        raise ReviewError("unable to resolve Git worktree root") from exc
+    if not top_level_result.stdout or git_root != resolved_root:
+        raise ReviewError("project path must be the Git worktree root")
+
+    status_result = _run_git(
+        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        cwd=resolved_root,
+        timeout_seconds=timeout_seconds,
+    )
+    if status_result.returncode != 0:
+        raise ReviewError("not a Git worktree")
+
+    return _parse_porcelain(status_result.stdout)
+
+
+def _run_git(
+    command: list[str], *, cwd: Path, timeout_seconds: float
+) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return subprocess.run(
             command,
-            cwd=resolved_root,
+            cwd=cwd,
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout_seconds,
+            shell=False,
         )
     except FileNotFoundError as exc:
         raise ReviewError("Git executable was not found") from exc
     except subprocess.TimeoutExpired as exc:
-        raise ReviewError("Git status timed out") from exc
+        raise ReviewError("Git command timeout") from exc
     except OSError as exc:
-        raise ReviewError(f"unable to run Git status: {_bounded_text(str(exc))}") from exc
-
-    if result.returncode != 0:
-        detail = _bounded_text(result.stderr.decode("utf-8", errors="replace").strip())
-        suffix = f": {detail}" if detail else ""
-        raise ReviewError(f"not a Git worktree{suffix}")
-
-    return _parse_porcelain(result.stdout)
+        raise ReviewError("unable to run Git command") from exc
 
 
 def _parse_porcelain(output: bytes) -> list[Change]:
@@ -104,7 +131,11 @@ def _parse_porcelain(output: bytes) -> list[Change]:
 
         path = _decode_git_path(record[3:])
         status = _normalize_status(status_bytes)
-        changes[path] = Change(path, status)
+        change = Change(path, status)
+        previous = changes.get(path)
+        if previous is not None and previous != change:
+            raise ReviewError("Git returned conflicting status data")
+        changes[path] = change
         index += 1
 
     return sorted(changes.values())
@@ -123,12 +154,4 @@ def _normalize_status(status: bytes) -> str:
 
 
 def _decode_git_path(value: bytes) -> str:
-    try:
-        path = value.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ReviewError("malformed Git status output: path is not UTF-8") from exc
-    return path.replace("\\", "/")
-
-
-def _bounded_text(value: str, limit: int = 240) -> str:
-    return value[:limit]
+    return os.fsdecode(value)
