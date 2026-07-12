@@ -135,6 +135,9 @@ class GitRunner:
             _bounded_cleanup(process, reader)
             raise GitOutputLimitError("Git command output limit exceeded")
         if read_failed.is_set():
+            _close_stdout(process)
+            raise GitLaunchError("unable to run Git command")
+        if not _close_stdout(process):
             raise GitLaunchError("unable to run Git command")
         return GitResult(returncode=returncode, stdout=bytes(stdout))
 
@@ -147,11 +150,6 @@ def _bounded_cleanup(
         process.kill()
     except OSError:
         pass
-    if process.stdout is not None:
-        try:
-            process.stdout.close()
-        except OSError:
-            pass
     wait_confirmed = True
     try:
         process.wait(timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
@@ -161,7 +159,19 @@ def _bounded_cleanup(
     if reader is not None:
         reader.join(timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
         reader_stopped = not reader.is_alive()
-    return wait_confirmed and reader_stopped
+    if not reader_stopped:
+        return False
+    return wait_confirmed and _close_stdout(process)
+
+
+def _close_stdout(process: subprocess.Popen[bytes]) -> bool:
+    if process.stdout is None:
+        return True
+    try:
+        process.stdout.close()
+    except OSError:
+        return False
+    return True
 
 
 def _resolve_git_executable(

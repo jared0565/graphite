@@ -31,7 +31,7 @@ class _FakeProcess:
         returncode: int = 0,
         timeout_until_killed: bool = False,
     ) -> None:
-        self.stdout = io.BytesIO(output)
+        self.stdout = _TrackingBytesIO(output)
         self.returncode = returncode
         self.timeout_until_killed = timeout_until_killed
         self.killed = False
@@ -48,9 +48,9 @@ class _FakeProcess:
 
 
 class _DescendantHeldPipe:
-    def __init__(self, *, close_unblocks: bool = True) -> None:
+    def __init__(self, *, close_must_not_run: bool = False) -> None:
         self.close_attempted = False
-        self.close_unblocks = close_unblocks
+        self.close_must_not_run = close_must_not_run
         self._closed = threading.Event()
 
     def read(self, size: int = -1) -> bytes:
@@ -59,8 +59,9 @@ class _DescendantHeldPipe:
 
     def close(self) -> None:
         self.close_attempted = True
-        if self.close_unblocks:
-            self._closed.set()
+        if self.close_must_not_run:
+            raise AssertionError("close must not run while reader owns the pipe")
+        self._closed.set()
 
 
 class _HeldPipeProcess:
@@ -68,9 +69,9 @@ class _HeldPipeProcess:
         self,
         *,
         wait_always_times_out: bool = False,
-        close_unblocks_reader: bool = True,
+        close_must_not_run: bool = False,
     ) -> None:
-        self.stdout = _DescendantHeldPipe(close_unblocks=close_unblocks_reader)
+        self.stdout = _DescendantHeldPipe(close_must_not_run=close_must_not_run)
         self.returncode = 0
         self.wait_always_times_out = wait_always_times_out
         self.killed = False
@@ -86,6 +87,16 @@ class _HeldPipeProcess:
 
     def kill(self) -> None:
         self.killed = True
+
+
+class _TrackingBytesIO(io.BytesIO):
+    def __init__(self, value: bytes) -> None:
+        super().__init__(value)
+        self.close_attempted = False
+
+    def close(self) -> None:
+        self.close_attempted = True
+        super().close()
 
 
 def _invoke_runner_in_daemon(
@@ -152,6 +163,7 @@ def test_git_runner_streams_bounded_stdout_with_stderr_discarded(
     assert kwargs["stdout"] is subprocess.PIPE
     assert kwargs["stderr"] is subprocess.DEVNULL
     assert kwargs["shell"] is False
+    assert process.stdout.close_attempted is True
 
 
 def test_git_runner_kills_process_when_stdout_limit_is_exceeded(
@@ -184,7 +196,7 @@ def test_git_runner_kills_and_waits_after_timeout(
 def test_git_runner_bounds_cleanup_when_descendant_holds_stdout_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    process = _HeldPipeProcess(close_unblocks_reader=False)
+    process = _HeldPipeProcess(close_must_not_run=True)
     runner, _ = _runner_with_fake_process(tmp_path, monkeypatch, process)  # type: ignore[arg-type]
     started = time.monotonic()
 
@@ -195,14 +207,16 @@ def test_git_runner_bounds_cleanup_when_descendant_holds_stdout_open(
     assert time.monotonic() - started < 0.75
     assert isinstance(outcome.get("error"), git_module.GitLaunchError)
     assert process.killed is True
-    assert process.stdout.close_attempted is True
+    assert process.stdout.close_attempted is False
     assert all(timeout is not None for timeout in process.wait_calls)
 
 
 def test_git_runner_bounds_cleanup_when_wait_keeps_timing_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    process = _HeldPipeProcess(wait_always_times_out=True)
+    process = _HeldPipeProcess(
+        wait_always_times_out=True, close_must_not_run=True
+    )
     runner, _ = _runner_with_fake_process(tmp_path, monkeypatch, process)  # type: ignore[arg-type]
     started = time.monotonic()
 
@@ -213,7 +227,7 @@ def test_git_runner_bounds_cleanup_when_wait_keeps_timing_out(
     assert time.monotonic() - started < 0.75
     assert isinstance(outcome.get("error"), git_module.GitTimeoutError)
     assert process.killed is True
-    assert process.stdout.close_attempted is True
+    assert process.stdout.close_attempted is False
     assert all(timeout is not None for timeout in process.wait_calls)
 
 
