@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,7 +11,7 @@ try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
     from mcp.types import Tool, TextContent
-except ImportError as e:
+except ImportError:
     print(
         "[graphite-mcp] MCP package not installed. Run: pip install -e 'tools/graphite[mcp]'",
         file=sys.stderr,
@@ -197,4 +196,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

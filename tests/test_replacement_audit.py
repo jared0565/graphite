@@ -6,7 +6,6 @@ from pathlib import Path
 
 from graphite.bootstrap import bootstrap_project
 from graphite.cli import main
-from graphite.config import Config
 from graphite.replacement_audit import audit_replacement
 
 

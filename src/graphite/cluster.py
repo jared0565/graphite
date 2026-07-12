@@ -1,7 +1,6 @@
 """Community detection using Louvain (and optional Leiden)."""
 from __future__ import annotations
 
-import random
 from collections import defaultdict
 from typing import Any
 

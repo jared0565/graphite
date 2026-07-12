@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import unicodedata
-from pathlib import Path
 from typing import Any
 
 import networkx as nx

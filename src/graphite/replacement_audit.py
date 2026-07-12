@@ -1,7 +1,6 @@
 """Audit whether Graphite is ready to replace legacy Graphify usage in a project."""
 from __future__ import annotations
 
-import fnmatch
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -266,4 +265,3 @@ def _find_graphify_text_references(root: Path) -> list[dict[str, Any]]:
             if "graphify" in line.lower():
                 refs.append({"file": rel, "line": index, "text": line.strip()})
     return refs
-

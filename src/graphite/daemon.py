@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Callable
 
 from .config import Config
-from .ingest import collect_files
 from .io import atomic_write_json
 from .watch import Snapshot, WatchChange, diff_snapshots, snapshot, wait_for_stable_snapshot
 
@@ -475,7 +474,6 @@ def run_daemon(
             logger.event("daemon_stop", reason="max_cycles", cycle=cycle)
             return last_status
         sleep(options.scan_interval_seconds)
-
 
 
 

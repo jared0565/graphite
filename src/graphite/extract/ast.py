@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..cache import Cache, content_hash
+from ..cache import Cache
 from ..config import Config
 from ..ingest import FileEntry
 from ..resolve import SourceIndex, should_keep_call_target
@@ -970,7 +970,6 @@ def _merge(results: list[ExtractionResult]) -> ExtractionResult:
             merged.edges.append(e)
             seen_edges.add(key)
     return merged
-
 
 
 
