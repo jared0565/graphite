@@ -47,6 +47,22 @@ class _FakeProcess:
         self.killed = True
 
 
+class _BlockingVersionProcess(_FakeProcess):
+    def __init__(
+        self, started: threading.Event, release: threading.Event
+    ) -> None:
+        super().__init__(b"git version 2.38.0\n")
+        self._started = started
+        self._release = release
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.wait_calls.append(timeout)
+        self._started.set()
+        if not self._release.wait(timeout):
+            raise subprocess.TimeoutExpired("private", timeout)
+        return self.returncode
+
+
 class _DescendantHeldPipe:
     def __init__(self, *, close_must_not_run: bool = False) -> None:
         self.close_attempted = False
@@ -180,6 +196,7 @@ def test_git_runner_rejects_git_2_37_with_a_sanitized_error(
         b"git version 2.38\n",
         b"git version 2.38.0\n",
         b"git version 2.53.0.windows.1\n",
+        b"git version 2.39.5 (Apple Git-154)\n",
     ],
 )
 def test_git_runner_accepts_supported_version_formats(
@@ -203,6 +220,13 @@ def test_git_runner_accepts_supported_version_formats(
     "version_process",
     [
         pytest.param(_FakeProcess(b"private malformed output\n"), id="malformed"),
+        pytest.param(
+            _FakeProcess(b"prefix git version 2.39.5\n"), id="malformed-prefix"
+        ),
+        pytest.param(
+            _FakeProcess(b"git version 2.39.5\nprivate"),
+            id="trailing-control-text",
+        ),
         pytest.param(
             _FakeProcess(b"private nonzero output\n", returncode=1), id="nonzero"
         ),
@@ -250,6 +274,67 @@ def test_git_runner_caches_a_successful_version_probe(
     runner.run(["status"], timeout_seconds=2)
     runner.run(["ls-files"], timeout_seconds=2)
 
+    assert [command[1:] for command in calls].count(["--version"]) == 1
+    assert len(calls) == 3
+
+
+def test_git_runner_serializes_a_simultaneous_version_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, _ = _runner_with_fake_process(
+        tmp_path, monkeypatch, _FakeProcess(b"unused")
+    )
+    start_barrier = threading.Barrier(3)
+    both_invoking = threading.Event()
+    version_started = threading.Event()
+    release_version = threading.Event()
+    state_lock = threading.Lock()
+    invoking_count = 0
+    calls: list[list[str]] = []
+    results: list[bytes] = []
+    errors: list[BaseException] = []
+
+    def fake_popen(command: list[str], **kwargs: object) -> _FakeProcess:
+        with state_lock:
+            calls.append(command)
+        if command[1:] == ["--version"]:
+            return _BlockingVersionProcess(version_started, release_version)
+        return _FakeProcess(b"ok")
+
+    def invoke(arguments: list[str]) -> None:
+        nonlocal invoking_count
+        start_barrier.wait()
+        with state_lock:
+            invoking_count += 1
+            if invoking_count == 2:
+                both_invoking.set()
+        try:
+            result = runner.run(arguments, timeout_seconds=2)
+        except BaseException as exc:
+            with state_lock:
+                errors.append(exc)
+        else:
+            with state_lock:
+                results.append(result.stdout)
+
+    monkeypatch.setattr(git_module.subprocess, "Popen", fake_popen)
+    threads = [
+        threading.Thread(target=invoke, args=(["status"],)),
+        threading.Thread(target=invoke, args=(["ls-files"],)),
+    ]
+    for thread in threads:
+        thread.start()
+
+    start_barrier.wait(timeout=1)
+    assert both_invoking.wait(1)
+    assert version_started.wait(1)
+    release_version.set()
+    for thread in threads:
+        thread.join(2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert results == [b"ok", b"ok"]
     assert [command[1:] for command in calls].count(["--version"]) == 1
     assert len(calls) == 3
 

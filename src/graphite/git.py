@@ -192,7 +192,8 @@ class GitRunner:
 def _parse_git_version(output: bytes) -> tuple[int, int, int] | None:
     match = re.fullmatch(
         rb"git version ([0-9]+)\.([0-9]+)(?:\.([0-9]+))?"
-        rb"(?:\.[0-9A-Za-z][0-9A-Za-z.-]*)?\r?\n?",
+        rb"(?:\.windows\.[0-9]+| \(Apple Git-[0-9A-Za-z][0-9A-Za-z.-]*\))?"
+        rb"\r?\n?",
         output,
     )
     if match is None:
