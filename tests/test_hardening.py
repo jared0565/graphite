@@ -1,6 +1,7 @@
 """Hardening tests for graph accuracy and development workflow helpers."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -21,6 +22,18 @@ import graphite.ingest as ingest_module
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+class _FakeGitProcess:
+    def __init__(self, output: bytes, returncode: int = 0) -> None:
+        self.stdout = io.BytesIO(output)
+        self.returncode = returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        pass
 
 
 def test_ingest_skips_generated_tooling_and_vendor_dirs(tmp_path: Path) -> None:
@@ -62,11 +75,11 @@ def test_ingest_git_enumeration_uses_shared_hardened_runner(
     monkeypatch.setenv("git_index_file", "private")
     calls = []
 
-    def fake_run(command, **kwargs):
+    def fake_popen(command, **kwargs):
         calls.append((command, kwargs))
-        return subprocess.CompletedProcess(command, 0, b"src/app.py\0", b"")
+        return _FakeGitProcess(b"src/app.py\0")
 
-    monkeypatch.setattr(git_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_module.subprocess, "Popen", fake_popen)
 
     entries = collect_files(root, Config())
 
@@ -83,7 +96,7 @@ def test_ingest_git_enumeration_uses_shared_hardened_runner(
     }
 
 
-def test_ingest_falls_back_when_repository_path_has_only_fake_git(
+def test_ingest_fails_closed_when_repository_path_has_only_fake_git(
     tmp_path: Path, monkeypatch
 ) -> None:
     root = tmp_path / "repository"
@@ -97,14 +110,107 @@ def test_ingest_falls_back_when_repository_path_has_only_fake_git(
         (repository_bin / fake_name).chmod(0o700)
     monkeypatch.setenv("PATH", str(repository_bin))
 
-    def must_not_run(*args, **kwargs):
-        raise AssertionError("repository-contained Git must not execute")
+    with pytest.raises(RuntimeError, match="unable to enumerate Git repository safely"):
+        collect_files(root, Config())
 
-    monkeypatch.setattr(git_module.subprocess, "run", must_not_run)
 
-    entries = collect_files(root, Config())
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["unavailable", "timeout", "output_limit", "nonzero", "malformed", "invalid_utf8"],
+)
+def test_git_repository_enumeration_failures_abort_without_fallback(
+    tmp_path: Path, monkeypatch, failure_mode: str
+) -> None:
+    root = tmp_path / "repository"
+    (root / ".git").mkdir(parents=True)
+    _write(root / "ignored" / "secret.env", "SECRET=private\n")
 
-    assert "src/app.py" in {entry.rel_path for entry in entries}
+    class FakeRunner:
+        def __init__(self, project_root):
+            if failure_mode == "unavailable":
+                raise git_module.GitUnavailableError("private")
+
+        def run(self, arguments, *, timeout_seconds, **kwargs):
+            if failure_mode == "timeout":
+                raise git_module.GitTimeoutError("private")
+            if failure_mode == "output_limit":
+                error_type = getattr(
+                    git_module, "GitOutputLimitError", git_module.GitError
+                )
+                raise error_type("private")
+            if failure_mode == "nonzero":
+                return subprocess.CompletedProcess(arguments, 128, b"", b"")
+            if failure_mode == "malformed":
+                return subprocess.CompletedProcess(arguments, 0, b"missing-nul", b"")
+            return subprocess.CompletedProcess(arguments, 0, b"invalid-\xff.py\0", b"")
+
+    def must_not_walk(*args, **kwargs):
+        raise AssertionError("Git repository must not use filesystem fallback")
+
+    def must_not_read(*args, **kwargs):
+        raise AssertionError("ignored secret must not be read or hashed")
+
+    monkeypatch.setattr(ingest_module, "GitRunner", FakeRunner)
+    monkeypatch.setattr(ingest_module, "_walk_files", must_not_walk)
+    monkeypatch.setattr(ingest_module, "_is_binary", must_not_read)
+    monkeypatch.setattr(ingest_module, "file_hash", must_not_read)
+
+    with pytest.raises(RuntimeError, match="unable to enumerate Git repository safely"):
+        collect_files(root, Config(include_dotfiles=True))
+
+
+def test_non_git_directory_still_uses_filesystem_walk(tmp_path: Path) -> None:
+    _write(tmp_path / "src" / "app.py", "value = 1\n")
+
+    assert [entry.rel_path for entry in collect_files(tmp_path, Config())] == [
+        "src/app.py"
+    ]
+
+
+def test_git_enumeration_applies_max_files_before_returning_paths(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "repository"
+    (root / ".git").mkdir(parents=True)
+    for index in range(5):
+        _write(root / f"file-{index}.py", f"value = {index}\n")
+
+    class FakeRunner:
+        def __init__(self, project_root):
+            assert project_root == root.resolve()
+
+        def run(self, arguments, *, timeout_seconds, **kwargs):
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                b"file-0.py\0file-1.py\0..\\record-beyond-cap.py\0",
+                b"",
+            )
+
+    monkeypatch.setattr(ingest_module, "GitRunner", FakeRunner)
+
+    assert ingest_module._git_ls_files(root.resolve(), max_files=2) == [
+        "file-0.py",
+        "file-1.py",
+    ]
+
+
+def test_walk_max_files_stops_iteration_before_materializing_all_paths(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _write(tmp_path / "first.py", "first = 1\n")
+    _write(tmp_path / "second.py", "second = 2\n")
+
+    def bounded_walk(*args, **kwargs):
+        yield "first.py"
+        yield "second.py"
+        raise AssertionError("walk iterated beyond max_files")
+
+    monkeypatch.setattr(ingest_module, "_walk_files", bounded_walk)
+
+    entries = collect_files(tmp_path, Config(max_files=2))
+
+    assert [entry.rel_path for entry in entries] == ["first.py", "second.py"]
 
 
 def test_git_file_listing_rejects_invalid_utf8(
@@ -122,7 +228,8 @@ def test_git_file_listing_rejects_invalid_utf8(
 
     monkeypatch.setattr(ingest_module, "GitRunner", FakeRunner)
 
-    assert ingest_module._git_ls_files(root.resolve()) is None
+    with pytest.raises(RuntimeError, match="unable to enumerate Git repository safely"):
+        ingest_module._git_ls_files(root.resolve())
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows native path containment")
@@ -147,7 +254,8 @@ def test_git_file_listing_rejects_windows_escape_paths(
 
     monkeypatch.setattr(ingest_module, "GitRunner", FakeRunner)
 
-    assert ingest_module._git_ls_files(root.resolve()) is None
+    with pytest.raises(RuntimeError, match="unable to enumerate Git repository safely"):
+        ingest_module._git_ls_files(root.resolve())
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX literal backslash behavior")
@@ -200,12 +308,18 @@ def test_collect_files_never_reads_git_listed_symlink_outside_root(
         return "safe-hash"
 
     monkeypatch.setattr(ingest_module, "GitRunner", FakeRunner)
+    monkeypatch.setattr(
+        ingest_module,
+        "_walk_files",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unsafe Git record must not fall back to filesystem walk")
+        ),
+    )
     monkeypatch.setattr(ingest_module, "_is_binary", guarded_binary)
     monkeypatch.setattr(ingest_module, "file_hash", guarded_hash)
 
-    entries = collect_files(root, Config())
-
-    assert "linked.py" not in {entry.rel_path for entry in entries}
+    with pytest.raises(RuntimeError, match="unable to enumerate Git repository safely"):
+        collect_files(root, Config())
 
 
 def test_collect_files_final_boundary_rejects_symlink_escape(
@@ -221,7 +335,9 @@ def test_collect_files_final_boundary_rejects_symlink_escape(
     except (NotImplementedError, OSError) as exc:
         pytest.skip(f"symlink creation unavailable: {exc}")
 
-    monkeypatch.setattr(ingest_module, "_git_ls_files", lambda _root: ["linked.py"])
+    monkeypatch.setattr(
+        ingest_module, "_git_ls_files", lambda _root, **_kwargs: ["linked.py"]
+    )
 
     def must_not_read(_path: Path):
         raise AssertionError("external file must not be read or hashed")
@@ -265,7 +381,9 @@ def test_internal_symlink_keeps_distinct_identity_in_git_and_walk_modes(
         "src/app.py",
     ]
 
-    monkeypatch.setattr(ingest_module, "_git_ls_files", lambda _root: None)
+    monkeypatch.setattr(
+        ingest_module, "_git_ls_files", lambda _root, **_kwargs: None
+    )
 
     assert [entry.rel_path for entry in collect_files(root, Config())] == [
         "alias.py",

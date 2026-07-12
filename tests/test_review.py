@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -80,6 +81,18 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+class _FakeGitProcess:
+    def __init__(self, output: bytes, returncode: int = 0) -> None:
+        self.stdout = io.BytesIO(output)
+        self.returncode = returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        pass
 
 
 def _collect_keys(value: object) -> set[str]:
@@ -321,18 +334,18 @@ def test_discover_git_changes_uses_hardened_absolute_git_commands(
     monkeypatch.setenv("GRAPHITE_REVIEW_TEST", "retained")
     source_environment = dict(os.environ)
 
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def fake_popen(command: list[str], **kwargs: object) -> _FakeGitProcess:
         calls.append((command, kwargs))
         if command[-2:] == ["rev-parse", "--show-toplevel"]:
-            return subprocess.CompletedProcess(command, 0, f"{tmp_path.resolve()}\n".encode(), b"")
-        return subprocess.CompletedProcess(command, 0, b"?? path with spaces.py\0", b"")
+            return _FakeGitProcess(f"{tmp_path.resolve()}\n".encode())
+        return _FakeGitProcess(b"?? path with spaces.py\0")
 
     monkeypatch.setattr(
         git_module,
         "_resolve_git_executable",
         lambda _root, **_kwargs: trusted_git,
     )
-    monkeypatch.setattr(git_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_module.subprocess, "Popen", fake_popen)
 
     assert discover_git_changes(tmp_path) == [Change("path with spaces.py", "untracked")]
     assert len(calls) == 2
@@ -377,12 +390,10 @@ def test_discover_git_changes_rejects_nested_worktree_path(tmp_path: Path) -> No
 def test_discover_git_changes_does_not_expose_git_stderr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def failed_git(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(
-            ["git"], 128, stdout=b"", stderr=b"C:\\private\\repo\nINJECTED"
-        )
+    def failed_git(*args: object, **kwargs: object) -> _FakeGitProcess:
+        return _FakeGitProcess(b"", returncode=128)
 
-    monkeypatch.setattr(git_module.subprocess, "run", failed_git)
+    monkeypatch.setattr(git_module.subprocess, "Popen", failed_git)
 
     with pytest.raises(ReviewError) as error:
         discover_git_changes(tmp_path)
@@ -396,10 +407,10 @@ def test_discover_git_changes_does_not_expose_git_stderr(
 def test_discover_git_changes_sanitizes_os_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def broken_git(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def broken_git(*args: object, **kwargs: object) -> _FakeGitProcess:
         raise OSError("C:\\private\\repo\nINJECTED")
 
-    monkeypatch.setattr(git_module.subprocess, "run", broken_git)
+    monkeypatch.setattr(git_module.subprocess, "Popen", broken_git)
 
     with pytest.raises(ReviewError) as error:
         discover_git_changes(tmp_path)
@@ -413,10 +424,10 @@ def test_discover_git_changes_sanitizes_os_errors(
 def test_discover_git_changes_rejects_invalid_utf8_worktree_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def invalid_root(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(["git"], 0, stdout=b"\xff\n", stderr=b"")
+    def invalid_root(*args: object, **kwargs: object) -> _FakeGitProcess:
+        return _FakeGitProcess(b"\xff\n")
 
-    monkeypatch.setattr(git_module.subprocess, "run", invalid_root)
+    monkeypatch.setattr(git_module.subprocess, "Popen", invalid_root)
 
     with pytest.raises(ReviewError) as error:
         discover_git_changes(tmp_path)
@@ -432,6 +443,13 @@ def test_discover_git_changes_rejects_non_positive_timeout(tmp_path: Path) -> No
 
 def test_parse_porcelain_maps_type_change_to_modified() -> None:
     assert _parse_porcelain(b"T  changed.bin\0") == [Change("changed.bin", "modified")]
+
+
+def test_parse_porcelain_rejects_record_count_above_limit() -> None:
+    output = b"?? one.py\0?? two.py\0?? three.py\0"
+
+    with pytest.raises(ReviewError, match="Git status record limit exceeded"):
+        _parse_porcelain(output, max_records=2)
 
 
 def test_parse_porcelain_maps_added_and_copied_states() -> None:
@@ -983,16 +1001,11 @@ def test_review_explicit_freshness_uses_only_shared_hardened_git_boundary(
     source_environment = dict(os.environ)
     calls: list[tuple[list[str], dict[str, object]]] = []
 
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def fake_popen(command: list[str], **kwargs: object) -> _FakeGitProcess:
         calls.append((command, kwargs))
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            b"src/store.py\0tests/test_store.py\0",
-            b"",
-        )
+        return _FakeGitProcess(b"src/store.py\0tests/test_store.py\0")
 
-    monkeypatch.setattr(git_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_module.subprocess, "Popen", fake_popen)
 
     assert main(["review-changes", str(root), "src/store.py", "--json"]) == 0
 

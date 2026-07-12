@@ -3,8 +3,22 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
+
+
+DEFAULT_GIT_STDOUT_MAX_BYTES = 16 * 1024 * 1024
+_READ_CHUNK_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class GitResult:
+    """Bounded output from one Git process."""
+
+    returncode: int
+    stdout: bytes
 
 
 class GitError(RuntimeError):
@@ -23,6 +37,10 @@ class GitLaunchError(GitError):
     """Raised when the trusted Git process cannot be launched."""
 
 
+class GitOutputLimitError(GitError):
+    """Raised when Git stdout exceeds the configured bound."""
+
+
 class GitRunner:
     """Run Git from one canonical external executable in an isolated environment."""
 
@@ -37,9 +55,15 @@ class GitRunner:
         self._environment = _isolated_environment()
 
     def run(
-        self, arguments: Sequence[str], *, timeout_seconds: float
-    ) -> subprocess.CompletedProcess[bytes]:
+        self,
+        arguments: Sequence[str],
+        *,
+        timeout_seconds: float,
+        max_stdout_bytes: int = DEFAULT_GIT_STDOUT_MAX_BYTES,
+    ) -> GitResult:
         """Run one bounded Git command with fixed process security controls."""
+        if max_stdout_bytes <= 0:
+            raise GitOutputLimitError("Git command output limit exceeded")
         command = [
             str(self.executable),
             "--no-optional-locks",
@@ -48,14 +72,12 @@ class GitRunner:
             *arguments,
         ]
         try:
-            return subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=self.root,
-                check=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout_seconds,
+                stderr=subprocess.DEVNULL,
                 shell=False,
                 env=self._environment,
             )
@@ -65,6 +87,65 @@ class GitRunner:
             raise GitTimeoutError("Git command timeout") from exc
         except OSError as exc:
             raise GitLaunchError("unable to run Git command") from exc
+
+        if process.stdout is None:
+            _kill_and_wait(process)
+            raise GitLaunchError("unable to run Git command")
+
+        stdout = bytearray()
+        overflow = threading.Event()
+        read_failed = threading.Event()
+
+        def read_stdout() -> None:
+            try:
+                while True:
+                    chunk = process.stdout.read(_READ_CHUNK_BYTES)
+                    if not chunk:
+                        return
+                    remaining = max_stdout_bytes - len(stdout)
+                    if len(chunk) > remaining:
+                        stdout.extend(chunk[:remaining])
+                        overflow.set()
+                        try:
+                            process.kill()
+                        except OSError:
+                            pass
+                        return
+                    stdout.extend(chunk)
+            except OSError:
+                read_failed.set()
+
+        reader = threading.Thread(target=read_stdout, daemon=True)
+        reader.start()
+        try:
+            returncode = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            _kill_and_wait(process)
+            reader.join()
+            raise GitTimeoutError("Git command timeout") from exc
+        except OSError as exc:
+            _kill_and_wait(process)
+            reader.join()
+            raise GitLaunchError("unable to run Git command") from exc
+
+        reader.join()
+        if overflow.is_set():
+            _kill_and_wait(process)
+            raise GitOutputLimitError("Git command output limit exceeded")
+        if read_failed.is_set():
+            raise GitLaunchError("unable to run Git command")
+        return GitResult(returncode=returncode, stdout=bytes(stdout))
+
+
+def _kill_and_wait(process: subprocess.Popen[bytes]) -> None:
+    try:
+        process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait()
+    except OSError:
+        pass
 
 
 def _resolve_git_executable(

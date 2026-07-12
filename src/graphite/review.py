@@ -9,12 +9,21 @@ from typing import Any, Iterable
 
 from .context import build_context
 from .graph import graph_from_json
-from .git import GitLaunchError, GitRunner, GitTimeoutError, GitUnavailableError
+from .git import (
+    GitLaunchError,
+    GitOutputLimitError,
+    GitRunner,
+    GitTimeoutError,
+    GitUnavailableError,
+)
 from .validation import validate_graph_bundle
 
 
 class ReviewError(ValueError):
     """Raised when review change evidence cannot be collected safely."""
+
+
+MAX_GIT_STATUS_RECORDS = 100_000
 
 
 @dataclass(frozen=True, order=True)
@@ -108,15 +117,21 @@ def _run_review_git(
         raise ReviewError("Git executable was not found") from exc
     except GitTimeoutError as exc:
         raise ReviewError("Git command timeout") from exc
+    except GitOutputLimitError as exc:
+        raise ReviewError("Git command output limit exceeded") from exc
     except GitLaunchError as exc:
         raise ReviewError("unable to run Git command") from exc
 
 
-def _parse_porcelain(output: bytes) -> list[Change]:
+def _parse_porcelain(
+    output: bytes, *, max_records: int = MAX_GIT_STATUS_RECORDS
+) -> list[Change]:
     if not output:
         return []
     if not output.endswith(b"\0"):
         raise ReviewError("malformed Git status output: missing NUL terminator")
+    if output.count(b"\0") > max_records:
+        raise ReviewError("Git status record limit exceeded")
 
     records = output[:-1].split(b"\0")
     changes: dict[str, Change] = {}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from itertools import islice
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable
@@ -9,6 +10,13 @@ from typing import Iterable
 from .cache import file_hash
 from .config import Config
 from .git import GitError, GitRunner
+
+
+MAX_GIT_FILE_RECORDS = 100_000
+
+
+class IngestError(RuntimeError):
+    """Raised when repository files cannot be enumerated safely."""
 
 
 @dataclass(frozen=True)
@@ -149,8 +157,8 @@ def _normalize_git_path(root: Path, value: str) -> str | None:
     return native_path.as_posix()
 
 
-def _git_ls_files(root: Path) -> list[str] | None:
-    """Return tracked and untracked non-ignored files, or None if git is unavailable."""
+def _git_ls_files(root: Path, *, max_files: int | None = None) -> list[str] | None:
+    """Return bounded Git files, or None only when *root* is not a Git repository."""
     git_dir = root / ".git"
     if not git_dir.exists():
         return None
@@ -159,23 +167,38 @@ def _git_ls_files(root: Path) -> list[str] | None:
             ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
             timeout_seconds=30,
         )
-    except GitError:
-        return None
+    except GitError as exc:
+        raise IngestError("unable to enumerate Git repository safely") from exc
     if result.returncode != 0:
-        return None
+        raise IngestError("unable to enumerate Git repository safely")
     try:
         output = result.stdout.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
+    except UnicodeDecodeError as exc:
+        raise IngestError("unable to enumerate Git repository safely") from exc
     if not output:
         return []
     if not output.endswith("\x00"):
-        return None
-    paths = output[:-1].split("\x00")
-    normalized = [_normalize_git_path(root, path) for path in paths]
-    if any(path is None for path in normalized):
-        return None
-    return [path for path in normalized if path is not None]
+        raise IngestError("unable to enumerate Git repository safely")
+
+    selected: list[str] = []
+    start = 0
+    record_count = 0
+    while start < len(output) and (
+        max_files is None or len(selected) < max_files
+    ):
+        end = output.find("\x00", start)
+        if end < 0:
+            raise IngestError("unable to enumerate Git repository safely")
+        record_count += 1
+        if record_count > MAX_GIT_FILE_RECORDS:
+            raise IngestError("unable to enumerate Git repository safely")
+        normalized = _normalize_git_path(root, output[start:end])
+        if normalized is None:
+            raise IngestError("unable to enumerate Git repository safely")
+        if max_files is None or len(selected) < max_files:
+            selected.append(normalized)
+        start = end + 1
+    return selected
 
 
 def _walk_files(
@@ -205,10 +228,10 @@ def _walk_files(
 
 
 def collect_files(root: Path, cfg: Config) -> list[FileEntry]:
-    """Collect all ingestible files under root."""
+    """Collect files under root, bounded by cfg.max_files as an ingestion cap."""
     root = root.resolve()
     dynamic_exclusions = _dynamic_exclusions(root, cfg)
-    tracked = _git_ls_files(root)
+    tracked = _git_ls_files(root, max_files=cfg.max_files)
     if tracked is not None:
         rel_paths = [
             path
@@ -216,9 +239,14 @@ def collect_files(root: Path, cfg: Config) -> list[FileEntry]:
             if not _should_skip(path, cfg, dynamic_exclusions)
         ]
     else:
-        rel_paths = list(_walk_files(root, cfg, dynamic_exclusions))
+        walked = _walk_files(root, cfg, dynamic_exclusions)
+        rel_paths = list(
+            islice(walked, cfg.max_files)
+            if cfg.max_files is not None
+            else walked
+        )
 
-    if cfg.max_files:
+    if cfg.max_files is not None:
         rel_paths = rel_paths[: cfg.max_files]
 
     entries: list[FileEntry] = []

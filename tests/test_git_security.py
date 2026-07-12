@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import subprocess
 from pathlib import Path
@@ -18,6 +19,105 @@ def test_shared_git_boundary_module_exists() -> None:
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+class _FakeProcess:
+    def __init__(
+        self,
+        output: bytes,
+        *,
+        returncode: int = 0,
+        timeout_until_killed: bool = False,
+    ) -> None:
+        self.stdout = io.BytesIO(output)
+        self.returncode = returncode
+        self.timeout_until_killed = timeout_until_killed
+        self.killed = False
+        self.wait_calls: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.wait_calls.append(timeout)
+        if self.timeout_until_killed and not self.killed:
+            raise subprocess.TimeoutExpired("private", timeout)
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def _runner_with_fake_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process: _FakeProcess,
+) -> tuple[object, list[tuple[list[str], dict[str, object]]]]:
+    repository = tmp_path / "repository"
+    trusted_bin = tmp_path / "trusted"
+    repository.mkdir()
+    trusted_bin.mkdir()
+    executable = trusted_bin / ("git.exe" if os.name == "nt" else "git")
+    _write(executable, "trusted")
+    if os.name != "nt":
+        executable.chmod(0o700)
+    monkeypatch.setenv("PATH", str(trusted_bin))
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_popen(command: list[str], **kwargs: object) -> _FakeProcess:
+        calls.append((command, kwargs))
+        return process
+
+    def forbidden_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("GitRunner must not use subprocess.run")
+
+    monkeypatch.setattr(git_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(git_module.subprocess, "run", forbidden_run)
+    return git_module.GitRunner(repository), calls
+
+
+def test_git_runner_streams_bounded_stdout_with_stderr_discarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = _FakeProcess(b"tracked.py\0")
+    runner, calls = _runner_with_fake_process(tmp_path, monkeypatch, process)
+
+    result = runner.run(
+        ["ls-files", "-z"], timeout_seconds=2, max_stdout_bytes=64
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == b"tracked.py\0"
+    assert len(calls) == 1
+    _, kwargs = calls[0]
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stdout"] is subprocess.PIPE
+    assert kwargs["stderr"] is subprocess.DEVNULL
+    assert kwargs["shell"] is False
+
+
+def test_git_runner_kills_process_when_stdout_limit_is_exceeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = _FakeProcess(b"private-overflow")
+    runner, _ = _runner_with_fake_process(tmp_path, monkeypatch, process)
+
+    error_type = getattr(git_module, "GitOutputLimitError", git_module.GitError)
+    with pytest.raises(error_type, match="Git command output limit exceeded") as error:
+        runner.run(["status"], timeout_seconds=2, max_stdout_bytes=4)
+
+    assert process.killed is True
+    assert "private" not in str(error.value)
+
+
+def test_git_runner_kills_and_waits_after_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = _FakeProcess(b"", timeout_until_killed=True)
+    runner, _ = _runner_with_fake_process(tmp_path, monkeypatch, process)
+
+    with pytest.raises(git_module.GitTimeoutError, match="Git command timeout"):
+        runner.run(["status"], timeout_seconds=0.01, max_stdout_bytes=64)
+
+    assert process.killed is True
+    assert len(process.wait_calls) >= 2
 
 
 def test_git_runner_resolves_only_external_absolute_windows_candidate(
@@ -110,11 +210,13 @@ def test_git_runner_hardens_every_process_without_mutating_source_environment(
     source_environment = dict(os.environ)
     calls: list[tuple[list[str], dict[str, object]]] = []
 
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        calls.append((command, kwargs))
-        return subprocess.CompletedProcess(command, 0, b"tracked.py\0", b"")
+    process = _FakeProcess(b"tracked.py\0")
 
-    monkeypatch.setattr(git_module.subprocess, "run", fake_run)
+    def fake_popen(command: list[str], **kwargs: object) -> _FakeProcess:
+        calls.append((command, kwargs))
+        return process
+
+    monkeypatch.setattr(git_module.subprocess, "Popen", fake_popen)
 
     result = git_module.GitRunner(repository).run(
         ["ls-files", "-z"], timeout_seconds=7.5
@@ -133,14 +235,13 @@ def test_git_runner_hardens_every_process_without_mutating_source_environment(
     ]
     assert kwargs == {
         "cwd": repository.resolve(),
-        "check": False,
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
-        "timeout": 7.5,
+        "stderr": subprocess.DEVNULL,
         "shell": False,
         "env": kwargs["env"],
     }
+    assert process.wait_calls == [7.5]
     environment = kwargs["env"]
     assert isinstance(environment, dict)
     assert environment["GRAPHITE_GIT_TEST"] == "retained"
@@ -176,10 +277,16 @@ def test_git_runner_sanitizes_process_errors(
         executable.chmod(0o700)
     monkeypatch.setenv("PATH", str(trusted_bin))
 
-    def broken_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        raise raised
+    if isinstance(raised, subprocess.TimeoutExpired):
+        process = _FakeProcess(b"", timeout_until_killed=True)
+        monkeypatch.setattr(
+            git_module.subprocess, "Popen", lambda *args, **kwargs: process
+        )
+    else:
+        def broken_popen(*args: object, **kwargs: object) -> None:
+            raise raised
 
-    monkeypatch.setattr(git_module.subprocess, "run", broken_run)
+        monkeypatch.setattr(git_module.subprocess, "Popen", broken_popen)
 
     error_type = getattr(git_module, error_name)
     with pytest.raises(error_type) as error:
