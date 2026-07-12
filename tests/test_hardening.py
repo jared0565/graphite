@@ -232,6 +232,47 @@ def test_collect_files_final_boundary_rejects_symlink_escape(
     assert collect_files(root, Config()) == []
 
 
+def test_internal_symlink_keeps_distinct_identity_in_git_and_walk_modes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "repository"
+    target = root / "src" / "app.py"
+    alias = root / "alias.py"
+    (root / ".git").mkdir(parents=True)
+    _write(target, "value = 1\n")
+    try:
+        alias.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    class FakeRunner:
+        def __init__(self, project_root):
+            assert project_root == root.resolve()
+
+        def run(self, arguments, *, timeout_seconds):
+            return subprocess.CompletedProcess(
+                arguments, 0, b"alias.py\0src/app.py\0", b""
+            )
+
+    monkeypatch.setattr(ingest_module, "GitRunner", FakeRunner)
+
+    assert ingest_module._git_ls_files(root.resolve()) == [
+        "alias.py",
+        "src/app.py",
+    ]
+    assert [entry.rel_path for entry in collect_files(root, Config())] == [
+        "alias.py",
+        "src/app.py",
+    ]
+
+    monkeypatch.setattr(ingest_module, "_git_ls_files", lambda _root: None)
+
+    assert [entry.rel_path for entry in collect_files(root, Config())] == [
+        "alias.py",
+        "src/app.py",
+    ]
+
+
 def test_filesystem_fallback_prunes_dynamic_dirs_by_component_prefix(tmp_path: Path) -> None:
     output_dir = tmp_path / "nested" / "custom-artifacts"
     cache_dir = tmp_path / "state" / "custom-cache"

@@ -146,7 +146,7 @@ def _normalize_git_path(root: Path, value: str) -> str | None:
     resolved = _resolve_contained_path(root, root / native_path)
     if resolved is None:
         return None
-    return resolved.relative_to(root).as_posix()
+    return native_path.as_posix()
 
 
 def _git_ls_files(root: Path) -> list[str] | None:
