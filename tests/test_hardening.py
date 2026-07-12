@@ -118,8 +118,17 @@ def test_git_runner_enumerates_a_differently_owned_repository(
         stderr=subprocess.PIPE,
     )
 
-    different_owner_environment = dict(os.environ)
-    different_owner_environment["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1"
+    different_owner_environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.casefold().startswith("git_")
+    }
+    ownership_test_git_environment = {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": str(tmp_path / "nonexistent-global-git-config"),
+        "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1",
+    }
+    different_owner_environment.update(ownership_test_git_environment)
     baseline = subprocess.run(
         ["git", "-C", str(root), "ls-files", "-z"],
         env=different_owner_environment,
@@ -129,12 +138,19 @@ def test_git_runner_enumerates_a_differently_owned_repository(
     )
     if baseline.returncode == 0:
         pytest.skip("installed Git does not trigger different-owner protection")
+    baseline_diagnostic = baseline.stderr.decode("utf-8", errors="replace").casefold()
+    for repository_path in (str(root), root.as_posix()):
+        baseline_diagnostic = baseline_diagnostic.replace(
+            repository_path.casefold(), "<repository>"
+        )
+    assert "dubious ownership" in baseline_diagnostic
+    assert "safe.directory" in baseline_diagnostic
 
     original_isolated_environment = git_module._isolated_environment
 
     def different_owner_isolated_environment() -> dict[str, str]:
         environment = original_isolated_environment()
-        environment["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1"
+        environment.update(ownership_test_git_environment)
         return environment
 
     monkeypatch.setattr(
