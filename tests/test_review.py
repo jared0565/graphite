@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import graphite.cli as cli_module
 import graphite.git as git_module
+import graphite.review as review_module
 
 from graphite.cache import file_hash
 from graphite.cli import main
@@ -336,6 +337,8 @@ def test_discover_git_changes_uses_hardened_absolute_git_commands(
 
     def fake_popen(command: list[str], **kwargs: object) -> _FakeGitProcess:
         calls.append((command, kwargs))
+        if command[1:] == ["--version"]:
+            return _FakeGitProcess(b"git version 2.38.0\n")
         if command[-2:] == ["rev-parse", "--show-toplevel"]:
             return _FakeGitProcess(f"{tmp_path.resolve()}\n".encode())
         return _FakeGitProcess(b"?? path with spaces.py\0")
@@ -348,8 +351,9 @@ def test_discover_git_changes_uses_hardened_absolute_git_commands(
     monkeypatch.setattr(git_module.subprocess, "Popen", fake_popen)
 
     assert discover_git_changes(tmp_path) == [Change("path with spaces.py", "untracked")]
-    assert len(calls) == 2
-    for command, kwargs in calls:
+    assert len(calls) == 3
+    assert calls[0][0] == [str(trusted_git), "--version"]
+    for command, kwargs in calls[1:]:
         assert command[0] == str(trusted_git)
         assert command[1:4] == ["--no-optional-locks", "-c", "core.fsmonitor=false"]
         assert kwargs["shell"] is False
@@ -364,8 +368,8 @@ def test_discover_git_changes_uses_hardened_absolute_git_commands(
             name for name in environment if name.casefold().startswith("git_")
         } == {"GIT_OPTIONAL_LOCKS", "GIT_TERMINAL_PROMPT"}
     assert dict(os.environ) == source_environment
-    assert calls[0][0][4:] == ["rev-parse", "--show-toplevel"]
-    assert calls[1][0][4:] == [
+    assert calls[1][0][6:] == ["rev-parse", "--show-toplevel"]
+    assert calls[2][0][6:] == [
         "status",
         "--porcelain=v1",
         "-z",
@@ -376,6 +380,45 @@ def test_discover_git_changes_uses_hardened_absolute_git_commands(
 def test_discover_git_changes_rejects_non_git_directory(tmp_path: Path) -> None:
     with pytest.raises(ReviewError, match="not a Git worktree"):
         discover_git_changes(tmp_path)
+
+
+def test_discover_git_changes_maps_unsupported_git_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class UnsupportedGitRunner:
+        def run(self, arguments: list[str], *, timeout_seconds: float) -> None:
+            raise git_module.GitUnsupportedVersionError("private raw version output")
+
+    monkeypatch.setattr(
+        review_module, "_review_git_runner", lambda _root: UnsupportedGitRunner()
+    )
+
+    with pytest.raises(ReviewError) as error:
+        discover_git_changes(tmp_path)
+
+    assert str(error.value) == "Git 2.38 or newer is required"
+    assert error.value.__cause__ is None
+
+
+def test_review_changes_cli_maps_unsupported_git_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class UnsupportedGitRunner:
+        def run(self, arguments: list[str], *, timeout_seconds: float) -> None:
+            raise git_module.GitUnsupportedVersionError("private raw version output")
+
+    monkeypatch.setattr(
+        review_module, "_review_git_runner", lambda _root: UnsupportedGitRunner()
+    )
+
+    assert main(["review-changes", str(tmp_path), "--json"]) == 1
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "[graphite] error: Git 2.38 or newer is required\n"
+    assert "private" not in output.err
 
 
 def test_discover_git_changes_rejects_nested_worktree_path(tmp_path: Path) -> None:
@@ -390,7 +433,9 @@ def test_discover_git_changes_rejects_nested_worktree_path(tmp_path: Path) -> No
 def test_discover_git_changes_does_not_expose_git_stderr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def failed_git(*args: object, **kwargs: object) -> _FakeGitProcess:
+    def failed_git(command: list[str], **kwargs: object) -> _FakeGitProcess:
+        if command[1:] == ["--version"]:
+            return _FakeGitProcess(b"git version 2.38.0\n")
         return _FakeGitProcess(b"", returncode=128)
 
     monkeypatch.setattr(git_module.subprocess, "Popen", failed_git)
@@ -407,7 +452,9 @@ def test_discover_git_changes_does_not_expose_git_stderr(
 def test_discover_git_changes_sanitizes_os_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def broken_git(*args: object, **kwargs: object) -> _FakeGitProcess:
+    def broken_git(command: list[str], **kwargs: object) -> _FakeGitProcess:
+        if command[1:] == ["--version"]:
+            return _FakeGitProcess(b"git version 2.38.0\n")
         raise OSError("C:\\private\\repo\nINJECTED")
 
     monkeypatch.setattr(git_module.subprocess, "Popen", broken_git)
@@ -424,7 +471,9 @@ def test_discover_git_changes_sanitizes_os_errors(
 def test_discover_git_changes_rejects_invalid_utf8_worktree_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def invalid_root(*args: object, **kwargs: object) -> _FakeGitProcess:
+    def invalid_root(command: list[str], **kwargs: object) -> _FakeGitProcess:
+        if command[1:] == ["--version"]:
+            return _FakeGitProcess(b"git version 2.38.0\n")
         return _FakeGitProcess(b"\xff\n")
 
     monkeypatch.setattr(git_module.subprocess, "Popen", invalid_root)
@@ -1003,6 +1052,8 @@ def test_review_explicit_freshness_uses_only_shared_hardened_git_boundary(
 
     def fake_popen(command: list[str], **kwargs: object) -> _FakeGitProcess:
         calls.append((command, kwargs))
+        if command[1:] == ["--version"]:
+            return _FakeGitProcess(b"git version 2.38.0\n")
         return _FakeGitProcess(b"src/store.py\0tests/test_store.py\0")
 
     monkeypatch.setattr(git_module.subprocess, "Popen", fake_popen)
@@ -1011,11 +1062,13 @@ def test_review_explicit_freshness_uses_only_shared_hardened_git_boundary(
 
     packet = json.loads(capsys.readouterr().out)
     assert packet["graph"]["status"]["stale"] is False
-    assert len(calls) == 1
-    command, kwargs = calls[0]
+    assert len(calls) == 2
+    assert calls[0][0][1:] == ["--version"]
+    command, kwargs = calls[1]
     assert Path(command[0]) == (trusted_bin / executable_name).resolve()
     assert command[1:4] == ["--no-optional-locks", "-c", "core.fsmonitor=false"]
-    assert command[4:] == ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+    assert command[4:6] == ["-c", f"safe.directory={root.resolve()}"]
+    assert command[6:] == ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]
     assert kwargs["shell"] is False
     assert kwargs["stdin"] is subprocess.DEVNULL
     assert {name for name in kwargs["env"] if name.casefold().startswith("git_")} == {

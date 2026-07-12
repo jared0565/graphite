@@ -15,6 +15,7 @@ from .git import (
     GitRunner,
     GitTimeoutError,
     GitUnavailableError,
+    GitUnsupportedVersionError,
 )
 from .validation import validate_graph_bundle
 
@@ -113,6 +114,8 @@ def _run_review_git(
 ):
     try:
         return runner.run(arguments, timeout_seconds=timeout_seconds)
+    except GitUnsupportedVersionError:
+        raise ReviewError("Git 2.38 or newer is required") from None
     except GitUnavailableError as exc:
         raise ReviewError("Git executable was not found") from exc
     except GitTimeoutError as exc:
