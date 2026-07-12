@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -10,6 +11,9 @@ from typing import Sequence
 
 
 DEFAULT_GIT_STDOUT_MAX_BYTES = 16 * 1024 * 1024
+_MINIMUM_GIT_VERSION = (2, 38, 0)
+_GIT_VERSION_TIMEOUT_SECONDS = 2.0
+_GIT_VERSION_STDOUT_MAX_BYTES = 256
 _READ_CHUNK_BYTES = 64 * 1024
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 0.1
 
@@ -42,6 +46,10 @@ class GitOutputLimitError(GitError):
     """Raised when Git stdout exceeds the configured bound."""
 
 
+class GitUnsupportedVersionError(GitError):
+    """Raised when Git's protected command configuration is unavailable."""
+
+
 class GitRunner:
     """Run Git from one canonical external executable in an isolated environment."""
 
@@ -54,6 +62,8 @@ class GitRunner:
             self.root, platform_name=platform_name
         )
         self._environment = _isolated_environment()
+        self._version: tuple[int, int, int] | None = None
+        self._version_lock = threading.Lock()
 
     def run(
         self,
@@ -65,6 +75,7 @@ class GitRunner:
         """Run one bounded Git command with fixed process security controls."""
         if max_stdout_bytes <= 0:
             raise GitOutputLimitError("Git command output limit exceeded")
+        self._ensure_supported_version()
         command = [
             str(self.executable),
             "--no-optional-locks",
@@ -74,6 +85,40 @@ class GitRunner:
             f"safe.directory={self.root}",
             *arguments,
         ]
+        return self._run_bounded(
+            command,
+            timeout_seconds=timeout_seconds,
+            max_stdout_bytes=max_stdout_bytes,
+        )
+
+    def _ensure_supported_version(self) -> None:
+        if self._version is not None:
+            return
+        with self._version_lock:
+            if self._version is not None:
+                return
+            try:
+                result = self._run_bounded(
+                    [str(self.executable), "--version"],
+                    timeout_seconds=_GIT_VERSION_TIMEOUT_SECONDS,
+                    max_stdout_bytes=_GIT_VERSION_STDOUT_MAX_BYTES,
+                )
+            except (GitTimeoutError, GitLaunchError, GitOutputLimitError) as exc:
+                raise GitUnsupportedVersionError(
+                    "Git 2.38 or newer is required"
+                ) from exc
+            version = _parse_git_version(result.stdout) if result.returncode == 0 else None
+            if version is None or version < _MINIMUM_GIT_VERSION:
+                raise GitUnsupportedVersionError("Git 2.38 or newer is required")
+            self._version = version
+
+    def _run_bounded(
+        self,
+        command: list[str],
+        *,
+        timeout_seconds: float,
+        max_stdout_bytes: int,
+    ) -> GitResult:
         try:
             process = subprocess.Popen(
                 command,
@@ -142,6 +187,24 @@ class GitRunner:
         if not _close_stdout(process):
             raise GitLaunchError("unable to run Git command")
         return GitResult(returncode=returncode, stdout=bytes(stdout))
+
+
+def _parse_git_version(output: bytes) -> tuple[int, int, int] | None:
+    match = re.fullmatch(
+        rb"git version ([0-9]+)\.([0-9]+)(?:\.([0-9]+))?"
+        rb"(?:\.[0-9A-Za-z][0-9A-Za-z.-]*)?\r?\n?",
+        output,
+    )
+    if match is None:
+        return None
+    try:
+        return (
+            int(match.group(1)),
+            int(match.group(2)),
+            int(match.group(3) or b"0"),
+        )
+    except ValueError:
+        return None
 
 
 def _bounded_cleanup(

@@ -121,6 +121,8 @@ def _runner_with_fake_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     process: _FakeProcess,
+    *,
+    version_process: _FakeProcess | None = None,
 ) -> tuple[object, list[tuple[list[str], dict[str, object]]]]:
     repository = tmp_path / "repository"
     trusted_bin = tmp_path / "trusted"
@@ -132,9 +134,12 @@ def _runner_with_fake_process(
         executable.chmod(0o700)
     monkeypatch.setenv("PATH", str(trusted_bin))
     calls: list[tuple[list[str], dict[str, object]]] = []
+    selected_version_process = version_process or _FakeProcess(b"git version 2.38.0\n")
 
     def fake_popen(command: list[str], **kwargs: object) -> _FakeProcess:
         calls.append((command, kwargs))
+        if command[1:] == ["--version"]:
+            return selected_version_process
         return process
 
     def forbidden_run(*args: object, **kwargs: object) -> None:
@@ -143,6 +148,110 @@ def _runner_with_fake_process(
     monkeypatch.setattr(git_module.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(git_module.subprocess, "run", forbidden_run)
     return git_module.GitRunner(repository), calls
+
+
+def test_git_runner_rejects_git_2_37_with_a_sanitized_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, calls = _runner_with_fake_process(
+        tmp_path,
+        monkeypatch,
+        _FakeProcess(b"tracked.py\0"),
+        version_process=_FakeProcess(b"git version 2.37.9\n"),
+    )
+    with pytest.raises(git_module.GitUnsupportedVersionError) as error:
+        runner.run(["ls-files", "-z"], timeout_seconds=2)
+
+    assert str(error.value) == "Git 2.38 or newer is required"
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[1:] == ["--version"]
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
+    assert kwargs["shell"] is False
+    assert {
+        name for name in kwargs["env"] if name.casefold().startswith("git_")
+    } == {"GIT_OPTIONAL_LOCKS", "GIT_TERMINAL_PROMPT"}
+
+
+@pytest.mark.parametrize(
+    "version_output",
+    [
+        b"git version 2.38\n",
+        b"git version 2.38.0\n",
+        b"git version 2.53.0.windows.1\n",
+    ],
+)
+def test_git_runner_accepts_supported_version_formats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version_output: bytes
+) -> None:
+    runner, calls = _runner_with_fake_process(
+        tmp_path,
+        monkeypatch,
+        _FakeProcess(b"tracked.py\0"),
+        version_process=_FakeProcess(version_output),
+    )
+
+    result = runner.run(["ls-files", "-z"], timeout_seconds=2)
+
+    assert result.stdout == b"tracked.py\0"
+    assert calls[0][0][1:] == ["--version"]
+    assert calls[1][0][-2:] == ["ls-files", "-z"]
+
+
+@pytest.mark.parametrize(
+    "version_process",
+    [
+        pytest.param(_FakeProcess(b"private malformed output\n"), id="malformed"),
+        pytest.param(
+            _FakeProcess(b"private nonzero output\n", returncode=1), id="nonzero"
+        ),
+        pytest.param(_FakeProcess(b"private" * 1024), id="overflow"),
+        pytest.param(
+            _FakeProcess(b"", timeout_until_killed=True), id="timeout"
+        ),
+    ],
+)
+def test_git_runner_sanitizes_version_probe_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version_process: _FakeProcess,
+) -> None:
+    runner, calls = _runner_with_fake_process(
+        tmp_path,
+        monkeypatch,
+        _FakeProcess(b"must not run"),
+        version_process=version_process,
+    )
+    with pytest.raises(git_module.GitUnsupportedVersionError) as error:
+        runner.run(["status"], timeout_seconds=2)
+
+    assert str(error.value) == "Git 2.38 or newer is required"
+    assert "private" not in str(error.value)
+    assert len(calls) == 1
+
+
+def test_git_runner_caches_a_successful_version_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, _ = _runner_with_fake_process(
+        tmp_path, monkeypatch, _FakeProcess(b"unused")
+    )
+    calls: list[list[str]] = []
+
+    def fake_popen(command: list[str], **kwargs: object) -> _FakeProcess:
+        calls.append(command)
+        if command[1:] == ["--version"]:
+            return _FakeProcess(b"git version 2.38.0\n")
+        return _FakeProcess(b"ok")
+
+    monkeypatch.setattr(git_module.subprocess, "Popen", fake_popen)
+
+    runner.run(["status"], timeout_seconds=2)
+    runner.run(["ls-files"], timeout_seconds=2)
+
+    assert [command[1:] for command in calls].count(["--version"]) == 1
+    assert len(calls) == 3
 
 
 def test_git_runner_streams_bounded_stdout_with_stderr_discarded(
@@ -157,8 +266,8 @@ def test_git_runner_streams_bounded_stdout_with_stderr_discarded(
 
     assert result.returncode == 0
     assert result.stdout == b"tracked.py\0"
-    assert len(calls) == 1
-    _, kwargs = calls[0]
+    assert len(calls) == 2
+    _, kwargs = calls[1]
     assert kwargs["stdin"] is subprocess.DEVNULL
     assert kwargs["stdout"] is subprocess.PIPE
     assert kwargs["stderr"] is subprocess.DEVNULL
@@ -325,6 +434,8 @@ def test_git_runner_hardens_every_process_without_mutating_source_environment(
 
     def fake_popen(command: list[str], **kwargs: object) -> _FakeProcess:
         calls.append((command, kwargs))
+        if command[1:] == ["--version"]:
+            return _FakeProcess(b"git version 2.38.0\n")
         return process
 
     monkeypatch.setattr(git_module.subprocess, "Popen", fake_popen)
@@ -334,8 +445,11 @@ def test_git_runner_hardens_every_process_without_mutating_source_environment(
     )
 
     assert result.stdout == b"tracked.py\0"
-    assert len(calls) == 1
-    command, kwargs = calls[0]
+    assert len(calls) == 2
+    version_command, version_kwargs = calls[0]
+    assert version_command == [str(executable.resolve()), "--version"]
+    assert version_kwargs["shell"] is False
+    command, kwargs = calls[1]
     assert command == [
         str(executable.resolve()),
         "--no-optional-locks",
@@ -392,11 +506,17 @@ def test_git_runner_sanitizes_process_errors(
 
     if isinstance(raised, subprocess.TimeoutExpired):
         process = _FakeProcess(b"", timeout_until_killed=True)
-        monkeypatch.setattr(
-            git_module.subprocess, "Popen", lambda *args, **kwargs: process
-        )
+
+        def timeout_popen(command: list[str], **kwargs: object) -> _FakeProcess:
+            if command[1:] == ["--version"]:
+                return _FakeProcess(b"git version 2.38.0\n")
+            return process
+
+        monkeypatch.setattr(git_module.subprocess, "Popen", timeout_popen)
     else:
-        def broken_popen(*args: object, **kwargs: object) -> None:
+        def broken_popen(command: list[str], **kwargs: object) -> _FakeProcess:
+            if command[1:] == ["--version"]:
+                return _FakeProcess(b"git version 2.38.0\n")
             raise raised
 
         monkeypatch.setattr(git_module.subprocess, "Popen", broken_popen)

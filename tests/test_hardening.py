@@ -77,6 +77,8 @@ def test_ingest_git_enumeration_uses_shared_hardened_runner(
 
     def fake_popen(command, **kwargs):
         calls.append((command, kwargs))
+        if command[1:] == ["--version"]:
+            return _FakeGitProcess(b"git version 2.38.0\n")
         return _FakeGitProcess(b"src/app.py\0")
 
     monkeypatch.setattr(git_module.subprocess, "Popen", fake_popen)
@@ -84,8 +86,9 @@ def test_ingest_git_enumeration_uses_shared_hardened_runner(
     entries = collect_files(root, Config())
 
     assert [entry.rel_path for entry in entries] == ["src/app.py"]
-    assert len(calls) == 1
-    command, kwargs = calls[0]
+    assert len(calls) == 2
+    assert calls[0][0][1:] == ["--version"]
+    command, kwargs = calls[1]
     assert Path(command[0]) == (trusted_bin / fake_name).resolve()
     assert command[1:4] == ["--no-optional-locks", "-c", "core.fsmonitor=false"]
     assert command[4:6] == ["-c", f"safe.directory={root.resolve()}"]
@@ -157,7 +160,12 @@ def test_git_runner_enumerates_a_differently_owned_repository(
         git_module, "_isolated_environment", different_owner_isolated_environment
     )
 
-    result = git_module.GitRunner(root).run(["ls-files", "-z"], timeout_seconds=2)
+    try:
+        result = git_module.GitRunner(root).run(
+            ["ls-files", "-z"], timeout_seconds=2
+        )
+    except git_module.GitUnsupportedVersionError:
+        pytest.skip("installed Git does not support protected command configuration")
 
     assert result.returncode == 0
     assert result.stdout == b"tracked.py\0"
