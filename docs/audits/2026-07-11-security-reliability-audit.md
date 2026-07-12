@@ -4,7 +4,7 @@
 
 This audit reviewed Graphite's generated HTML trust boundary, shared Git execution and ingestion boundary, artifact publication, and repository-level change-review evidence. Two high-severity security issues and one medium-severity reliability issue were confirmed and fixed; one informational capability gap with medium operational priority was also closed. Review and ingestion now share a deterministic Git runner that rejects repository-contained executables, scrubs inherited `GIT_*` redirection, bounds process output and cleanup, and fails closed for Git repositories. The review packet remains local, zero-LLM, and independent of model, vendor, and agent.
 
-The changes materially reduce exposure; they do not make Graphite perfectly secure. Residual recommendations remain for optional LLM endpoint governance and response bounds, packet/impact/rendered-output limits, dependency/CI controls, existing lint debt, artifact authenticity when artifacts cross trust boundaries, injected atomic-write failure tests, descriptor-based no-follow reads, and external Git executable integrity in hostile shared workspaces. Results recorded before architectural code head `bd1e13d` are historical only; release verification for this head is pending.
+The changes materially reduce exposure; they do not make Graphite perfectly secure. Residual recommendations remain for optional LLM endpoint governance and response bounds, packet/impact/rendered-output limits, dependency/CI controls, existing lint debt, artifact authenticity when artifacts cross trust boundaries, injected atomic-write failure tests, descriptor-based no-follow reads, and external Git executable integrity in hostile shared workspaces. Fresh release verification for architectural code head `bd1e13d` passed on 2026-07-12.
 
 ## Scope and threat model
 
@@ -139,11 +139,20 @@ The resolver excludes relative, current-directory, and project-contained candida
 - **Pre-feature baseline (historical):** on Windows with Python 3.14.5, `python -m pytest -q` produced **92 passed, 3 skipped**.
 - **Feature commit `6835227` (historical):** on Windows with Python 3.14.5, `python -m pytest -q tests/test_html_security.py` produced **4 passed**, and `python -m pytest -q tests/test_review.py` produced **114 passed**.
 - **Pre-architecture commit `001d246` (historical):** focused tests reported **122 passed, 1 skipped**; the full suite reported **214 passed, 4 skipped**; touched Ruff, build, validation, live blocking review, diff, and status checks were recorded as successful. These results predate the shared Git/ingestion architecture ending at `bd1e13d` and are not release evidence for the current code.
-- **Ruff history:** `python -m ruff check . --output-format concise` reported **13 findings** before the feature changes and **11 pre-existing findings** after them, outside the then-touched implementation files.
+- **Ruff history:** `python -m ruff check . --output-format concise` reported **13 findings** before the feature changes and **11 pre-existing findings** at code head `bd1e13d`, outside the touched implementation files.
 
-### Pending release verification — code head `bd1e13d`
+### Final release verification — 2026-07-12, code head `bd1e13d`
 
-No release-gate result is claimed for `bd1e13d` in this documentation commit. A final verifier must run the commands below in the target Windows/Python environment, record exit codes and counts, and update this section before release.
+Fresh verification ran on Windows with Python 3.14.5. Commands used `$env:PYTHONPATH = "src"` and `$env:GRAPHITE_LLM = "none"`; pytest used fresh writable bases under `F:\tmp`. The live Git check used an isolated external HOME with an explicit global `safe.directory`, because the verification sandbox SID differs from the worktree owner and the production runner deliberately removes inherited `GIT_CONFIG_*` overrides.
+
+- Focused security/review/ingestion tests exited `0`: **168 passed, 3 skipped in 16.63s**.
+- The complete pytest suite exited `0`: **254 passed, 6 skipped in 36.29s**.
+- Touched-file Ruff exited `0`: **All checks passed**.
+- `git diff --check 3718a7b..HEAD` and the working-tree diff check exited `0` with no output.
+- A zero-LLM build exited `0` and wrote the Markdown, JSON, and HTML graph artifacts.
+- Graph validation exited `0`: **1981 nodes / 3717 edges, 0 warnings**.
+- The live blocker-enforced review exited `0`: valid JSON, **0 blockers**, **0 warnings**, `stale=false`, `CONFIRM_CLEAN`, no absolute worktree path, and no forbidden model/time keys.
+- `git status --short` exited `0` with no output; ignored generated artifacts did not dirty the worktree.
 
 ## Acceptance checklist and recommendation
 
@@ -159,13 +168,13 @@ No release-gate result is claimed for `bd1e13d` in this documentation commit. A 
 - [x] For a successfully constructed packet, high risk remains advisory; evidence-blocker failure is explicit opt-in behavior. Invalid inputs and operational errors fail independently.
 - [x] Custom graph reads are project-contained, capped at 128 MiB, sanitized, and checked against a sibling manifest.
 - [x] Local review output is documented as sensitive repository metadata that callers must protect.
-- [ ] Run focused tests with a fresh writable base: `python -m pytest -q tests/test_html_security.py tests/test_git_security.py tests/test_hardening.py tests/test_review.py --basetemp F:\tmp\graphite-bd1-focused`.
-- [ ] Run the full suite with a fresh writable base: `python -m pytest -q --basetemp F:\tmp\graphite-bd1-full`.
-- [ ] Run Ruff on touched implementation and test files: `python -m ruff check src/graphite/git.py src/graphite/ingest.py src/graphite/review.py src/graphite/cli.py src/graphite/export/html.py src/graphite/io.py tests/test_git_security.py tests/test_hardening.py tests/test_review.py tests/test_html_security.py tests/test_reliability.py`.
-- [ ] Build from this worktree with LLM use disabled: `$env:PYTHONPATH = "src"; $env:GRAPHITE_LLM = "none"; python -m graphite build .`.
-- [ ] Validate the generated graph: `$env:PYTHONPATH = "src"; $env:GRAPHITE_LLM = "none"; python -m graphite validate`.
-- [ ] Run and inspect a live blocking review: `$env:PYTHONPATH = "src"; $env:GRAPHITE_LLM = "none"; python -m graphite review-changes . --json --fail-on-blocker`.
-- [ ] Confirm the final patch and worktree: `git diff --check` and `git status --short`.
+- [x] Focused tests passed with a fresh writable base: `python -m pytest -q tests/test_html_security.py tests/test_git_security.py tests/test_hardening.py tests/test_review.py --basetemp F:\tmp\graphite-shared-git-focused-final`.
+- [x] The full suite passed with a fresh writable base: `python -m pytest -q --basetemp F:\tmp\graphite-shared-git-full-final`.
+- [x] Ruff passed on touched implementation and test files: `python -m ruff check src/graphite/git.py src/graphite/ingest.py src/graphite/review.py src/graphite/cli.py src/graphite/export/html.py src/graphite/io.py tests/test_git_security.py tests/test_hardening.py tests/test_review.py tests/test_html_security.py tests/test_reliability.py`.
+- [x] A build passed with LLM use disabled: `$env:PYTHONPATH = "src"; $env:GRAPHITE_LLM = "none"; python -m graphite build .`.
+- [x] The generated graph validated: `$env:PYTHONPATH = "src"; $env:GRAPHITE_LLM = "none"; python -m graphite validate`.
+- [x] The live blocking review produced the inspected clean packet: `$env:PYTHONPATH = "src"; $env:GRAPHITE_LLM = "none"; python -m graphite review-changes . --json --fail-on-blocker`.
+- [x] The patch and worktree checks passed: `git diff --check` and `git status --short`.
 - [ ] Triage residual P1 recommendations before managed or multi-tenant deployment.
 
-**Recommendation:** Do not treat the historical results as release acceptance for `bd1e13d`. Accept only after the pending release gates above pass and their fresh evidence is recorded. This recommendation does not claim perfect security. Track the residual items as hardening work, with LLM egress governance, LLM and review resource bounds, and CI/dependency assurance prioritized before broader managed deployment.
+**Recommendation:** Accept the fixed findings for integration based on the fresh release evidence above. This recommendation does not claim perfect security. Track the residual items as hardening work, with LLM egress governance, LLM and review output bounds, and CI/dependency assurance prioritized before broader managed deployment.
