@@ -35,6 +35,20 @@ def _status(updated_at: str, projects: list[dict] | None = None, status: str = "
     }
 
 
+def _project(root: str, **overrides) -> dict:
+    project = {
+        "root": root,
+        "file_count": 2,
+        "build_count": 1,
+        "failure_count": 0,
+        "last_success_at": "2026-06-23T11:59:00+00:00",
+        "last_error": None,
+        "needs_initial_build": False,
+    }
+    project.update(overrides)
+    return project
+
+
 def test_daemon_health_ok_when_status_process_and_startup_are_good(tmp_path: Path) -> None:
     now = datetime(2026, 6, 23, 12, 1, tzinfo=timezone.utc)
     _write_status(tmp_path, _status("2026-06-23T12:00:30+00:00"))
@@ -118,6 +132,94 @@ def test_daemon_health_reports_failing_pending_and_old_projects(tmp_path: Path) 
     assert report["summary"]["failing_count"] == 1
     assert report["summary"]["pending_count"] == 1
     assert report["summary"]["not_built_recently_count"] == 2
+
+
+def test_daemon_health_does_not_report_recovered_project_as_failing(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
+    recovered = _project("F:/Projects/recovered", failure_count=4)
+    _write_status(tmp_path, _status("2026-06-23T11:59:30+00:00", projects=[recovered]))
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(max_project_success_age_seconds=3600, require_process=False, require_startup=False),
+        now=now,
+    )
+
+    assert report["projects"] == {"failing": [], "pending": [], "not_built_recently": []}
+    assert report["summary"]["failing_count"] == 0
+    assert report["status"] == "ok"
+    assert {issue["code"] for issue in report["errors"]}.isdisjoint({"project_failing"})
+
+
+def test_daemon_health_reports_last_error_as_active_failure_after_recent_success(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
+    failing = _project("F:/Projects/failing", failure_count=7, last_error="still broken")
+    _write_status(tmp_path, _status("2026-06-23T11:59:30+00:00", projects=[failing]))
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(max_project_success_age_seconds=3600, require_process=False, require_startup=False),
+        now=now,
+    )
+
+    assert [project["root"] for project in report["projects"]["failing"]] == ["F:/Projects/failing"]
+    assert report["projects"]["failing"][0]["failure_count"] == 7
+    assert report["summary"]["failing_count"] == 1
+    assert [issue["code"] for issue in report["errors"]] == ["project_failing"]
+
+
+def test_daemon_health_keeps_pending_and_stale_classification_independent(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
+    projects = [
+        _project(
+            "F:/Projects/pending-by-flag",
+            build_count=2,
+            needs_initial_build=True,
+        ),
+        _project("F:/Projects/pending-by-count", build_count=0),
+        _project(
+            "F:/Projects/old-recovered",
+            failure_count=3,
+            last_success_at="2026-06-20T12:00:00+00:00",
+        ),
+        _project(
+            "F:/Projects/missing-success-recovered",
+            failure_count=5,
+            last_success_at=None,
+        ),
+        _project(
+            "F:/Projects/missing-success-failing",
+            failure_count=2,
+            last_success_at=None,
+            last_error="current error",
+        ),
+    ]
+    _write_status(tmp_path, _status("2026-06-23T11:59:30+00:00", projects=projects))
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(max_project_success_age_seconds=3600, require_process=False, require_startup=False),
+        now=now,
+    )
+
+    assert [project["root"] for project in report["projects"]["failing"]] == [
+        "F:/Projects/missing-success-failing"
+    ]
+    assert [project["root"] for project in report["projects"]["pending"]] == [
+        "F:/Projects/pending-by-flag",
+        "F:/Projects/pending-by-count",
+    ]
+    assert [project["root"] for project in report["projects"]["not_built_recently"]] == [
+        "F:/Projects/old-recovered",
+        "F:/Projects/missing-success-recovered",
+        "F:/Projects/missing-success-failing",
+    ]
+    assert report["summary"]["failing_count"] == 1
+    assert report["summary"]["pending_count"] == 2
+    assert report["summary"]["not_built_recently_count"] == 3
+    assert [issue["code"] for issue in report["errors"]] == ["project_failing"]
+    assert [issue["code"] for issue in report["warnings"]].count("project_pending_initial_build") == 2
+    assert [issue["code"] for issue in report["warnings"]].count("project_not_built_recently") == 3
 
 
 def test_daemon_health_cli_fail_on_error(tmp_path: Path, monkeypatch, capsys) -> None:
