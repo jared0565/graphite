@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 from .cache import file_hash
 from .config import Config
+from .git import GitError, GitRunner
 
 
 @dataclass(frozen=True)
@@ -84,9 +84,37 @@ def _classify_language(rel_path: str) -> str | None:
     return None
 
 
-def _should_skip(rel_path: str, cfg: Config) -> bool:
+def _has_component_prefix(parts: tuple[str, ...], prefix: tuple[str, ...]) -> bool:
+    if len(parts) < len(prefix):
+        return False
+    return all(
+        os.path.normcase(part) == os.path.normcase(expected)
+        for part, expected in zip(parts, prefix)
+    )
+
+
+def _dynamic_exclusions(root: Path, cfg: Config) -> tuple[tuple[str, ...], ...]:
+    exclusions: set[tuple[str, ...]] = set()
+    for configured in (cfg.output_dir, cfg.cache_dir):
+        candidate = configured if configured.is_absolute() else root / configured
+        try:
+            relative = candidate.resolve().relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if relative != Path("."):
+            exclusions.add(relative.parts)
+    return tuple(sorted(exclusions))
+
+
+def _should_skip(
+    rel_path: str,
+    cfg: Config,
+    dynamic_exclusions: tuple[tuple[str, ...], ...] = (),
+) -> bool:
     parts = Path(rel_path).parts
     if any(part in SKIP_DIRS for part in parts):
+        return True
+    if any(_has_component_prefix(parts, prefix) for prefix in dynamic_exclusions):
         return True
     lower = rel_path.lower()
     if any(lower.endswith(s) for s in SKIP_SUFFIXES):
@@ -103,31 +131,51 @@ def _git_ls_files(root: Path) -> list[str] | None:
     if not git_dir.exists():
         return None
     try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-            cwd=root,
-            capture_output=True,
-            text=False,
-            check=False,
-            timeout=30,
+        result = GitRunner(root).run(
+            ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            timeout_seconds=30,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    except GitError:
         return None
     if result.returncode != 0:
         return None
-    files = result.stdout.decode("utf-8", errors="ignore").split("\x00")
-    return [f for f in files if f]
+    try:
+        files = result.stdout.decode("utf-8").split("\x00")
+    except UnicodeDecodeError:
+        return None
+    paths = [path for path in files if path]
+    if any(
+        PurePosixPath(path).is_absolute()
+        or path == "."
+        or ".." in PurePosixPath(path).parts
+        for path in paths
+    ):
+        return None
+    return paths
 
 
-def _walk_files(root: Path, cfg: Config) -> Iterable[str]:
+def _walk_files(
+    root: Path,
+    cfg: Config,
+    dynamic_exclusions: tuple[tuple[str, ...], ...],
+) -> Iterable[str]:
     """Fallback filesystem walk respecting SKIP_DIRS."""
     for dirpath, dirnames, filenames in os.walk(root):
         # Prune skip dirs in-place.
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        current_parts = Path(dirpath).relative_to(root).parts
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in SKIP_DIRS
+            and not any(
+                _has_component_prefix((*current_parts, name), prefix)
+                for prefix in dynamic_exclusions
+            )
+        ]
         for filename in filenames:
             full = Path(dirpath) / filename
             rel = full.relative_to(root).as_posix()
-            if _should_skip(rel, cfg):
+            if _should_skip(rel, cfg, dynamic_exclusions):
                 continue
             yield rel
 
@@ -135,11 +183,16 @@ def _walk_files(root: Path, cfg: Config) -> Iterable[str]:
 def collect_files(root: Path, cfg: Config) -> list[FileEntry]:
     """Collect all ingestible files under root."""
     root = root.resolve()
+    dynamic_exclusions = _dynamic_exclusions(root, cfg)
     tracked = _git_ls_files(root)
     if tracked is not None:
-        rel_paths = [p for p in tracked if not _should_skip(p, cfg)]
+        rel_paths = [
+            path
+            for path in tracked
+            if not _should_skip(path, cfg, dynamic_exclusions)
+        ]
     else:
-        rel_paths = list(_walk_files(root, cfg))
+        rel_paths = list(_walk_files(root, cfg, dynamic_exclusions))
 
     if cfg.max_files:
         rel_paths = rel_paths[: cfg.max_files]
@@ -166,4 +219,3 @@ def collect_files(root: Path, cfg: Config) -> list[FileEntry]:
         )
 
     return sorted(entries, key=lambda e: e.rel_path)
-

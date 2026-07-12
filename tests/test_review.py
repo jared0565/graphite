@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import graphite.cli as cli_module
-import graphite.review as review_module
+import graphite.git as git_module
 
 from graphite.cache import file_hash
 from graphite.cli import main
@@ -233,7 +233,7 @@ def test_resolve_trusted_git_ignores_unsafe_path_entries_and_cwd_on_windows(
         ),
     )
 
-    executable = review_module._resolve_trusted_git_executable(
+    executable = git_module._resolve_git_executable(
         repository.resolve(), platform_name="nt"
     )
 
@@ -252,8 +252,8 @@ def test_resolve_trusted_git_rejects_only_project_contained_candidate(
     _write(repository_tools / "git.exe", "malicious")
     monkeypatch.setenv("PATH", str(repository_tools))
 
-    with pytest.raises(ReviewError) as error:
-        review_module._resolve_trusted_git_executable(
+    with pytest.raises(git_module.GitUnavailableError) as error:
+        git_module._resolve_git_executable(
             repository.resolve(), platform_name="nt"
         )
 
@@ -269,8 +269,8 @@ def test_resolve_trusted_git_failure_is_sanitized(
     private_path = tmp_path / ("private-" + "x" * 80)
     monkeypatch.setenv("PATH", os.pathsep.join(("", ".", "relative", str(private_path))))
 
-    with pytest.raises(ReviewError) as error:
-        review_module._resolve_trusted_git_executable(
+    with pytest.raises(git_module.GitUnavailableError) as error:
+        git_module._resolve_git_executable(
             repository.resolve(), platform_name="nt"
         )
 
@@ -294,7 +294,7 @@ def test_resolve_trusted_git_skips_non_executable_posix_candidate(
     (trusted_bin / "git").chmod(0o700)
     monkeypatch.setenv("PATH", os.pathsep.join((str(first_bin), str(trusted_bin))))
 
-    executable = review_module._resolve_trusted_git_executable(
+    executable = git_module._resolve_git_executable(
         repository.resolve(), platform_name="posix"
     )
 
@@ -328,11 +328,11 @@ def test_discover_git_changes_uses_hardened_absolute_git_commands(
         return subprocess.CompletedProcess(command, 0, b"?? path with spaces.py\0", b"")
 
     monkeypatch.setattr(
-        review_module,
-        "_resolve_trusted_git_executable",
-        lambda _root: trusted_git,
+        git_module,
+        "_resolve_git_executable",
+        lambda _root, **_kwargs: trusted_git,
     )
-    monkeypatch.setattr(review_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_module.subprocess, "run", fake_run)
 
     assert discover_git_changes(tmp_path) == [Change("path with spaces.py", "untracked")]
     assert len(calls) == 2
@@ -382,7 +382,7 @@ def test_discover_git_changes_does_not_expose_git_stderr(
             ["git"], 128, stdout=b"", stderr=b"C:\\private\\repo\nINJECTED"
         )
 
-    monkeypatch.setattr(review_module.subprocess, "run", failed_git)
+    monkeypatch.setattr(git_module.subprocess, "run", failed_git)
 
     with pytest.raises(ReviewError) as error:
         discover_git_changes(tmp_path)
@@ -399,7 +399,7 @@ def test_discover_git_changes_sanitizes_os_errors(
     def broken_git(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         raise OSError("C:\\private\\repo\nINJECTED")
 
-    monkeypatch.setattr(review_module.subprocess, "run", broken_git)
+    monkeypatch.setattr(git_module.subprocess, "run", broken_git)
 
     with pytest.raises(ReviewError) as error:
         discover_git_changes(tmp_path)
@@ -416,7 +416,7 @@ def test_discover_git_changes_rejects_invalid_utf8_worktree_root(
     def invalid_root(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(["git"], 0, stdout=b"\xff\n", stderr=b"")
 
-    monkeypatch.setattr(review_module.subprocess, "run", invalid_root)
+    monkeypatch.setattr(git_module.subprocess, "run", invalid_root)
 
     with pytest.raises(ReviewError) as error:
         discover_git_changes(tmp_path)
@@ -959,6 +959,59 @@ def test_review_changes_cli_explicit_json_is_deterministic(tmp_path: Path, capsy
     assert str(root.resolve()) not in serialized
 
 
+def test_review_explicit_freshness_uses_only_shared_hardened_git_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "sample-project"
+    repository_bin = root / "repo-bin"
+    trusted_bin = tmp_path / "trusted-bin"
+    _write_review_project(root)
+    (root / ".git").mkdir()
+    repository_bin.mkdir()
+    trusted_bin.mkdir()
+    executable_name = "git.exe" if os.name == "nt" else "git"
+    _write(repository_bin / executable_name, "malicious")
+    _write(trusted_bin / executable_name, "trusted")
+    if os.name != "nt":
+        (repository_bin / executable_name).chmod(0o700)
+        (trusted_bin / executable_name).chmod(0o700)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(repository_bin), str(trusted_bin))))
+    for name in ("GiT_DiR", "GIT_INDEX_FILE", "git_exec_path"):
+        monkeypatch.setenv(name, "private")
+    source_environment = dict(os.environ)
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            b"src/store.py\0tests/test_store.py\0",
+            b"",
+        )
+
+    monkeypatch.setattr(git_module.subprocess, "run", fake_run)
+
+    assert main(["review-changes", str(root), "src/store.py", "--json"]) == 0
+
+    packet = json.loads(capsys.readouterr().out)
+    assert packet["graph"]["status"]["stale"] is False
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert Path(command[0]) == (trusted_bin / executable_name).resolve()
+    assert command[1:4] == ["--no-optional-locks", "-c", "core.fsmonitor=false"]
+    assert command[4:] == ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+    assert kwargs["shell"] is False
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert {name for name in kwargs["env"] if name.casefold().startswith("git_")} == {
+        "GIT_OPTIONAL_LOCKS",
+        "GIT_TERMINAL_PROMPT",
+    }
+    assert dict(os.environ) == source_environment
+
+
 def test_review_changes_cli_markdown_contains_evidence(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root = tmp_path / "markdown-project"
     _write_review_project(root)
@@ -1188,7 +1241,7 @@ def test_review_changes_cli_custom_graph_uses_sibling_manifest_for_freshness(
     _write_review_manifest(
         root,
         "custom",
-        ("custom/graph.json", "src/store.py", "tests/test_store.py"),
+        ("src/store.py", "tests/test_store.py"),
     )
 
     assert main(["review-changes", str(root), "src/store.py", "--graph-json", "custom/graph.json", "--json"]) == 0
