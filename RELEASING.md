@@ -1,27 +1,31 @@
 # Releasing Graphite
 
-This runbook is a fail-closed checklist for maintainers. Stop when a prerequisite or
-gate fails; investigate and repeat the complete affected gate after the fix.
+This is a fail-closed maintainer checklist. Stop when a prerequisite or gate fails,
+resolve the cause, and repeat the complete affected gate.
 
 ## Current release model
 
 Graphite releases are manual. The repository has no checked-in publication workflow
-and, as of 2026-07-12, no established Git tags. This guide does not authorize a
+and, as of 2026-07-12, no established Git tags. This guide does not authorize
 publication. A release requires explicit maintainer authority, an approved destination,
 and credentials configured separately in a secure release environment.
 
 Releases are model-independent. No LLM or other model access is required, and model
-output is not accepted as release evidence. Run all Graphite checks below with model
-integration disabled.
+output is not release evidence. Run Graphite checks with model integration disabled.
+
+Maintain a release evidence record containing the approved version and destination,
+commit SHA, annotated tag object SHA, artifact SHA256 hashes, build-tool versions,
+dependency snapshot source and hashes, verification results, and publication result.
+Keep credentials and other secrets out of that record.
 
 ## Preconditions
 
 Use an isolated release environment with Python 3.11 or newer and Git. Confirm the
 semantic version and scoped release notes have been agreed. Confirm the intended remote
-and release branch. Use only trusted build tooling that has already been validated under
-repository policy; do not install an unreviewed package during a release.
+and release branch. Build tools and dependencies must come from sources approved before
+the release.
 
-Run these read-only checks:
+Run these non-destructive checks:
 
 ```text
 git status --short
@@ -33,33 +37,40 @@ git rev-list --left-right --count origin/main...HEAD
 
 The first command must produce no output. The branch and remote must match the approved
 release target, fetching tags must succeed, and both divergence counts must be zero.
-Replace `main` in the final command if the approved release branch differs. Stop for a
-dirty worktree, unexpected branch or remote, fetch failure, or nonzero divergence. Do
-not use a force reset or force push to make these checks pass.
+Replace `main` if the approved release branch differs. Stop for a dirty worktree,
+unexpected branch or remote, fetch failure, or nonzero divergence. Do not force reset or
+force push to make these checks pass.
 
 ## Prepare the version
 
-Set the same version in both authoritative locations:
+Set the agreed semantic version, without a leading `v`, in both authoritative sources:
 
 - `[project].version` in `pyproject.toml`
 - `__version__` in `src/graphite/__init__.py`
 
-Use the agreed semantic version without a leading `v` in both files. Review the complete
-diff and confirm it contains only the intended version and release-documentation changes:
+Review the complete diff and confirm the values match and no unrelated changes exist:
 
 ```text
 git diff -- pyproject.toml src/graphite/__init__.py
 git status --short
 ```
 
-Stop if the values differ or unrelated changes are present.
-
 ## Verification gates
 
 Run from the repository root in the isolated environment. Global Graphite options must
 precede the subcommand; the repository path is the positional argument to `scan` and
-`build`. Use disposable output and cache directories that are inside the repository and
-excluded from the release commit:
+`build`.
+
+Prefer an approved external temporary workspace for generated output and cache. If
+policy requires a repository-contained disposable directory, resolve its path first,
+confirm its identity and containment, confirm it is absent or empty, and expect it to
+appear in `git status --short` because these release directories are not guaranteed to
+be ignored. After verification, clean it with a safe operation appropriate to the
+current shell, re-check containment before any removal, and require a clean status. No
+generic recursive-delete command is provided by this guide.
+
+In the commands below, replace the literal `APPROVED-CHECK-DIR` with the resolved path
+to a verified-fresh external directory named for this release. Do not add angle brackets.
 
 ```text
 python -m ruff check .
@@ -68,121 +79,190 @@ python -m graphite --help
 python -m graphite scan --help
 python -m graphite build --help
 python -m graphite validate --help
-python -m graphite --llm none --output-dir .release-check/graph-out --cache-dir .release-check/cache scan .
-python -m graphite --llm none --output-dir .release-check/graph-out --cache-dir .release-check/cache build .
-python -m graphite validate --graph-json .release-check/graph-out/graph.json --json
+python -m graphite --llm none --output-dir APPROVED-CHECK-DIR/graph-out --cache-dir APPROVED-CHECK-DIR/cache scan .
+python -m graphite --llm none --output-dir APPROVED-CHECK-DIR/graph-out --cache-dir APPROVED-CHECK-DIR/cache build .
+python -m graphite validate --graph-json APPROVED-CHECK-DIR/graph-out/graph.json --json
 ```
 
-The build must deterministically produce valid JSON, Markdown, and HTML at
-`.release-check/graph-out/graph.json`,
-`.release-check/graph-out/GRAPH_REPORT.md`, and
-`.release-check/graph-out/graph.html` without optional model access. Re-run the build in
-a fresh disposable output directory and compare the generated content when checking
-determinism; do not treat timestamps, environment-specific paths, or model output as
-acceptable evidence. Inspect outputs for unsafe paths and unexpected repository data.
-
-Stop on any lint, test, CLI, graph-validation, unsafe-path, nondeterminism, or artifact
-failure. Generated directories are not source changes and must not be committed. Before
-cleanup, resolve the candidate path, verify it is the intended disposable directory,
-and confirm it remains inside this repository. Then remove it using the normal safe file
-operation for the current shell or file manager. Never use a wildcard, repository root,
-or an unverified computed path for cleanup.
+The build must create valid deterministic JSON, Markdown, and HTML at `graph.json`,
+`GRAPH_REPORT.md`, and `graph.html` in that output directory without optional model
+access. Build again into a different verified-fresh directory and compare outputs.
+Inspect them for unexpected repository data or unsafe absolute paths. Stop on any lint,
+test, CLI, graph-validation, unsafe-path, nondeterminism, or artifact failure.
 
 ## Build and inspect artifacts
 
-Graphite uses the Hatchling backend declared in `pyproject.toml`; this release does not
-add a build dependency. In the isolated release environment, use a trusted,
-prevalidated Python build frontend that is already available. Do not install one during
-the release merely to satisfy this step.
+Graphite uses the Hatchling backend declared in `pyproject.toml`. Before starting, the
+isolated environment must already contain maintainer-approved, pinned or otherwise
+recorded versions of the Python build frontend and Hatchling. Validate those versions
+against repository policy and record them as release evidence. An approved,
+hash-verified internal wheelhouse may be used to prepare the environment before the
+release; never allow a release build to download unreviewed tooling.
+
+Record the installed tool versions without changing the environment:
 
 ```text
-python -m build --sdist --wheel
+python -c "import importlib.metadata as m; print('build', m.version('build')); print('hatchling', m.version('hatchling'))"
 ```
 
-List `dist` and copy the exact wheel filename it contains. In the command below,
-`VERSION` is prose notation: replace it with the approved version before running the
-command; do not type angle brackets or shell redirection characters.
+Choose a unique external output path named for the version. Resolve it and confirm it is
+the intended location. It must be absent or a verified fresh empty directory. Stop if it
+contains anything; never silently reuse or delete unknown content. Replace the literal
+`APPROVED-ARTIFACT-DIR` below with that path and build without network-capable isolation:
 
 ```text
-python -m zipfile --list dist/graphite-VERSION-py3-none-any.whl
+python -m build --no-isolation --sdist --wheel --outdir APPROVED-ARTIFACT-DIR
 ```
 
-Inspect the wheel and source archive for the expected Python sources,
-`graphite/ts_resolver.mjs`, and package metadata. Confirm they contain no credentials,
-caches, build scratch data, or absolute developer paths.
-
-Create a disposable `.release-smoke` virtual environment and activate it. Activation is
-shell-specific:
+The build must produce exactly one wheel and one source distribution matching the
+approved version, normally `graphite-VERSION-py3-none-any.whl` and
+`graphite-VERSION.tar.gz`. Stop for extra, missing, or mismatched artifacts. List both
+archives:
 
 ```text
-python -m venv .release-smoke
-# POSIX shells:
-. .release-smoke/bin/activate
-# PowerShell:
-.release-smoke\Scripts\Activate.ps1
+python -m zipfile --list APPROVED-ARTIFACT-DIR/graphite-VERSION-py3-none-any.whl
+python -m tarfile -l APPROVED-ARTIFACT-DIR/graphite-VERSION.tar.gz
 ```
 
-While still at the Graphite repository root, install the exact wheel from `dist` without
-any model extra:
+Using an archive viewer in a separate verified-fresh inspection directory, inspect the
+wheel's `METADATA` fields `Name`, `Version`, and every `Requires-Dist`, plus
+`entry_points.txt`. Verify the wheel contains the expected `graphite` Python sources,
+`graphite/ts_resolver.mjs`, and package metadata. Verify the sdist contains the expected
+source and build files. Both archives must exclude credentials, caches, VCS files,
+local configuration, scratch output, and absolute developer paths.
+
+Compute and record a SHA256 hash for each exact artifact. The following shell-neutral
+Python commands use the same literal `VERSION` substitution:
 
 ```text
-python -m pip install dist/graphite-VERSION-py3-none-any.whl
+python -c "import hashlib,pathlib; p=pathlib.Path('APPROVED-ARTIFACT-DIR/graphite-VERSION-py3-none-any.whl'); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)"
+python -c "import hashlib,pathlib; p=pathlib.Path('APPROVED-ARTIFACT-DIR/graphite-VERSION.tar.gz'); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)"
 ```
 
-Create a small temporary repository inside the verified `.release-smoke` area,
-initialize it with Git, and add one small Python source file. Change into that temporary
-repository and run the installed commands with global options before their subcommands:
+Smoke testing requires a maintainer-approved, hash-verified dependency snapshot and
+offline wheelhouse prepared before release. Record its source and hashes. No dependency
+lockfile is currently claimed to be checked in; absence of an approved snapshot is a
+stop condition. Create a fresh virtual environment in an approved external temporary
+workspace, activate it using the current shell, and install dependencies offline. In
+the example, replace every uppercase literal with its resolved approved path:
 
 ```text
+python -m venv APPROVED-SMOKE-DIR
+# POSIX shell activation:
+. APPROVED-SMOKE-DIR/bin/activate
+# PowerShell activation:
+APPROVED-SMOKE-DIR\Scripts\Activate.ps1
+python -m pip install --no-cache-dir --no-index --find-links APPROVED-WHEELHOUSE --require-hashes -r APPROVED-HASHED-REQUIREMENTS
+python -m pip install --no-index --no-deps APPROVED-ARTIFACT-DIR/graphite-VERSION-py3-none-any.whl
+python -m pip check
+```
+
+The dependency snapshot may be generated from an approved requirements or constraints
+process, but every resolved artifact must be verified; broad minimum bounds from
+`pyproject.toml` must not be resolved from a public index during release smoke testing.
+
+From outside the Graphite source tree, verify the installed version and imports, inspect
+the installed console-script registrations, and exercise the base `graphite` script:
+
+```text
+python -c "import graphite; print(graphite.__version__)"
+python -c "import importlib.metadata as m; print(sorted(e.name for e in m.entry_points(group='console_scripts') if e.name.startswith('graphite')))"
 graphite --help
+```
+
+The printed version must exactly match the approved version, and the registrations must
+match the wheel's inspected `entry_points.txt`. Do not start `graphite-mcp` as a help
+probe: it is a protocol server rather than a help-style CLI and requires the optional
+`mcp` dependency. A separate protocol smoke test is permitted only when that dependency
+is included in the approved, hash-verified snapshot.
+
+Create a small temporary Git repository under the approved smoke workspace with one
+small Python file. From that repository run:
+
+```text
 graphite --llm none --output-dir graph-out --cache-dir cache scan .
 graphite --llm none --output-dir graph-out --cache-dir cache build .
 graphite validate --graph-json graph-out/graph.json --json
 ```
 
-The install command uses the same `VERSION` replacement described above. Confirm the
-smoke build creates valid JSON, Markdown, and HTML. For cleanup, first resolve and verify
-that `.release-smoke` is the intended repository-contained disposable environment; then
-remove it with a safe shell-appropriate operation. Do not issue a recursive deletion
-against an unresolved or unexpected path.
+Confirm valid JSON, Markdown, and HTML. Retain artifact hashes and results in the release
+evidence. Clean disposable areas only after resolving and re-verifying their identity;
+then require `git status --short` to be clean in the release checkout.
 
 ## Tag and publish
 
-Only continue after every gate passes and publication authority, destination, and secure
-credentials are confirmed. In the commands below, replace `VERSION` with the approved
-version and replace `main` if the approved release branch differs:
+Explicitly enumerate every approved candidate file. Stage the two version files and each
+approved release-note or documentation file by name; never use `git add .`. In the
+example, `PATH-TO-APPROVED-RELEASE-NOTES` is a literal to replace, and may be repeated
+for multiple approved files:
 
 ```text
-git add pyproject.toml src/graphite/__init__.py
+git add pyproject.toml src/graphite/__init__.py PATH-TO-APPROVED-RELEASE-NOTES
+git diff --cached --check
+git diff --cached
 git commit -m "release: prepare vVERSION"
+git status --short
+```
+
+Review the staged diff before committing. After the commit, status must be empty. Record
+the commit SHA. Immediately before tagging or pushing, repeat the remote, divergence,
+and cleanliness checks:
+
+```text
+git fetch --tags origin
+git rev-list --left-right --count origin/main...HEAD
+git status --short
+git rev-parse --verify --quiet refs/tags/vVERSION
+git ls-remote --exit-code --tags origin refs/tags/vVERSION
+```
+
+Replace `main` if needed. Fetch must succeed and status must be empty. The left-hand
+(remote-only) divergence count must be zero; the right-hand (local-only) count must equal
+the explicitly reviewed unpublished release commits, normally the single release commit.
+Any unexpected count is a stop condition. Exit 1 from the local-tag check means the tag
+is absent; exit 0 means it exists, and any other result is inconclusive. For `git ls-remote
+--exit-code`, exit 2 means no matching remote tag; exit 0 means the tag exists, while any
+other failure is inconclusive. Stop unless absence is conclusively established. Also
+confirm the version is available at the approved package destination using its approved
+destination-specific mechanism; inability to prove availability is a stop condition.
+
+Only then create the annotated tag, record its tag object SHA, and push the approved
+branch followed by the tag:
+
+```text
 git tag -a vVERSION -m "Release vVERSION"
+git rev-parse vVERSION
 git push origin main
 git push origin vVERSION
 ```
 
-Review the staged diff before committing. Push the approved branch first and its single
-annotated tag second; never force push either. Publication to PyPI or another index may
-use only the separately approved mechanism from a secure environment with scoped
-credentials. Never place tokens in command-line arguments, shell history, files in the
-repository, or logs. This repository and guide do not claim that PyPI or any other index
-is configured.
+Never force push. Publication to PyPI or another index may use only a separately approved
+mechanism from a secure environment with scoped credentials. Never place tokens in
+command-line arguments, shell history, repository files, or logs. This repository and
+guide do not claim that any package index is configured.
 
 ## Verify and recover
 
-Verify that the approved remote shows the expected commit on the release branch and that
-the annotated tag resolves to that commit. If an artifact was published, download it
-from the destination into a new isolated environment, verify its digest and provenance
-when the destination provides them, and repeat the wheel inspection and smoke test. Do
-not use locally built artifacts as evidence that the published artifact is correct.
+Verify the remote branch commit and annotated tag object against the release evidence.
+If published, download the destination artifact into a new isolated environment, verify
+its SHA256 digest and provenance when provided, and repeat archive inspection and smoke
+testing. Do not use the local build as evidence that the published artifact is correct.
 
-Recovery depends on how far the release progressed:
+Recovery depends on the completed state:
 
-- Before pushing, a local tag may be deleted and recreated only after fixing the issue
+- Before any push, a local tag may be deleted and recreated only after fixing the issue
   and repeating all gates.
-- After pushing, never silently move a public tag. Coordinate a documented correction
-  with maintainers and consumers.
-- After publication, do not overwrite an immutable version. Use the destination's
-  approved yank or revocation process when appropriate, then release a new patch version.
-- For suspected credential or artifact compromise, stop immediately, revoke or rotate
-  affected credentials, preserve audit evidence, notify the appropriate parties through
-  approved private channels, and conduct an incident review before resuming.
+- If the branch push succeeds but the tag push fails, verify the remote branch is the
+  recorded commit, diagnose the tag failure, then push that same verified tag. Do not
+  create a replacement commit or tag merely to retry transport.
+- If the tag push succeeds but publication fails, verify the remote commit and tag object
+  identity, fix the publication mechanism, and publish the already-recorded artifacts.
+  Never recreate or move a public tag.
+- If immutable publication succeeds but a release page or later verification fails, do
+  not repeat the successful publication. Verify exact artifact identity and resume only
+  the incomplete destination-specific step.
+- After publication, never reuse a released version or overwrite it. Use the approved
+  yank or revocation process when appropriate, then prepare a new patch release.
+- For suspected credential or artifact compromise, stop, revoke or rotate affected
+  credentials, preserve audit evidence, notify appropriate parties through approved
+  private channels, and complete an incident review before resuming.

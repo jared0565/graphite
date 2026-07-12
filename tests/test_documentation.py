@@ -90,3 +90,12 @@ def test_release_guide_has_gates_and_version_sources() -> None:
     assert "pyproject.toml" in releasing_lower
     assert "src/graphite/__init__.py" in releasing_lower
     assert "model" in releasing_lower
+    assert "--no-isolation" in releasing
+    assert "--no-index" in releasing
+    assert "python -m pip check" in releasing
+    assert "git diff --cached" in releasing
+    assert "git status --short" in releasing
+    assert "sha256" in releasing_lower
+    assert "--llm none" in releasing
+    assert "never recreate or move a public tag" in releasing_lower
+    assert "never reuse a released version" in releasing_lower
