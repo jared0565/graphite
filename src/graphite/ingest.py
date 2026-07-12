@@ -5,7 +5,7 @@ import os
 from itertools import islice
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .cache import file_hash
 from .config import Config
@@ -157,7 +157,12 @@ def _normalize_git_path(root: Path, value: str) -> str | None:
     return native_path.as_posix()
 
 
-def _git_ls_files(root: Path, *, max_files: int | None = None) -> list[str] | None:
+def _git_ls_files(
+    root: Path,
+    *,
+    max_files: int | None = None,
+    is_eligible: Callable[[str], bool] | None = None,
+) -> list[str] | None:
     """Return bounded Git files, or None only when *root* is not a Git repository."""
     git_dir = root / ".git"
     if not os.path.lexists(git_dir):
@@ -197,7 +202,7 @@ def _git_ls_files(root: Path, *, max_files: int | None = None) -> list[str] | No
         normalized = _normalize_git_path(root, output[start:end])
         if normalized is None:
             raise IngestError("unable to enumerate Git repository safely")
-        if max_files is None or len(selected) < max_files:
+        if is_eligible is None or is_eligible(normalized):
             selected.append(normalized)
         start = end + 1
     return selected
@@ -233,13 +238,13 @@ def collect_files(root: Path, cfg: Config) -> list[FileEntry]:
     """Collect files under root, bounded by cfg.max_files as an ingestion cap."""
     root = root.resolve()
     dynamic_exclusions = _dynamic_exclusions(root, cfg)
-    tracked = _git_ls_files(root, max_files=cfg.max_files)
+    tracked = _git_ls_files(
+        root,
+        max_files=cfg.max_files,
+        is_eligible=lambda path: not _should_skip(path, cfg, dynamic_exclusions),
+    )
     if tracked is not None:
-        rel_paths = [
-            path
-            for path in tracked
-            if not _should_skip(path, cfg, dynamic_exclusions)
-        ]
+        rel_paths = tracked
     else:
         walked = _walk_files(root, cfg, dynamic_exclusions)
         rel_paths = list(
@@ -247,9 +252,6 @@ def collect_files(root: Path, cfg: Config) -> list[FileEntry]:
             if cfg.max_files is not None
             else walked
         )
-
-    if cfg.max_files is not None:
-        rel_paths = rel_paths[: cfg.max_files]
 
     entries: list[FileEntry] = []
     for rel in rel_paths:

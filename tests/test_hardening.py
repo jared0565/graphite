@@ -216,6 +216,71 @@ def test_git_enumeration_applies_max_files_before_returning_paths(
     ]
 
 
+@pytest.mark.parametrize(
+    ("max_files", "expected"),
+    [
+        (1, ["src/app.py"]),
+        (2, ["src/app.py", "src/next.py"]),
+        (
+            3,
+            [
+                "custom-artifacts-source/kept.py",
+                "src/app.py",
+                "src/next.py",
+            ],
+        ),
+    ],
+)
+def test_git_max_files_counts_only_eligible_ingest_paths(
+    tmp_path: Path, monkeypatch, max_files: int, expected: list[str]
+) -> None:
+    root = tmp_path / "repository"
+    (root / ".git").mkdir(parents=True)
+    ordered_paths = [
+        "custom-artifacts/generated.py",
+        "custom-cache/cached.py",
+        ".hidden.py",
+        "vendor/lib.py",
+        "build/generated.py",
+        "assets/image.png",
+        "src/app.py",
+        "src/next.py",
+        "custom-artifacts-source/kept.py",
+    ]
+    for path in ordered_paths:
+        _write(root / path, "value = 1\n")
+
+    class FakeRunner:
+        def __init__(self, project_root):
+            assert project_root == root.resolve()
+
+        def run(self, arguments, *, timeout_seconds, **kwargs):
+            output = "\0".join(ordered_paths).encode("utf-8") + b"\0"
+            return subprocess.CompletedProcess(arguments, 0, output, b"")
+
+    hashed: list[str] = []
+
+    def record_hash(path: Path) -> str:
+        hashed.append(path.relative_to(root).as_posix())
+        return "hash"
+
+    monkeypatch.setattr(ingest_module, "GitRunner", FakeRunner)
+    monkeypatch.setattr(ingest_module, "_is_binary", lambda _path: False)
+    monkeypatch.setattr(ingest_module, "file_hash", record_hash)
+
+    entries = collect_files(
+        root,
+        Config(
+            output_dir=root / "custom-artifacts",
+            cache_dir=root / "custom-cache",
+            max_files=max_files,
+        ),
+    )
+
+    assert [entry.rel_path for entry in entries] == expected
+    assert sorted(hashed) == expected
+
+
 def test_walk_max_files_stops_iteration_before_materializing_all_paths(
     tmp_path: Path, monkeypatch
 ) -> None:
