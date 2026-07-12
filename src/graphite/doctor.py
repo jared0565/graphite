@@ -55,9 +55,9 @@ def build_report(root: Path, checks: Iterable[DoctorCheck], deep: bool, llm_incl
 def format_doctor_text(report: Mapping[str, Any]) -> str:
     lines = [f"[graphite] doctor: {report.get('status', 'ready')}"]
     for item in report.get("checks", []):
-        lines.append(f"[{item['status']}] {item['label']}: {item['summary']}")
+        lines.append(f"  [{item['status']}] {item['label']}: {item['summary']}")
         for remediation in item.get("remediation", []):
-            lines.append(f"  remediation: {remediation}")
+            lines.append(f"    - {remediation}")
     return "\n".join(lines) + "\n"
 
 

@@ -38,7 +38,7 @@ def test_report_is_typed_sorted_ranked_and_safe(tmp_path: Path) -> None:
     with pytest.raises(Exception):
         checks[0].status = "ready"  # type: ignore[misc]
     text = format_doctor_text(report)
-    assert text == "[graphite] doctor: degraded\n[degraded] A: degraded\n  remediation: Fix it\n[optional] Z: optional\n"
+    assert text == "[graphite] doctor: degraded\n  [degraded] A: degraded\n    - Fix it\n  [optional] Z: optional\n"
 
 
 def test_empty_report_ready_and_blocked_exits_one(tmp_path: Path) -> None:
