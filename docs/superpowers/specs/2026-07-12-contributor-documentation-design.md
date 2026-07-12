@@ -1,7 +1,7 @@
 # Contributor Documentation Design
 
 **Date:** 2026-07-12  
-**Status:** Design approved; written spec pending review  
+**Status:** Implemented and verified
 **Scope:** Contributor-facing documentation only
 
 ## Objective
