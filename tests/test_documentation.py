@@ -6,7 +6,7 @@ from urllib.parse import unquote
 ROOT = Path(__file__).resolve().parents[1]
 MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
-WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 DOCUMENTS = ("README.md", "CONTRIBUTING.md", "ARCHITECTURE.md", "RELEASING.md")
 
 
@@ -39,6 +39,10 @@ def test_readme_links_to_contributor_guides() -> None:
     assert "[Contributor guide](CONTRIBUTING.md)" in readme
     assert "[Architecture guide](ARCHITECTURE.md)" in readme
     assert "[Release guide](RELEASING.md)" in readme
+
+
+def test_windows_drive_relative_link_is_detected() -> None:
+    assert WINDOWS_DRIVE.match("C:outside.md")
 
 
 def test_relative_markdown_links_resolve() -> None:
