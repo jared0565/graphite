@@ -10,6 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
+DANGEROUS_URI_SCHEMES = frozenset(("data", "javascript", "vbscript"))
 DOCUMENTS = ("README.md", "CONTRIBUTING.md", "ARCHITECTURE.md", "RELEASING.md")
 
 
@@ -303,6 +304,9 @@ def link_target_diagnostic(document_path: Path, raw_target: str) -> str | None:
 
     encoded_path = _markdown_path(markdown_target)
     if URI_SCHEME.match(encoded_path) and not WINDOWS_DRIVE.match(encoded_path):
+        scheme = encoded_path.partition(":")[0].casefold()
+        if scheme in DANGEROUS_URI_SCHEMES:
+            return f"unsafe URI scheme is not allowed: {scheme}"
         return None
     if not encoded_path:
         return None
@@ -473,7 +477,13 @@ def test_link_target_diagnostic_normalizes_before_security_checks() -> None:
 def test_link_target_diagnostic_skips_non_local_targets_and_queries() -> None:
     document_path = ROOT / "README.md"
 
-    for target in ("https://example.com/docs", "mailto:docs@example.com", "#usage"):
+    for target in (
+        "https://example.com/docs",
+        "http://example.com/docs",
+        "mailto:docs@example.com",
+        "ftp://example.com/docs",
+        "#usage",
+    ):
         assert link_target_diagnostic(document_path, target) is None
 
     assert link_target_diagnostic(document_path, "README.md?download=1#usage") is None
@@ -482,14 +492,30 @@ def test_link_target_diagnostic_skips_non_local_targets_and_queries() -> None:
 def test_link_target_diagnostic_classifies_uri_before_percent_decoding() -> None:
     document_path = ROOT / "README.md"
 
-    for target in ("https://example.com/docs", "javascript:alert(1)"):
-        assert link_target_diagnostic(document_path, target) is None
-
     for target in (
         "https%3A%2F%2Fexample.com%2Fdocs",
         "javascript%3Aalert%281%29",
+        "data%3Atext%2Fplain%2Chello",
+        "vbscript%3AMsgBox%281%29",
     ):
         assert link_target_diagnostic(document_path, target) == "target does not exist"
+
+
+def test_link_target_diagnostic_rejects_dangerous_uri_schemes() -> None:
+    document_path = ROOT / "README.md"
+    dangerous_targets = (
+        ("javascript:alert(1)", "javascript"),
+        ("JaVaScRiPt:alert(1)", "javascript"),
+        ("data:text/html,<script>alert(1)</script>", "data"),
+        ("DaTa:text/plain,hello", "data"),
+        ("vbscript:MsgBox(1)", "vbscript"),
+        ("VbScRiPt:MsgBox(1)", "vbscript"),
+    )
+
+    for target, scheme in dangerous_targets:
+        assert link_target_diagnostic(document_path, target) == (
+            f"unsafe URI scheme is not allowed: {scheme}"
+        )
 
 
 def test_link_target_diagnostic_splits_after_markdown_unescaping() -> None:
@@ -507,6 +533,9 @@ def test_document_link_diagnostics_reports_unsafe_and_missing_targets() -> None:
             "[fragment](#usage)",
             "[drive](%43%3Aoutside.md)",
             "[missing](missing-document.md)",
+            "[script](JaVaScRiPt:alert(1))",
+            "[embedded](data:text/html,unsafe)",
+            "[legacy](VBSCRIPT:MsgBox(1))",
         )
     )
 
@@ -514,6 +543,12 @@ def test_document_link_diagnostics_reports_unsafe_and_missing_targets() -> None:
         "README.md:4: Windows drive target is not repository-local: "
         "'%43%3Aoutside.md'",
         "README.md:5: target does not exist: 'missing-document.md'",
+        "README.md:6: unsafe URI scheme is not allowed: javascript: "
+        "'JaVaScRiPt:alert(1)'",
+        "README.md:7: unsafe URI scheme is not allowed: data: "
+        "'data:text/html,unsafe'",
+        "README.md:8: unsafe URI scheme is not allowed: vbscript: "
+        "'VBSCRIPT:MsgBox(1)'",
     ]
 
 
