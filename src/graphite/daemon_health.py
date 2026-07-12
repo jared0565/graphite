@@ -233,7 +233,7 @@ def _project_health(status: dict[str, Any], now: datetime, max_success_age_secon
     old: list[dict[str, Any]] = []
     for item in status.get("projects", []):
         project = _project_summary(item, now)
-        if item.get("last_error"):
+        if item.get("last_error") is not None:
             failing.append(project)
         if item.get("needs_initial_build") or int(item.get("build_count") or 0) == 0:
             pending.append(project)
