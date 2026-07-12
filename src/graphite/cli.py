@@ -20,6 +20,7 @@ from .config import Config, default_projects_root
 from .context import build_context, format_context_markdown
 from .daemon import DaemonOptions, read_daemon_status, run_daemon
 from .daemon_health import HealthOptions, evaluate_daemon_health, format_health_text
+from .doctor import format_doctor_text, run_doctor
 from .export.html import to_html as export_html
 from .export.json import build_bundle, to_json as export_json
 from .export.md import to_markdown as export_md
@@ -336,6 +337,25 @@ def cmd_check(args: argparse.Namespace) -> int:
     else:
         print("[graphite] graph is fresh")
     return 1 if status["stale"] else 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    root = Path(args.path).resolve()
+    if not root.is_dir():
+        raise ValueError("doctor path must be an existing directory")
+    cfg = _project_scoped_config(args, root)
+    report = run_doctor(
+        root,
+        cfg=cfg,
+        daemon_base=Path(args.daemon_base).resolve() if args.daemon_base else None,
+        deep=args.deep,
+        include_llm=args.include_llm,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(format_doctor_text(report), end="")
+    return int(report["exit_code"])
 
 
 def _project_scoped_config(args: argparse.Namespace, root: Path) -> Config:
@@ -901,6 +921,28 @@ def main(argv: list[str] | None = None) -> int:
     p_check.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_check.set_defaults(func=cmd_check)
 
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="Check Graphite core and optional integration readiness",
+        description="Check Graphite core and optional integration readiness",
+    )
+    p_doctor.add_argument(
+        "path", nargs="?", default=".", help="Project path (default: current directory)"
+    )
+    p_doctor.add_argument(
+        "--daemon-base", default=None, help="Daemon base folder (default: auto-detect)"
+    )
+    p_doctor.add_argument(
+        "--deep", action="store_true", help="Run bounded functional probes in temporary storage"
+    )
+    p_doctor.add_argument(
+        "--include-llm",
+        action="store_true",
+        help="With --deep, run one synthetic LLM connectivity probe",
+    )
+    p_doctor.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_doctor.set_defaults(func=cmd_doctor)
+
 
     p_init = sub.add_parser("init", aliases=["Init"], help="Initialize Graphite instructions for AI coding platforms")
     p_init.add_argument("path", nargs="?", default=".", help="Project path (default: current directory)")
@@ -1091,6 +1133,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.command:
         parser.print_help()
         return 1
+    if args.command == "doctor" and args.include_llm and not args.deep:
+        p_doctor.error("--include-llm requires --deep")
 
     try:
         return int(args.func(args) or 0)
@@ -1104,7 +1148,6 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 
 
 

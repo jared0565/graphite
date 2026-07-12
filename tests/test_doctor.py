@@ -5,6 +5,7 @@ import json
 import math
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 import graphite.doctor as doctor_module
 
 from graphite.config import Config
+from graphite.cli import main
 from graphite.freshness import FreshnessLimitError, check_graph_freshness
 from graphite.doctor import (
     DoctorCheck,
@@ -28,6 +30,129 @@ from graphite.doctor import (
     format_doctor_text,
     run_doctor,
 )
+
+
+def _cli_report(*, status: str = "ready", exit_code: int = 0) -> dict:
+    return {
+        "schema_version": 1,
+        "root": "repo",
+        "deep": False,
+        "llm_included": False,
+        "status": status,
+        "exit_code": exit_code,
+        "checks": [],
+    }
+
+
+def test_doctor_cli_json_forwards_scoped_options_and_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "repo"
+    daemon_base = tmp_path / "daemon"
+    root.mkdir()
+    daemon_base.mkdir()
+    observed: dict[str, object] = {}
+
+    def fake_run_doctor(selected: Path, **kwargs: object) -> dict:
+        observed.update(root=selected, **kwargs)
+        return _cli_report(status="blocked", exit_code=1)
+
+    monkeypatch.setattr("graphite.cli.run_doctor", fake_run_doctor)
+    assert main([
+        "doctor",
+        str(root),
+        "--daemon-base",
+        str(daemon_base),
+        "--deep",
+        "--include-llm",
+        "--json",
+    ]) == 1
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["status"] == "blocked"
+    assert captured.err == ""
+    assert observed["root"] == root.resolve()
+    assert observed["daemon_base"] == daemon_base.resolve()
+    assert observed["deep"] is True
+    assert observed["include_llm"] is True
+    cfg = observed["cfg"]
+    assert isinstance(cfg, Config)
+    assert cfg.output_dir == root.resolve() / "graph-out"
+    assert cfg.cache_dir == root.resolve() / ".cache" / "graphite"
+
+
+def test_doctor_cli_text_is_printed_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert "graphite.doctor_probes" not in sys.modules
+    monkeypatch.setattr("graphite.cli.run_doctor", lambda *args, **kwargs: _cli_report())
+    monkeypatch.setattr("graphite.cli.format_doctor_text", lambda report: "doctor text\n")
+
+    assert main(["doctor", str(tmp_path)]) == 0
+    assert capsys.readouterr().out == "doctor text\n"
+    assert "graphite.doctor_probes" not in sys.modules
+
+
+def test_doctor_cli_rejects_llm_without_deep_before_calling_doctor(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    called = False
+
+    def fake_run_doctor(*args: object, **kwargs: object) -> dict:
+        nonlocal called
+        called = True
+        return _cli_report()
+
+    monkeypatch.setattr("graphite.cli.run_doctor", fake_run_doctor)
+    with pytest.raises(SystemExit) as exc_info:
+        main(["doctor", "--include-llm"])
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 2
+    assert "--include-llm requires --deep" in captured.err
+    assert captured.out == ""
+    assert called is False
+
+
+def test_doctor_cli_invalid_path_is_safe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sentinel = "SECRET-PROJECT-PATH"
+    called = False
+
+    def fake_run_doctor(*args: object, **kwargs: object) -> dict:
+        nonlocal called
+        called = True
+        return _cli_report()
+
+    monkeypatch.setattr("graphite.cli.run_doctor", fake_run_doctor)
+    invalid = tmp_path / sentinel
+    assert main(["doctor", str(invalid)]) == 1
+
+    captured = capsys.readouterr()
+    assert "doctor path must be an existing directory" in captured.err
+    assert sentinel not in captured.out + captured.err
+    assert called is False
+
+
+def test_doctor_cli_help_describes_optional_synthetic_llm_probe(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["doctor", "--help"])
+
+    output = capsys.readouterr().out
+    assert exc_info.value.code == 0
+    assert "Check Graphite core and optional integration readiness" in output
+    assert "--include-llm" in output
+    assert "synthetic LLM connectivity probe" in output
 
 
 def test_report_is_typed_sorted_ranked_and_safe(tmp_path: Path) -> None:
