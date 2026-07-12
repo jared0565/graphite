@@ -1,7 +1,13 @@
+import re
 from pathlib import Path
+from urllib.parse import unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
+MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+DOCUMENTS = ("README.md", "CONTRIBUTING.md", "ARCHITECTURE.md", "RELEASING.md")
 
 
 def read_document(name: str) -> str:
@@ -33,6 +39,64 @@ def test_readme_links_to_contributor_guides() -> None:
     assert "[Contributor guide](CONTRIBUTING.md)" in readme
     assert "[Architecture guide](ARCHITECTURE.md)" in readme
     assert "[Release guide](RELEASING.md)" in readme
+
+
+def test_relative_markdown_links_resolve() -> None:
+    repository_root = ROOT.resolve()
+    failures: list[str] = []
+
+    for document_name in DOCUMENTS:
+        document_path = ROOT / document_name
+        for match in MARKDOWN_LINK.finditer(read_document(document_name)):
+            raw_target = match.group(1).strip()
+            target = raw_target
+            if target.startswith("<") and target.endswith(">"):
+                target = target[1:-1].strip()
+
+            if not target or target.startswith("#"):
+                continue
+            if target.startswith("//") or target.startswith("\\\\"):
+                failures.append(
+                    f"{document_name}: protocol-relative target is not repository-local: "
+                    f"{raw_target!r}"
+                )
+                continue
+            if WINDOWS_DRIVE.match(target):
+                failures.append(
+                    f"{document_name}: Windows drive target is not repository-local: "
+                    f"{raw_target!r}"
+                )
+                continue
+            if URI_SCHEME.match(target):
+                continue
+
+            local_target = unquote(target.split("#", 1)[0])
+            resolved_target = (document_path.parent / local_target).resolve()
+            if not resolved_target.is_relative_to(repository_root):
+                failures.append(
+                    f"{document_name}: target escapes repository: {raw_target!r}"
+                )
+            elif not resolved_target.exists():
+                failures.append(
+                    f"{document_name}: target does not exist: {raw_target!r}"
+                )
+
+    assert not failures, "Broken local Markdown links:\n" + "\n".join(failures)
+
+
+def test_contributor_guides_have_no_draft_markers() -> None:
+    markers = ("T" + "ODO", "T" + "BD", "F" + "IXME")
+    failures: list[str] = []
+
+    for document_name in DOCUMENTS[1:]:
+        document = read_document(document_name)
+        for marker in markers:
+            if marker in document:
+                failures.append(f"{document_name}: contains draft marker {marker!r}")
+
+    assert not failures, "Contributor guides contain draft markers:\n" + "\n".join(
+        failures
+    )
 
 
 def test_architecture_guide_has_pipeline_and_boundaries() -> None:
