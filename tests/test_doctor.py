@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
@@ -543,3 +544,183 @@ def test_daemon_preserves_global_health_failures(
     result = check_daemon(root, tmp_path)
     assert result.status == "degraded"
     assert "RAW" not in json.dumps(result.to_dict())
+
+
+def test_deep_probe_result_is_immutable_and_error_is_safe() -> None:
+    from graphite.doctor_probes import DoctorProbeError, ProbeProcessResult
+
+    result = ProbeProcessResult(0, b"out", b"err", 0.1)
+    with pytest.raises(FrozenInstanceError):
+        result.returncode = 1  # type: ignore[misc]
+    error = DoctorProbeError("timeout")
+    assert error.code == "timeout"
+    assert "RAW" not in str(error)
+
+
+def test_deep_bounded_runner_sanitizes_environment_and_bounds_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from graphite.doctor_probes import DoctorProbeError, _run_bounded
+
+    monkeypatch.setenv("DOCTOR_SECRET_SENTINEL", "leak")
+    monkeypatch.setenv("OPENAI_API_KEY", "leak")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("NODE_OPTIONS", "--inspect")
+    script = "import os,sys; bad=[k for k in os.environ if k in {'DOCTOR_SECRET_SENTINEL','OPENAI_API_KEY','GIT_CONFIG_COUNT','NODE_OPTIONS'}]; sys.stdout.write(','.join(bad))"
+    result = _run_bounded([sys.executable, "-c", script], cwd=tmp_path, timeout_seconds=5)
+    assert result.returncode == 0
+    assert result.stdout == b""
+    for script in ("import sys;sys.stdout.write('x'*40000)", "import sys;sys.stderr.write('x'*40000)"):
+        with pytest.raises(DoctorProbeError) as exc_info:
+            _run_bounded([sys.executable, "-c", script], cwd=tmp_path, timeout_seconds=5)
+        assert exc_info.value.code == "output_limit"
+
+
+def test_deep_bounded_runner_times_out_without_leaking_process_output(tmp_path: Path) -> None:
+    from graphite.doctor_probes import DoctorProbeError, _run_bounded
+
+    started = time.monotonic()
+    with pytest.raises(DoctorProbeError) as exc_info:
+        _run_bounded([sys.executable, "-c", "import time;print('RAW C:/secret', flush=True);time.sleep(5)"], cwd=tmp_path, timeout_seconds=0.1)
+    assert time.monotonic() - started < 2
+    assert exc_info.value.code == "timeout"
+    assert "RAW" not in str(exc_info.value)
+
+
+def test_deep_bounded_runner_handles_nonzero_and_held_descendant_pipe(tmp_path: Path) -> None:
+    from graphite.doctor_probes import DoctorProbeError, _run_bounded
+
+    with pytest.raises(DoctorProbeError) as exc_info:
+        _run_bounded([sys.executable, "-c", "raise SystemExit(7)"], cwd=tmp_path, timeout_seconds=5)
+    assert exc_info.value.code == "nonzero"
+
+    held_pipe = "import subprocess,sys; subprocess.Popen([sys.executable,'-c','import time;time.sleep(5)'])"
+    started = time.monotonic()
+    result = _run_bounded([sys.executable, "-c", held_pipe], cwd=tmp_path, timeout_seconds=2)
+    assert result.returncode == 0
+    assert time.monotonic() - started < 2
+
+
+def test_core_deep_probe_runs_real_pipeline_without_touching_selected_root(tmp_path: Path) -> None:
+    from graphite.doctor_probes import probe_core_pipeline
+
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    (selected / "keep.txt").write_text("unchanged", encoding="utf-8")
+    before = [(entry.name, entry.read_bytes()) for entry in selected.iterdir()]
+    check = probe_core_pipeline(selected, timeout_seconds=30)
+    after = [(entry.name, entry.read_bytes()) for entry in selected.iterdir()]
+    assert check.status == "ready"
+    assert check.code == "deep_core"
+    assert check.label == "Deterministic pipeline"
+    assert check.details["node_count"] > 0
+    assert check.details["commands_completed"] == 3
+    assert set(check.details) == {"node_count", "edge_count", "duration_ms", "commands_completed"}
+    assert before == after
+    assert str(tmp_path) not in json.dumps(check.to_dict())
+
+
+@pytest.mark.parametrize(("failure_code", "expected_type"), [("timeout", "timeout"), ("output_limit", "output_limit"), ("nonzero", "process")])
+def test_core_deep_probe_maps_runner_failures_safely(tmp_path: Path, failure_code: str, expected_type: str) -> None:
+    import graphite.doctor_probes as probes
+
+    def fail(*args: object, **kwargs: object) -> object:
+        raise probes.DoctorProbeError(failure_code)
+    check = probes.probe_core_pipeline(tmp_path, timeout_seconds=1, _runner=fail)
+    encoded = json.dumps(check.to_dict())
+    assert check.status == "blocked"
+    assert check.details == {"error_type": expected_type, "code": failure_code}
+    assert "RAW" not in encoded
+    assert str(tmp_path) not in encoded
+
+
+def test_core_deep_probe_blocks_malformed_and_invalid_validation(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+
+    outputs = iter([probes.ProbeProcessResult(0, b"", b"", 0.01), probes.ProbeProcessResult(0, b'{"ok":false,"error_count":1}', b"", 0.01)])
+    check = probes.probe_core_pipeline(tmp_path, _runner=lambda *a, **k: next(outputs))
+    assert check.status == "blocked"
+    assert check.details == {"error_type": "validation", "code": "validation_failed"}
+    malformed = probes.probe_core_pipeline(tmp_path, _runner=lambda *a, **k: probes.ProbeProcessResult(0, b"not-json", b"", 0.01))
+    assert malformed.status == "blocked"
+    assert malformed.details == {"error_type": "response", "code": "malformed_output"}
+
+
+def test_core_deep_probe_rejects_temp_path_outside_os_temp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    class UnsafeTemporaryDirectory:
+        def __init__(self, **kwargs: object) -> None: pass
+        def __enter__(self) -> str: return str(outside)
+        def __exit__(self, *args: object) -> None: pass
+    check = probes.probe_core_pipeline(
+        tmp_path,
+        _temp_factory=UnsafeTemporaryDirectory,
+        _temp_root_resolver=lambda: tmp_path / "claimed-temp",
+    )
+    assert check.status == "blocked"
+    assert check.details == {"error_type": "isolation", "code": "unsafe_temp_path"}
+    assert list(outside.iterdir()) == []
+
+
+def test_core_deep_probe_cleans_temp_after_success_and_failure(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+
+    created: list[Path] = []
+    real_factory = probes.tempfile.TemporaryDirectory
+    class TrackingTemporaryDirectory:
+        def __init__(self, **kwargs: object) -> None:
+            self.inner = real_factory(**kwargs)
+        def __enter__(self) -> str:
+            value = self.inner.__enter__()
+            created.append(Path(value))
+            return value
+        def __exit__(self, *args: object) -> object:
+            return self.inner.__exit__(*args)
+
+    assert probes.probe_core_pipeline(tmp_path, _temp_factory=TrackingTemporaryDirectory).status == "ready"
+    assert created and not created[-1].exists()
+    def fail(*args: object, **kwargs: object) -> object:
+        raise probes.DoctorProbeError("nonzero")
+    assert probes.probe_core_pipeline(tmp_path, _runner=fail, _temp_factory=TrackingTemporaryDirectory).status == "blocked"
+    assert not created[-1].exists()
+
+
+def test_core_deep_probe_uses_one_total_budget_and_maps_cleanup_error(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+
+    timeouts: list[float] = []
+    outputs = iter([
+        b"",
+        b'{"ok":true,"error_count":0,"errors":[],"node_count":2}',
+        b'{"node_count":2,"edge_count":1}',
+    ])
+    def run(*args: object, timeout_seconds: float, **kwargs: object) -> object:
+        timeouts.append(timeout_seconds)
+        time.sleep(0.01)
+        return probes.ProbeProcessResult(0, next(outputs), b"", 0.01)
+    assert probes.probe_core_pipeline(tmp_path, timeout_seconds=1, _runner=run).status == "ready"
+    assert timeouts[0] > timeouts[1] > timeouts[2] > 0
+
+    real_factory = probes.tempfile.TemporaryDirectory
+    class CleanupFailure:
+        def __init__(self, **kwargs: object) -> None:
+            self.inner = real_factory(**kwargs)
+        def __enter__(self) -> str:
+            return self.inner.__enter__()
+        def __exit__(self, *args: object) -> object:
+            self.inner.__exit__(*args)
+            raise RuntimeError("RAW cleanup path")
+    outputs = iter([b"", b'{"ok":true,"error_count":0,"errors":[]}', b'{"node_count":2,"edge_count":1}'])
+    check = probes.probe_core_pipeline(tmp_path, _runner=run, _temp_factory=CleanupFailure)
+    assert check.status == "blocked"
+    assert check.details == {"error_type": "cleanup", "code": "temporary_directory_failed"}
+    assert "RAW" not in json.dumps(check.to_dict())
+
+
+def test_run_deep_probes_currently_reports_only_core(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+
+    expected = DoctorCheck("deep_core", "Deterministic pipeline", "ready", "ok")
+    monkeypatch.setattr(probes, "probe_core_pipeline", lambda root: expected)
+    assert probes.run_deep_probes(tmp_path, cfg=Config(), include_llm=True) == [expected]
