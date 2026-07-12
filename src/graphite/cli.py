@@ -24,6 +24,7 @@ from .export.html import to_html as export_html
 from .export.json import build_bundle, to_json as export_json
 from .export.md import to_markdown as export_md
 from .extract.ast import extract_all
+from .freshness import check_graph_freshness
 from .graph import build_graph, graph_from_json, graph_to_json
 from .ingest import collect_files
 from .init import init_project, platform_choices, resolve_platform_selection
@@ -208,49 +209,6 @@ def _build_project(path: Path, cfg: Config) -> None:
     _report(cfg, manifest, graph_data, clusters, analysis)
 
 
-def _manifest_map(manifest: dict[str, Any]) -> dict[str, str]:
-    return {f["rel_path"]: f.get("hash", "") for f in manifest.get("files", []) if "rel_path" in f}
-
-
-def _check_status(root: Path, cfg: Config) -> dict[str, Any]:
-    manifest_path = cfg.output_dir / ".graphite_manifest.json"
-    if not manifest_path.exists():
-        return {
-            "stale": True,
-            "reason": "missing manifest",
-            "manifest": manifest_path.as_posix(),
-            "added": [],
-            "changed": [],
-            "removed": [],
-        }
-    try:
-        previous = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return {
-            "stale": True,
-            "reason": f"unreadable manifest: {exc}",
-            "added": [],
-            "changed": [],
-            "removed": [],
-        }
-
-    entries = collect_files(root, cfg)
-    current = {e.rel_path: e.content_hash for e in entries}
-    old = _manifest_map(previous)
-    added = sorted(set(current) - set(old))
-    removed = sorted(set(old) - set(current))
-    changed = sorted(p for p in set(current).intersection(old) if current[p] != old[p])
-    stale = bool(added or removed or changed)
-    return {
-        "stale": stale,
-        "file_count": len(current),
-        "manifest_file_count": len(old),
-        "added": added,
-        "changed": changed,
-        "removed": removed,
-    }
-
-
 def _load_graph(path: Path) -> Any:
     if not path.exists():
         print(f"[graphite] graph not found: {path}", file=sys.stderr)
@@ -367,7 +325,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     cfg = _config_from_args(args)
-    status = _check_status(Path(args.path).resolve(), cfg)
+    status = check_graph_freshness(Path(args.path).resolve(), cfg)
     if args.json:
         print(json.dumps(status, ensure_ascii=False, indent=2))
     elif status["stale"]:
@@ -618,10 +576,10 @@ def _review_graph_status(
     custom_graph: bool,
 ) -> dict[str, Any]:
     if not custom_graph:
-        return _check_status(root, cfg)
+        return check_graph_freshness(root, cfg)
     data = cfg.to_dict()
     data["output_dir"] = graph_path.parent
-    return _check_status(root, Config(**data))
+    return check_graph_freshness(root, Config(**data))
 
 
 def cmd_review_changes(args: argparse.Namespace) -> int:
@@ -1146,8 +1104,6 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
 
 
 
