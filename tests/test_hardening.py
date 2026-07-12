@@ -88,12 +88,63 @@ def test_ingest_git_enumeration_uses_shared_hardened_runner(
     command, kwargs = calls[0]
     assert Path(command[0]) == (trusted_bin / fake_name).resolve()
     assert command[1:4] == ["--no-optional-locks", "-c", "core.fsmonitor=false"]
-    assert command[4:] == ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+    assert command[4:6] == ["-c", f"safe.directory={root.resolve()}"]
+    assert command[6:] == [
+        "ls-files", "-z", "--cached", "--others", "--exclude-standard"
+    ]
     assert kwargs["shell"] is False
     assert {name for name in kwargs["env"] if name.casefold().startswith("git_")} == {
         "GIT_OPTIONAL_LOCKS",
         "GIT_TERMINAL_PROMPT",
     }
+
+
+def test_git_runner_enumerates_a_differently_owned_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    subprocess.run(
+        ["git", "init", "--quiet", str(root)],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _write(root / "tracked.py", "value = 1\n")
+    subprocess.run(
+        ["git", "-C", str(root), "add", "tracked.py"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    different_owner_environment = dict(os.environ)
+    different_owner_environment["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1"
+    baseline = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z"],
+        env=different_owner_environment,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if baseline.returncode == 0:
+        pytest.skip("installed Git does not trigger different-owner protection")
+
+    original_isolated_environment = git_module._isolated_environment
+
+    def different_owner_isolated_environment() -> dict[str, str]:
+        environment = original_isolated_environment()
+        environment["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1"
+        return environment
+
+    monkeypatch.setattr(
+        git_module, "_isolated_environment", different_owner_isolated_environment
+    )
+
+    result = git_module.GitRunner(root).run(["ls-files", "-z"], timeout_seconds=2)
+
+    assert result.returncode == 0
+    assert result.stdout == b"tracked.py\0"
 
 
 def test_ingest_fails_closed_when_repository_path_has_only_fake_git(

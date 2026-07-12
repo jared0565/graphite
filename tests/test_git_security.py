@@ -341,6 +341,8 @@ def test_git_runner_hardens_every_process_without_mutating_source_environment(
         "--no-optional-locks",
         "-c",
         "core.fsmonitor=false",
+        "-c",
+        f"safe.directory={repository.resolve()}",
         "ls-files",
         "-z",
     ]

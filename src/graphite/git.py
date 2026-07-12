@@ -70,6 +70,8 @@ class GitRunner:
             "--no-optional-locks",
             "-c",
             "core.fsmonitor=false",
+            "-c",
+            f"safe.directory={self.root}",
             *arguments,
         ]
         try:
