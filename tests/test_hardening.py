@@ -124,6 +124,31 @@ def test_filesystem_fallback_prunes_dynamic_dirs_by_component_prefix(tmp_path: P
     ]
 
 
+def test_relative_dynamic_dirs_resolve_from_process_cwd(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "project"
+    _write(root / "src" / "app.py", "value = 1\n")
+    _write(root / "custom-artifacts" / "graph.json", "{}\n")
+    _write(root / "custom-cache" / "cached.py", "value = 2\n")
+    _write(root / "custom-artifacts-source" / "kept.py", "value = 3\n")
+    monkeypatch.chdir(tmp_path)
+
+    entries = collect_files(
+        root,
+        Config(
+            output_dir=Path("project/custom-artifacts"),
+            cache_dir=Path("project/custom-cache"),
+            include_dotfiles=True,
+        ),
+    )
+
+    assert [entry.rel_path for entry in entries] == [
+        "custom-artifacts-source/kept.py",
+        "src/app.py",
+    ]
+
+
 def test_dynamic_dirs_outside_root_and_root_itself_do_not_exclude_sources(tmp_path: Path) -> None:
     root = tmp_path / "repository"
     _write(root / "src" / "app.py", "value = 1\n")

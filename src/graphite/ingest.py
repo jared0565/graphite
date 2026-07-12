@@ -96,9 +96,8 @@ def _has_component_prefix(parts: tuple[str, ...], prefix: tuple[str, ...]) -> bo
 def _dynamic_exclusions(root: Path, cfg: Config) -> tuple[tuple[str, ...], ...]:
     exclusions: set[tuple[str, ...]] = set()
     for configured in (cfg.output_dir, cfg.cache_dir):
-        candidate = configured if configured.is_absolute() else root / configured
         try:
-            relative = candidate.resolve().relative_to(root)
+            relative = configured.resolve().relative_to(root)
         except (OSError, ValueError):
             continue
         if relative != Path("."):
