@@ -26,15 +26,80 @@ def _is_escaped(text: str, index: int) -> bool:
     return backslashes % 2 == 1
 
 
-def _fence_run(line: str) -> tuple[str, int] | None:
+def _fence_run(line: str) -> tuple[str, int, int] | None:
     stripped = line.lstrip(" ")
-    if len(line) - len(stripped) > 3 or not stripped:
+    indentation = len(line) - len(stripped)
+    if indentation > 3 or not stripped:
         return None
     marker = stripped[0]
     if marker not in ("`", "~"):
         return None
     length = len(stripped) - len(stripped.lstrip(marker))
-    return (marker, length) if length >= 3 else None
+    return (marker, length, indentation + length) if length >= 3 else None
+
+
+def _blockquote_content(line: str) -> tuple[int, str]:
+    index = 0
+    while index < min(3, len(line)) and line[index] == " ":
+        index += 1
+    if index == len(line) or line[index] != ">":
+        return 0, line
+
+    depth = 0
+    while index < len(line) and line[index] == ">":
+        depth += 1
+        index += 1
+        if index < len(line) and line[index] in (" ", "\t"):
+            index += 1
+    return depth, line[index:]
+
+
+def _mask_inline_code_and_comments(
+    line: str, in_html_comment: bool
+) -> tuple[str, bool]:
+    visible = list(line)
+    index = 0
+    while index < len(line):
+        if in_html_comment:
+            comment_end = line.find("-->", index)
+            if comment_end == -1:
+                visible[index:] = " " * (len(line) - index)
+                return "".join(visible), True
+            comment_end += 3
+            visible[index:comment_end] = " " * (comment_end - index)
+            index = comment_end
+            in_html_comment = False
+            continue
+
+        if line.startswith("<!--", index):
+            in_html_comment = True
+            continue
+
+        if line[index] != "`":
+            index += 1
+            continue
+
+        run_length = len(line[index:]) - len(line[index:].lstrip("`"))
+        search_index = index + run_length
+        closing_end: int | None = None
+        while search_index < len(line):
+            closing_start = line.find("`", search_index)
+            if closing_start == -1:
+                break
+            closing_length = len(line[closing_start:]) - len(
+                line[closing_start:].lstrip("`")
+            )
+            if closing_length == run_length:
+                closing_end = closing_start + closing_length
+                break
+            search_index = closing_start + closing_length
+        if closing_end is None:
+            index += run_length
+            continue
+        visible[index:closing_end] = " " * (closing_end - index)
+        index = closing_end
+
+    return "".join(visible), in_html_comment
 
 
 def _parse_title(text: str, start: int, line_number: int) -> int:
@@ -138,48 +203,62 @@ def _reference_destination_start(line: str) -> int | None:
 def scan_markdown_links(markdown: str) -> Iterator[tuple[int, str]]:
     """Yield line/target pairs for inline, image, and reference-definition links.
 
-    The scanner handles fenced code, nested/empty labels, balanced or escaped
-    destination parentheses, angle destinations, and optional link titles.
+    The scanner ignores fenced/indented/inline code and HTML comments. It handles
+    nested/empty labels, balanced or escaped destination parentheses, angle
+    destinations, blockquote-contained fences, and optional link titles.
     Malformed supported link forms raise ValueError instead of disappearing;
     multiline links and reference definitions are intentionally unsupported.
     """
-    fence: tuple[str, int] | None = None
+    fence: tuple[str, int, int] | None = None
+    in_html_comment = False
     for line_number, line in enumerate(markdown.splitlines(), start=1):
-        run = _fence_run(line)
+        quote_depth, content = _blockquote_content(line)
+        run = _fence_run(content)
         if fence:
             if (
                 run
                 and run[0] == fence[0]
                 and run[1] >= fence[1]
-                and not line.lstrip(" ")[run[1] :].strip()
+                and quote_depth == fence[2]
+                and not content[run[2] :].strip()
             ):
                 fence = None
             continue
-        if run:
-            fence = run
+
+        if not in_html_comment and (
+            content.startswith("\t") or content.startswith("    ")
+        ):
             continue
 
-        reference_start = _reference_destination_start(line)
+        visible, in_html_comment = _mask_inline_code_and_comments(
+            content, in_html_comment
+        )
+        run = _fence_run(visible)
+        if run:
+            fence = (run[0], run[1], quote_depth)
+            continue
+
+        reference_start = _reference_destination_start(visible)
         if reference_start is not None:
             target, _ = _parse_destination(
-                line, reference_start, line_number, inline=False
+                visible, reference_start, line_number, inline=False
             )
             yield line_number, target
             continue
 
         index = 0
         label_depth = 0
-        while index < len(line):
-            if line[index] == "[" and not _is_escaped(line, index):
+        while index < len(visible):
+            if visible[index] == "[" and not _is_escaped(visible, index):
                 label_depth += 1
-            elif line[index] == "]" and not _is_escaped(line, index):
+            elif visible[index] == "]" and not _is_escaped(visible, index):
                 if (
                     label_depth
-                    and index + 1 < len(line)
-                    and line[index + 1] == "("
+                    and index + 1 < len(visible)
+                    and visible[index + 1] == "("
                 ):
                     target, index = _parse_destination(
-                        line, index + 2, line_number, inline=True
+                        visible, index + 2, line_number, inline=True
                     )
                     yield line_number, target
                     label_depth = 0
@@ -218,24 +297,21 @@ def _unescape_markdown(text: str) -> str:
 
 
 def link_target_diagnostic(document_path: Path, raw_target: str) -> str | None:
-    if not raw_target or raw_target.startswith("#"):
+    markdown_target = _unescape_markdown(raw_target)
+    if not markdown_target or markdown_target.startswith("#"):
         return None
 
-    decoded_path = unquote(_markdown_path(raw_target))
+    encoded_path = _markdown_path(markdown_target)
+    if URI_SCHEME.match(encoded_path) and not WINDOWS_DRIVE.match(encoded_path):
+        return None
+    if not encoded_path:
+        return None
+
+    decoded_path = unquote(encoded_path)
     if WINDOWS_DRIVE.match(decoded_path):
         return "Windows drive target is not repository-local"
     if decoded_path.startswith(("//", "\\\\")):
         return "UNC or protocol-relative target is not repository-local"
-    decoded_path = _unescape_markdown(decoded_path)
-    if WINDOWS_DRIVE.match(decoded_path):
-        return "Windows drive target is not repository-local"
-    if decoded_path.startswith(("//", "\\\\")):
-        return "UNC or protocol-relative target is not repository-local"
-    if URI_SCHEME.match(decoded_path):
-        return None
-    if not decoded_path:
-        return None
-
     repository_root = ROOT.resolve()
     portable_path = decoded_path.replace("\\", "/")
     resolved_target = (document_path.parent / portable_path).resolve()
@@ -321,6 +397,36 @@ def test_markdown_link_scanner_handles_supported_forms_and_fences() -> None:
     ]
 
 
+def test_markdown_link_scanner_ignores_code_comments_and_quoted_fences() -> None:
+    markdown = "\n".join(
+        (
+            "`[inline](missing.md)` [first](README.md)",
+            "``code ` [long span](missing.md)`` [second](CONTRIBUTING.md)",
+            "    [indented](missing.md)",
+            "\t[tab indented](missing.md)",
+            "<!-- [single comment](missing.md) --> [third](ARCHITECTURE.md)",
+            "<!--",
+            "[multiline comment](missing.md)",
+            "--> [fourth](RELEASING.md)",
+            "> ```python",
+            "> [quoted fence](missing.md)",
+            "> ```",
+            "> > ~~~~",
+            "> > [nested quoted fence](missing.md)",
+            "> > ~~~~",
+            "> [fifth](README.md)",
+        )
+    )
+
+    assert list(scan_markdown_links(markdown)) == [
+        (1, "README.md"),
+        (2, "CONTRIBUTING.md"),
+        (5, "ARCHITECTURE.md"),
+        (8, "RELEASING.md"),
+        (15, "README.md"),
+    ]
+
+
 def test_markdown_link_scanner_rejects_malformed_single_line_forms() -> None:
     malformed = (
         "[missing close](README.md",
@@ -352,7 +458,7 @@ def test_link_target_diagnostic_normalizes_before_security_checks() -> None:
         ("%43%3Aoutside.md", "Windows drive target is not repository-local"),
         ("%43%3A%2Foutside.md", "Windows drive target is not repository-local"),
         ("//server/share.md", "UNC or protocol-relative target is not repository-local"),
-        (r"\\server\share.md", "UNC or protocol-relative target is not repository-local"),
+        (r"\\\\server\share.md", "UNC or protocol-relative target is not repository-local"),
         ("%2F%2Fserver%2Fshare.md", "UNC or protocol-relative target is not repository-local"),
         ("%5C%5Cserver%5Cshare.md", "UNC or protocol-relative target is not repository-local"),
         ("../outside.md", "target escapes repository"),
@@ -371,6 +477,26 @@ def test_link_target_diagnostic_skips_non_local_targets_and_queries() -> None:
         assert link_target_diagnostic(document_path, target) is None
 
     assert link_target_diagnostic(document_path, "README.md?download=1#usage") is None
+
+
+def test_link_target_diagnostic_classifies_uri_before_percent_decoding() -> None:
+    document_path = ROOT / "README.md"
+
+    for target in ("https://example.com/docs", "javascript:alert(1)"):
+        assert link_target_diagnostic(document_path, target) is None
+
+    for target in (
+        "https%3A%2F%2Fexample.com%2Fdocs",
+        "javascript%3Aalert%281%29",
+    ):
+        assert link_target_diagnostic(document_path, target) == "target does not exist"
+
+
+def test_link_target_diagnostic_splits_after_markdown_unescaping() -> None:
+    document_path = ROOT / "README.md"
+
+    assert link_target_diagnostic(document_path, r"README.md\#usage") is None
+    assert link_target_diagnostic(document_path, r"README.md\?download=1") is None
 
 
 def test_document_link_diagnostics_reports_unsafe_and_missing_targets() -> None:
