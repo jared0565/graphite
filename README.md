@@ -13,6 +13,12 @@ Local-first, deterministic knowledge graph extraction for codebases. A safer, fa
 - **Multi-language** — structural extraction for TypeScript/JavaScript, Python, Go, and Rust.
 - **TypeScript-aware** — uses the local TypeScript compiler API when available, with heuristic fallback.
 
+## Contributing and project internals
+
+- [Contributor guide](CONTRIBUTING.md) — development setup, testing, security expectations, and pull-request conventions.
+- [Architecture guide](ARCHITECTURE.md) — pipeline, module boundaries, artifacts, extension points, and failure behavior.
+- [Release guide](RELEASING.md) — maintainer verification, packaging, tagging, publication, and recovery steps.
+
 ## Installation
 
 ```bash
@@ -405,7 +411,6 @@ Once configured, Claude can call these tools automatically:
 - `graphite_community` — list the community around a node
 - `graphite_summary` — stats, god nodes, entry points, surprising connections
 - `graphite_refresh` — rebuild and reload the graph
-
 
 
 
