@@ -66,3 +66,27 @@ def test_architecture_guide_has_pipeline_and_boundaries() -> None:
     architecture_lower = architecture.lower()
     assert "repository input" in architecture_lower
     assert "model provider" in architecture_lower
+
+
+def test_release_guide_has_gates_and_version_sources() -> None:
+    releasing = read_document("RELEASING.md")
+    lines = set(releasing.splitlines())
+
+    required_headings = (
+        "# Releasing Graphite",
+        "## Current release model",
+        "## Preconditions",
+        "## Prepare the version",
+        "## Verification gates",
+        "## Build and inspect artifacts",
+        "## Tag and publish",
+        "## Verify and recover",
+    )
+
+    for heading in required_headings:
+        assert heading in lines
+
+    releasing_lower = releasing.lower()
+    assert "pyproject.toml" in releasing_lower
+    assert "src/graphite/__init__.py" in releasing_lower
+    assert "model" in releasing_lower
