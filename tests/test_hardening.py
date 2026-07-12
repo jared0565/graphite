@@ -6,6 +6,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from graphite.cli import main
 from graphite.config import Config
 from graphite.extract.ast import extract_all
@@ -13,6 +15,7 @@ from graphite.analyze import analyze
 from graphite.graph import build_graph
 from graphite.ingest import collect_files
 import graphite.git as git_module
+import graphite.ingest as ingest_module
 
 
 def _write(path: Path, text: str) -> None:
@@ -102,6 +105,131 @@ def test_ingest_falls_back_when_repository_path_has_only_fake_git(
     entries = collect_files(root, Config())
 
     assert "src/app.py" in {entry.rel_path for entry in entries}
+
+
+def test_git_file_listing_rejects_invalid_utf8(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "repository"
+    (root / ".git").mkdir(parents=True)
+
+    class FakeRunner:
+        def __init__(self, project_root):
+            assert project_root == root.resolve()
+
+        def run(self, arguments, *, timeout_seconds):
+            return subprocess.CompletedProcess(arguments, 0, b"invalid-\xff.py\0", b"")
+
+    monkeypatch.setattr(ingest_module, "GitRunner", FakeRunner)
+
+    assert ingest_module._git_ls_files(root.resolve()) is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native path containment")
+@pytest.mark.parametrize(
+    "hostile_path",
+    [r"..\secret.py", r"C:\secret.py", r"\\server\share\secret.py"],
+)
+def test_git_file_listing_rejects_windows_escape_paths(
+    tmp_path: Path, monkeypatch, hostile_path: str
+) -> None:
+    root = tmp_path / "repository"
+    (root / ".git").mkdir(parents=True)
+
+    class FakeRunner:
+        def __init__(self, project_root):
+            assert project_root == root.resolve()
+
+        def run(self, arguments, *, timeout_seconds):
+            return subprocess.CompletedProcess(
+                arguments, 0, hostile_path.encode("utf-8") + b"\0", b""
+            )
+
+    monkeypatch.setattr(ingest_module, "GitRunner", FakeRunner)
+
+    assert ingest_module._git_ls_files(root.resolve()) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX literal backslash behavior")
+def test_git_file_listing_preserves_safe_posix_literal_backslash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "repository"
+    (root / ".git").mkdir(parents=True)
+    _write(root / r"..\secret.py", "safe literal filename\n")
+
+    class FakeRunner:
+        def __init__(self, project_root):
+            assert project_root == root.resolve()
+
+        def run(self, arguments, *, timeout_seconds):
+            return subprocess.CompletedProcess(arguments, 0, b"..\\secret.py\0", b"")
+
+    monkeypatch.setattr(ingest_module, "GitRunner", FakeRunner)
+
+    assert ingest_module._git_ls_files(root.resolve()) == [r"..\secret.py"]
+
+
+def test_collect_files_never_reads_git_listed_symlink_outside_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "repository"
+    outside = tmp_path / "secret.py"
+    link = root / "linked.py"
+    (root / ".git").mkdir(parents=True)
+    _write(root / "src" / "safe.py", "safe = True\n")
+    _write(outside, "secret = True\n")
+    try:
+        link.symlink_to(outside)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    class FakeRunner:
+        def __init__(self, project_root):
+            assert project_root == root.resolve()
+
+        def run(self, arguments, *, timeout_seconds):
+            return subprocess.CompletedProcess(arguments, 0, b"linked.py\0", b"")
+
+    def guarded_binary(path: Path) -> bool:
+        assert path.resolve() != outside.resolve()
+        return False
+
+    def guarded_hash(path: Path) -> str:
+        assert path.resolve() != outside.resolve()
+        return "safe-hash"
+
+    monkeypatch.setattr(ingest_module, "GitRunner", FakeRunner)
+    monkeypatch.setattr(ingest_module, "_is_binary", guarded_binary)
+    monkeypatch.setattr(ingest_module, "file_hash", guarded_hash)
+
+    entries = collect_files(root, Config())
+
+    assert "linked.py" not in {entry.rel_path for entry in entries}
+
+
+def test_collect_files_final_boundary_rejects_symlink_escape(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "repository"
+    outside = tmp_path / "secret.py"
+    link = root / "linked.py"
+    root.mkdir()
+    _write(outside, "secret = True\n")
+    try:
+        link.symlink_to(outside)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    monkeypatch.setattr(ingest_module, "_git_ls_files", lambda _root: ["linked.py"])
+
+    def must_not_read(_path: Path):
+        raise AssertionError("external file must not be read or hashed")
+
+    monkeypatch.setattr(ingest_module, "_is_binary", must_not_read)
+    monkeypatch.setattr(ingest_module, "file_hash", must_not_read)
+
+    assert collect_files(root, Config()) == []
 
 
 def test_filesystem_fallback_prunes_dynamic_dirs_by_component_prefix(tmp_path: Path) -> None:

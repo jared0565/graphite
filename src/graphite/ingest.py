@@ -124,6 +124,31 @@ def _should_skip(
     return False
 
 
+def _resolve_contained_path(root: Path, candidate: Path) -> Path | None:
+    """Resolve *candidate* and return it only when strictly below *root*."""
+    try:
+        resolved = candidate.resolve()
+        relative = resolved.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    if relative == Path("."):
+        return None
+    return resolved
+
+
+def _normalize_git_path(root: Path, value: str) -> str | None:
+    posix_path = PurePosixPath(value)
+    if not value or value == "." or posix_path.is_absolute() or ".." in posix_path.parts:
+        return None
+    native_path = Path(value)
+    if native_path.is_absolute():
+        return None
+    resolved = _resolve_contained_path(root, root / native_path)
+    if resolved is None:
+        return None
+    return resolved.relative_to(root).as_posix()
+
+
 def _git_ls_files(root: Path) -> list[str] | None:
     """Return tracked and untracked non-ignored files, or None if git is unavailable."""
     git_dir = root / ".git"
@@ -139,18 +164,18 @@ def _git_ls_files(root: Path) -> list[str] | None:
     if result.returncode != 0:
         return None
     try:
-        files = result.stdout.decode("utf-8").split("\x00")
+        output = result.stdout.decode("utf-8")
     except UnicodeDecodeError:
         return None
-    paths = [path for path in files if path]
-    if any(
-        PurePosixPath(path).is_absolute()
-        or path == "."
-        or ".." in PurePosixPath(path).parts
-        for path in paths
-    ):
+    if not output:
+        return []
+    if not output.endswith("\x00"):
         return None
-    return paths
+    paths = output[:-1].split("\x00")
+    normalized = [_normalize_git_path(root, path) for path in paths]
+    if any(path is None for path in normalized):
+        return None
+    return [path for path in normalized if path is not None]
 
 
 def _walk_files(
@@ -198,7 +223,9 @@ def collect_files(root: Path, cfg: Config) -> list[FileEntry]:
 
     entries: list[FileEntry] = []
     for rel in rel_paths:
-        abs_path = root / rel
+        abs_path = _resolve_contained_path(root, root / Path(rel))
+        if abs_path is None:
+            continue
         try:
             size = abs_path.stat().st_size
         except OSError:
