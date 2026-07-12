@@ -33,3 +33,26 @@ def test_readme_links_to_contributor_guides() -> None:
     assert "[Contributor guide](CONTRIBUTING.md)" in readme
     assert "[Architecture guide](ARCHITECTURE.md)" in readme
     assert "[Release guide](RELEASING.md)" in readme
+
+
+def test_architecture_guide_has_pipeline_and_boundaries() -> None:
+    architecture = read_document("ARCHITECTURE.md")
+    lines = set(architecture.splitlines())
+
+    required_headings = (
+        "# Graphite architecture",
+        "## System context",
+        "## Processing pipeline",
+        "## Module map",
+        "## Trust boundaries",
+        "## Artifacts and state",
+        "## Failure behavior",
+        "## Extension points and invariants",
+    )
+
+    for heading in required_headings:
+        assert heading in lines
+
+    architecture_lower = architecture.lower()
+    assert "repository input" in architecture_lower
+    assert "model provider" in architecture_lower
