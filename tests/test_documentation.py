@@ -99,3 +99,6 @@ def test_release_guide_has_gates_and_version_sources() -> None:
     assert "--llm none" in releasing
     assert "never recreate or move a public tag" in releasing_lower
     assert "never reuse a released version" in releasing_lower
+    assert "sys.argv[1]" in releasing
+    assert "normalized forward slashes" in releasing_lower
+    assert "shell metacharacters" in releasing_lower

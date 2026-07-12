@@ -25,6 +25,16 @@ semantic version and scoped release notes have been agreed. Confirm the intended
 and release branch. Build tools and dependencies must come from sources approved before
 the release.
 
+The command examples target PowerShell and POSIX-like shells only where their semantics
+are shared; activation commands remain shell-specific. Before use, the operator must
+replace every path token with a resolved absolute path using normalized forward slashes.
+This applies to `CHECK_DIR`, `ARTIFACT_DIR`, `WHEELHOUSE_DIR`,
+`DEPENDENCY_MANIFEST`, `SMOKE_DIR`, `WHEEL_PATH`, `SDIST_PATH`, and
+`RELEASE_NOTES_PATH`. Substituted paths must exclude whitespace, newlines or other
+control characters, and shell metacharacters. Validate every substituted value, retain
+the quotes shown below, and stop if a path violates this policy. These examples do not
+claim universal shell neutrality.
+
 Run these non-destructive checks:
 
 ```text
@@ -69,8 +79,8 @@ be ignored. After verification, clean it with a safe operation appropriate to th
 current shell, re-check containment before any removal, and require a clean status. No
 generic recursive-delete command is provided by this guide.
 
-In the commands below, replace the literal `APPROVED-CHECK-DIR` with the resolved path
-to a verified-fresh external directory named for this release. Do not add angle brackets.
+In the commands below, `CHECK_DIR` is the policy-compliant path to a verified-fresh
+external directory named for this release. Do not add angle brackets.
 
 ```text
 python -m ruff check .
@@ -79,9 +89,9 @@ python -m graphite --help
 python -m graphite scan --help
 python -m graphite build --help
 python -m graphite validate --help
-python -m graphite --llm none --output-dir APPROVED-CHECK-DIR/graph-out --cache-dir APPROVED-CHECK-DIR/cache scan .
-python -m graphite --llm none --output-dir APPROVED-CHECK-DIR/graph-out --cache-dir APPROVED-CHECK-DIR/cache build .
-python -m graphite validate --graph-json APPROVED-CHECK-DIR/graph-out/graph.json --json
+python -m graphite --llm none --output-dir "CHECK_DIR/graph-out" --cache-dir "CHECK_DIR/cache" scan .
+python -m graphite --llm none --output-dir "CHECK_DIR/graph-out" --cache-dir "CHECK_DIR/cache" build .
+python -m graphite validate --graph-json "CHECK_DIR/graph-out/graph.json" --json
 ```
 
 The build must create valid deterministic JSON, Markdown, and HTML at `graph.json`,
@@ -107,21 +117,21 @@ python -c "import importlib.metadata as m; print('build', m.version('build')); p
 
 Choose a unique external output path named for the version. Resolve it and confirm it is
 the intended location. It must be absent or a verified fresh empty directory. Stop if it
-contains anything; never silently reuse or delete unknown content. Replace the literal
-`APPROVED-ARTIFACT-DIR` below with that path and build without network-capable isolation:
+contains anything; never silently reuse or delete unknown content. Substitute that path
+for `ARTIFACT_DIR` and build without network-capable isolation:
 
 ```text
-python -m build --no-isolation --sdist --wheel --outdir APPROVED-ARTIFACT-DIR
+python -m build --no-isolation --sdist --wheel --outdir "ARTIFACT_DIR"
 ```
 
 The build must produce exactly one wheel and one source distribution matching the
 approved version, normally `graphite-VERSION-py3-none-any.whl` and
-`graphite-VERSION.tar.gz`. Stop for extra, missing, or mismatched artifacts. List both
-archives:
+`graphite-VERSION.tar.gz`. Stop for extra, missing, or mismatched artifacts. Resolve the
+actual files as the policy-compliant `WHEEL_PATH` and `SDIST_PATH`, then list both:
 
 ```text
-python -m zipfile --list APPROVED-ARTIFACT-DIR/graphite-VERSION-py3-none-any.whl
-python -m tarfile -l APPROVED-ARTIFACT-DIR/graphite-VERSION.tar.gz
+python -m zipfile --list "WHEEL_PATH"
+python -m tarfile -l "SDIST_PATH"
 ```
 
 Using an archive viewer in a separate verified-fresh inspection directory, inspect the
@@ -131,12 +141,12 @@ wheel's `METADATA` fields `Name`, `Version`, and every `Requires-Dist`, plus
 source and build files. Both archives must exclude credentials, caches, VCS files,
 local configuration, scratch output, and absolute developer paths.
 
-Compute and record a SHA256 hash for each exact artifact. The following shell-neutral
-Python commands use the same literal `VERSION` substitution:
+Compute and record a SHA256 hash for each exact artifact. Paths are quoted shell
+arguments and are never embedded in Python source:
 
 ```text
-python -c "import hashlib,pathlib; p=pathlib.Path('APPROVED-ARTIFACT-DIR/graphite-VERSION-py3-none-any.whl'); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)"
-python -c "import hashlib,pathlib; p=pathlib.Path('APPROVED-ARTIFACT-DIR/graphite-VERSION.tar.gz'); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)"
+python -c "import hashlib, pathlib, sys; p = pathlib.Path(sys.argv[1]); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)" "WHEEL_PATH"
+python -c "import hashlib, pathlib, sys; p = pathlib.Path(sys.argv[1]); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)" "SDIST_PATH"
 ```
 
 Smoke testing requires a maintainer-approved, hash-verified dependency snapshot and
@@ -144,16 +154,16 @@ offline wheelhouse prepared before release. Record its source and hashes. No dep
 lockfile is currently claimed to be checked in; absence of an approved snapshot is a
 stop condition. Create a fresh virtual environment in an approved external temporary
 workspace, activate it using the current shell, and install dependencies offline. In
-the example, replace every uppercase literal with its resolved approved path:
+the example, use the validated path tokens defined above:
 
 ```text
-python -m venv APPROVED-SMOKE-DIR
+python -m venv "SMOKE_DIR"
 # POSIX shell activation:
-. APPROVED-SMOKE-DIR/bin/activate
+. "SMOKE_DIR/bin/activate"
 # PowerShell activation:
-APPROVED-SMOKE-DIR\Scripts\Activate.ps1
-python -m pip install --no-cache-dir --no-index --find-links APPROVED-WHEELHOUSE --require-hashes -r APPROVED-HASHED-REQUIREMENTS
-python -m pip install --no-index --no-deps APPROVED-ARTIFACT-DIR/graphite-VERSION-py3-none-any.whl
+& "SMOKE_DIR/Scripts/Activate.ps1"
+python -m pip install --no-cache-dir --no-index --find-links "WHEELHOUSE_DIR" --require-hashes -r "DEPENDENCY_MANIFEST"
+python -m pip install --no-index --no-deps "WHEEL_PATH"
 python -m pip check
 ```
 
@@ -193,11 +203,12 @@ then require `git status --short` to be clean in the release checkout.
 
 Explicitly enumerate every approved candidate file. Stage the two version files and each
 approved release-note or documentation file by name; never use `git add .`. In the
-example, `PATH-TO-APPROVED-RELEASE-NOTES` is a literal to replace, and may be repeated
-for multiple approved files:
+example, `RELEASE_NOTES_PATH` follows the path policy above and may be repeated for
+multiple approved files. Omit it only when there are no approved release-note or
+documentation changes:
 
 ```text
-git add pyproject.toml src/graphite/__init__.py PATH-TO-APPROVED-RELEASE-NOTES
+git add pyproject.toml src/graphite/__init__.py "RELEASE_NOTES_PATH"
 git diff --cached --check
 git diff --cached
 git commit -m "release: prepare vVERSION"
@@ -223,8 +234,9 @@ Any unexpected count is a stop condition. Exit 1 from the local-tag check means 
 is absent; exit 0 means it exists, and any other result is inconclusive. For `git ls-remote
 --exit-code`, exit 2 means no matching remote tag; exit 0 means the tag exists, while any
 other failure is inconclusive. Stop unless absence is conclusively established. Also
-confirm the version is available at the approved package destination using its approved
-destination-specific mechanism; inability to prove availability is a stop condition.
+confirm through the approved destination-specific mechanism that the approved version is
+not already published or reserved and is eligible for publication; inability to prove
+all three conditions is a stop condition.
 
 Only then create the annotated tag, record its tag object SHA, and push the approved
 branch followed by the tag:
