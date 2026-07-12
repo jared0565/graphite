@@ -5,6 +5,8 @@ import importlib.util
 import io
 import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -43,6 +45,65 @@ class _FakeProcess:
 
     def kill(self) -> None:
         self.killed = True
+
+
+class _DescendantHeldPipe:
+    def __init__(self, *, close_unblocks: bool = True) -> None:
+        self.close_attempted = False
+        self.close_unblocks = close_unblocks
+        self._closed = threading.Event()
+
+    def read(self, size: int = -1) -> bytes:
+        self._closed.wait()
+        return b""
+
+    def close(self) -> None:
+        self.close_attempted = True
+        if self.close_unblocks:
+            self._closed.set()
+
+
+class _HeldPipeProcess:
+    def __init__(
+        self,
+        *,
+        wait_always_times_out: bool = False,
+        close_unblocks_reader: bool = True,
+    ) -> None:
+        self.stdout = _DescendantHeldPipe(close_unblocks=close_unblocks_reader)
+        self.returncode = 0
+        self.wait_always_times_out = wait_always_times_out
+        self.killed = False
+        self.wait_calls: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.wait_calls.append(timeout)
+        if self.wait_always_times_out:
+            if timeout is None:
+                threading.Event().wait()
+            raise subprocess.TimeoutExpired("private", timeout)
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def _invoke_runner_in_daemon(
+    runner: object, *, timeout_seconds: float
+) -> tuple[threading.Thread, dict[str, object]]:
+    outcome: dict[str, object] = {}
+
+    def invoke() -> None:
+        try:
+            outcome["result"] = runner.run(  # type: ignore[attr-defined]
+                ["status"], timeout_seconds=timeout_seconds, max_stdout_bytes=64
+            )
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=invoke, daemon=True)
+    thread.start()
+    return thread, outcome
 
 
 def _runner_with_fake_process(
@@ -118,6 +179,42 @@ def test_git_runner_kills_and_waits_after_timeout(
 
     assert process.killed is True
     assert len(process.wait_calls) >= 2
+
+
+def test_git_runner_bounds_cleanup_when_descendant_holds_stdout_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = _HeldPipeProcess(close_unblocks_reader=False)
+    runner, _ = _runner_with_fake_process(tmp_path, monkeypatch, process)  # type: ignore[arg-type]
+    started = time.monotonic()
+
+    thread, outcome = _invoke_runner_in_daemon(runner, timeout_seconds=0.01)
+    thread.join(0.75)
+
+    assert thread.is_alive() is False
+    assert time.monotonic() - started < 0.75
+    assert isinstance(outcome.get("error"), git_module.GitLaunchError)
+    assert process.killed is True
+    assert process.stdout.close_attempted is True
+    assert all(timeout is not None for timeout in process.wait_calls)
+
+
+def test_git_runner_bounds_cleanup_when_wait_keeps_timing_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = _HeldPipeProcess(wait_always_times_out=True)
+    runner, _ = _runner_with_fake_process(tmp_path, monkeypatch, process)  # type: ignore[arg-type]
+    started = time.monotonic()
+
+    thread, outcome = _invoke_runner_in_daemon(runner, timeout_seconds=0.01)
+    thread.join(0.75)
+
+    assert thread.is_alive() is False
+    assert time.monotonic() - started < 0.75
+    assert isinstance(outcome.get("error"), git_module.GitTimeoutError)
+    assert process.killed is True
+    assert process.stdout.close_attempted is True
+    assert all(timeout is not None for timeout in process.wait_calls)
 
 
 def test_git_runner_resolves_only_external_absolute_windows_candidate(

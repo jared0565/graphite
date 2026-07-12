@@ -11,6 +11,7 @@ from typing import Sequence
 
 DEFAULT_GIT_STDOUT_MAX_BYTES = 16 * 1024 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
+_PROCESS_CLEANUP_TIMEOUT_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -89,7 +90,7 @@ class GitRunner:
             raise GitLaunchError("unable to run Git command") from exc
 
         if process.stdout is None:
-            _kill_and_wait(process)
+            _bounded_cleanup(process)
             raise GitLaunchError("unable to run Git command")
 
         stdout = bytearray()
@@ -120,32 +121,47 @@ class GitRunner:
         try:
             returncode = process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
-            _kill_and_wait(process)
-            reader.join()
+            _bounded_cleanup(process, reader)
             raise GitTimeoutError("Git command timeout") from exc
         except OSError as exc:
-            _kill_and_wait(process)
-            reader.join()
+            _bounded_cleanup(process, reader)
             raise GitLaunchError("unable to run Git command") from exc
 
-        reader.join()
+        reader.join(timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+        if reader.is_alive():
+            _bounded_cleanup(process, reader)
+            raise GitLaunchError("unable to run Git command")
         if overflow.is_set():
-            _kill_and_wait(process)
+            _bounded_cleanup(process, reader)
             raise GitOutputLimitError("Git command output limit exceeded")
         if read_failed.is_set():
             raise GitLaunchError("unable to run Git command")
         return GitResult(returncode=returncode, stdout=bytes(stdout))
 
 
-def _kill_and_wait(process: subprocess.Popen[bytes]) -> None:
+def _bounded_cleanup(
+    process: subprocess.Popen[bytes], reader: threading.Thread | None = None
+) -> bool:
+    """Best-effort cleanup that never waits beyond the fixed cleanup deadline."""
     try:
         process.kill()
     except OSError:
         pass
+    if process.stdout is not None:
+        try:
+            process.stdout.close()
+        except OSError:
+            pass
+    wait_confirmed = True
     try:
-        process.wait()
-    except OSError:
-        pass
+        process.wait(timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+    except (subprocess.TimeoutExpired, OSError):
+        wait_confirmed = False
+    reader_stopped = True
+    if reader is not None:
+        reader.join(timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
+        reader_stopped = not reader.is_alive()
+    return wait_confirmed and reader_stopped
 
 
 def _resolve_git_executable(

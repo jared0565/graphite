@@ -160,7 +160,9 @@ def _normalize_git_path(root: Path, value: str) -> str | None:
 def _git_ls_files(root: Path, *, max_files: int | None = None) -> list[str] | None:
     """Return bounded Git files, or None only when *root* is not a Git repository."""
     git_dir = root / ".git"
-    if not git_dir.exists():
+    if not os.path.lexists(git_dir):
+        if any(os.path.lexists(ancestor / ".git") for ancestor in root.parents):
+            raise IngestError("nested Git roots are unsupported")
         return None
     try:
         result = GitRunner(root).run(

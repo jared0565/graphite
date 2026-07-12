@@ -14,7 +14,7 @@ from graphite.config import Config
 from graphite.extract.ast import extract_all
 from graphite.analyze import analyze
 from graphite.graph import build_graph
-from graphite.ingest import collect_files
+from graphite.ingest import IngestError, collect_files
 import graphite.git as git_module
 import graphite.ingest as ingest_module
 
@@ -165,6 +165,27 @@ def test_non_git_directory_still_uses_filesystem_walk(tmp_path: Path) -> None:
     assert [entry.rel_path for entry in collect_files(tmp_path, Config())] == [
         "src/app.py"
     ]
+
+
+def test_nested_path_inside_git_repository_fails_closed_without_walk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / ".git").mkdir()
+    nested = tmp_path / "nested"
+    _write(nested / "ignored" / "secret.env", "SECRET=private\n")
+
+    def must_not_walk(*args, **kwargs):
+        raise AssertionError("nested Git root must not use filesystem walk")
+
+    def must_not_read(*args, **kwargs):
+        raise AssertionError("nested ignored file must not be read or hashed")
+
+    monkeypatch.setattr(ingest_module, "_walk_files", must_not_walk)
+    monkeypatch.setattr(ingest_module, "_is_binary", must_not_read)
+    monkeypatch.setattr(ingest_module, "file_hash", must_not_read)
+
+    with pytest.raises(IngestError, match="nested Git roots are unsupported"):
+        collect_files(nested, Config(include_dotfiles=True))
 
 
 def test_git_enumeration_applies_max_files_before_returning_paths(
