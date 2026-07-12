@@ -53,6 +53,16 @@ def test_architecture_guide_has_pipeline_and_boundaries() -> None:
     for heading in required_headings:
         assert heading in lines
 
+    boundary_labels = (
+        "**Repository input.**",
+        "**Process boundary.**",
+        "**Artifact and browser boundary.**",
+        "**Model and network boundary.**",
+    )
+
+    for label in boundary_labels:
+        assert label in lines
+
     architecture_lower = architecture.lower()
     assert "repository input" in architecture_lower
     assert "model provider" in architecture_lower
