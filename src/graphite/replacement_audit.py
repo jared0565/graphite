@@ -265,3 +265,4 @@ def _find_graphify_text_references(root: Path) -> list[dict[str, Any]]:
             if "graphify" in line.lower():
                 refs.append({"file": rel, "line": index, "text": line.strip()})
     return refs
+
