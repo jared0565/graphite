@@ -9,6 +9,7 @@ import pytest
 from graphite.config import Config
 from graphite.doctor import (
     DoctorCheck,
+    DoctorStatus,
     build_report,
     check_git,
     check_graph,
@@ -37,8 +38,7 @@ def test_report_is_typed_sorted_ranked_and_safe(tmp_path: Path) -> None:
     with pytest.raises(Exception):
         checks[0].status = "ready"  # type: ignore[misc]
     text = format_doctor_text(report)
-    assert "status: degraded" in text
-    assert "Fix it" in text
+    assert text == "[graphite] doctor: degraded\n[degraded] A: degraded\n  remediation: Fix it\n[optional] Z: optional\n"
 
 
 def test_empty_report_ready_and_blocked_exits_one(tmp_path: Path) -> None:
@@ -47,6 +47,22 @@ def test_empty_report_ready_and_blocked_exits_one(tmp_path: Path) -> None:
     assert report["exit_code"] == 1
     with pytest.raises(ValueError):
         DoctorCheck("x", "X", "bad", "no")
+    assert DoctorStatus is not None
+
+
+def test_build_report_resolves_root_and_rejects_invalid_check_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert build_report(Path("."), [], deep=False, llm_included=False)["root"] == tmp_path.name
+
+    class InvalidCheck:
+        code = "bad"
+        status = "invalid"
+
+        def to_dict(self) -> dict:
+            return {"code": self.code, "status": self.status}
+
+    with pytest.raises(ValueError, match="invalid doctor check status"):
+        build_report(tmp_path, [InvalidCheck()], deep=False, llm_included=False)  # type: ignore[list-item]
 
 
 def test_python_and_git_checks_are_bounded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -57,14 +73,26 @@ def test_python_and_git_checks_are_bounded(monkeypatch: pytest.MonkeyPatch, tmp_
             assert root == tmp_path
 
         def run(self, args, *, timeout_seconds, max_stdout_bytes):
-            assert args == ["ls-files", "--cached", "--others", "--exclude-standard"]
+            assert args == ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]
             assert timeout_seconds == 10.0
-            return type("R", (), {"returncode": 0, "stdout": b"a\nb\n"})()
+            return type("R", (), {"returncode": 0, "stdout": b"line\ninside\0second\0"})()
 
     monkeypatch.setattr("graphite.doctor.GitRunner", Runner)
     result = check_git(tmp_path)
     assert result.status == "ready"
     assert result.details == {"record_count": 2}
+
+
+def test_git_requires_nul_terminated_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class Runner:
+        def __init__(self, root: Path):
+            pass
+
+        def run(self, *args, **kwargs):
+            return type("R", (), {"returncode": 0, "stdout": b"unterminated"})()
+
+    monkeypatch.setattr("graphite.doctor.GitRunner", Runner)
+    assert check_git(tmp_path).status == "blocked"
 
 
 def _bundle() -> dict:
@@ -96,9 +124,14 @@ def test_mcp_typescript_and_llm_never_leak_raw_values(monkeypatch: pytest.Monkey
     assert check_mcp().status == "optional"
 
     monkeypatch.setattr("graphite.doctor.shutil.which", lambda name: "node")
-    monkeypatch.setattr("graphite.doctor._run_node_probe", lambda root, script: (1, b"", False))
-    ts = check_typescript(tmp_path)
-    assert ts.status == "degraded"
+    captured = {}
+    def node_probe(root, script, *, timeout_seconds):
+        captured["timeout"] = timeout_seconds
+        return 0, b'{"ok":true,"version":"5.0"}', False
+    monkeypatch.setattr("graphite.doctor._run_node_probe", node_probe)
+    ts = check_typescript(tmp_path, timeout_seconds=1.25)
+    assert ts.status == "ready"
+    assert captured == {"timeout": 1.25}
     assert "RAW" not in json.dumps(ts.to_dict())
 
     secret = "CREDENTIAL_SENTINEL"
@@ -124,10 +157,32 @@ def test_daemon_missing_is_optional_and_exposes_counts_only(monkeypatch: pytest.
 def test_run_doctor_deep_runner_is_injected_and_repo_not_mutated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("graphite.doctor._fast_checks", lambda root, cfg, daemon_base: [])
     before = sorted(tmp_path.iterdir())
-    fast = run_doctor(tmp_path, Config(), deep=False)
+    fast = run_doctor(tmp_path, Config(), deep=False, include_llm=True)
     assert fast["checks"] == []
+    assert fast["llm_included"] is False
     calls = []
-    deep = run_doctor(tmp_path, Config(), deep=True, include_llm=True, deep_runner=lambda root, cfg, include_llm: calls.append(root) or [DoctorCheck("deep", "Deep", "ready", "ok")])
-    assert calls == [tmp_path.resolve()]
+    def deep_runner(root, *, cfg, include_llm):
+        calls.append((root, cfg, include_llm))
+        return [DoctorCheck("deep", "Deep", "ready", "ok")]
+    cfg = Config()
+    deep = run_doctor(tmp_path, cfg, deep=True, include_llm=True, deep_runner=deep_runner)
+    assert calls == [(tmp_path.resolve(), cfg, True)]
     assert deep["llm_included"] is True
     assert sorted(tmp_path.iterdir()) == before
+
+
+def test_run_doctor_uses_default_daemon_base(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    daemon_base = tmp_path / "daemon-base"
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    observed = []
+    monkeypatch.setattr("graphite.doctor.default_projects_root", lambda: daemon_base)
+    monkeypatch.setattr("graphite.doctor.check_python", lambda: DoctorCheck("python", "Python", "ready", "ok"))
+    monkeypatch.setattr("graphite.doctor.check_git", lambda root: DoctorCheck("git", "Git", "ready", "ok"))
+    monkeypatch.setattr("graphite.doctor.check_graph", lambda root, cfg: DoctorCheck("graph", "Graph", "ready", "ok"))
+    monkeypatch.setattr("graphite.doctor.check_mcp", lambda: DoctorCheck("mcp", "MCP", "ready", "ok"))
+    monkeypatch.setattr("graphite.doctor.check_typescript", lambda root: DoctorCheck("typescript", "TypeScript", "ready", "ok"))
+    monkeypatch.setattr("graphite.doctor.check_llm_config", lambda cfg: DoctorCheck("llm", "LLM", "optional", "ok"))
+    monkeypatch.setattr("graphite.doctor.evaluate_daemon_health", lambda base, **kwargs: observed.append(base) or {"ok": True, "status": "ok", "daemon_status": "ok", "errors": [], "warnings": [], "process": {}, "startup": {}})
+    run_doctor(selected, Config())
+    assert observed == [daemon_base.resolve()]

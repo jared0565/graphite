@@ -10,15 +10,16 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
 
-from .config import Config
+from .config import Config, default_projects_root
 from .daemon_health import HealthOptions, evaluate_daemon_health
 from .freshness import check_graph_freshness
 from .git import GitError, GitRunner
 from .validation import validate_graph_bundle
 
-STATUSES = ("ready", "optional", "degraded", "blocked")
+DoctorStatus = Literal["ready", "optional", "degraded", "blocked"]
+STATUSES: tuple[DoctorStatus, ...] = ("ready", "optional", "degraded", "blocked")
 _RANK = {name: rank for rank, name in enumerate(STATUSES)}
 _ARTIFACT_LIMIT = 128 * 1024 * 1024
 _TEXT_LIMIT = 500
@@ -28,7 +29,7 @@ _TEXT_LIMIT = 500
 class DoctorCheck:
     code: str
     label: str
-    status: str
+    status: DoctorStatus
     summary: str
     details: Mapping[str, Any] = field(default_factory=dict)
     remediation: tuple[str, ...] = ()
@@ -45,17 +46,19 @@ class DoctorCheck:
 
 def build_report(root: Path, checks: Iterable[DoctorCheck], deep: bool, llm_included: bool) -> dict[str, Any]:
     ordered = sorted(checks, key=lambda check: check.code)
+    if any(check.status not in _RANK for check in ordered):
+        raise ValueError("invalid doctor check status")
     status = max((check.status for check in ordered), key=_RANK.get, default="ready")
-    return {"schema_version": 1, "root": root.name, "deep": bool(deep), "llm_included": bool(llm_included), "status": status, "exit_code": 1 if status == "blocked" else 0, "checks": [check.to_dict() for check in ordered]}
+    return {"schema_version": 1, "root": root.resolve().name, "deep": bool(deep), "llm_included": bool(llm_included), "status": status, "exit_code": 1 if status == "blocked" else 0, "checks": [check.to_dict() for check in ordered]}
 
 
 def format_doctor_text(report: Mapping[str, Any]) -> str:
-    lines = [f"Graphite doctor — {report.get('root', '')}", f"status: {report.get('status', 'ready')}"]
+    lines = [f"[graphite] doctor: {report.get('status', 'ready')}"]
     for item in report.get("checks", []):
         lines.append(f"[{item['status']}] {item['label']}: {item['summary']}")
         for remediation in item.get("remediation", []):
             lines.append(f"  remediation: {remediation}")
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"
 
 
 def check_python() -> DoctorCheck:
@@ -66,10 +69,12 @@ def check_python() -> DoctorCheck:
 
 def check_git(root: Path) -> DoctorCheck:
     try:
-        result = GitRunner(root).run(["ls-files", "--cached", "--others", "--exclude-standard"], timeout_seconds=10.0, max_stdout_bytes=16 * 1024 * 1024)
+        result = GitRunner(root).run(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], timeout_seconds=10.0, max_stdout_bytes=16 * 1024 * 1024)
         if result.returncode != 0:
             raise GitError("Git command failed")
-        count = len([line for line in result.stdout.splitlines() if line])
+        if result.stdout and not result.stdout.endswith(b"\0"):
+            raise GitError("Git returned malformed output")
+        count = result.stdout.count(b"\0")
         return DoctorCheck("git", "Git", "ready", "Git repository inventory is readable.", {"record_count": count})
     except (GitError, OSError):
         return DoctorCheck("git", "Git", "blocked", "Git repository inventory is unavailable.", remediation=("Verify Git 2.38+ and repository access.",))
@@ -137,12 +142,12 @@ def check_mcp() -> DoctorCheck:
     return DoctorCheck("mcp", "MCP", "optional", "MCP integration is not fully activated.", details, ("Install the Graphite MCP extra and ensure `graphite-mcp` is on PATH if MCP is needed.",))
 
 
-def check_typescript(root: Path) -> DoctorCheck:
+def check_typescript(root: Path, *, timeout_seconds: float = 5.0) -> DoctorCheck:
     if not shutil.which("node"):
         return DoctorCheck("typescript", "TypeScript", "optional", "Node.js is unavailable; TypeScript compiler resolution is optional.")
     script = "try{const p=require('typescript/package.json');process.stdout.write(JSON.stringify({ok:true,version:p.version}))}catch(e){process.stdout.write(JSON.stringify({ok:false,reason:'missing'}))}"
     try:
-        returncode, stdout, timed_out = _run_node_probe(root, script)
+        returncode, stdout, timed_out = _run_node_probe(root, script, timeout_seconds=timeout_seconds)
         if timed_out:
             return DoctorCheck("typescript", "TypeScript", "degraded", "TypeScript probe timed out.")
         if returncode != 0:
@@ -157,7 +162,7 @@ def check_typescript(root: Path) -> DoctorCheck:
         return DoctorCheck("typescript", "TypeScript", "degraded", "TypeScript probe returned an invalid response.")
 
 
-def _run_node_probe(root: Path, script: str) -> tuple[int, bytes, bool]:
+def _run_node_probe(root: Path, script: str, *, timeout_seconds: float) -> tuple[int, bytes, bool]:
     process = subprocess.Popen(
         ["node", "-e", script],
         cwd=root,
@@ -175,7 +180,7 @@ def _run_node_probe(root: Path, script: str) -> tuple[int, bytes, bool]:
     reader = threading.Thread(target=read_bounded, daemon=True)
     reader.start()
     try:
-        returncode = process.wait(timeout=5.0)
+        returncode = process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait()
@@ -213,10 +218,11 @@ def _fast_checks(root: Path, cfg: Config, daemon_base: Path | None) -> list[Doct
 
 def run_doctor(root: Path, cfg: Config, daemon_base: Path | None = None, deep: bool = False, include_llm: bool = False, deep_runner: Callable[[Path, Config, bool], Iterable[DoctorCheck]] | None = None) -> dict[str, Any]:
     selected = root.resolve()
-    checks = _fast_checks(selected, cfg, daemon_base.resolve() if daemon_base else None)
+    selected_daemon_base = (daemon_base or default_projects_root()).resolve()
+    checks = _fast_checks(selected, cfg, selected_daemon_base)
     if deep:
         if deep_runner is None:
-            from .doctor_probes import run_deep_checks
-            deep_runner = run_deep_checks
-        checks.extend(deep_runner(selected, cfg, include_llm))
-    return build_report(selected, checks, deep, include_llm)
+            from .doctor_probes import run_deep_probes
+            deep_runner = run_deep_probes
+        checks.extend(deep_runner(selected, cfg=cfg, include_llm=include_llm))
+    return build_report(selected, checks, deep, bool(deep and include_llm))
