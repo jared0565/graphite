@@ -381,3 +381,40 @@ def test_daemon_classifies_only_selected_project(monkeypatch: pytest.MonkeyPatch
     assert result.status == expected
     assert result.details["registered"] is (selected_state != "missing")
     assert str(root) not in json.dumps(result.to_dict())
+
+
+@pytest.mark.parametrize(
+    ("issue_kind", "issue_code", "registered"),
+    [
+        ("errors", "status_stale", True),
+        ("errors", "daemon_process_not_running", True),
+        ("warnings", "startup_missing", True),
+        ("errors", "status_stale", False),
+    ],
+)
+def test_daemon_preserves_global_health_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    issue_kind: str,
+    issue_code: str,
+    registered: bool,
+) -> None:
+    root = tmp_path / "selected"
+    root.mkdir()
+    projects = [{"root": str(root), "build_count": 1, "last_error": None}] if registered else []
+    monkeypatch.setattr("graphite.doctor.read_daemon_status", lambda *a, **k: {"projects": projects})
+    report = {
+        "ok": False,
+        "status": "degraded",
+        "daemon_status": "ok",
+        "errors": [],
+        "warnings": [],
+        "process": {"checked": True, "running": issue_code != "daemon_process_not_running"},
+        "startup": {"checked": True},
+        "projects": {"failing": [], "pending": [], "not_built_recently": []},
+    }
+    report[issue_kind] = [{"code": issue_code, "message": "RAW C:/secret"}]
+    monkeypatch.setattr("graphite.doctor.evaluate_daemon_health", lambda *a, **k: report)
+    result = check_daemon(root, tmp_path)
+    assert result.status == "degraded"
+    assert "RAW" not in json.dumps(result.to_dict())

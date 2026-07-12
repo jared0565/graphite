@@ -30,6 +30,11 @@ _TEXT_LIMIT = 500
 _MANIFEST_LIMIT = 16 * 1024 * 1024
 _FILE_LIMIT = 10_000
 _PROCESS_CLEANUP_SECONDS = 0.2
+_PROJECT_SCOPED_DAEMON_ISSUES = {
+    "project_failing",
+    "project_pending_initial_build",
+    "project_not_built_recently",
+}
 
 
 def _freeze_json(value: Any) -> Any:
@@ -207,6 +212,18 @@ def _category_contains(report: Mapping[str, Any], category: str, selected: str) 
     )
 
 
+def _global_issue_count(report: Mapping[str, Any], key: str) -> int:
+    issues = report.get(key, [])
+    if not isinstance(issues, list):
+        return 1
+    return sum(
+        1
+        for issue in issues
+        if not isinstance(issue, MappingABC)
+        or issue.get("code") not in _PROJECT_SCOPED_DAEMON_ISSUES
+    )
+
+
 def check_daemon(root: Path, daemon_base: Path) -> DoctorCheck:
     try:
         report = evaluate_daemon_health(daemon_base, options=HealthOptions())
@@ -227,6 +244,8 @@ def check_daemon(root: Path, daemon_base: Path) -> DoctorCheck:
         failing = bool(selected and _category_contains(report, "failing", selected))
         pending = bool(selected and _category_contains(report, "pending", selected))
         stale = bool(selected and _category_contains(report, "not_built_recently", selected))
+        global_error_count = _global_issue_count(report, "errors")
+        global_warning_count = _global_issue_count(report, "warnings")
         details = {
             "status_found": status_found,
             "registered": registered,
@@ -236,9 +255,13 @@ def check_daemon(root: Path, daemon_base: Path) -> DoctorCheck:
             "process_checked": process_checked,
             "process_running": process_running,
             "startup_checked": bool(report.get("startup", {}).get("checked")),
+            "global_error_count": global_error_count,
+            "global_warning_count": global_warning_count,
         }
         if not status_found and any(item.get("code") == "status_missing" for item in report.get("errors", [])):
             return DoctorCheck("daemon", "Daemon", "optional", "Daemon status is not present; core operation is unaffected.", details)
+        if global_error_count or global_warning_count:
+            return DoctorCheck("daemon", "Daemon", "degraded", "Daemon runtime health needs attention.", details)
         if not process_running:
             return DoctorCheck("daemon", "Daemon", "degraded", "Daemon process is not running.", details)
         if not registered:
