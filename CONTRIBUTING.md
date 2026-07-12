@@ -7,12 +7,14 @@ Contributions should be focused, reviewable changes that preserve Graphite's det
 Graphite requires Python 3.11 or newer, Git, and an isolated virtual environment. Clone and enter the repository using paths appropriate for your system:
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/jared0565/graphite.git
 cd graphite
 python -m venv .venv
 ```
 
-Activate `.venv` using the command for your shell. After following the repository's package-validation policy for every exact package name, install the declared development extra:
+If you contribute from a fork, clone the fork's verified URL instead. Keep URLs and other environment-specific values outside shell metacharacters.
+
+Activate `.venv` using the command for your shell. Before installing already-declared extras, inspect `pyproject.toml` and confirm the exact extra and dependency names. Then install the declared development extra:
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -24,7 +26,14 @@ For MCP development, install the optional MCP extra as well:
 python -m pip install -e ".[dev,mcp]"
 ```
 
-Do not add or install dependencies without first validating the exact package name under the repository package-validation policy. Prefer existing declared dependencies and standard-library capabilities when they are sufficient.
+Installing these declared extras is different from proposing a new dependency. Before adding or installing any new dependency:
+
+1. Verify its exact registry name and project identity to prevent typo-squatting or substitution.
+2. Review its maintenance activity and reputation, license compatibility, published security advisories, and transitive dependency risk.
+3. Obtain maintainer approval before changing dependency declarations or installing it for repository work.
+4. Run any package validator mandated by your organization when one exists.
+
+Prefer existing declared dependencies and standard-library capabilities when they are sufficient. Never invent a package name or assume that a similarly named registry project is the intended dependency.
 
 ## Engineering workflow
 

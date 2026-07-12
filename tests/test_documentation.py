@@ -10,6 +10,7 @@ def read_document(name: str) -> str:
 
 def test_contributing_guide_has_required_sections() -> None:
     contributing = read_document("CONTRIBUTING.md")
+    lines = set(contributing.splitlines())
 
     required_headings = (
         "# Contributing to Graphite",
@@ -23,7 +24,7 @@ def test_contributing_guide_has_required_sections() -> None:
     )
 
     for heading in required_headings:
-        assert heading in contributing
+        assert heading in lines
 
 
 def test_readme_links_to_contributor_guides() -> None:
