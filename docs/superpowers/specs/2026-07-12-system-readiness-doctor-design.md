@@ -1,7 +1,7 @@
 # System Readiness and Doctor Design
 
 **Date:** 2026-07-12
-**Status:** Design approved; written spec pending review
+**Status:** Implemented and verified
 **Scope:** Core reliability, operational health semantics, and optional-integration readiness
 
 ## Objective
@@ -248,6 +248,12 @@ The code change cannot revoke or remove a credential injected by the parent proc
 2. Human/provider action: revoke the exposed key, remove it from the parent application's secret configuration, restart affected processes including the daemon if they inherited it, and create a session-scoped replacement only when cloud testing is required.
 
 Acceptance evidence must never include the credential value.
+
+## Acceptance Record
+
+Offline repository verification passed. Recovered-daemon classification is verified, while live
+daemon process observation remains permission-limited in the acceptance environment. The live LLM
+probe was intentionally skipped pending credential rotation, whose completion remains unproven.
 
 ## Documentation
 
