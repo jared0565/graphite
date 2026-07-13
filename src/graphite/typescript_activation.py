@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import secrets
 import stat
 import sys
 import tempfile
@@ -126,32 +127,80 @@ class ActivationRequest:
 @dataclass(frozen=True)
 class _TemporaryDirectoryLease:
     name: str
+    identity: tuple[int, int]
+
+    def __fspath__(self) -> str:
+        return self.name
 
 
 def _new_temporary_directory() -> _TemporaryDirectoryLease:
-    return _TemporaryDirectoryLease(tempfile.mkdtemp(prefix="graphite-typescript-"))
+    path = Path(tempfile.mkdtemp(prefix="graphite-typescript-")).absolute()
+    details = path.lstat()
+    if not stat.S_ISDIR(details.st_mode) or _is_reparse(details):
+        raise OSError("temporary_directory_invalid")
+    return _TemporaryDirectoryLease(str(path), (details.st_dev, details.st_ino))
 
 
 _CLEANUP_SCRIPT = (
-    "import pathlib,shutil,sys;"
+    "import pathlib,shutil,stat,sys;"
     "path=pathlib.Path(sys.argv[1]);"
-    "shutil.rmtree(path)"
+    "details=path.lstat();"
+    "expected=(int(sys.argv[2]),int(sys.argv[3]));"
+    "reparse=getattr(details,'st_file_attributes',0)&"
+    "getattr(stat,'FILE_ATTRIBUTE_REPARSE_POINT',0);"
+    "valid=(details.st_dev,details.st_ino)==expected and "
+    "stat.S_ISDIR(details.st_mode) and not stat.S_ISLNK(details.st_mode) "
+    "and not reparse;"
+    "sys.exit(73) if not valid else shutil.rmtree(path)"
 )
 
 
 def _cleanup_isolated_home(
-    isolated_home: Path,
+    lease: _TemporaryDirectoryLease,
     root: Path,
     timeout: float,
 ) -> StepResult:
     if not math.isfinite(timeout) or timeout <= 0:
         return StepResult(False, "cleanup_timeout")
-    if _isolated_home_path(_TemporaryDirectoryLease(str(isolated_home)), root) is None:
+    validated_lease = _validated_isolated_lease(lease, root)
+    if validated_lease is None:
+        return StepResult(False, "cleanup_failed")
+    isolated_home = Path(validated_lease.name)
+    quarantine: Path | None = None
+    for _attempt in range(4):
+        candidate = isolated_home.with_name(
+            f".{isolated_home.name}.graphite-cleanup-{secrets.token_hex(16)}"
+        )
+        if not _path_is_lexically_present(candidate):
+            quarantine = candidate
+            break
+    if quarantine is None:
+        return StepResult(False, "cleanup_failed")
+    try:
+        os.rename(isolated_home, quarantine)
+        details = quarantine.lstat()
+        if (
+            (details.st_dev, details.st_ino) != lease.identity
+            or not stat.S_ISDIR(details.st_mode)
+            or stat.S_ISLNK(details.st_mode)
+            or _is_reparse(details)
+            or quarantine.resolve(strict=True) != quarantine
+        ):
+            return StepResult(False, "cleanup_failed")
+    except (OSError, RuntimeError, ValueError):
         return StepResult(False, "cleanup_failed")
     try:
         result = run_bounded_process(
-            [sys.executable, "-I", "-c", _CLEANUP_SCRIPT, str(isolated_home)],
-            cwd=isolated_home.parent,
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                _CLEANUP_SCRIPT,
+                str(quarantine),
+                str(lease.identity[0]),
+                str(lease.identity[1]),
+            ],
+            cwd=quarantine.parent,
             stdin=None,
             timeout_seconds=timeout,
             max_output_bytes=4096,
@@ -163,7 +212,7 @@ def _cleanup_isolated_home(
         return StepResult(False, reason)
     except Exception:
         return StepResult(False, "cleanup_failed")
-    if result.returncode != 0 or _path_is_lexically_present(isolated_home):
+    if result.returncode != 0 or _path_is_lexically_present(quarantine):
         return StepResult(False, "cleanup_failed")
     return StepResult(True, "cleaned")
 
@@ -175,7 +224,9 @@ class ActivationDependencies:
     monotonic: Callable[[], float] = time.monotonic
     runner: Runner = run_bounded_process
     temporary_directory: Callable[[], Any] = _new_temporary_directory
-    cleanup: Callable[[Path, Path, float], StepResult] = _cleanup_isolated_home
+    cleanup: Callable[[_TemporaryDirectoryLease, Path, float], StepResult] = (
+        _cleanup_isolated_home
+    )
 
 
 _ACTIVATION_LOCKS_GUARD = threading.Lock()
@@ -249,10 +300,10 @@ def _clear_cleanup_active(root: Path) -> None:
 
 
 def _bounded_temporary_cleanup(
-    isolated_home: Path,
+    lease: _TemporaryDirectoryLease,
     deadline: _Deadline,
     root: Path,
-    cleanup: Callable[[Path, Path, float], StepResult],
+    cleanup: Callable[[_TemporaryDirectoryLease, Path, float], StepResult],
 ) -> tuple[str, bool]:
     """Run terminable cleanup while lock acquisition observes its ownership."""
     expired_before_cleanup = False
@@ -268,7 +319,7 @@ def _bounded_temporary_cleanup(
     cleanup_timeout = min(_CLEANUP_MAX_SECONDS, max(0.001, remaining))
     _mark_cleanup_active(root)
     try:
-        cleanup_result = cleanup(isolated_home, root, cleanup_timeout)
+        cleanup_result = cleanup(lease, root, cleanup_timeout)
     except Exception:
         cleanup_result = StepResult(False, "cleanup_failed")
     finally:
@@ -898,7 +949,10 @@ def _resolve_manager_command(
     return command_for(executable) if executable is not None else None
 
 
-def _isolated_home_path(temporary: Any, root: Path) -> Path | None:
+def _validated_isolated_lease(
+    temporary: Any,
+    root: Path,
+) -> _TemporaryDirectoryLease | None:
     try:
         candidate = Path(temporary.name)
         if not candidate.is_absolute():
@@ -907,9 +961,12 @@ def _isolated_home_path(temporary: Any, root: Path) -> Path | None:
         details = lexical.lstat()
         canonical = lexical.resolve(strict=True)
         canonical_root = root.resolve(strict=True)
+        identity = (details.st_dev, details.st_ino)
+        supplied_identity = getattr(temporary, "identity", None)
         return (
-            canonical
-            if canonical == lexical
+            _TemporaryDirectoryLease(str(canonical), identity)
+            if (supplied_identity is None or supplied_identity == identity)
+            and canonical == lexical
             and canonical != canonical_root
             and not _is_contained(canonical, canonical_root)
             and stat.S_ISDIR(details.st_mode)
@@ -1077,6 +1134,7 @@ def _install_with_isolation(
     dependencies: ActivationDependencies,
 ) -> ActivationResult:
     temporary = None
+    isolated_lease: _TemporaryDirectoryLease | None = None
     isolated_home: Path | None = None
     result = _result_for_detection(
         detection,
@@ -1086,8 +1144,9 @@ def _install_with_isolation(
     )
     try:
         temporary = dependencies.temporary_directory()
-        isolated_home = _isolated_home_path(temporary, root)
-        if isolated_home is None:
+        isolated_lease = _validated_isolated_lease(temporary, root)
+        isolated_home = Path(isolated_lease.name) if isolated_lease is not None else None
+        if isolated_lease is None:
             result = _result_for_detection(
                 detection,
                 ActivationOutcome.INSTALLATION_FAILED,
@@ -1158,9 +1217,9 @@ def _install_with_isolation(
             attempted=True,
         )
     finally:
-        if isolated_home is not None:
+        if isolated_lease is not None:
             cleanup_status, expired_before_cleanup = _bounded_temporary_cleanup(
-                isolated_home,
+                isolated_lease,
                 deadline,
                 root,
                 dependencies.cleanup,
@@ -1184,7 +1243,10 @@ def _install_with_isolation(
                     attempted=True,
                     changed_files=result.changed_files,
                 )
-            elif cleanup_status == "cleanup_timeout" and not expired_before_cleanup:
+            elif cleanup_status == "cleanup_timeout" and (
+                not expired_before_cleanup
+                or result.outcome is not ActivationOutcome.VERIFICATION_FAILED
+            ):
                 result = _result_for_detection(
                     detection,
                     ActivationOutcome.INSTALLATION_FAILED,

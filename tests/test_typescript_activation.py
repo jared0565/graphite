@@ -1330,9 +1330,13 @@ def test_cleanup_timeout_stress_retains_no_workers_or_root_ownership(tmp_path):
         isolated = tmp_path / f"isolated-{index}"
         root.mkdir()
         isolated.mkdir()
+        details = isolated.lstat()
+        lease = typescript_activation._TemporaryDirectoryLease(
+            str(isolated), (details.st_dev, details.st_ino)
+        )
         deadline = typescript_activation._Deadline(1.0, lambda: 0.0)
         status, expired_before = typescript_activation._bounded_temporary_cleanup(
-            isolated,
+            lease,
             deadline,
             root,
             terminated_never_returning_cleanup,
@@ -1358,18 +1362,146 @@ def test_default_cleanup_uses_exact_bounded_process_contract(tmp_path, monkeypat
         raise ProbeProcessError("timeout")
 
     monkeypatch.setattr(typescript_activation, "run_bounded_process", runner)
-    result = typescript_activation._cleanup_isolated_home(isolated, root, 0.25)
+    details = isolated.lstat()
+    lease = typescript_activation._TemporaryDirectoryLease(
+        str(isolated), (details.st_dev, details.st_ino)
+    )
+    result = typescript_activation._cleanup_isolated_home(lease, root, 0.25)
 
     assert result == StepResult(False, "cleanup_timeout")
     assert len(calls) == 1
     argv, kwargs = calls[0]
     assert argv[:3] == [sys.executable, "-I", "-c"]
-    assert argv[-1] == str(isolated)
+    quarantine = Path(argv[-3])
+    assert quarantine.parent == isolated.parent
+    assert quarantine.name.startswith(f".{isolated.name}.graphite-cleanup-")
+    assert argv[-2:] == [str(details.st_dev), str(details.st_ino)]
     assert kwargs["cwd"] == isolated.parent
     assert kwargs["stdin"] is None
     assert kwargs["timeout_seconds"] == 0.25
     assert kwargs["check"] is False
     assert "shell" not in kwargs
+    shutil.rmtree(quarantine, ignore_errors=True)
+
+
+def test_cleanup_rejects_replacement_at_leased_path_without_deleting_it(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    lease = typescript_activation._new_temporary_directory()
+    leased_path = Path(lease.name)
+    original = leased_path.with_name(f"{leased_path.name}-original")
+    leased_path.rename(original)
+    leased_path.mkdir()
+    marker = leased_path / "replacement-marker"
+    marker.write_text("must survive", encoding="utf-8")
+    monkeypatch.setattr(
+        typescript_activation,
+        "run_bounded_process",
+        lambda *_args, **_kwargs: pytest.fail("cleanup child called"),
+    )
+    try:
+        result = typescript_activation._cleanup_isolated_home(lease, root, 0.25)
+        assert result == StepResult(False, "cleanup_failed")
+        assert marker.read_text(encoding="utf-8") == "must survive"
+        assert original.is_dir()
+    finally:
+        shutil.rmtree(leased_path, ignore_errors=True)
+        shutil.rmtree(original, ignore_errors=True)
+
+
+def test_cleanup_quarantine_never_deletes_object_swapped_after_validation(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    lease = typescript_activation._new_temporary_directory()
+    leased_path = Path(lease.name)
+    original = leased_path.with_name(f"{leased_path.name}-original")
+    real_rename = typescript_activation.os.rename
+    swapped = False
+
+    def swap_before_quarantine(source, destination):
+        nonlocal swapped
+        if not swapped and Path(source) == leased_path:
+            swapped = True
+            real_rename(source, original)
+            leased_path.mkdir()
+            (leased_path / "replacement-marker").write_text(
+                "must survive", encoding="utf-8"
+            )
+        return real_rename(source, destination)
+
+    monkeypatch.setattr(typescript_activation.os, "rename", swap_before_quarantine)
+    monkeypatch.setattr(
+        typescript_activation,
+        "run_bounded_process",
+        lambda *_args, **_kwargs: pytest.fail("cleanup child called"),
+    )
+    try:
+        result = typescript_activation._cleanup_isolated_home(lease, root, 0.25)
+        quarantines = list(
+            leased_path.parent.glob(f".{leased_path.name}.graphite-cleanup-*")
+        )
+        markers = [path / "replacement-marker" for path in quarantines]
+        assert result == StepResult(False, "cleanup_failed")
+        assert markers
+        assert all(marker.read_text(encoding="utf-8") == "must survive" for marker in markers)
+        assert original.is_dir()
+    finally:
+        for marker in leased_path.parent.glob(f".{leased_path.name}.graphite-cleanup-*"):
+            shutil.rmtree(marker, ignore_errors=True)
+        shutil.rmtree(leased_path, ignore_errors=True)
+        shutil.rmtree(original, ignore_errors=True)
+
+
+def test_cleanup_quarantine_preserves_new_object_at_original_path(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    lease = typescript_activation._new_temporary_directory()
+    leased_path = Path(lease.name)
+
+    def runner(argv, **_kwargs):
+        quarantine = Path(argv[-3])
+        leased_path.mkdir()
+        (leased_path / "replacement-marker").write_text(
+            "must survive", encoding="utf-8"
+        )
+        shutil.rmtree(quarantine)
+        return ProbeProcessResult(0, b"", b"", 0)
+
+    monkeypatch.setattr(typescript_activation, "run_bounded_process", runner)
+    try:
+        result = typescript_activation._cleanup_isolated_home(lease, root, 0.25)
+        assert result == StepResult(True, "cleaned")
+        assert (leased_path / "replacement-marker").read_text(encoding="utf-8") == "must survive"
+    finally:
+        shutil.rmtree(leased_path, ignore_errors=True)
+
+
+def test_deadline_first_expiring_at_cleanup_entry_overrides_install_success(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    dependencies = _activation_dependencies(tmp_path, root, events)
+    calls = 0
+
+    def monotonic():
+        nonlocal calls
+        calls += 1
+        return 31.0 if calls >= 9 else 0.0
+
+    dependencies.monotonic = monotonic
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False, 30),
+        dependencies,
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "operation_timeout"
+    assert result.changed_files == ("package-lock.json", "package.json")
 
 
 def test_activate_separate_roots_do_not_share_lock(tmp_path):
