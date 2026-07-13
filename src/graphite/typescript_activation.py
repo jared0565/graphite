@@ -12,7 +12,8 @@ import math
 import os
 import re
 import stat
-from dataclasses import dataclass, replace
+import time
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,7 @@ from .dependency_install import (
     control_files_use_trusted_sources,
     snapshot_control_file,
 )
-from .ingest import collect_files
+from .ingest import SKIP_DIRS
 
 
 class ActivationOutcome(StrEnum):
@@ -88,11 +89,19 @@ class ActivationDetection:
 
 _PACKAGE_MANAGER_RE = re.compile(r"(npm|pnpm|yarn|bun)@(\S+)")
 _STABLE_STAT_FIELDS = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+_EVIDENCE_SCAN_SECONDS = 1.0
 _SUPPORTED_LOCKFILES = tuple(
     (lockfile, manager)
     for manager in Manager
     for lockfile in adapter_for(manager).lockfiles
 )
+
+
+class _EvidenceScanOutcome(StrEnum):
+    FOUND = "found"
+    ABSENT = "absent"
+    LIMITED = "limited"
+    UNSAFE = "unsafe"
 
 
 def _is_reparse(details: os.stat_result) -> bool:
@@ -139,6 +148,82 @@ def _root_file_state(
     if canonical != path or not _is_contained(canonical, root):
         return "unsafe"
     return "safe"
+
+
+def _evidence_entry_limit(value: int | None) -> int | None:
+    if isinstance(value, bool) or (value is not None and not isinstance(value, int)):
+        return None
+    if value is not None and value < 0:
+        return None
+    return min(value or ACTIVATION_MAX_FILES, ACTIVATION_MAX_FILES)
+
+
+def _configured_exclusions(root: Path, cfg: Config) -> tuple[tuple[str, ...], ...]:
+    exclusions: set[tuple[str, ...]] = set()
+    for configured in (cfg.output_dir, cfg.cache_dir):
+        candidate = configured if configured.is_absolute() else root / configured
+        try:
+            relative = candidate.resolve(strict=False).relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if relative != Path("."):
+            exclusions.add(tuple(os.path.normcase(part) for part in relative.parts))
+    return tuple(sorted(exclusions))
+
+
+def _is_excluded_path(
+    parts: tuple[str, ...],
+    exclusions: tuple[tuple[str, ...], ...],
+) -> bool:
+    normalized = tuple(os.path.normcase(part) for part in parts)
+    return any(
+        len(normalized) >= len(exclusion)
+        and normalized[: len(exclusion)] == exclusion
+        for exclusion in exclusions
+    )
+
+
+def _scan_typescript_evidence(
+    root: Path,
+    cfg: Config,
+    entry_limit: int,
+) -> _EvidenceScanOutcome:
+    deadline = time.monotonic() + _EVIDENCE_SCAN_SECONDS
+    exclusions = _configured_exclusions(root, cfg)
+    stack: list[tuple[Path, tuple[str, ...]]] = [(root, ())]
+    visited = 0
+    while stack:
+        if time.monotonic() >= deadline:
+            return _EvidenceScanOutcome.LIMITED
+        directory, directory_parts = stack.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    visited += 1
+                    if visited > entry_limit or time.monotonic() >= deadline:
+                        return _EvidenceScanOutcome.LIMITED
+                    details = entry.stat(follow_symlinks=False)
+                    if stat.S_ISLNK(details.st_mode) or _is_reparse(details):
+                        continue
+                    parts = (*directory_parts, entry.name)
+                    if stat.S_ISDIR(details.st_mode):
+                        if (
+                            entry.name in SKIP_DIRS
+                            or (not cfg.include_dotfiles and entry.name.startswith("."))
+                            or _is_excluded_path(parts, exclusions)
+                        ):
+                            continue
+                        stack.append((Path(entry.path), parts))
+                        continue
+                    if not stat.S_ISREG(details.st_mode):
+                        continue
+                    if not cfg.include_dotfiles and entry.name.startswith("."):
+                        continue
+                    if Path(entry.name).suffix.lower() in {".ts", ".tsx"}:
+                        return _EvidenceScanOutcome.FOUND
+        except (OSError, RuntimeError, ValueError):
+            return _EvidenceScanOutcome.UNSAFE
+    return _EvidenceScanOutcome.ABSENT
 
 
 def _read_stable_control_file(
@@ -254,7 +339,7 @@ def detect_activation(
     *,
     local_typescript_available: bool,
 ) -> ActivationDetection:
-    """Detect whether a repository is eligible for safe TypeScript activation."""
+    """Return ephemeral eligibility; revalidate it immediately before mutation."""
     try:
         canonical_root = root.resolve(strict=True)
         if not canonical_root.is_dir():
@@ -262,25 +347,25 @@ def detect_activation(
     except (OSError, RuntimeError):
         return _terminal(ActivationOutcome.GUIDANCE_ONLY, "repository_unsafe")
 
-    bounded_cfg = replace(
-        cfg,
-        max_files=min(cfg.max_files or ACTIVATION_MAX_FILES, ACTIVATION_MAX_FILES),
-    )
-    try:
-        entries = collect_files(canonical_root, bounded_cfg)
-    except (OSError, RuntimeError):
-        return _terminal(ActivationOutcome.GUIDANCE_ONLY, "evidence_collection_failed")
-
     tsconfig_state = _root_file_state(canonical_root, "tsconfig.json")
     if tsconfig_state not in {"missing", "safe"}:
         return _terminal(
             ActivationOutcome.GUIDANCE_ONLY,
             "typescript_configuration_unsafe",
         )
-    has_typescript = tsconfig_state == "safe" or any(
-        entry.language in {"typescript", "tsx"} for entry in entries
+    entry_limit = _evidence_entry_limit(cfg.max_files)
+    if entry_limit is None:
+        return _terminal(ActivationOutcome.GUIDANCE_ONLY, "invalid_file_limit")
+    evidence = (
+        _EvidenceScanOutcome.FOUND
+        if tsconfig_state == "safe"
+        else _scan_typescript_evidence(canonical_root, cfg, entry_limit)
     )
-    if not has_typescript:
+    if evidence is _EvidenceScanOutcome.LIMITED:
+        return _terminal(ActivationOutcome.GUIDANCE_ONLY, "evidence_scan_limited")
+    if evidence is _EvidenceScanOutcome.UNSAFE:
+        return _terminal(ActivationOutcome.GUIDANCE_ONLY, "evidence_collection_failed")
+    if evidence is _EvidenceScanOutcome.ABSENT:
         return _terminal(ActivationOutcome.NOT_APPLICABLE, "no_typescript_evidence")
 
     if local_typescript_available:
@@ -427,3 +512,20 @@ def detect_activation(
         manifest_snapshot,
         lockfile_snapshot,
     )
+
+
+def revalidate_activation_detection(
+    root: Path,
+    cfg: Config,
+    expected: ActivationDetection,
+) -> bool:
+    """Recheck ephemeral detection immediately before any repository mutation."""
+    try:
+        current = detect_activation(
+            root,
+            cfg,
+            local_typescript_available=False,
+        )
+        return expected.result is None and current.result is None and current == expected
+    except Exception:
+        return False

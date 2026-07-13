@@ -166,7 +166,11 @@ def _bun_tail(registry: str) -> tuple[str, ...]:
 
 _ADAPTERS = {
     Manager.NPM: ManagerAdapter(
-        Manager.NPM, ("package-lock.json",), frozenset(range(8, 12)), _npm_tail, (".npmrc",)
+        Manager.NPM,
+        ("package-lock.json",),
+        frozenset(range(8, 12)),
+        _npm_tail,
+        (".npmrc", "npm-shrinkwrap.json"),
     ),
     Manager.PNPM: ManagerAdapter(
         Manager.PNPM,

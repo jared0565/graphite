@@ -35,7 +35,6 @@ from graphite.dependency_install import (
     run_validator,
     snapshot_control_file,
 )
-from graphite.ingest import IngestError
 from graphite.probe_process import ProbeProcessResult
 from graphite.typescript_activation import (
     FATAL_OUTCOMES,
@@ -43,6 +42,7 @@ from graphite.typescript_activation import (
     ActivationOutcome,
     ActivationResult,
     detect_activation,
+    revalidate_activation_detection,
 )
 
 
@@ -110,7 +110,7 @@ def _command(path: Path) -> TrustedCommand:
             True,
             ("package-lock.json",),
             ("install", "--save-dev", "--ignore-scripts", "--no-audit", "--no-fund", "--registry=https://registry.npmjs.org/", "typescript"),
-            (".npmrc",),
+            (".npmrc", "npm-shrinkwrap.json"),
             True,
         ),
         (
@@ -119,7 +119,7 @@ def _command(path: Path) -> TrustedCommand:
             True,
             ("package-lock.json",),
             ("install", "--save-dev", "--ignore-scripts", "--no-audit", "--no-fund", "--registry=https://registry.npmjs.org/", "typescript"),
-            (".npmrc",),
+            (".npmrc", "npm-shrinkwrap.json"),
             True,
         ),
         (
@@ -1087,28 +1087,141 @@ def test_detect_accepts_typescript_and_safe_root_config_evidence(tmp_path, evide
     assert detection.manager is Manager.NPM
 
 
-@pytest.mark.parametrize(
-    ("configured", "expected"),
-    [
-        (None, ACTIVATION_MAX_FILES),
-        (0, ACTIVATION_MAX_FILES),
-        (ACTIVATION_MAX_FILES + 1, ACTIVATION_MAX_FILES),
-        (17, 17),
-    ],
-)
-def test_detect_always_bounds_evidence_collection(tmp_path, monkeypatch, configured, expected):
+@pytest.mark.parametrize("configured", [None, 0, ACTIVATION_MAX_FILES + 1])
+def test_evidence_scan_applies_real_activation_cap(
+    tmp_path,
+    monkeypatch,
+    configured,
+):
     root = tmp_path / "repo"
     root.mkdir()
-    observed = []
+    (root / "first.js").write_text("", encoding="utf-8")
+    (root / "second.js").write_text("", encoding="utf-8")
+    monkeypatch.setattr(typescript_activation, "ACTIVATION_MAX_FILES", 1)
 
-    def bounded_collect(selected_root, cfg):
-        observed.append((selected_root, cfg.max_files))
-        return []
+    detection = _detect(root, cfg=Config(max_files=configured))
 
-    monkeypatch.setattr(typescript_activation, "collect_files", bounded_collect)
+    assert detection.result.reason == "evidence_scan_limited"
 
-    assert _detect(root, cfg=Config(max_files=configured)).result.reason == "no_typescript_evidence"
-    assert observed == [(root.resolve(), expected)]
+
+def test_evidence_scan_counts_skipped_and_ineligible_entries(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "node_modules").mkdir()
+    (root / "ordinary.js").write_text("", encoding="utf-8")
+
+    detection = _detect(root, cfg=Config(max_files=1))
+
+    assert detection.result.reason == "evidence_scan_limited"
+
+
+@pytest.mark.parametrize("configured", [-1, 1.5, True, False, "10"])
+def test_evidence_scan_rejects_invalid_file_limit(tmp_path, configured):
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    detection = _detect(root, cfg=Config(max_files=configured))
+
+    assert detection.result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        None,
+        "invalid_file_limit",
+    )
+
+
+def test_safe_root_tsconfig_proves_evidence_without_traversal(tmp_path, monkeypatch):
+    root = _activation_root(tmp_path)
+    (root / "source.ts").unlink()
+    (root / "tsconfig.json").write_text("{}", encoding="utf-8")
+
+    def traversal_forbidden(*_args, **_kwargs):
+        raise AssertionError("root tsconfig must bypass traversal")
+
+    monkeypatch.setattr(typescript_activation.os, "scandir", traversal_forbidden)
+
+    assert _detect(root).result is None
+
+
+def test_evidence_scan_exits_on_first_typescript_entry(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "source.ts").write_text("content must not be read", encoding="utf-8")
+
+    detection = _detect(root, available=True, cfg=Config(max_files=1))
+
+    assert detection.result.reason == "local_typescript_available"
+
+
+def test_evidence_scan_deadline_is_fixed_guidance(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "ordinary.js").write_text("", encoding="utf-8")
+    ticks = iter((10.0, 20.0))
+    monkeypatch.setattr(typescript_activation.time, "monotonic", lambda: next(ticks))
+
+    detection = _detect(root)
+
+    assert detection.result.reason == "evidence_scan_limited"
+
+
+def test_evidence_scan_reads_no_file_contents_or_hashes(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "source.tsx").write_text("content must not be read", encoding="utf-8")
+
+    def content_open_forbidden(*_args, **_kwargs):
+        raise AssertionError("evidence collection must be metadata-only")
+
+    monkeypatch.setattr(typescript_activation.os, "open", content_open_forbidden)
+
+    detection = _detect(root, available=True)
+
+    assert detection.result.reason == "local_typescript_available"
+
+
+def test_evidence_scan_does_not_follow_symlinked_files_or_directories(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside_file = tmp_path / "outside.ts"
+    outside_file.write_text("export {};", encoding="utf-8")
+    outside_directory = tmp_path / "outside-directory"
+    outside_directory.mkdir()
+    (outside_directory / "nested.tsx").write_text("export {};", encoding="utf-8")
+    _symlink_or_skip(root / "linked.ts", outside_file)
+    _symlink_or_skip(root / "linked-directory", outside_directory)
+
+    detection = _detect(root)
+
+    assert detection.result.reason == "no_typescript_evidence"
+
+
+def test_evidence_scan_does_not_follow_simulated_reparse_entries(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    reparse_file = root / "reparse.ts"
+    reparse_file.write_text("export {};", encoding="utf-8")
+    reparse_directory = root / "reparse-directory"
+    reparse_directory.mkdir()
+    (reparse_directory / "nested.tsx").write_text("export {};", encoding="utf-8")
+    monkeypatch.setattr(typescript_activation, "_is_reparse", lambda _details: True)
+
+    detection = _detect(root)
+
+    assert detection.result.reason == "no_typescript_evidence"
+
+
+def test_evidence_scan_prunes_repository_exclusions(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    for directory in ("node_modules", ".hidden", "generated", "cache-data"):
+        target = root / directory
+        target.mkdir()
+        (target / "hidden.ts").write_text("export {};", encoding="utf-8")
+    cfg = Config(output_dir=Path("generated"), cache_dir=Path("cache-data"))
+
+    detection = _detect(root, cfg=cfg)
+
+    assert detection.result.reason == "no_typescript_evidence"
 
 
 def test_already_available_precedes_package_manager_inspection(tmp_path):
@@ -1232,7 +1345,7 @@ def test_detect_rejects_oversized_manifest(tmp_path):
 
 def _symlink_or_skip(link: Path, target: Path) -> None:
     try:
-        link.symlink_to(target)
+        link.symlink_to(target, target_is_directory=target.is_dir())
     except OSError as error:
         pytest.skip(f"symlinks unavailable: {error.__class__.__name__}")
 
@@ -1272,6 +1385,72 @@ def test_unsafe_root_tsconfig_is_guidance_not_evidence(tmp_path):
         None,
         "typescript_configuration_unsafe",
     )
+
+
+@pytest.mark.parametrize(
+    ("control", "lockfile", "expected_reason"),
+    [
+        ("tsconfig.json", "package-lock.json", "typescript_configuration_unsafe"),
+        ("package.json", "package-lock.json", "manifest_unsafe"),
+        ("package-lock.json", "package-lock.json", "lockfile_unsafe"),
+        ("pnpm-lock.yaml", "pnpm-lock.yaml", "lockfile_unsafe"),
+        ("yarn.lock", "yarn.lock", "lockfile_unsafe"),
+        ("bun.lock", "bun.lock", "lockfile_unsafe"),
+    ],
+)
+def test_detect_rejects_simulated_reparse_control_without_following(
+    tmp_path,
+    monkeypatch,
+    control,
+    lockfile,
+    expected_reason,
+):
+    root = _activation_root(tmp_path, lockfile)
+    target = root / control
+    if control == "tsconfig.json":
+        target.write_text("{}", encoding="utf-8")
+    target_identity = target.lstat().st_dev, target.lstat().st_ino
+    original_is_reparse = typescript_activation._is_reparse
+    original_resolve = Path.resolve
+
+    def simulate_reparse(details):
+        identity = details.st_dev, details.st_ino
+        return identity == target_identity or original_is_reparse(details)
+
+    def forbid_target_resolution(path, *args, **kwargs):
+        if path == target:
+            raise AssertionError("reparse control must not be followed")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(typescript_activation, "_is_reparse", simulate_reparse)
+    monkeypatch.setattr(Path, "resolve", forbid_target_resolution)
+
+    detection = _detect(root)
+
+    assert detection.result.reason == expected_reason
+
+
+def test_available_compiler_performs_no_package_control_inspection(
+    tmp_path,
+    monkeypatch,
+):
+    root = _activation_root(tmp_path)
+    original_root_file_state = typescript_activation._root_file_state
+
+    def guard_root_file_state(selected_root, relative_path, **kwargs):
+        if relative_path != "tsconfig.json":
+            raise AssertionError(f"package control inspected: {relative_path}")
+        return original_root_file_state(selected_root, relative_path, **kwargs)
+
+    def content_open_forbidden(*_args, **_kwargs):
+        raise AssertionError("package control opened")
+
+    monkeypatch.setattr(typescript_activation, "_root_file_state", guard_root_file_state)
+    monkeypatch.setattr(typescript_activation.os, "open", content_open_forbidden)
+
+    detection = _detect(root, available=True)
+
+    assert detection.result.reason == "local_typescript_available"
 
 
 @pytest.mark.parametrize(
@@ -1348,6 +1527,45 @@ def test_detect_rejects_manager_root_configuration(tmp_path, lockfile, unsafe_pa
     assert detection.result.outcome is ActivationOutcome.GUIDANCE_ONLY
     assert detection.result.reason == "manager_configuration_unsafe"
     assert detection.result.lockfile == lockfile
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["regular", "directory", "symlink", "broken_symlink", "simulated_reparse"],
+)
+def test_detect_rejects_every_npm_shrinkwrap_path_kind(tmp_path, monkeypatch, kind):
+    root = _activation_root(tmp_path)
+    shrinkwrap = root / "npm-shrinkwrap.json"
+    if kind == "regular":
+        shrinkwrap.write_text("{}", encoding="utf-8")
+    elif kind == "directory":
+        shrinkwrap.mkdir()
+    elif kind in {"symlink", "broken_symlink"}:
+        target = tmp_path / "outside-shrinkwrap.json"
+        if kind == "symlink":
+            target.write_text("{}", encoding="utf-8")
+        _symlink_or_skip(shrinkwrap, target)
+    else:
+        original_present = typescript_activation._path_is_lexically_present
+
+        def simulate_reparse(path):
+            return Path(path) == shrinkwrap or original_present(Path(path))
+
+        monkeypatch.setattr(
+            typescript_activation,
+            "_path_is_lexically_present",
+            simulate_reparse,
+        )
+
+    detection = _detect(root)
+
+    assert detection.result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        Manager.NPM,
+        "manager_configuration_unsafe",
+        "package.json",
+        "package-lock.json",
+    )
 
 
 @pytest.mark.parametrize("broken", [False, True])
@@ -1460,14 +1678,17 @@ def test_terminal_detection_never_retains_snapshots(tmp_path):
     assert detection.lockfile_snapshot is None
 
 
-def test_ingestion_failure_maps_to_fixed_guidance_without_error_text(tmp_path, monkeypatch):
+def test_evidence_scan_failure_maps_to_fixed_guidance_without_error_text(
+    tmp_path,
+    monkeypatch,
+):
     root = tmp_path / "repo"
     root.mkdir()
 
-    def fail_collection(*_args, **_kwargs):
-        raise IngestError(f"secret path: {tmp_path}")
+    def fail_scan(*_args, **_kwargs):
+        raise OSError(f"secret path: {tmp_path}")
 
-    monkeypatch.setattr(typescript_activation, "collect_files", fail_collection)
+    monkeypatch.setattr(typescript_activation.os, "scandir", fail_scan)
 
     detection = _detect(root)
 
@@ -1542,3 +1763,103 @@ def test_control_file_close_failure_maps_to_fixed_guidance(
     assert detection.result.outcome is ActivationOutcome.GUIDANCE_ONLY
     assert detection.result.reason == expected_reason
     assert str(tmp_path) not in str(detection.result.to_dict())
+
+
+@pytest.mark.parametrize(
+    "lockfile",
+    ["package-lock.json", "pnpm-lock.yaml", "bun.lock", "bun.lockb"],
+)
+def test_revalidation_accepts_unchanged_eligible_detection(tmp_path, lockfile):
+    root = _activation_root(tmp_path, lockfile)
+    expected = _detect(root)
+    assert expected.result is None
+
+    assert revalidate_activation_detection(root, Config(), expected)
+
+
+@pytest.mark.parametrize(
+    ("lockfile", "unsafe_path", "directory"),
+    [
+        ("package-lock.json", ".npmrc", False),
+        ("package-lock.json", "npm-shrinkwrap.json", False),
+        ("pnpm-lock.yaml", ".npmrc", False),
+        ("pnpm-lock.yaml", "pnpm-workspace.yaml", False),
+        ("pnpm-lock.yaml", ".pnpmfile.cjs", False),
+        ("pnpm-lock.yaml", ".pnpmfile.mjs", False),
+        ("yarn.lock", ".yarnrc.yml", False),
+        ("yarn.lock", ".yarnrc", False),
+        ("yarn.lock", ".yarn/plugins", True),
+        ("bun.lock", ".npmrc", False),
+        ("bun.lock", "bunfig.toml", False),
+    ],
+)
+def test_revalidation_rejects_new_manager_configuration(
+    tmp_path,
+    lockfile,
+    unsafe_path,
+    directory,
+):
+    root = _activation_root(tmp_path, lockfile)
+    expected = _detect(root)
+    path = root / unsafe_path
+    if directory:
+        path.mkdir(parents=True)
+    else:
+        path.write_text("unsafe", encoding="utf-8")
+
+    assert not revalidate_activation_detection(root, Config(), expected)
+
+
+def test_revalidation_rejects_new_second_lockfile(tmp_path):
+    root = _activation_root(tmp_path)
+    expected = _detect(root)
+    (root / "pnpm-lock.yaml").write_bytes(_SAFE_LOCKS["pnpm-lock.yaml"])
+
+    assert not revalidate_activation_detection(root, Config(), expected)
+
+
+@pytest.mark.parametrize("control", ["package.json", "package-lock.json"])
+def test_revalidation_rejects_replaced_control_identity(tmp_path, control):
+    root = _activation_root(tmp_path)
+    expected = _detect(root)
+    path = root / control
+    original = path.read_bytes()
+    path.rename(root / f"old-{control}")
+    path.write_bytes(original)
+
+    assert not revalidate_activation_detection(root, Config(), expected)
+
+
+@pytest.mark.parametrize("control", ["package.json", "package-lock.json"])
+def test_revalidation_rejects_changed_control_content(tmp_path, control):
+    root = _activation_root(tmp_path)
+    expected = _detect(root)
+    if control == "package.json":
+        (root / control).write_bytes(b'{"dependencies":{"x":"file:../x"}}')
+    else:
+        (root / control).write_bytes(
+            b'{"lockfileVersion":3,"resolved":"https://evil.example/x.tgz"}'
+        )
+
+    assert not revalidate_activation_detection(root, Config(), expected)
+
+
+def test_revalidation_contains_detection_errors(tmp_path, monkeypatch):
+    root = _activation_root(tmp_path)
+    expected = _detect(root)
+
+    def fail_detection(*_args, **_kwargs):
+        raise OSError(f"secret detection error: {tmp_path}")
+
+    monkeypatch.setattr(typescript_activation, "detect_activation", fail_detection)
+
+    assert not revalidate_activation_detection(root, Config(), expected)
+
+
+def test_revalidation_rejects_terminal_expected_detection(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    expected = _detect(root)
+    assert expected.result.reason == "no_typescript_evidence"
+
+    assert not revalidate_activation_detection(root, Config(), expected)
