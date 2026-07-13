@@ -452,7 +452,12 @@ def run_doctor(root: Path, cfg: Config, daemon_base: Path | None = None, deep: b
             from .doctor_probes import run_deep_probes
             deep_runner = run_deep_probes
         deep_checks = list(deep_runner(selected, cfg=cfg, include_llm=include_llm))
-        if include_llm and any(check.code == "deep_llm" for check in deep_checks):
+        disabled_llm = isinstance(cfg.llm_mode, str) and cfg.llm_mode.strip().lower() == "none"
+        if (
+            include_llm
+            and not disabled_llm
+            and any(check.code == "deep_llm" for check in deep_checks)
+        ):
             checks = [check for check in checks if check.code != "llm"]
         checks.extend(deep_checks)
     return build_report(selected, checks, deep, bool(deep and include_llm))

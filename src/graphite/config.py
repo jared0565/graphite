@@ -44,6 +44,7 @@ class Config:
     llm_api_key: str | None = None
     llm_timeout_seconds: float = 30.0
     llm_max_input_chars: int = 12000
+    llm_max_output_tokens: int = 512
     seed: int = 42
     verbose: bool = False
 
@@ -63,6 +64,9 @@ class Config:
 
         def _int(key: str, default: int) -> int:
             return int(env[key]) if key in env and env[key].isdigit() else default
+
+        def _bounded_int(key: str, default: int, minimum: int, maximum: int) -> int:
+            return min(max(_int(key, default), minimum), maximum)
 
         def _opt_int(key: str, default: int | None) -> int | None:
             if key in env and env[key].isdigit():
@@ -96,6 +100,9 @@ class Config:
             llm_api_key=env.get("graphite_llm_api_key"),
             llm_timeout_seconds=_float("graphite_llm_timeout", 30.0),
             llm_max_input_chars=_int("graphite_llm_max_input_chars", 12000),
+            llm_max_output_tokens=_bounded_int(
+                "graphite_llm_max_output_tokens", 512, 1, 4096
+            ),
             seed=_int("graphite_seed", 42),
             verbose=_bool("graphite_verbose", False),
         )

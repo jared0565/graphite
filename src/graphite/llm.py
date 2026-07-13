@@ -11,7 +11,9 @@ from typing import Any, Literal, Protocol
 from .config import Config
 
 MAX_RESPONSE_BYTES = 64 * 1024
-MAX_COMPLETION_TOKENS = 16
+DEFAULT_MAX_OUTPUT_TOKENS = 512
+PROBE_MAX_OUTPUT_TOKENS = 16
+MAX_OUTPUT_TOKENS = 4096
 ProviderErrorCategory = Literal[
     "configuration",
     "authentication",
@@ -53,6 +55,33 @@ class LLMProviderError(RuntimeError):
         super().__init__(f"LLM provider failure: {self.category}")
 
 
+def _bounded_output_tokens(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return DEFAULT_MAX_OUTPUT_TOKENS
+    return min(max(value, 1), MAX_OUTPUT_TOKENS)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Turn every redirect into an HTTPError without forwarding credentials."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        del req, fp, code, msg, headers, newurl
+        return None
+
+
+def _open_no_redirect(request: urllib.request.Request, timeout: float) -> Any:
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    return opener.open(request, timeout=timeout)
+
+
 class OpenAICompatibleProvider:
     """Chat-completions adapter for OpenAI-compatible HTTP APIs.
 
@@ -74,6 +103,7 @@ class OpenAICompatibleProvider:
         self.api_key = cfg.llm_api_key
         self.timeout = cfg.llm_timeout_seconds
         self.seed = cfg.seed
+        self.max_output_tokens = _bounded_output_tokens(cfg.llm_max_output_tokens)
 
     def complete(self, system: str, user: str) -> CompletionResult:
         payload = {
@@ -84,7 +114,7 @@ class OpenAICompatibleProvider:
             ],
             "temperature": 0.1,
             "stream": False,
-            "max_tokens": MAX_COMPLETION_TOKENS,
+            "max_tokens": self.max_output_tokens,
         }
         if self.seed is not None:
             payload["seed"] = self.seed
@@ -123,6 +153,7 @@ class OllamaProvider:
         self.model = cfg.llm_model or "llama3.1"
         self.timeout = cfg.llm_timeout_seconds
         self.seed = cfg.seed
+        self.max_output_tokens = _bounded_output_tokens(cfg.llm_max_output_tokens)
 
     def complete(self, system: str, user: str) -> CompletionResult:
         payload = {
@@ -135,7 +166,7 @@ class OllamaProvider:
             "options": {
                 "temperature": 0.1,
                 "seed": self.seed,
-                "num_predict": MAX_COMPLETION_TOKENS,
+                "num_predict": self.max_output_tokens,
             },
         }
         request = urllib.request.Request(
@@ -364,7 +395,7 @@ def build_report_prompt(
 
 def _urlopen_json(request: urllib.request.Request, timeout: float) -> dict[str, Any]:
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec: opt-in user URL
+        with _open_no_redirect(request, timeout) as response:  # nosec: opt-in user URL
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         try:

@@ -5,6 +5,7 @@ import json
 import math
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -27,6 +28,7 @@ from .llm import (
     CompletionProvider,
     LLMConfigurationError,
     LLMProviderError,
+    PROBE_MAX_OUTPUT_TOKENS,
     ProviderErrorCategory,
     make_provider,
 )
@@ -86,7 +88,8 @@ def run_synthetic_probe(
 ) -> ProbeResult:
     """Make exactly one constant-content completion and discard the response text."""
     try:
-        provider = provider_factory(cfg)
+        probe_cfg = replace(cfg, llm_max_output_tokens=PROBE_MAX_OUTPUT_TOKENS)
+        provider = provider_factory(probe_cfg)
         completion = provider.complete(SYSTEM_PROMPT, USER_PROMPT)
         text = completion.text
     except Exception as exc:
@@ -135,6 +138,7 @@ def _config_from_payload(payload: object) -> Config:
         llm_base_url=_optional_string(payload["base_url"], limit=2048),
         llm_api_key=_optional_string(payload["api_key"], limit=4096),
         llm_timeout_seconds=float(timeout),
+        llm_max_output_tokens=PROBE_MAX_OUTPUT_TOKENS,
         seed=seed,
     )
 

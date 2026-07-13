@@ -22,7 +22,13 @@ from .doctor import DoctorCheck
 from .llm import canonical_provider_name
 from .llm_probe import SYSTEM_PROMPT as _LLM_SYSTEM_PROMPT
 from .llm_probe import USER_PROMPT as _LLM_USER_PROMPT
-from .probe_process import ProbeProcessError, ProbeProcessResult, run_bounded_process
+from .llm_probe import WORKER_INPUT_LIMIT_BYTES as _LLM_WORKER_INPUT_LIMIT_BYTES
+from .probe_process import (
+    INPUT_LIMIT_BYTES,
+    ProbeProcessError,
+    ProbeProcessResult,
+    run_bounded_process,
+)
 from .probe_workspace import ProbeWorkspaceLease, WorkspaceLeaseError
 
 _CLEANUP_RESERVE_SECONDS = 1.0
@@ -1591,7 +1597,10 @@ def _llm_worker_input(cfg: Config, timeout_seconds: float) -> bytes:
         "system": _LLM_SYSTEM_PROMPT,
         "user": _LLM_USER_PROMPT,
     }
-    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > INPUT_LIMIT_BYTES or len(encoded) > _LLM_WORKER_INPUT_LIMIT_BYTES:
+        raise ValueError
+    return encoded
 
 
 def probe_llm(

@@ -428,6 +428,44 @@ def test_run_doctor_deep_llm_ready_supersedes_fast_unverified_check(
     assert [check["code"] for check in report["checks"]] == ["deep_llm", "python"]
 
 
+def test_run_doctor_disabled_llm_retains_ambient_credential_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import graphite.doctor_probes as probes
+
+    sentinel = "ApiKey_SECRET"
+    cfg = Config(llm_mode="none", llm_api_key=sentinel)
+    fast_llm = check_llm_config(cfg)
+    monkeypatch.setattr(
+        "graphite.doctor._fast_checks",
+        lambda root, configured, daemon_base: [fast_llm],
+    )
+    provider_calls = 0
+
+    def unexpected_runner(*args: object, **kwargs: object) -> object:
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("disabled mode started a provider worker")
+
+    report = run_doctor(
+        tmp_path,
+        cfg,
+        deep=True,
+        include_llm=True,
+        deep_runner=lambda root, *, cfg, include_llm: [
+            probes.probe_llm(cfg, _runner=unexpected_runner)
+        ],
+    )
+
+    by_code = {check["code"]: check for check in report["checks"]}
+    assert set(by_code) == {"llm", "deep_llm"}
+    assert by_code["llm"]["details"]["credential_present"] is True
+    assert "rotate or remove" in by_code["llm"]["summary"].lower()
+    assert provider_calls == 0
+    assert sentinel not in json.dumps(report)
+
+
 def test_run_doctor_uses_default_daemon_base(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     daemon_base = tmp_path / "daemon-base"
     selected = tmp_path / "selected"
@@ -1885,6 +1923,7 @@ def test_llm_worker_uses_exact_synthetic_content_once_and_never_returns_response
     from graphite.llm_probe import run_synthetic_probe
 
     calls: list[tuple[str, str]] = []
+    worker_limits: list[int] = []
 
     class RecordingProvider:
         name = "fake"
@@ -1893,9 +1932,13 @@ def test_llm_worker_uses_exact_synthetic_content_once_and_never_returns_response
             calls.append((system, user))
             return CompletionResult(text="unexpected probabilistic response with private data")
 
+    def factory(cfg: Config) -> RecordingProvider:
+        worker_limits.append(cfg.llm_max_output_tokens)
+        return RecordingProvider()
+
     result = run_synthetic_probe(
         Config(llm_mode="cloud", llm_provider="fake"),
-        provider_factory=lambda cfg: RecordingProvider(),
+        provider_factory=factory,
     )
 
     assert calls == [
@@ -1904,6 +1947,7 @@ def test_llm_worker_uses_exact_synthetic_content_once_and_never_returns_response
             "Synthetic Graphite connectivity test. No repository data is included.",
         )
     ]
+    assert worker_limits == [16]
     assert result == {"status": "ready", "response_present": True}
     assert "private data" not in json.dumps(result)
 
@@ -2091,6 +2135,47 @@ def test_llm_parent_timeout_is_wall_clock_bounded_and_leaves_no_orphan(tmp_path:
     assert check.details == {"category": "timeout"}
     time.sleep(1.1)
     assert not sentinel.exists()
+
+
+def test_llm_real_isolated_worker_rejects_unsupported_provider_without_network() -> None:
+    import graphite.doctor_probes as probes
+
+    check = probes.probe_llm(
+        Config(
+            llm_mode="cloud",
+            llm_provider="unsupported-provider",
+            llm_timeout_seconds=2,
+        )
+    )
+
+    assert check.status == "degraded"
+    assert check.details == {"category": "configuration"}
+
+
+def test_llm_parent_rejects_encoded_payload_over_transport_limit_before_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import graphite.doctor_probes as probes
+
+    monkeypatch.setattr(probes, "INPUT_LIMIT_BYTES", 1024, raising=False)
+    runner_calls = 0
+
+    def unexpected_runner(*args: object, **kwargs: object) -> object:
+        nonlocal runner_calls
+        runner_calls += 1
+        raise AssertionError("oversized encoded payload started worker")
+
+    check = probes.probe_llm(
+        Config(
+            llm_mode="cloud",
+            llm_provider="ollama",
+            llm_api_key="\U0001f4a5" * 100,
+        ),
+        _runner=unexpected_runner,
+    )
+
+    assert check.details == {"category": "configuration"}
+    assert runner_calls == 0
 
 
 def test_run_deep_probes_not_requested_makes_zero_provider_calls(

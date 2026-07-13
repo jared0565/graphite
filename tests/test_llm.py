@@ -47,7 +47,7 @@ def test_llm_disabled_does_not_call_provider(monkeypatch) -> None:
     def fail_urlopen(*_: object, **__: object) -> None:
         raise AssertionError("urlopen should not be called when Graphite LLM mode is none")
 
-    monkeypatch.setattr("urllib.request.urlopen", fail_urlopen)
+    monkeypatch.setattr("graphite.llm._open_no_redirect", fail_urlopen)
     graph, clusters, analysis = _minimal_graph()
 
     result = enrich_report(graph, clusters, analysis, Config())
@@ -70,7 +70,7 @@ def test_openai_compatible_provider_is_selected_by_base_url(monkeypatch) -> None
             }
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("graphite.llm._open_no_redirect", fake_urlopen)
     graph, clusters, analysis = _minimal_graph()
     cfg = Config(
         llm_mode="cloud",
@@ -79,6 +79,7 @@ def test_openai_compatible_provider_is_selected_by_base_url(monkeypatch) -> None
         llm_base_url="http://llm.example/v1",
         llm_api_key="secret-token",
         llm_timeout_seconds=5.5,
+        llm_max_output_tokens=777,
     )
 
     result = enrich_report(graph, clusters, analysis, cfg)
@@ -92,7 +93,7 @@ def test_openai_compatible_provider_is_selected_by_base_url(monkeypatch) -> None
     assert captured["headers"]["Authorization"] == "Bearer secret-token"
     assert captured["body"]["model"] == "portable-model"
     assert captured["body"]["stream"] is False
-    assert captured["body"]["max_tokens"] == 16
+    assert captured["body"]["max_tokens"] == 777
 
 
 def test_openrouter_provider_uses_default_base_url(monkeypatch) -> None:
@@ -109,7 +110,7 @@ def test_openrouter_provider_uses_default_base_url(monkeypatch) -> None:
             }
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("graphite.llm._open_no_redirect", fake_urlopen)
     graph, clusters, analysis = _minimal_graph()
     cfg = Config(
         llm_mode="cloud",
@@ -140,7 +141,7 @@ def test_openrouter_provider_defaults_to_kimi_code(monkeypatch) -> None:
             }
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("graphite.llm._open_no_redirect", fake_urlopen)
     graph, clusters, analysis = _minimal_graph()
     cfg = Config(
         llm_mode="cloud",
@@ -168,7 +169,7 @@ def test_ollama_provider_uses_native_chat_endpoint(monkeypatch) -> None:
             }
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("graphite.llm._open_no_redirect", fake_urlopen)
     graph, clusters, analysis = _minimal_graph()
     cfg = Config(llm_mode="local", llm_provider="ollama", llm_model="qwen2.5-coder")
 
@@ -180,7 +181,7 @@ def test_ollama_provider_uses_native_chat_endpoint(monkeypatch) -> None:
     assert result["tokens"] == 8
     assert captured["url"] == "http://localhost:11434/api/chat"
     assert captured["body"]["model"] == "qwen2.5-coder"
-    assert captured["body"]["options"]["num_predict"] == 16
+    assert captured["body"]["options"]["num_predict"] == 512
 
 
 def test_provider_response_read_is_bounded_and_overflow_is_rejected(monkeypatch) -> None:
@@ -197,7 +198,10 @@ def test_provider_response_read_is_bounded_and_overflow_is_rejected(monkeypatch)
             read_sizes.append(size)
             return b"x" * size
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: OversizedResponse())
+    monkeypatch.setattr(
+        "graphite.llm._open_no_redirect",
+        lambda request, timeout: OversizedResponse(),
+    )
 
     with pytest.raises(LLMProviderError) as exc_info:
         _urlopen_json(object(), 1.0)  # type: ignore[arg-type]
@@ -206,11 +210,77 @@ def test_provider_response_read_is_bounded_and_overflow_is_rejected(monkeypatch)
     assert read_sizes == [MAX_RESPONSE_BYTES + 1]
 
 
+@pytest.mark.parametrize("status", [301, 302, 303])
+def test_provider_redirect_is_not_followed_and_error_body_is_bounded(
+    monkeypatch,
+    status: int,
+) -> None:
+    import urllib.error
+    import urllib.request
+
+    opens: list[str] = []
+    read_sizes: list[int] = []
+    handlers: list[object] = []
+
+    class ErrorBody:
+        def read(self, size: int) -> bytes:
+            read_sizes.append(size)
+            return b"redirect body with credential-shaped private data"
+
+        def close(self) -> None:
+            return None
+
+    class FakeOpener:
+        def open(self, request, timeout: float):
+            del timeout
+            opens.append(request.full_url)
+            raise urllib.error.HTTPError(
+                request.full_url,
+                status,
+                "redirect",
+                {"Location": "https://attacker.invalid/collect"},
+                ErrorBody(),
+            )
+
+    def fake_build_opener(*configured_handlers: object) -> FakeOpener:
+        handlers.extend(configured_handlers)
+        return FakeOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+    request = urllib.request.Request(
+        "https://provider.invalid/v1/chat/completions",
+        headers={"Authorization": "Bearer ApiKey_SECRET"},
+    )
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        _urlopen_json(request, 1.0)
+
+    assert exc_info.value.category == "provider_error"
+    assert "credential-shaped" not in str(exc_info.value)
+    assert opens == ["https://provider.invalid/v1/chat/completions"]
+    assert read_sizes == [MAX_RESPONSE_BYTES + 1]
+    redirect_handler = next(handler for handler in handlers if hasattr(handler, "redirect_request"))
+    assert (
+        redirect_handler.redirect_request(
+            request, None, status, "redirect", {}, request.full_url
+        )
+        is None
+    )
+
+
+def test_llm_output_token_config_defaults_overrides_and_clamps() -> None:
+    assert Config().llm_max_output_tokens == 512
+    assert Config.from_env({"GRAPHITE_LLM_MAX_OUTPUT_TOKENS": "2048"}).llm_max_output_tokens == 2048
+    assert Config.from_env({"GRAPHITE_LLM_MAX_OUTPUT_TOKENS": "0"}).llm_max_output_tokens == 1
+    assert Config.from_env({"GRAPHITE_LLM_MAX_OUTPUT_TOKENS": "999999"}).llm_max_output_tokens == 4096
+    assert Config.from_env({"GRAPHITE_LLM_MAX_OUTPUT_TOKENS": "invalid"}).llm_max_output_tokens == 512
+
+
 def test_llm_auto_skips_simple_graph(monkeypatch) -> None:
     def fail_urlopen(*_: object, **__: object) -> None:
         raise AssertionError("auto should not call provider for a small simple graph")
 
-    monkeypatch.setattr("urllib.request.urlopen", fail_urlopen)
+    monkeypatch.setattr("graphite.llm._open_no_redirect", fail_urlopen)
     graph, clusters, analysis = _minimal_graph()
     cfg = Config(llm_mode="auto", llm_provider="openrouter", llm_api_key="openrouter-secret")
 
@@ -226,7 +296,7 @@ def test_llm_auto_skips_cloud_provider_without_api_key(monkeypatch) -> None:
     def fail_urlopen(*_: object, **__: object) -> None:
         raise AssertionError("auto should not call cloud provider without an API key")
 
-    monkeypatch.setattr("urllib.request.urlopen", fail_urlopen)
+    monkeypatch.setattr("graphite.llm._open_no_redirect", fail_urlopen)
     graph = {"metadata": {"node_count": 300, "edge_count": 500}}
     clusters = {"count": 10, "clusters": []}
     analysis = {"top_files_by_links": [{}] * 10, "god_nodes": [{}, {}], "surprising_connections": []}
@@ -253,7 +323,7 @@ def test_llm_auto_runs_when_threshold_and_provider_ready(monkeypatch) -> None:
             }
         )
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("graphite.llm._open_no_redirect", fake_urlopen)
     graph = {"metadata": {"node_count": 300, "edge_count": 500}}
     clusters = {"count": 10, "clusters": []}
     analysis = {"top_files_by_links": [{}] * 10, "god_nodes": [{}, {}], "surprising_connections": []}
