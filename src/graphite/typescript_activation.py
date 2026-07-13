@@ -133,6 +133,12 @@ class _TemporaryDirectoryLease:
         return self.name
 
 
+# Fixed worker protocol disposition; mirrored by
+# ``_cleanup_worker.EXIT_POSIX_ROOT_RETAINED`` without importing package code
+# into the isolated worker process.
+_POSIX_CLEANUP_ROOT_RETAINED_EXIT = 75
+
+
 def _new_temporary_directory() -> _TemporaryDirectoryLease:
     temporary_parent = Path(tempfile.gettempdir()).resolve(strict=True)
     path = Path(
@@ -246,6 +252,16 @@ def _cleanup_isolated_home(
         return fail_after_quarantine(reason)
     except Exception:
         return fail_after_quarantine()
+    # POSIX has no primitive that unlinks an open directory by descriptor.
+    # Exit 75 means the trusted worker emptied the held Graphite-created lease
+    # but intentionally retained its root name, which we leave untouched for
+    # OS temporary-directory reclamation. In particular, do not inspect and
+    # then remove that name: a same-UID actor could have replaced it meanwhile.
+    if (
+        os.name != "nt"
+        and result.returncode == _POSIX_CLEANUP_ROOT_RETAINED_EXIT
+    ):
+        return StepResult(True, "cleanup_root_retained")
     if result.returncode != 0 or _path_is_lexically_present(cleanup_target):
         return fail_after_quarantine()
     return StepResult(True, "cleaned")

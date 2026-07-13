@@ -112,7 +112,16 @@ def test_activate_without_typescript_evidence_is_not_applicable_without_process(
     )
 
 
-def _activation_dependencies(tmp_path, root, events, *, prompt_answer="yes", install_ok=True, verify_ok=True):
+def _activation_dependencies(
+    tmp_path,
+    root,
+    events,
+    *,
+    prompt_answer="yes",
+    install_ok=True,
+    verify_ok=True,
+    record_initial_probe=True,
+):
     tools = tmp_path / "tools"
     tools.mkdir(exist_ok=True)
     node_name = "node.exe" if os.name == "nt" else "node"
@@ -143,7 +152,8 @@ def _activation_dependencies(tmp_path, root, events, *, prompt_answer="yes", ins
         if "-e" in argv:
             probes += 1
             phase = "local_probe" if probes == 1 else "verify"
-            events.append((phase, kwargs["timeout_seconds"]))
+            if phase != "local_probe" or record_initial_probe:
+                events.append((phase, kwargs["timeout_seconds"]))
             if phase == "verify" and verify_ok:
                 package = root / "node_modules" / "typescript" / "package.json"
                 package.parent.mkdir(parents=True, exist_ok=True)
@@ -244,7 +254,13 @@ def test_activate_decline_prompts_once_and_stops(tmp_path, answer):
 def test_activate_accepts_consent_and_installs_in_exact_order(tmp_path, monkeypatch, answer):
     root = _activation_root(tmp_path)
     events = []
-    deps = _activation_dependencies(tmp_path, root, events, prompt_answer=answer)
+    deps = _activation_dependencies(
+        tmp_path,
+        root,
+        events,
+        prompt_answer=answer,
+        record_initial_probe=False,
+    )
     original_revalidate = typescript_activation.revalidate_activation_detection
     original_snapshot = typescript_activation.snapshot_control_file
     revalidation_calls = 0
@@ -260,7 +276,7 @@ def test_activate_accepts_consent_and_installs_in_exact_order(tmp_path, monkeypa
         nonlocal snapshot_started
         if not snapshot_started and any(event[0] == "install" for event in events):
             snapshot_started = True
-            events.append(("postinstall_snapshot/safety", 0))
+            events.append(("postinstall_snapshot", 0))
         return original_snapshot(*args, **kwargs)
 
     monkeypatch.setattr(typescript_activation, "revalidate_activation_detection", recording_revalidate)
@@ -280,13 +296,12 @@ def test_activate_accepts_consent_and_installs_in_exact_order(tmp_path, monkeypa
         True,
     )
     assert [event[0] for event in events] == [
-        "local_probe",
         "manager_version",
         "prompt",
         "validator",
         "prelaunch_snapshot",
         "install",
-        "postinstall_snapshot/safety",
+        "postinstall_snapshot",
         "verify",
     ]
     assert revalidation_calls == 1
@@ -1460,23 +1475,29 @@ def test_cleanup_postcheck_preserves_new_object_at_original_path(
     root.mkdir()
     lease = typescript_activation._new_temporary_directory()
     leased_path = Path(lease.name)
+    cleanup_target = None
 
     def runner(argv, **_kwargs):
+        nonlocal cleanup_target
+        cleanup_target = Path(argv[3])
         returncode = cleanup_worker.main(argv[2:])
-        assert returncode == 0
+        assert returncode in {0, cleanup_worker.EXIT_POSIX_ROOT_RETAINED}
         leased_path.mkdir()
         (leased_path / "replacement-marker").write_text(
             "must survive", encoding="utf-8"
         )
-        return ProbeProcessResult(0, b"", b"", 0)
+        return ProbeProcessResult(returncode, b"", b"", 0)
 
     monkeypatch.setattr(typescript_activation, "run_bounded_process", runner)
     try:
         result = typescript_activation._cleanup_isolated_home(lease, root, 0.25)
-        assert result == StepResult(True, "cleaned")
+        expected_reason = "cleaned" if os.name == "nt" else "cleanup_root_retained"
+        assert result == StepResult(True, expected_reason)
         assert (leased_path / "replacement-marker").read_text(encoding="utf-8") == "must survive"
     finally:
         shutil.rmtree(leased_path, ignore_errors=True)
+        if cleanup_target is not None:
+            shutil.rmtree(cleanup_target, ignore_errors=True)
 
 
 def test_isolated_lease_rejects_ancestor_of_selected_root(tmp_path):
@@ -1504,10 +1525,47 @@ def test_posix_cleanup_worker_deletes_fd_relative_tree_without_following_links(t
     (isolated / "outside-link").symlink_to(outside, target_is_directory=True)
     details = isolated.lstat()
 
+    disposition = cleanup_worker.main(
+        [
+            "_cleanup_worker.py",
+            str(isolated),
+            str(details.st_dev),
+            str(details.st_ino),
+        ]
+    )
+
+    assert disposition == cleanup_worker.EXIT_POSIX_ROOT_RETAINED
+    assert isolated.is_dir()
+    assert list(isolated.iterdir()) == []
+    assert marker.read_text(encoding="utf-8") == "survives"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor deletion")
+def test_posix_cleanup_worker_never_deletes_replacement_at_final_root_boundary(
+    tmp_path, monkeypatch
+):
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    (isolated / "content.txt").write_text("disposable", encoding="utf-8")
+    details = isolated.lstat()
+    displaced = tmp_path / "held-original"
+    original_delete_contents = cleanup_worker._delete_posix_directory
+
+    def replace_root_after_contents_are_empty(descriptor):
+        original_delete_contents(descriptor)
+        isolated.rename(displaced)
+        isolated.mkdir()
+        (isolated / "replacement-marker").write_text("survives", encoding="utf-8")
+
+    monkeypatch.setattr(
+        cleanup_worker, "_delete_posix_directory", replace_root_after_contents_are_empty
+    )
+
     cleanup_worker._delete_posix(isolated, (details.st_dev, details.st_ino))
 
-    assert not isolated.exists()
-    assert marker.read_text(encoding="utf-8") == "survives"
+    assert (isolated / "replacement-marker").read_text(encoding="utf-8") == "survives"
+    assert displaced.is_dir()
+    assert list(displaced.iterdir()) == []
 
 
 class _FakeWindowsCleanupBackend:

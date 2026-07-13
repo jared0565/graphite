@@ -18,6 +18,7 @@ from typing import Protocol
 
 EXIT_UNSAFE = 73
 EXIT_FAILED = 74
+EXIT_POSIX_ROOT_RETAINED = 75
 
 
 def _same_posix_identity(details: os.stat_result, expected: tuple[int, int]) -> bool:
@@ -100,6 +101,22 @@ def _delete_posix_directory(descriptor: int) -> None:
 
 
 def _delete_posix(path: Path, expected: tuple[int, int]) -> None:
+    """Empty the identity-bound lease while deliberately retaining its root.
+
+    POSIX ``unlinkat``/``rmdir`` accepts a name relative to a directory file
+    descriptor; it cannot remove the directory referenced by an already-open
+    descriptor. A final stat-then-rmdir would therefore reopen the root-name
+    replacement race. The root was created by Graphite and its contents are
+    disposable after the package manager runs, so contents are removed only
+    through the held, no-follow descriptor and the empty root is left for OS
+    temporary-directory reclamation.
+
+    A hostile process running as the same UID can still race individual names
+    inside that disposable root between validation and unlink. It can cause
+    cleanup failure or replace disposable contents, but descriptor-relative
+    traversal cannot escape the held root and this worker never removes a
+    replacement of the root itself or any ancestor.
+    """
     parent = path.parent
     name = path.name
     if not path.is_absolute() or not _valid_entry_name(name):
@@ -119,10 +136,6 @@ def _delete_posix(path: Path, expected: tuple[int, int]) -> None:
         if not _same_posix_identity(details, expected) or not stat.S_ISDIR(details.st_mode):
             raise OSError("cleanup lease changed")
         _delete_posix_directory(root_fd)
-        current = _posix_stat_at(parent_fd, name)
-        if not _same_posix_identity(current, expected) or not stat.S_ISDIR(current.st_mode):
-            raise OSError("cleanup root binding changed")
-        os.rmdir(name, dir_fd=parent_fd)
     finally:
         if root_fd >= 0:
             os.close(root_fd)
@@ -435,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
             _delete_windows(path, expected)
         else:
             _delete_posix(path, expected)
+            return EXIT_POSIX_ROOT_RETAINED
         return 0
     except (OSError, RuntimeError, TypeError, ValueError):
         return EXIT_UNSAFE
