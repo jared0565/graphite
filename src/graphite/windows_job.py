@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import ctypes
 import io
-import msvcrt
 import os
 import signal
-import subprocess
 import threading
 from ctypes import wintypes
 from pathlib import Path
 from typing import BinaryIO, Mapping
+
+from .process_contracts import build_windows_environment_block
 
 CREATE_SUSPENDED = 0x00000004
 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -118,15 +118,6 @@ def _kernel32() -> ctypes.WinDLL:
     return api
 
 
-def build_environment_block(environment: Mapping[str, str]) -> str:
-    entries: list[str] = []
-    for key, value in sorted(environment.items(), key=lambda item: item[0].upper()):
-        if not key or "=" in key or "\0" in key or "\0" in value:
-            raise ValueError("invalid environment")
-        entries.append(f"{key}={value}")
-    return "\0".join(entries) + "\0\0"
-
-
 class JobProcess:
     def __init__(self, api: ctypes.WinDLL, process_handle: int, job_handle: int, pid: int,
                  stdin: BinaryIO | None, stdout: BinaryIO, stderr: BinaryIO) -> None:
@@ -150,6 +141,8 @@ class JobProcess:
         return self.returncode
 
     def wait(self, timeout: float | None = None) -> int:
+        import subprocess
+
         milliseconds = 0xFFFFFFFF if timeout is None else max(0, min(0xFFFFFFFE, int(timeout * 1000 + 0.999)))
         result = self._api.WaitForSingleObject(self._process_handle, milliseconds)
         if result == WAIT_TIMEOUT:
@@ -186,6 +179,9 @@ class JobProcess:
 
 def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_stdin: bool) -> JobProcess:
     """Launch suspended, assign to a preconfigured Job, then resume."""
+    import msvcrt
+    import subprocess
+
     if not argv or any("\0" in part for part in argv) or "\0" in str(cwd):
         raise ValueError("invalid launch data")
     api = _kernel32()
@@ -244,7 +240,7 @@ def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_s
             startup.lpAttributeList = attribute_pointer
             process_info = PROCESS_INFORMATION()
             command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
-            environment_block = ctypes.create_unicode_buffer(build_environment_block(environment))
+            environment_block = ctypes.create_unicode_buffer(build_windows_environment_block(environment))
             flags = CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT
             if not api.CreateProcessW(
                 None, command_line, None, None, True, flags, environment_block, str(cwd),
@@ -295,10 +291,10 @@ def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_s
             stdin_value = stdin_stream
         return JobProcess(api, process_handle, job, process_info.dwProcessId, stdin_value, stdout_stream, stderr_stream)
     except Exception:
+        if process_handle:
+            api.TerminateProcess(process_handle, 1)
         if job:
             api.TerminateJobObject(job, 1)
-        elif process_handle:
-            api.TerminateProcess(process_handle, 1)
         for stream in streams:
             try:
                 stream.close()

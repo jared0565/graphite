@@ -254,7 +254,15 @@ def _cancel_synchronous_io(thread: threading.Thread) -> None:
     try:
         import ctypes
 
-        kernel32 = ctypes.windll.kernel32
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenThread.restype = wintypes.HANDLE
+        kernel32.CancelSynchronousIo.argtypes = (wintypes.HANDLE,)
+        kernel32.CancelSynchronousIo.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
         handle = kernel32.OpenThread(0x0001, False, thread.native_id)
         if handle:
             try:
@@ -293,10 +301,34 @@ def _force_kill_process_tree(process: _Process, deadline: float) -> None:
             pass
 
 
+def _posix_process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        # Unknown probe failures must fail safe: assume the group still exists.
+        return True
+
+
 def _terminate_process_tree(process: _Process, deadline: float) -> None:
     """Gracefully signal the process group, then force-kill the tree within the deadline."""
     signaled = _gracefully_signal_process_tree(process)
-    if signaled:
+    if signaled and os.name != "nt":
+        grace_deadline = min(deadline, time.monotonic() + _GRACEFUL_CLEANUP_SECONDS)
+        group_exists = _posix_process_group_exists(process.pid)
+        while group_exists:
+            remaining = grace_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.01, remaining))
+            group_exists = _posix_process_group_exists(process.pid)
+        if not group_exists:
+            return
+    elif signaled:
         remaining = max(0.0, deadline - time.monotonic())
         if remaining > 0:
             try:

@@ -794,11 +794,24 @@ def test_deep_bounded_runner_kills_descendant_after_leader_exits(tmp_path: Path,
 
 
 def test_windows_job_environment_block_is_sorted_double_nul_and_rejects_nul() -> None:
-    from graphite.windows_job import build_environment_block
+    from graphite.process_contracts import build_windows_environment_block
 
-    assert build_environment_block({"z": "last", "A": "first"}) == "A=first\0z=last\0\0"
+    assert build_windows_environment_block({"z": "last", "A": "first"}) == "A=first\0z=last\0\0"
     with pytest.raises(ValueError):
-        build_environment_block({"SAFE": "bad\0value"})
+        build_windows_environment_block({"SAFE": "bad\0value"})
+
+
+def test_windows_contract_builders_import_without_msvcrt(tmp_path: Path) -> None:
+    script = (
+        "import builtins; original=builtins.__import__;"
+        "builtins.__import__=lambda name,*a,**k: (_ for _ in ()).throw(ImportError('blocked')) "
+        "if name=='msvcrt' else original(name,*a,**k);"
+        "import graphite.process_contracts as contracts;"
+        "import graphite.windows_job;"
+        "assert contracts.build_windows_environment_block({'A':'1'}) == 'A=1\\0\\0'"
+    )
+    completed = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, capture_output=True, check=False)
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows native launcher contract")
@@ -808,6 +821,7 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
     tmp_path: Path,
     failure: str,
 ) -> None:
+    import ctypes
     import graphite.windows_job as native
 
     class FakeKernel32:
@@ -817,7 +831,10 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
             self.created: list[int] = []
             self.closed: list[int] = []
             self.terminated: list[int] = []
+            self.terminated_processes: list[int] = []
             self.launch_contract: dict[str, object] = {}
+            self.handle_list: tuple[int, ...] = ()
+            self.environment_block = ""
 
         def CreateJobObjectW(self, security: object, name: object) -> int:
             return 0 if failure == "job_create" else 1
@@ -838,10 +855,20 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
                 size._obj.value = 128  # type: ignore[attr-defined]
                 return False
             return failure != "attribute_init"
-        def UpdateProcThreadAttribute(self, *args: object) -> bool: return failure != "attribute_update"
+        def UpdateProcThreadAttribute(self, *args: object) -> bool:
+            handles = ctypes.cast(args[3], ctypes.POINTER(native.wintypes.HANDLE * 3)).contents
+            self.handle_list = tuple(handles)
+            return failure != "attribute_update"
         def DeleteProcThreadAttributeList(self, pointer: object) -> None: pass
         def CreateProcessW(self, *args: object) -> bool:
             startup = args[8].contents  # type: ignore[attr-defined]
+            environment = args[6]
+            characters: list[str] = []
+            index = 0
+            while len(characters) < 2 or characters[-2:] != ["\0", "\0"]:
+                characters.append(environment[index])
+                index += 1
+            self.environment_block = "".join(characters)
             self.launch_contract = {
                 "command": args[1].value,  # type: ignore[attr-defined]
                 "inherit": args[4],
@@ -859,7 +886,9 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
         def TerminateJobObject(self, job: int, code: int) -> bool:
             self.terminated.append(job)
             return True
-        def TerminateProcess(self, process: int, code: int) -> bool: return True
+        def TerminateProcess(self, process: int, code: int) -> bool:
+            self.terminated_processes.append(process)
+            return True
         def CloseHandle(self, handle: int) -> bool:
             self.closed.append(handle)
             return True
@@ -868,7 +897,8 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
     monkeypatch.setattr(native, "_kernel32", lambda: api)
     closed_fds: list[int] = []
     if failure == "file_wrap":
-        monkeypatch.setattr(native.msvcrt, "open_osfhandle", lambda handle, flags: 100)
+        import msvcrt
+        monkeypatch.setattr(msvcrt, "open_osfhandle", lambda handle, flags: 100)
         monkeypatch.setattr(native.io, "FileIO", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("wrap failed")))
         monkeypatch.setattr(native.os, "close", closed_fds.append)
 
@@ -895,8 +925,78 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
             "cwd": str(tmp_path),
             "stdio": (10, 13, 15),
         }
+        assert api.handle_list == (10, 13, 15)
+        assert api.environment_block == "A=1\0\0"
     if failure in {"process_create", "assign", "resume"}:
         assert api.terminated == [1]
+    if failure in {"assign", "resume", "file_wrap"}:
+        assert api.terminated_processes == [30]
+
+
+def test_cancel_synchronous_io_preserves_pointer_width_and_closes_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    import ctypes
+    import graphite.probe_process as transport
+
+    calls: list[tuple[str, int]] = []
+    high_handle = 0x1_0000_1234
+    class Function:
+        argtypes: object = None
+        restype: object = None
+        def __init__(self, name: str, result: object) -> None:
+            self.name, self.result = name, result
+        def __call__(self, *args: object) -> object:
+            if args:
+                calls.append((self.name, int(args[0])))
+            return self.result
+    class API:
+        OpenThread = Function("open", high_handle)
+        CancelSynchronousIo = Function("cancel", True)
+        CloseHandle = Function("close", True)
+    api = API()
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: api)
+    monkeypatch.setattr(transport.os, "name", "nt")
+    thread = type("Thread", (), {"native_id": 77})()
+
+    transport._cancel_synchronous_io(thread)  # type: ignore[arg-type]
+
+    assert calls == [("open", 1), ("cancel", high_handle), ("close", high_handle)]
+    assert api.OpenThread.restype is ctypes.wintypes.HANDLE
+
+
+def test_posix_cleanup_skips_sigkill_when_group_exits_during_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    import graphite.probe_process as transport
+
+    signals: list[int] = []
+    def killpg(pid: int, sig: int) -> None:
+        signals.append(sig)
+        if sig == 0:
+            raise ProcessLookupError
+    process = type("Process", (), {"pid": 42, "returncode": 0, "kill": lambda self: None})()
+    monkeypatch.setattr(transport.os, "name", "posix")
+    monkeypatch.setattr(transport.os, "killpg", killpg, raising=False)
+
+    transport._terminate_process_tree(process, time.monotonic() + 1)  # type: ignore[arg-type]
+
+    assert signals[0] == signal.SIGTERM
+    assert all(sig != 9 for sig in signals)
+
+
+def test_posix_cleanup_graces_surviving_group_then_sigkills(monkeypatch: pytest.MonkeyPatch) -> None:
+    import graphite.probe_process as transport
+
+    signals: list[int] = []
+    ticks = iter((0.0, 0.0, 0.04, 0.11, 0.11))
+    process = type("Process", (), {"pid": 42, "returncode": 0, "kill": lambda self: None})()
+    monkeypatch.setattr(transport.os, "name", "posix")
+    monkeypatch.setattr(transport.os, "killpg", lambda pid, sig: signals.append(sig), raising=False)
+    monkeypatch.setattr(transport.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(transport.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(transport.time, "sleep", lambda duration: None)
+
+    transport._terminate_process_tree(process, 1.0)  # type: ignore[arg-type]
+
+    assert signals[-1] == 9
+    assert signals.count(0) >= 2
 
 
 def test_windows_launch_failure_never_falls_back_to_popen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -910,6 +1010,59 @@ def test_windows_launch_failure_never_falls_back_to_popen(monkeypatch: pytest.Mo
         transport.run_bounded_process(["python"], cwd=tmp_path, timeout_seconds=1)
 
     assert exc_info.value.code == "launch_failed"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows CreateProcessW argv contract")
+def test_windows_native_launcher_round_trips_hostile_argv(tmp_path: Path) -> None:
+    from graphite.probe_process import run_bounded_process
+
+    hostile = ["", "space value", "trailing\\", 'quote"inside', 'slashes\\\\\"quote']
+    script = "import json,sys;print(json.dumps(sys.argv[1:]))"
+
+    result = run_bounded_process([sys.executable, "-c", script, *hostile], cwd=tmp_path, timeout_seconds=5)
+
+    assert json.loads(result.stdout) == hostile
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows CreateProcessW environment contract")
+def test_windows_native_launcher_child_observes_only_sanitized_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from graphite.probe_process import run_bounded_process, sanitized_probe_environment
+
+    monkeypatch.setenv("DOCTOR_UNRELATED_SECRET", "must-not-inherit")
+    expected = sanitized_probe_environment()
+    script = "import json,os;print(json.dumps(dict(os.environ),sort_keys=True))"
+
+    result = run_bounded_process([sys.executable, "-c", script], cwd=tmp_path, timeout_seconds=5)
+
+    assert json.loads(result.stdout) == expected
+    assert "DOCTOR_UNRELATED_SECRET" not in result.stdout.decode("utf-8")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-list inheritance contract")
+def test_windows_native_launcher_does_not_inherit_unrelated_inheritable_handle(tmp_path: Path) -> None:
+    import msvcrt
+    from graphite.probe_process import run_bounded_process
+
+    read_fd, write_fd = os.pipe()
+    handle = msvcrt.get_osfhandle(read_fd)
+    os.set_handle_inheritable(handle, True)
+    script = (
+        "import ctypes,sys;from ctypes import wintypes;"
+        "api=ctypes.WinDLL('kernel32',use_last_error=True);"
+        "api.GetHandleInformation.argtypes=(wintypes.HANDLE,ctypes.POINTER(wintypes.DWORD));"
+        "api.GetHandleInformation.restype=wintypes.BOOL;flags=wintypes.DWORD();"
+        "print(int(bool(api.GetHandleInformation(int(sys.argv[1]),ctypes.byref(flags)))))"
+    )
+    try:
+        result = run_bounded_process([sys.executable, "-c", script, str(handle)], cwd=tmp_path, timeout_seconds=5)
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+    assert result.stdout.strip() == b"0"
 
 
 def test_core_deep_probe_runs_real_pipeline_without_touching_selected_root(tmp_path: Path) -> None:
