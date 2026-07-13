@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import platform
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,7 +53,7 @@ def evaluate_daemon_health(
     status_path = (state_dir or (base / ".graphite-daemon")) / "status.json"
 
     try:
-        status = read_daemon_status(base, state_dir)
+        raw_status = read_daemon_status(base, state_dir)
     except FileNotFoundError:
         return _finalize(
             base,
@@ -80,7 +81,11 @@ def evaluate_daemon_health(
             project_health={"failing": [], "pending": [], "not_built_recently": []},
         )
 
-    updated_at = _parse_time(str(status.get("updated_at", "")))
+    status, schema_issues = _normalize_status(raw_status)
+    errors.extend(schema_issues)
+
+    updated_at_value = status.get("updated_at")
+    updated_at = _parse_time(updated_at_value if isinstance(updated_at_value, str) else "")
     status_age = None
     if updated_at is None:
         errors.append({"code": "status_updated_at_invalid", "message": "status updated_at is missing or invalid"})
@@ -243,6 +248,80 @@ def _project_health(status: dict[str, Any], now: datetime, max_success_age_secon
     return {"failing": failing, "pending": pending, "not_built_recently": old}
 
 
+_PROJECT_COUNT_FIELDS = ("build_count", "file_count", "failure_count")
+_MAX_SCHEMA_ISSUES = 20
+
+
+def _schema_issue(field: str, index: int | None = None) -> dict[str, Any]:
+    issue: dict[str, Any] = {
+        "code": "status_schema_invalid",
+        "message": "daemon status schema is invalid",
+        "field": field,
+    }
+    if index is not None:
+        issue["index"] = index
+    return issue
+
+
+def _nonnegative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _invalid_project_field(item: Mapping[str, Any]) -> str | None:
+    root = item.get("root")
+    if not isinstance(root, str) or not root.strip():
+        return "root"
+    for field in _PROJECT_COUNT_FIELDS:
+        if field not in item or not _nonnegative_int(item[field]):
+            return field
+    if "needs_initial_build" not in item or not isinstance(item["needs_initial_build"], bool):
+        return "needs_initial_build"
+    for field in ("last_error", "last_success_at"):
+        if field not in item or (item[field] is not None and not isinstance(item[field], str)):
+            return field
+    return None
+
+
+def _normalize_status(raw_status: object) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Return the bounded, non-leaking subset safe for health classification."""
+    if not isinstance(raw_status, Mapping):
+        return {"projects": [], "project_count": 0}, [_schema_issue("status")]
+
+    status = dict(raw_status)
+    issues: list[dict[str, Any]] = []
+    raw_projects = raw_status.get("projects")
+    valid_projects: list[dict[str, Any]] = []
+    if not isinstance(raw_projects, list):
+        issues.append(_schema_issue("projects"))
+    else:
+        for index, item in enumerate(raw_projects):
+            if not isinstance(item, Mapping):
+                if len(issues) < _MAX_SCHEMA_ISSUES:
+                    issues.append(_schema_issue("project", index))
+                continue
+            invalid_field = _invalid_project_field(item)
+            if invalid_field is not None:
+                if len(issues) < _MAX_SCHEMA_ISSUES:
+                    issues.append(_schema_issue(invalid_field, index))
+                continue
+            valid_projects.append(dict(item))
+
+    raw_project_count = raw_status.get("project_count")
+    if not _nonnegative_int(raw_project_count):
+        if len(issues) < _MAX_SCHEMA_ISSUES:
+            issues.append(_schema_issue("project_count"))
+        status["project_count"] = len(valid_projects)
+
+    raw_daemon_status = raw_status.get("status")
+    if raw_daemon_status is not None and not isinstance(raw_daemon_status, str):
+        if len(issues) < _MAX_SCHEMA_ISSUES:
+            issues.append(_schema_issue("status"))
+        status["status"] = None
+
+    status["projects"] = valid_projects
+    return status, issues
+
+
 def _project_summary(item: dict[str, Any], now: datetime) -> dict[str, Any]:
     last_success = _parse_time(str(item.get("last_success_at") or ""))
     age = None if last_success is None else max(0.0, (now - last_success).total_seconds())
@@ -284,8 +363,7 @@ def _finalize(
     project_health: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
     health_status = "degraded" if errors else "warning" if warnings else "ok"
-    raw_project_count = status.get("project_count") if status else 0
-    project_count = int(raw_project_count or 0)
+    project_count = status.get("project_count", 0) if status else 0
     return {
         "ok": not errors,
         "status": health_status,

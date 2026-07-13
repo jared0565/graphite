@@ -5,11 +5,13 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from graphite.cli import main
 from graphite.daemon_health import HealthOptions, evaluate_daemon_health, format_health_text
 
 
-def _write_status(base: Path, payload: dict) -> None:
+def _write_status(base: Path, payload: object) -> None:
     state = base / ".graphite-daemon"
     state.mkdir(parents=True, exist_ok=True)
     (state / "status.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -310,3 +312,167 @@ def test_daemon_health_cli_fail_on_error(tmp_path: Path, monkeypatch, capsys) ->
 
     assert result == 1
     assert "daemon health: degraded" in output
+
+
+@pytest.mark.parametrize("payload", [[], None, "invalid", 7])
+def test_daemon_health_rejects_non_object_status_without_crashing(tmp_path: Path, payload: object) -> None:
+    _write_status(tmp_path, payload)
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+
+    assert report["ok"] is False
+    assert report["status"] == "degraded"
+    assert any(issue["code"] == "status_schema_invalid" for issue in report["errors"])
+    assert report["projects"] == {"failing": [], "pending": [], "not_built_recently": []}
+
+
+@pytest.mark.parametrize("projects", [None, {}, "invalid", 1, True])
+def test_daemon_health_rejects_non_list_projects(tmp_path: Path, projects: object) -> None:
+    payload = _status("2026-06-23T12:00:00+00:00")
+    payload["projects"] = projects
+    _write_status(tmp_path, payload)
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+
+    issues = [issue for issue in report["errors"] if issue["code"] == "status_schema_invalid"]
+    assert issues == [{"code": "status_schema_invalid", "message": "daemon status schema is invalid", "field": "projects"}]
+    assert report["summary"]["project_count"] == 1
+
+
+@pytest.mark.parametrize("entry", [None, [], "invalid", 3, True])
+def test_daemon_health_rejects_non_mapping_project_entries(tmp_path: Path, entry: object) -> None:
+    payload = _status("2026-06-23T12:00:00+00:00")
+    payload["projects"] = [entry]
+    payload["project_count"] = 1
+    _write_status(tmp_path, payload)
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+
+    schema_issues = [issue for issue in report["errors"] if issue["code"] == "status_schema_invalid"]
+    assert schema_issues == [{"code": "status_schema_invalid", "message": "daemon status schema is invalid", "field": "project", "index": 0}]
+    assert report["projects"] == {"failing": [], "pending": [], "not_built_recently": []}
+
+
+@pytest.mark.parametrize("field", ["build_count", "file_count", "failure_count"])
+@pytest.mark.parametrize("value", ["1", True, -1, [], {}, None])
+def test_daemon_health_rejects_invalid_project_counts(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    project = _project("F:/Projects/secret-sentinel")
+    project[field] = value
+    _write_status(tmp_path, _status("2026-06-23T12:00:00+00:00", projects=[project]))
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+    encoded = json.dumps(report)
+
+    issue = next(issue for issue in report["errors"] if issue["code"] == "status_schema_invalid")
+    assert issue == {"code": "status_schema_invalid", "message": "daemon status schema is invalid", "field": field, "index": 0}
+    assert "secret-sentinel" not in encoded
+    assert report["summary"]["project_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("root", ""),
+        ("root", 1),
+        ("needs_initial_build", 0),
+        ("needs_initial_build", "false"),
+        ("last_error", 1),
+        ("last_error", []),
+        ("last_success_at", 1),
+        ("last_success_at", []),
+    ],
+)
+def test_daemon_health_rejects_invalid_project_field_types(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    project = _project("F:/Projects/private")
+    project[field] = value
+    _write_status(tmp_path, _status("2026-06-23T12:00:00+00:00", projects=[project]))
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+
+    assert {issue["field"] for issue in report["errors"] if issue["code"] == "status_schema_invalid"} == {field}
+    assert report["projects"] == {"failing": [], "pending": [], "not_built_recently": []}
+
+
+@pytest.mark.parametrize("project_count", ["1", True, -1, [], {}, None])
+def test_daemon_health_invalid_project_count_falls_back_to_valid_projects(
+    tmp_path: Path,
+    project_count: object,
+) -> None:
+    payload = _status("2026-06-23T12:00:00+00:00", projects=[_project("F:/Projects/valid")])
+    payload["project_count"] = project_count
+    _write_status(tmp_path, payload)
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+
+    assert report["summary"]["project_count"] == 1
+    assert any(issue.get("field") == "project_count" for issue in report["errors"])
+
+
+def test_daemon_health_mixed_schema_classifies_only_valid_projects_and_formats_safely(tmp_path: Path) -> None:
+    secret = "F:/Projects/DO-NOT-LEAK"
+    projects = [
+        _project("F:/Projects/good", last_error="failed"),
+        _project(secret, build_count="bad"),
+        "not-a-project",
+    ]
+    payload = _status("2026-06-23T12:00:00+00:00")
+    payload["projects"] = projects
+    payload["project_count"] = len(projects)
+    _write_status(tmp_path, payload)
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+    text = format_health_text(report)
+
+    assert report["ok"] is False
+    assert [project["root"] for project in report["projects"]["failing"]] == ["F:/Projects/good"]
+    assert report["summary"]["project_count"] == 3
+    assert len([issue for issue in report["errors"] if issue["code"] == "status_schema_invalid"]) == 2
+    assert secret not in json.dumps(report)
+    assert secret not in text
+
+
+def test_daemon_health_schema_issue_cap_does_not_skip_later_valid_projects(tmp_path: Path) -> None:
+    invalid_projects = [None] * 25
+    valid = _project("F:/Projects/later-valid", last_error="failed")
+    payload = _status("2026-06-23T12:00:00+00:00")
+    payload["projects"] = [*invalid_projects, valid]
+    payload["project_count"] = len(invalid_projects) + 1
+    _write_status(tmp_path, payload)
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+
+    schema_issues = [issue for issue in report["errors"] if issue["code"] == "status_schema_invalid"]
+    assert len(schema_issues) == 20
+    assert [project["root"] for project in report["projects"]["failing"]] == ["F:/Projects/later-valid"]
