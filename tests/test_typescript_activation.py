@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 import pytest
+import graphite._cleanup_worker as cleanup_worker
 import graphite.dependency_install as dependency_install
 import graphite.ingest as ingest
 import graphite.typescript_activation as typescript_activation
@@ -1371,17 +1372,19 @@ def test_default_cleanup_uses_exact_bounded_process_contract(tmp_path, monkeypat
     assert result == StepResult(False, "cleanup_timeout")
     assert len(calls) == 1
     argv, kwargs = calls[0]
-    assert argv[:3] == [sys.executable, "-I", "-c"]
-    quarantine = Path(argv[-3])
-    assert quarantine.parent == isolated.parent
-    assert quarantine.name.startswith(f".{isolated.name}.graphite-cleanup-")
-    assert argv[-2:] == [str(details.st_dev), str(details.st_ino)]
+    assert argv[:2] == [sys.executable, "-I"]
+    worker = Path(argv[2])
+    assert worker.name == "_cleanup_worker.py"
+    assert worker.is_file()
+    cleanup_target = Path(argv[3])
+    assert cleanup_target.parent == isolated.parent
+    assert cleanup_target.name.startswith(f".{isolated.name}.graphite-cleanup-")
+    assert argv[4:] == [str(details.st_dev), str(details.st_ino)]
     assert kwargs["cwd"] == isolated.parent
     assert kwargs["stdin"] is None
     assert kwargs["timeout_seconds"] == 0.25
     assert kwargs["check"] is False
     assert "shell" not in kwargs
-    shutil.rmtree(quarantine, ignore_errors=True)
 
 
 def test_cleanup_rejects_replacement_at_leased_path_without_deleting_it(
@@ -1411,7 +1414,7 @@ def test_cleanup_rejects_replacement_at_leased_path_without_deleting_it(
         shutil.rmtree(original, ignore_errors=True)
 
 
-def test_cleanup_quarantine_never_deletes_object_swapped_after_validation(
+def test_cleanup_worker_never_deletes_object_swapped_after_parent_validation(
     tmp_path, monkeypatch
 ):
     root = tmp_path / "repo"
@@ -1441,22 +1444,16 @@ def test_cleanup_quarantine_never_deletes_object_swapped_after_validation(
     )
     try:
         result = typescript_activation._cleanup_isolated_home(lease, root, 0.25)
-        quarantines = list(
-            leased_path.parent.glob(f".{leased_path.name}.graphite-cleanup-*")
-        )
-        markers = [path / "replacement-marker" for path in quarantines]
         assert result == StepResult(False, "cleanup_failed")
-        assert markers
-        assert all(marker.read_text(encoding="utf-8") == "must survive" for marker in markers)
+        marker = leased_path / "replacement-marker"
+        assert marker.read_text(encoding="utf-8") == "must survive"
         assert original.is_dir()
     finally:
-        for marker in leased_path.parent.glob(f".{leased_path.name}.graphite-cleanup-*"):
-            shutil.rmtree(marker, ignore_errors=True)
         shutil.rmtree(leased_path, ignore_errors=True)
         shutil.rmtree(original, ignore_errors=True)
 
 
-def test_cleanup_quarantine_preserves_new_object_at_original_path(
+def test_cleanup_postcheck_preserves_new_object_at_original_path(
     tmp_path, monkeypatch
 ):
     root = tmp_path / "repo"
@@ -1465,12 +1462,12 @@ def test_cleanup_quarantine_preserves_new_object_at_original_path(
     leased_path = Path(lease.name)
 
     def runner(argv, **_kwargs):
-        quarantine = Path(argv[-3])
+        returncode = cleanup_worker.main(argv[2:])
+        assert returncode == 0
         leased_path.mkdir()
         (leased_path / "replacement-marker").write_text(
             "must survive", encoding="utf-8"
         )
-        shutil.rmtree(quarantine)
         return ProbeProcessResult(0, b"", b"", 0)
 
     monkeypatch.setattr(typescript_activation, "run_bounded_process", runner)
@@ -1482,10 +1479,235 @@ def test_cleanup_quarantine_preserves_new_object_at_original_path(
         shutil.rmtree(leased_path, ignore_errors=True)
 
 
+def test_isolated_lease_rejects_ancestor_of_selected_root(tmp_path):
+    isolated = tmp_path / "isolated"
+    root = isolated / "repo"
+    root.mkdir(parents=True)
+    details = isolated.lstat()
+    lease = typescript_activation._TemporaryDirectoryLease(
+        str(isolated), (details.st_dev, details.st_ino)
+    )
+
+    assert typescript_activation._validated_isolated_lease(lease, root) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor deletion")
+def test_posix_cleanup_worker_deletes_fd_relative_tree_without_following_links(tmp_path):
+    isolated = tmp_path / "isolated"
+    nested = isolated / "nested"
+    nested.mkdir(parents=True)
+    (nested / "content.txt").write_text("content", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "survives.txt"
+    marker.write_text("survives", encoding="utf-8")
+    (isolated / "outside-link").symlink_to(outside, target_is_directory=True)
+    details = isolated.lstat()
+
+    cleanup_worker._delete_posix(isolated, (details.st_dev, details.st_ino))
+
+    assert not isolated.exists()
+    assert marker.read_text(encoding="utf-8") == "survives"
+
+
+class _FakeWindowsCleanupBackend:
+    directory_attribute = 0x10
+    reparse_attribute = 0x400
+
+    def __init__(self, records):
+        self.records = records
+        self.opened = []
+        self.enumerated = []
+        self.deleted = []
+        self.closed = []
+
+    def open(self, path, *, directory):
+        key = str(path)
+        self.opened.append((key, directory))
+        return key
+
+    def information(self, handle):
+        volume, file_id, attributes, _entries = self.records[handle]
+        return volume, file_id, attributes
+
+    def entries(self, handle):
+        self.enumerated.append(handle)
+        return list(self.records[handle][3])
+
+    def mark_delete(self, handle):
+        self.deleted.append(handle)
+
+    def close(self, handle):
+        assert handle not in self.closed
+        self.closed.append(handle)
+
+
+def test_windows_cleanup_backend_is_handle_bound_and_never_traverses_reparse(tmp_path):
+    root = tmp_path / "leased"
+    directory = root / "directory"
+    regular = directory / "file.txt"
+    junction = root / "junction"
+    records = {
+        str(root): (
+            7,
+            100,
+            0x10,
+            [
+                cleanup_worker._WindowsEntry("directory", 101, 0x10),
+                cleanup_worker._WindowsEntry("junction", 102, 0x410),
+            ],
+        ),
+        str(directory): (
+            7,
+            101,
+            0x10,
+            [cleanup_worker._WindowsEntry("file.txt", 103, 0x20)],
+        ),
+        str(regular): (7, 103, 0x20, []),
+        str(junction): (7, 102, 0x410, []),
+    }
+    backend = _FakeWindowsCleanupBackend(records)
+
+    cleanup_worker._delete_windows(root, (7, 100), backend)
+
+    assert backend.deleted == [str(regular), str(directory), str(junction), str(root)]
+    assert str(junction) not in backend.enumerated
+    assert backend.closed == [str(regular), str(directory), str(junction), str(root)]
+
+
+def test_windows_cleanup_backend_closes_every_handle_on_child_identity_race(tmp_path):
+    root = tmp_path / "leased"
+    child = root / "child.txt"
+    records = {
+        str(root): (
+            9,
+            200,
+            0x10,
+            [cleanup_worker._WindowsEntry("child.txt", 201, 0x20)],
+        ),
+        str(child): (9, 999, 0x20, []),
+    }
+    backend = _FakeWindowsCleanupBackend(records)
+
+    with pytest.raises(OSError, match="identity changed"):
+        cleanup_worker._delete_windows(root, (9, 200), backend)
+
+    assert backend.deleted == []
+    assert backend.closed == [str(child), str(root)]
+
+
+def test_native_windows_open_uses_reparse_safe_nondelete_sharing(tmp_path):
+    calls = []
+
+    class FakeApi:
+        def CreateFileW(self, *args):
+            calls.append(args)
+            return 123
+
+    backend = cleanup_worker._NativeWindowsBackend.__new__(
+        cleanup_worker._NativeWindowsBackend
+    )
+    backend._api = FakeApi()
+
+    assert backend.open(tmp_path / "leased", directory=True) == 123
+    path, access, sharing, security, creation, flags, template = calls[0]
+    assert path == str(tmp_path / "leased")
+    assert access & 0x00010000  # DELETE
+    assert access & 0x00000001  # FILE_LIST_DIRECTORY
+    assert sharing == 0x00000001 | 0x00000002  # no FILE_SHARE_DELETE
+    assert security is None and template is None
+    assert creation == 3  # OPEN_EXISTING
+    assert flags & 0x02000000  # FILE_FLAG_BACKUP_SEMANTICS
+    assert flags & 0x00200000  # FILE_FLAG_OPEN_REPARSE_POINT
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native handle deletion")
+def test_windows_cleanup_worker_deletes_nested_readonly_tree_by_handle(tmp_path):
+    isolated = tmp_path / "isolated"
+    nested = isolated / "nested"
+    nested.mkdir(parents=True)
+    readonly = nested / "readonly.txt"
+    readonly.write_text("content", encoding="utf-8")
+    readonly.chmod(0o444)
+    details = isolated.lstat()
+
+    cleanup_worker._delete_windows(isolated, (details.st_dev, details.st_ino))
+
+    assert not isolated.exists()
+
+
+def test_expired_deadline_still_reaps_default_cleanup_without_retaining_ownership(
+    tmp_path,
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    lease = typescript_activation._new_temporary_directory()
+    isolated = Path(lease.name)
+    (isolated / "content.txt").write_text("content", encoding="utf-8")
+    deadline = typescript_activation._Deadline(0.0, lambda: 1.0)
+
+    status, expired_before = typescript_activation._bounded_temporary_cleanup(
+        lease,
+        deadline,
+        root,
+        typescript_activation._cleanup_isolated_home,
+    )
+
+    assert status == "cleanup_timeout"
+    assert expired_before
+    assert not isolated.exists()
+    assert typescript_activation._ACTIVE_CLEANUP_ROOTS == set()
+
+
+def test_cleanup_dependency_malformed_result_is_contained(tmp_path):
+    root = tmp_path / "repo"
+    isolated = tmp_path / "isolated"
+    root.mkdir()
+    isolated.mkdir()
+    details = isolated.lstat()
+    lease = typescript_activation._TemporaryDirectoryLease(
+        str(isolated), (details.st_dev, details.st_ino)
+    )
+    deadline = typescript_activation._Deadline(1.0, lambda: 0.0)
+
+    status, expired_before = typescript_activation._bounded_temporary_cleanup(
+        lease,
+        deadline,
+        root,
+        lambda *_args: object(),
+    )
+
+    assert status == "cleanup_failed"
+    assert not expired_before
+    assert typescript_activation._ACTIVE_CLEANUP_ROOTS == set()
+
+
 def test_deadline_first_expiring_at_cleanup_entry_overrides_install_success(tmp_path):
     root = _activation_root(tmp_path)
     events = []
     dependencies = _activation_dependencies(tmp_path, root, events)
+    calls = 0
+
+    def monotonic():
+        nonlocal calls
+        calls += 1
+        return 31.0 if calls >= 9 else 0.0
+
+    dependencies.monotonic = monotonic
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False, 30),
+        dependencies,
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "operation_timeout"
+    assert result.changed_files == ("package-lock.json", "package.json")
+
+
+def test_cleanup_entry_timeout_overrides_ordinary_verification_failure(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    dependencies = _activation_dependencies(tmp_path, root, events, verify_ok=False)
     calls = 0
 
     def monotonic():

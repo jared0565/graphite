@@ -11,7 +11,6 @@ import json
 import math
 import os
 import re
-import secrets
 import stat
 import sys
 import tempfile
@@ -36,6 +35,7 @@ from .dependency_install import (
     command_for,
     control_files_use_trusted_sources,
     probe_local_typescript,
+    revalidate_trusted_file,
     resolve_trusted_executable,
     resolve_trusted_file,
     resolve_windows_npm_prefix,
@@ -134,25 +134,46 @@ class _TemporaryDirectoryLease:
 
 
 def _new_temporary_directory() -> _TemporaryDirectoryLease:
-    path = Path(tempfile.mkdtemp(prefix="graphite-typescript-")).absolute()
+    temporary_parent = Path(tempfile.gettempdir()).resolve(strict=True)
+    path = Path(
+        tempfile.mkdtemp(prefix="graphite-typescript-", dir=temporary_parent)
+    ).absolute()
     details = path.lstat()
     if not stat.S_ISDIR(details.st_mode) or _is_reparse(details):
         raise OSError("temporary_directory_invalid")
     return _TemporaryDirectoryLease(str(path), (details.st_dev, details.st_ino))
 
 
-_CLEANUP_SCRIPT = (
-    "import pathlib,shutil,stat,sys;"
-    "path=pathlib.Path(sys.argv[1]);"
-    "details=path.lstat();"
-    "expected=(int(sys.argv[2]),int(sys.argv[3]));"
-    "reparse=getattr(details,'st_file_attributes',0)&"
-    "getattr(stat,'FILE_ATTRIBUTE_REPARSE_POINT',0);"
-    "valid=(details.st_dev,details.st_ino)==expected and "
-    "stat.S_ISDIR(details.st_mode) and not stat.S_ISLNK(details.st_mode) "
-    "and not reparse;"
-    "sys.exit(73) if not valid else shutil.rmtree(path)"
-)
+def _rename_no_replace(source: Path, destination: Path) -> bool:
+    """Atomically rename one path without clobbering an existing recovery path."""
+    try:
+        if os.name == "nt":
+            os.rename(source, destination)
+            return True
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        source_bytes = os.fsencode(source)
+        destination_bytes = os.fsencode(destination)
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is not None:
+            renameat2.argtypes = [
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            ]
+            renameat2.restype = ctypes.c_int
+            return renameat2(-100, source_bytes, -100, destination_bytes, 1) == 0
+        renamex_np = getattr(libc, "renamex_np", None)
+        if renamex_np is not None:
+            renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            renamex_np.restype = ctypes.c_int
+            return renamex_np(source_bytes, destination_bytes, 4) == 0
+    except (OSError, TypeError, ValueError):
+        return False
+    return False
 
 
 def _cleanup_isolated_home(
@@ -166,41 +187,54 @@ def _cleanup_isolated_home(
     if validated_lease is None:
         return StepResult(False, "cleanup_failed")
     isolated_home = Path(validated_lease.name)
-    quarantine: Path | None = None
-    for _attempt in range(4):
-        candidate = isolated_home.with_name(
-            f".{isolated_home.name}.graphite-cleanup-{secrets.token_hex(16)}"
-        )
-        if not _path_is_lexically_present(candidate):
-            quarantine = candidate
-            break
-    if quarantine is None:
+    cleanup_target = isolated_home.with_name(
+        f".{isolated_home.name}.graphite-cleanup-recovery-"
+        f"{lease.identity[0]:x}-{lease.identity[1]:x}"
+    )
+    if not _rename_no_replace(isolated_home, cleanup_target):
         return StepResult(False, "cleanup_failed")
+
+    def fail_after_quarantine(reason: str = "cleanup_failed") -> StepResult:
+        if _path_is_lexically_present(cleanup_target):
+            _rename_no_replace(cleanup_target, isolated_home)
+        return StepResult(False, reason)
+
     try:
-        os.rename(isolated_home, quarantine)
-        details = quarantine.lstat()
+        details = cleanup_target.lstat()
         if (
             (details.st_dev, details.st_ino) != lease.identity
             or not stat.S_ISDIR(details.st_mode)
             or stat.S_ISLNK(details.st_mode)
             or _is_reparse(details)
-            or quarantine.resolve(strict=True) != quarantine
+            or cleanup_target.resolve(strict=True) != cleanup_target
         ):
-            return StepResult(False, "cleanup_failed")
+            return fail_after_quarantine()
     except (OSError, RuntimeError, ValueError):
-        return StepResult(False, "cleanup_failed")
+        return fail_after_quarantine()
+    worker = Path(__file__).with_name("_cleanup_worker.py")
+    try:
+        python_executable = Path(sys.executable).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return fail_after_quarantine()
+    worker_reference = resolve_trusted_file(worker, root, executable=False)
+    python_reference = resolve_trusted_file(python_executable, root, executable=True)
+    if worker_reference is None or python_reference is None:
+        return fail_after_quarantine()
+    if not revalidate_trusted_file(
+        worker_reference, root, executable=False
+    ) or not revalidate_trusted_file(python_reference, root, executable=True):
+        return fail_after_quarantine()
     try:
         result = run_bounded_process(
             [
-                sys.executable,
+                str(python_reference.path),
                 "-I",
-                "-c",
-                _CLEANUP_SCRIPT,
-                str(quarantine),
+                str(worker_reference.path),
+                str(cleanup_target),
                 str(lease.identity[0]),
                 str(lease.identity[1]),
             ],
-            cwd=quarantine.parent,
+            cwd=cleanup_target.parent,
             stdin=None,
             timeout_seconds=timeout,
             max_output_bytes=4096,
@@ -209,11 +243,11 @@ def _cleanup_isolated_home(
         )
     except ProbeProcessError as error:
         reason = "cleanup_timeout" if error.code == "timeout" else "cleanup_failed"
-        return StepResult(False, reason)
+        return fail_after_quarantine(reason)
     except Exception:
-        return StepResult(False, "cleanup_failed")
-    if result.returncode != 0 or _path_is_lexically_present(quarantine):
-        return StepResult(False, "cleanup_failed")
+        return fail_after_quarantine()
+    if result.returncode != 0 or _path_is_lexically_present(cleanup_target):
+        return fail_after_quarantine()
     return StepResult(True, "cleaned")
 
 
@@ -311,7 +345,7 @@ def _bounded_temporary_cleanup(
     try:
         remaining = deadline.remaining()
     except _DeadlineExpired:
-        remaining = 0.0
+        remaining = _CLEANUP_MAX_SECONDS
         expired_before_cleanup = True
     except _DependencyFailure:
         remaining = _CLEANUP_MAX_SECONDS
@@ -326,6 +360,8 @@ def _bounded_temporary_cleanup(
         _clear_cleanup_active(root)
     if dependency_failed:
         return "dependency_failed", expired_before_cleanup
+    if not isinstance(cleanup_result, StepResult):
+        return "cleanup_failed", expired_before_cleanup
     if not cleanup_result.ok:
         reason = (
             cleanup_result.reason
@@ -969,6 +1005,7 @@ def _validated_isolated_lease(
             and canonical == lexical
             and canonical != canonical_root
             and not _is_contained(canonical, canonical_root)
+            and not _is_contained(canonical_root, canonical)
             and stat.S_ISDIR(details.st_mode)
             and not stat.S_ISLNK(details.st_mode)
             and not _is_reparse(details)
@@ -1246,6 +1283,7 @@ def _install_with_isolation(
             elif cleanup_status == "cleanup_timeout" and (
                 not expired_before_cleanup
                 or result.outcome is not ActivationOutcome.VERIFICATION_FAILED
+                or result.reason not in {"operation_timeout", "dependency_failed"}
             ):
                 result = _result_for_detection(
                     detection,
