@@ -48,6 +48,20 @@ The intended dependency direction is observable in current imports but is not en
 
 ## Trust boundaries
 
+### Doctor and deep-probe boundary
+
+Fast checks are read-only with respect to the selected repository. They inspect the supported Python runtime, bounded Git enumeration, graph validity, daemon health, and static configuration or package availability. Missing MCP, TypeScript, daemon registration, or model configuration is an optional state; optional states do not block core graph operation. Only a `blocked` aggregate crosses the command's non-zero exit boundary.
+
+Deep deterministic work creates a synthetic repository in an external private temporary workspace and never writes to or executes the selected root. The workspace lease validates canonical containment, directory identity, ownership or Windows ACLs, reparse points, no-follow handles, and bindings before and after each phase. Subprocesses cross a separate hostile boundary with bounded stdin/stdout/stderr, one shared deadline, disabled shell execution, and native process containment: Windows Job Objects or POSIX process groups contain descendants. Cleanup coordination reserves part of the same deadline, revalidates the lease before deletion, and gives one bounded cleanup worker sole ownership. A cleanup timeout blocks the result and prevents another core probe from racing the live lease until cleanup completes.
+
+These controls do not provide an OS sandbox. The local user and same-user process namespace remain a best effort boundary: another malicious process with the same authority may still interfere, so uncertain workspace bindings are leaked rather than deleted by pathname.
+
+The MCP probe starts an isolated interpreter from a guarded distribution-record import manifest. It rejects imports shadowed by the selected root, current directory, or user site and validates the expected Graphite and MCP module origins before protocol startup. The TypeScript probe is static no-exec detection: it reads package metadata through externally resolved Node but does not load, execute, or transpile project-controlled JavaScript, so detection stays optional/unverified.
+
+The LLM path is an explicit subprocess and model trust boundary. `--include-llm` sends synthetic content only through an isolated bounded worker: one constant request, fixed output cap, no redirect or retry, sanitized category-only failure, and no response body in the doctor report. There is no repository data or model context carried between roots or tenants, preventing repository/model cross-contamination in this probe. Provider output cannot affect deterministic graph facts, validation, authorization, or core readiness.
+
+The daemon-status path preserves bounded parse, schema, and output contracts. Input is size-limited before strict UTF-8 JSON parsing; health classification accepts only expected structures; doctor output exposes fixed booleans and counts rather than raw status, errors, process output, or paths.
+
 **Repository input.**
 
 Treat paths, bytes, symlinks, encodings, file counts, and file sizes as hostile. Current ingestion resolves roots and candidates, requires candidates to remain below the root, rejects unsafe Git paths, skips unreadable/binary/oversized files, applies configured count bounds, and records normalized project-relative paths. Extraction reads bytes and degrades or reports parse/read errors. New readers must use the same containment model; never trust a repository string as an absolute destination or executable.

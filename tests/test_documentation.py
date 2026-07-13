@@ -364,6 +364,132 @@ def test_readme_links_to_contributor_guides() -> None:
     assert "[Release guide](RELEASING.md)" in readme
 
 
+def test_readme_documents_system_readiness_and_optional_activation() -> None:
+    readme = read_document("README.md")
+    lines = set(readme.splitlines())
+
+    assert "## System readiness and optional integrations" in lines
+    for command in (
+        "python -m graphite doctor .",
+        "python -m graphite doctor . --deep",
+        "python -m graphite doctor . --deep --include-llm",
+    ):
+        assert command in readme
+
+    required_phrases = (
+        "ready",
+        "optional",
+        "degraded",
+        "blocked",
+        "exit code",
+        "external private temporary workspace",
+        "selected repository remains read-only",
+        "identity, reparse-point, and ACL checks",
+        "no-follow lease",
+        "native Job Object",
+        "POSIX process group",
+        "same-user process namespace",
+        "best-effort trust boundary",
+        'python -m pip install -e ".[mcp]"',
+        "guarded distribution-record import manifest",
+        "current working directory and user-site shadows",
+        "validate-packages.cjs typescript",
+        "project-local TypeScript",
+        "never executes or transpiles untrusted project JavaScript",
+        "local Ollama",
+        "newly rotated, session-scoped",
+        "GRAPHITE_LLM_API_KEY",
+        "provider dashboard",
+        "synthetic content only",
+        "no repository data",
+        "no redirects or retries",
+        "GRAPHITE_LLM_MAX_OUTPUT_TOKENS",
+        "16-token cap",
+    )
+    readme_folded = readme.casefold()
+    for phrase in required_phrases:
+        assert phrase.casefold() in readme_folded
+
+
+def test_optional_activation_docs_reject_unsafe_examples() -> None:
+    readme = read_document("README.md")
+    contributing = read_document("CONTRIBUTING.md")
+    documents = "\n".join((readme, contributing))
+    validator_command = (
+        'node "C:\\Users\\fbmac\\atlas\\Codex\\.codex_state\\user_home\\scripts\\'
+        'validate-packages.cjs" typescript'
+    )
+
+    assert validator_command in readme
+    assert validator_command in contributing
+    forbidden_global_installs = (
+        "npm install -g typescript",
+        "npm i -g typescript",
+        "pnpm add -g typescript",
+        "yarn global add typescript",
+    )
+    for command in forbidden_global_installs:
+        assert command not in documents.casefold()
+    key_shaped_example = re.compile(
+        r"(?i)\b(?:sk|key|token|ghp|github_pat)[-_][a-z0-9_-]{12,}\b"
+        r"|\bxox[baprs]-[a-z0-9-]{12,}\b|\bAIza[a-z0-9_-]{20,}\b"
+    )
+    assert not key_shaped_example.search(documents)
+
+    assert "defaults to 512" in readme
+    assert "1–4096" in readme
+    assert "16-token cap" in readme
+
+
+def test_contributing_documents_doctor_test_and_security_contracts() -> None:
+    contributing = read_document("CONTRIBUTING.md")
+    contributing_folded = contributing.casefold()
+
+    required_phrases = (
+        "stable doctor JSON",
+        "redaction",
+        "deadlines",
+        "process cleanup",
+        "missing tools",
+        "optional semantics",
+        "validate-packages.cjs typescript",
+        "no live provider calls in automated tests",
+        "fake worker",
+        "fake provider",
+        "fake process boundary",
+        "selected root is hostile",
+        "raw outputs, raw errors, secrets, or absolute paths",
+        "Windows and POSIX",
+    )
+    for phrase in required_phrases:
+        assert phrase.casefold() in contributing_folded
+
+
+def test_architecture_documents_doctor_and_deep_probe_boundary() -> None:
+    architecture = read_document("ARCHITECTURE.md")
+    lines = set(architecture.splitlines())
+    architecture_folded = architecture.casefold()
+
+    assert "### Doctor and deep-probe boundary" in lines
+    required_phrases = (
+        "fast checks are read-only",
+        "external private temporary workspace",
+        "native process containment",
+        "cleanup coordination",
+        "guarded distribution-record import manifest",
+        "static no-exec",
+        "synthetic content only",
+        "isolated bounded worker",
+        "optional states do not block core",
+        "no repository data or model context",
+        "same-user process namespace",
+        "best effort",
+        "bounded parse, schema, and output",
+    )
+    for phrase in required_phrases:
+        assert phrase.casefold() in architecture_folded
+
+
 def test_markdown_link_scanner_handles_supported_forms_and_fences() -> None:
     markdown = "\n".join(
         (

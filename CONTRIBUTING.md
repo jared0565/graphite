@@ -63,6 +63,10 @@ python -m graphite --help
 
 Focused tests shorten the feedback loop; they do not replace the full Ruff, pytest, and CLI smoke checks. Add behavior-level tests for new or changed contracts and ensure failures are meaningful rather than dependent on local machine state.
 
+Doctor changes require focused tests for stable doctor JSON, deterministic ordering, redaction, end-to-end deadlines, process cleanup, missing tools, and optional semantics. Cover both successful and adversarial outcomes. Cross-platform behavior must have Windows and POSIX coverage; use narrowly scoped platform skips only when an operating-system primitive truly has no counterpart, and test the portable contract on every platform.
+
+No live provider calls in automated tests are permitted. Exercise network and subprocess behavior through a fake worker, fake provider, and fake process boundary with controlled time, output, failures, and descendants. Tests must remain offline, deterministic, and safe to run without credentials.
+
 ## Security expectations
 
 Treat repository files, file names, symlinks, Git metadata, generated graph data, and model output as untrusted input. Pass subprocess arguments as an argument vector and never interpolate untrusted values into a shell command. Preserve path containment, bounded I/O, explicit timeouts, atomic writes, output encoding, and safe error redaction at every relevant boundary.
@@ -70,6 +74,16 @@ Treat repository files, file names, symlinks, Git metadata, generated graph data
 Never place credentials or other secrets in commits, fixtures, logs, examples, generated artifacts, or prompts. Do not publish exploitable vulnerability details in a public issue or pull request. This repository does not invent or imply a private security contact; use an officially documented private reporting channel if one exists, and otherwise disclose only through an appropriate repository-owner channel.
 
 Security-sensitive changes should include tests for hostile input, boundary violations, partial failure, and safe cleanup where applicable.
+
+For doctor work, assume the selected root is hostile. Neither text nor JSON diagnostics may include raw outputs, raw errors, secrets, or absolute paths. Preserve private external workspaces, no-follow identity checks, native child-process containment, bounded parsing and output, redacted error categories, and deadline-coordinated cleanup.
+
+Before any optional-integration activation install, follow the repository package-validation policy. The exact user guardrail for TypeScript is:
+
+```text
+node "C:\Users\fbmac\atlas\Codex\.codex_state\user_home\scripts\validate-packages.cjs" typescript
+```
+
+In shorthand, the validated target is `validate-packages.cjs typescript`. If validation exits 1, stop; if registry lookup is unavailable, manually verify the spelling and identity before proceeding. After validation, use the target project's existing package manager and project-local dependency declaration. Do not use a global TypeScript install.
 
 ## Model-agnostic design
 

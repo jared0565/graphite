@@ -27,6 +27,42 @@ pip install -e F:/Projects/graphite
 
 No model SDK is required for optional LLM enrichment; Graphite uses standard-library HTTP adapters.
 
+## System readiness and optional integrations
+
+Use the doctor before enabling optional integrations or when diagnosing a host. The fast command performs read-only checks; deep mode exercises the deterministic pipeline and configured integration boundaries:
+
+```bash
+python -m graphite doctor .
+python -m graphite doctor . --deep
+python -m graphite doctor . --deep --include-llm
+```
+
+Each check is `ready` when usable, `optional` when an absent integration does not affect core operation, `degraded` when a non-core capability needs attention, or `blocked` when a core safety or execution requirement failed. The overall result is the most severe check. The exit code boundary is deliberately narrow: `blocked` exits 1, while `ready`, `optional`, and `degraded` exit 0. Use `--json` for the stable machine-readable report.
+
+Fast checks do not write to the selected repository. Deep pipeline work writes only to an external private temporary workspace; the selected repository remains read-only. The lease uses containment, identity, reparse-point, and ACL checks, a no-follow lease, and pinned directory handles. Child processes receive native Job Object containment on Windows or POSIX process group containment, bounded I/O, and one end-to-end deadline. Cleanup is reserved within that deadline. A cleanup timeout is reported as a blocked result, and the cleanup worker retains sole ownership of the live lease while overlapping core probes remain blocked. The local OS user and same-user process namespace remain a best-effort trust boundary: these controls reduce pathname races and contain descendants but cannot fully isolate a malicious process running as the same user.
+
+MCP is optional. Only after satisfying the repository package-validation policy for every distribution that activation would install, enable the declared extra:
+
+```bash
+python -m pip install -e ".[mcp]"
+```
+
+The deep MCP probe launches an isolated interpreter from a guarded distribution-record import manifest. It rejects current working directory and user-site shadows and does not import Graphite or MCP from the selected repository.
+
+TypeScript compiler resolution is also optional. Before adding TypeScript, run the mandated package guardrail:
+
+```text
+node "C:\Users\fbmac\atlas\Codex\.codex_state\user_home\scripts\validate-packages.cjs" typescript
+```
+
+Then use the target project's existing package manager to add the verified `typescript` package locally; do not install it globally. Doctor statically detects project-local TypeScript from package metadata but intentionally never executes or transpiles untrusted project JavaScript. A detected compiler therefore remains optional/unverified rather than being treated as executed proof.
+
+The validator target in that command is `validate-packages.cjs typescript`; preserve that package spelling exactly.
+
+Local Ollama activation needs no API key: set `GRAPHITE_LLM=local`, `GRAPHITE_LLM_PROVIDER=ollama`, and an explicit `GRAPHITE_LLM_MODEL`; leave `GRAPHITE_LLM_API_KEY` unset. For a cloud provider, use a newly rotated, session-scoped `GRAPHITE_LLM_API_KEY` and explicitly set the provider, model, and HTTPS base URL. Never place the value in a command example, repository file, persistent parent-process configuration, shell history, or log. If a credential may have been exposed, revoke it in the provider dashboard, remove it from parent secret configuration, rotate it, and restart the parent and all affected processes so they cannot retain the old environment.
+
+`--include-llm` is an explicit network action and uses synthetic content only. It sends one bounded constant probe with no repository data, follows no redirects or retries, and reports neither response text, raw error text, nor secrets. The normal enrichment setting `GRAPHITE_LLM_MAX_OUTPUT_TOKENS` defaults to 512 and is clamped to 1–4096. The doctor probe overrides it with a fixed 16-token cap. Keep the LLM probe disabled unless network access to the configured endpoint is approved.
+
 ## Global F:/Projects usage
 
 This repository lives at `F:\Projects\graphite` (its own git repo) and is pip-installed editable, so `python -m graphite` works from any project in any shell. The `graphite` / `graphite-mcp` console-script shims are equivalent where they are on PATH (on this machine: PowerShell/cmd via `C:\Users\fbmac\.local\bin\graphite.cmd`, but not Git Bash — prefer `python -m graphite` in scripts and agent instructions).
@@ -411,9 +447,6 @@ Once configured, Claude can call these tools automatically:
 - `graphite_community` — list the community around a node
 - `graphite_summary` — stats, god nodes, entry points, surprising connections
 - `graphite_refresh` — rebuild and reload the graph
-
-
-
 
 
 
