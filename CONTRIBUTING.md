@@ -20,7 +20,13 @@ Activate `.venv` using the command for your shell. Before installing already-dec
 python -m pip install -e ".[dev]"
 ```
 
-For MCP development, install the optional MCP extra as well:
+For MCP development, the mandatory repository package-validation policy requires this check before activation:
+
+```text
+node "C:\Users\fbmac\atlas\Codex\.codex_state\user_home\scripts\validate-packages.cjs" mcp
+```
+
+If validation exits 1, stop. If registry lookup is unavailable, manually verify the exact package spelling and identity. Only after successful validation, install the optional MCP extra as well:
 
 ```bash
 python -m pip install -e ".[dev,mcp]"
@@ -31,7 +37,7 @@ Installing these declared extras is different from proposing a new dependency. B
 1. Verify its exact registry name and project identity to prevent typo-squatting or substitution.
 2. Review its maintenance activity and reputation, license compatibility, published security advisories, and transitive dependency risk.
 3. Obtain maintainer approval before changing dependency declarations or installing it for repository work.
-4. Run any package validator mandated by your organization when one exists.
+4. Run the repository package validator before installation; a failed validation blocks the install.
 
 Prefer existing declared dependencies and standard-library capabilities when they are sufficient. Never invent a package name or assume that a similarly named registry project is the intended dependency.
 

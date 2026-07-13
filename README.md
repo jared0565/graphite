@@ -41,7 +41,13 @@ Each check is `ready` when usable, `optional` when an absent integration does no
 
 Fast checks do not write to the selected repository. Deep pipeline work writes only to an external private temporary workspace; the selected repository remains read-only. The lease uses containment, identity, reparse-point, and ACL checks, a no-follow lease, and pinned directory handles. Child processes receive native Job Object containment on Windows or POSIX process group containment, bounded I/O, and one end-to-end deadline. Cleanup is reserved within that deadline. A cleanup timeout is reported as a blocked result, and the cleanup worker retains sole ownership of the live lease while overlapping core probes remain blocked. The local OS user and same-user process namespace remain a best-effort trust boundary: these controls reduce pathname races and contain descendants but cannot fully isolate a malicious process running as the same user.
 
-MCP is optional. Only after satisfying the repository package-validation policy for every distribution that activation would install, enable the declared extra:
+MCP is optional. Before activation, the mandatory repository package-validation policy requires validating the declared `mcp` distribution:
+
+```text
+node "C:\Users\fbmac\atlas\Codex\.codex_state\user_home\scripts\validate-packages.cjs" mcp
+```
+
+If validation exits 1, stop. If registry lookup is unavailable, manually verify the exact package spelling and identity. Only after that validation succeeds, enable the declared extra:
 
 ```bash
 python -m pip install -e ".[mcp]"
@@ -421,11 +427,7 @@ Then use `/graphite [path]` inside Claude Code. The skill defaults to zero-LLM m
 
 ### MCP server for Claude Code
 
-Install the optional MCP dependency:
-
-```bash
-pip install -e "F:/Projects/graphite[mcp]"
-```
+Complete the mandatory package-validation policy and MCP activation steps in [System readiness and optional integrations](#system-readiness-and-optional-integrations). Do not bypass or reorder the validator and install steps.
 
 Then configure Claude Code (Desktop) to use the local server. Add this to your `claude_desktop_config.json`:
 
@@ -447,7 +449,6 @@ Once configured, Claude can call these tools automatically:
 - `graphite_community` — list the community around a node
 - `graphite_summary` — stats, god nodes, entry points, surprising connections
 - `graphite_refresh` — rebuild and reload the graph
-
 
 
 

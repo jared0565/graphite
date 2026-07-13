@@ -12,10 +12,42 @@ URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 DANGEROUS_URI_SCHEMES = frozenset(("data", "javascript", "vbscript"))
 DOCUMENTS = ("README.md", "CONTRIBUTING.md", "ARCHITECTURE.md", "RELEASING.md")
+SECRET_VALUE = re.compile(
+    r"(?i)\b(?:sk-(?:proj-)?[a-z0-9_-]{12,}|ghp_[a-z0-9]{20,}|"
+    r"github_pat_[a-z0-9_]{20,}|xox[baprs]-[a-z0-9-]{12,}|"
+    r"AIza[a-z0-9_-]{20,})\b"
+)
+API_KEY_ASSIGNMENT = re.compile(
+    r"(?i)\bGRAPHITE_LLM_API_KEY\s*=\s*(?P<value>[^\s`]+)"
+)
+AUTHORIZATION_BEARER = re.compile(
+    r"(?i)\bAuthorization\s*:\s*Bearer\s+(?P<value>[^\s`]+)"
+)
 
 
 def read_document(name: str) -> str:
     return (ROOT / name).read_text(encoding="utf-8")
+
+
+def contains_secret_example(text: str) -> bool:
+    """Return whether text contains a credential-shaped value, not a placeholder."""
+    if SECRET_VALUE.search(text):
+        return True
+    placeholders = {"...", "redacted", "placeholder", "your-api-key"}
+    for pattern in (API_KEY_ASSIGNMENT, AUTHORIZATION_BEARER):
+        for match in pattern.finditer(text):
+            value = match.group("value").strip("\"'")
+            value_folded = value.casefold()
+            if (
+                value_folded in placeholders
+                or (value.startswith("<") and value.endswith(">"))
+                or value.startswith("${")
+                or value_folded.startswith("$env:")
+            ):
+                continue
+            if len(value) >= 12:
+                return True
+    return False
 
 
 def _is_escaped(text: str, index: int) -> bool:
@@ -374,7 +406,7 @@ def test_readme_documents_system_readiness_and_optional_activation() -> None:
         "python -m graphite doctor . --deep",
         "python -m graphite doctor . --deep --include-llm",
     ):
-        assert command in readme
+        assert command in lines
 
     required_phrases = (
         "ready",
@@ -430,15 +462,61 @@ def test_optional_activation_docs_reject_unsafe_examples() -> None:
     )
     for command in forbidden_global_installs:
         assert command not in documents.casefold()
-    key_shaped_example = re.compile(
-        r"(?i)\b(?:sk|key|token|ghp|github_pat)[-_][a-z0-9_-]{12,}\b"
-        r"|\bxox[baprs]-[a-z0-9-]{12,}\b|\bAIza[a-z0-9_-]{20,}\b"
-    )
-    assert not key_shaped_example.search(documents)
+    assert not contains_secret_example(documents)
 
     assert "defaults to 512" in readme
     assert "1–4096" in readme
     assert "16-token cap" in readme
+
+
+def test_secret_example_detection_is_precise() -> None:
+    prohibited = (
+        "GRAPHITE_LLM_API_KEY=" + "live-secret-value-12345",
+        "GRAPHITE_LLM_API_KEY=" + "sk-" + "a" * 20,
+        "Authorization: Bearer " + "sk-" + "b" * 20,
+        "provider credential " + "ghp_" + "c" * 24,
+    )
+    allowed = (
+        "token-based-authentication",
+        "key-value_configuration",
+        "GRAPHITE_LLM_API_KEY",
+        "GRAPHITE_LLM_API_KEY=...",
+        "GRAPHITE_LLM_API_KEY=<provider-secret>",
+        "Authorization: Bearer <session-token>",
+    )
+
+    for example in prohibited:
+        assert contains_secret_example(example)
+    for example in allowed:
+        assert not contains_secret_example(example)
+
+
+def test_every_mcp_install_is_gated_by_local_validation() -> None:
+    install_pattern = re.compile(r"(?i)\bpip install\b.*\[[^\]]*mcp[^\]]*\]")
+    validator_pattern = re.compile(r"validate-packages\.cjs[\"']?\s+mcp\b")
+    found: list[str] = []
+
+    for document_name in ("README.md", "CONTRIBUTING.md"):
+        lines = read_document(document_name).splitlines()
+        for index, line in enumerate(lines):
+            if not install_pattern.search(line):
+                continue
+            found.append(f"{document_name}:{index + 1}")
+            section_start = max(
+                (offset for offset in range(index) if lines[offset].startswith("#")),
+                default=-1,
+            )
+            preceding_window = "\n".join(
+                lines[max(section_start + 1, index - 12) : index]
+            )
+            assert "package-validation policy" in preceding_window.casefold(), (
+                f"{document_name}:{index + 1} installs MCP without preceding policy"
+            )
+            assert validator_pattern.search(preceding_window), (
+                f"{document_name}:{index + 1} installs MCP without preceding validator"
+            )
+
+    assert found, "No MCP activation install instructions were found"
 
 
 def test_contributing_documents_doctor_test_and_security_contracts() -> None:
