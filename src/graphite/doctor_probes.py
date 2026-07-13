@@ -19,7 +19,9 @@ from typing import Any
 
 from .config import Config
 from .doctor import DoctorCheck
-from .llm import make_provider
+from .llm import canonical_provider_name
+from .llm_probe import SYSTEM_PROMPT as _LLM_SYSTEM_PROMPT
+from .llm_probe import USER_PROMPT as _LLM_USER_PROMPT
 from .probe_process import ProbeProcessError, ProbeProcessResult, run_bounded_process
 from .probe_workspace import ProbeWorkspaceLease, WorkspaceLeaseError
 
@@ -33,15 +35,17 @@ _MCP_NESTING_LIMIT = 32
 _MCP_METADATA_ROOT_LIMIT = 64
 _MCP_BUILDER_ARGUMENT_LIMIT_BYTES = 16 * 1024
 _MCP_PROTOCOL_VERSION = "2024-11-05"
-_LLM_SYSTEM_PROMPT = "You are a connectivity probe. Reply with READY only."
-_LLM_USER_PROMPT = "Synthetic Graphite connectivity test. No repository data is included."
 _LLM_FAILURE_REMEDIATION = (
     "Verify the provider endpoint.",
     "Use a rotated session credential.",
     "Verify the configured model.",
     "Verify the provider timeout.",
 )
-_SAFE_ERROR_TYPE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
+_LLM_CATEGORIES = frozenset(
+    {"configuration", "authentication", "timeout", "connection", "provider_error"}
+)
+_LLM_OUTPUT_LIMIT_BYTES = 4096
+_LLM_TIMEOUT_MAX_SECONDS = 60.0
 _REQUIRED_MCP_TOOLS = frozenset(
     {"graphite_query", "graphite_summary", "graphite_community", "graphite_refresh"}
 )
@@ -1545,28 +1549,59 @@ def probe_typescript(
     )
 
 
-def _llm_failure(exc: Exception | None = None) -> DoctorCheck:
-    details: dict[str, str] = {}
-    if exc is not None:
-        error_type = type(exc).__name__
-        if _SAFE_ERROR_TYPE.fullmatch(error_type):
-            details["error_type"] = error_type
+def _llm_failure(category: str = "provider_error") -> DoctorCheck:
+    safe_category = category if category in _LLM_CATEGORIES else "provider_error"
     return DoctorCheck(
         "deep_llm",
         "LLM",
         "degraded",
         "synthetic connectivity probe failed",
-        details,
+        {"category": safe_category},
         _LLM_FAILURE_REMEDIATION,
     )
+
+
+def _bounded_llm_text(value: object, *, limit: int) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > limit:
+        raise ValueError
+    return value
+
+
+def _llm_worker_input(cfg: Config, timeout_seconds: float) -> bytes:
+    mode = _bounded_llm_text(cfg.llm_mode, limit=16)
+    provider = _bounded_llm_text(cfg.llm_provider, limit=128)
+    if (
+        mode is None
+        or mode.strip().lower() not in {"auto", "local", "cloud"}
+        or provider is None
+        or not isinstance(cfg.seed, int)
+        or isinstance(cfg.seed, bool)
+    ):
+        raise ValueError
+    payload = {
+        "mode": mode,
+        "provider": provider,
+        "model": _bounded_llm_text(cfg.llm_model, limit=512),
+        "base_url": _bounded_llm_text(cfg.llm_base_url, limit=2048),
+        "api_key": _bounded_llm_text(cfg.llm_api_key, limit=4096),
+        "timeout_seconds": timeout_seconds,
+        "seed": cfg.seed,
+        "system": _LLM_SYSTEM_PROMPT,
+        "user": _LLM_USER_PROMPT,
+    }
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
 def probe_llm(
     cfg: Config,
     *,
-    provider_factory: Callable[[Config], Any] = make_provider,
+    _runner: Callable[..., ProbeProcessResult] = run_bounded_process,
 ) -> DoctorCheck:
-    """Run one explicit synthetic connectivity request without repository data."""
+    """Run one synthetic request in a native-contained, deadline-bounded worker."""
+    if not isinstance(cfg.llm_mode, str):
+        return _llm_failure("configuration")
     if cfg.llm_mode.strip().lower() == "none":
         return DoctorCheck(
             "deep_llm",
@@ -1576,21 +1611,52 @@ def probe_llm(
         )
 
     try:
-        provider = provider_factory(cfg)
-        completion = provider.complete(_LLM_SYSTEM_PROMPT, _LLM_USER_PROMPT)
-        text = getattr(completion, "text", None)
-    except Exception as exc:
-        return _llm_failure(exc)
-
-    if not isinstance(text, str) or not text.strip():
-        return _llm_failure()
-    provider_name = cfg.llm_provider.strip().lower().replace("_", "-")
+        configured_timeout = float(cfg.llm_timeout_seconds)
+        if not math.isfinite(configured_timeout) or configured_timeout <= 0:
+            return _llm_failure("configuration")
+        timeout_seconds = max(0.1, min(configured_timeout, _LLM_TIMEOUT_MAX_SECONDS))
+        stdin = _llm_worker_input(cfg, timeout_seconds)
+        python = Path(sys.executable).resolve(strict=True)
+        source = Path(__file__).resolve(strict=True)
+        worker = source.with_name("llm_probe.py").resolve(strict=True)
+        if worker.parent != source.parent or not worker.is_file() or not python.is_file():
+            return _llm_failure("provider_error")
+        result = _runner(
+            [str(python), "-I", "-S", "-B", str(worker)],
+            cwd=python.parent,
+            stdin=stdin,
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=_LLM_OUTPUT_LIMIT_BYTES,
+            check=False,
+        )
+    except ProbeProcessError as exc:
+        return _llm_failure("timeout" if exc.code == "timeout" else "provider_error")
+    except (OSError, TypeError, ValueError):
+        return _llm_failure("configuration")
+    except Exception:
+        return _llm_failure("provider_error")
+    if result.returncode != 0:
+        return _llm_failure("provider_error")
+    try:
+        payload = _json_object(result.stdout)
+    except Exception:
+        return _llm_failure("provider_error")
+    if payload == {"status": "ready", "response_present": True}:
+        pass
+    elif (
+        set(payload) == {"status", "category"}
+        and payload.get("status") == "degraded"
+        and payload.get("category") in _LLM_CATEGORIES
+    ):
+        return _llm_failure(str(payload["category"]))
+    else:
+        return _llm_failure("provider_error")
     return DoctorCheck(
         "deep_llm",
         "LLM",
         "ready",
         "synthetic connectivity probe succeeded",
-        {"provider": provider_name, "response_present": True},
+        {"provider": canonical_provider_name(cfg.llm_provider), "response_present": True},
     )
 
 
@@ -1599,7 +1665,6 @@ def run_deep_probes(
     *,
     cfg: Config,
     include_llm: bool,
-    provider_factory: Callable[[Config], Any] = make_provider,
 ) -> list[DoctorCheck]:
     """Return the deep capabilities implemented in this release."""
     probes: tuple[tuple[Callable[[Path], DoctorCheck], Callable[[], DoctorCheck]], ...] = (
@@ -1627,7 +1692,7 @@ def run_deep_probes(
         )
         return checks
     try:
-        checks.append(probe_llm(cfg, provider_factory=provider_factory))
+        checks.append(probe_llm(cfg))
     except Exception:
         checks.append(_llm_failure())
     return checks

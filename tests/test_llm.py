@@ -4,8 +4,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from graphite.config import Config
-from graphite.llm import build_report_prompt, enrich_report
+from graphite.llm import (
+    MAX_RESPONSE_BYTES,
+    LLMProviderError,
+    _urlopen_json,
+    build_report_prompt,
+    enrich_report,
+)
 
 
 class _FakeResponse:
@@ -18,7 +26,8 @@ class _FakeResponse:
     def __exit__(self, *_: object) -> None:
         return None
 
-    def read(self) -> bytes:
+    def read(self, size: int = -1) -> bytes:
+        del size
         return json.dumps(self.payload).encode("utf-8")
 
 
@@ -83,6 +92,7 @@ def test_openai_compatible_provider_is_selected_by_base_url(monkeypatch) -> None
     assert captured["headers"]["Authorization"] == "Bearer secret-token"
     assert captured["body"]["model"] == "portable-model"
     assert captured["body"]["stream"] is False
+    assert captured["body"]["max_tokens"] == 16
 
 
 def test_openrouter_provider_uses_default_base_url(monkeypatch) -> None:
@@ -170,6 +180,30 @@ def test_ollama_provider_uses_native_chat_endpoint(monkeypatch) -> None:
     assert result["tokens"] == 8
     assert captured["url"] == "http://localhost:11434/api/chat"
     assert captured["body"]["model"] == "qwen2.5-coder"
+    assert captured["body"]["options"]["num_predict"] == 16
+
+
+def test_provider_response_read_is_bounded_and_overflow_is_rejected(monkeypatch) -> None:
+    read_sizes: list[int] = []
+
+    class OversizedResponse:
+        def __enter__(self) -> "OversizedResponse":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self, size: int) -> bytes:
+            read_sizes.append(size)
+            return b"x" * size
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: OversizedResponse())
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        _urlopen_json(object(), 1.0)  # type: ignore[arg-type]
+
+    assert exc_info.value.category == "provider_error"
+    assert read_sizes == [MAX_RESPONSE_BYTES + 1]
 
 
 def test_llm_auto_skips_simple_graph(monkeypatch) -> None:

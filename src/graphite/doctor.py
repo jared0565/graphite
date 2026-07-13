@@ -20,6 +20,7 @@ from .daemon import read_daemon_status
 from .daemon_health import HealthOptions, evaluate_daemon_health
 from .freshness import FreshnessLimitError, check_graph_freshness
 from .git import GitError, GitRunner
+from .llm import canonical_provider_name
 from .validation import validate_graph_bundle
 
 DoctorStatus = Literal["ready", "optional", "degraded", "blocked"]
@@ -397,13 +398,38 @@ def _run_bounded_process(command: list[str], *, cwd: Path, env: Mapping[str, str
 
 def check_llm_config(cfg: Config) -> DoctorCheck:
     mode = cfg.llm_mode.strip().lower()
-    provider = cfg.llm_provider.strip().lower().replace("_", "-")
+    normalized_provider = cfg.llm_provider.strip().lower().replace("_", "-")
+    provider = canonical_provider_name(cfg.llm_provider)
     credential = bool(cfg.llm_api_key)
     details = {"mode": mode, "provider": provider, "credential_present": credential}
     if mode == "none":
         summary = "LLM enrichment is disabled. An ambient credential is unused; rotate or remove it." if credential else "LLM enrichment is disabled."
         return DoctorCheck("llm", "LLM", "optional", summary, details)
-    return DoctorCheck("llm", "LLM", "degraded", "LLM is configured but requires a deep connectivity test.", details, ("Run doctor with deep LLM checks when network access is approved.",))
+    invalid_mode = mode not in {"auto", "local", "cloud"}
+    unsupported_provider = provider == "custom/unknown"
+    missing_base_url = normalized_provider in {"openai-compatible", "compatible"} and not cfg.llm_base_url
+    missing_cloud_credential = (
+        mode == "cloud"
+        and normalized_provider in {"openai", "openrouter", "groq"}
+        and not credential
+    )
+    if invalid_mode or unsupported_provider or missing_base_url or missing_cloud_credential:
+        return DoctorCheck(
+            "llm",
+            "LLM",
+            "degraded",
+            "LLM required configuration is incomplete or invalid.",
+            details,
+            ("Verify the provider, endpoint, model, and session credential configuration.",),
+        )
+    return DoctorCheck(
+        "llm",
+        "LLM",
+        "optional",
+        "LLM is configured but synthetic connectivity was not requested.",
+        details,
+        ("Run doctor with --deep --include-llm when network access is approved.",),
+    )
 
 
 def _fast_checks(root: Path, cfg: Config, daemon_base: Path | None) -> list[DoctorCheck]:
@@ -425,5 +451,8 @@ def run_doctor(root: Path, cfg: Config, daemon_base: Path | None = None, deep: b
         if deep_runner is None:
             from .doctor_probes import run_deep_probes
             deep_runner = run_deep_probes
-        checks.extend(deep_runner(selected, cfg=cfg, include_llm=include_llm))
+        deep_checks = list(deep_runner(selected, cfg=cfg, include_llm=include_llm))
+        if include_llm and any(check.code == "deep_llm" for check in deep_checks):
+            checks = [check for check in checks if check.code != "llm"]
+        checks.extend(deep_checks)
     return build_report(selected, checks, deep, bool(deep and include_llm))

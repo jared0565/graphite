@@ -6,9 +6,22 @@ from dataclasses import replace
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from .config import Config
+
+MAX_RESPONSE_BYTES = 64 * 1024
+MAX_COMPLETION_TOKENS = 16
+ProviderErrorCategory = Literal[
+    "configuration",
+    "authentication",
+    "timeout",
+    "connection",
+    "provider_error",
+]
+_PROVIDER_ERROR_CATEGORIES = frozenset(
+    {"configuration", "authentication", "timeout", "connection", "provider_error"}
+)
 
 
 @dataclass(frozen=True)
@@ -28,6 +41,16 @@ class CompletionProvider(Protocol):
 
 class LLMConfigurationError(ValueError):
     """Raised when optional LLM enrichment is enabled but misconfigured."""
+
+
+class LLMProviderError(RuntimeError):
+    """Fixed-category provider failure that never contains remote response data."""
+
+    def __init__(self, category: ProviderErrorCategory) -> None:
+        self.category: ProviderErrorCategory = (
+            category if category in _PROVIDER_ERROR_CATEGORIES else "provider_error"
+        )
+        super().__init__(f"LLM provider failure: {self.category}")
 
 
 class OpenAICompatibleProvider:
@@ -61,6 +84,7 @@ class OpenAICompatibleProvider:
             ],
             "temperature": 0.1,
             "stream": False,
+            "max_tokens": MAX_COMPLETION_TOKENS,
         }
         if self.seed is not None:
             payload["seed"] = self.seed
@@ -108,7 +132,11 @@ class OllamaProvider:
                 {"role": "user", "content": user},
             ],
             "stream": False,
-            "options": {"temperature": 0.1, "seed": self.seed},
+            "options": {
+                "temperature": 0.1,
+                "seed": self.seed,
+                "num_predict": MAX_COMPLETION_TOKENS,
+            },
         }
         request = urllib.request.Request(
             f"{self.base_url}/api/chat",
@@ -137,6 +165,27 @@ def make_provider(cfg: Config) -> CompletionProvider:
     raise LLMConfigurationError(
         f"unsupported Graphite LLM provider '{cfg.llm_provider}'. Use 'ollama' or 'openai-compatible'."
     )
+
+
+def canonical_provider_name(provider: str) -> Literal[
+    "ollama", "openai-compatible", "custom/unknown"
+]:
+    """Return a fixed public identifier without reflecting configuration input."""
+    normalized = provider.strip().lower().replace("_", "-")
+    if normalized in {"ollama", "local"}:
+        return "ollama"
+    if normalized in {
+        "openai",
+        "openai-compatible",
+        "compatible",
+        "lmstudio",
+        "lm-studio",
+        "vllm",
+        "openrouter",
+        "groq",
+    }:
+        return "openai-compatible"
+    return "custom/unknown"
 
 
 def _provider_requires_api_key(provider: str) -> bool:
@@ -316,11 +365,31 @@ def build_report_prompt(
 def _urlopen_json(request: urllib.request.Request, timeout: float) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec: opt-in user URL
-            raw = response.read().decode("utf-8")
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"LLM provider HTTP {exc.code}: {detail}") from exc
-    return json.loads(raw)
+        try:
+            exc.read(MAX_RESPONSE_BYTES + 1)
+        except Exception:
+            pass
+        category: ProviderErrorCategory = (
+            "authentication" if exc.code in {401, 403} else "provider_error"
+        )
+        raise LLMProviderError(category) from None
+    except (TimeoutError, urllib.error.URLError) as exc:
+        reason = getattr(exc, "reason", None)
+        category = "timeout" if isinstance(exc, TimeoutError) or isinstance(reason, TimeoutError) else "connection"
+        raise LLMProviderError(category) from None
+    except OSError:
+        raise LLMProviderError("connection") from None
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise LLMProviderError("provider_error")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise LLMProviderError("provider_error") from None
+    if not isinstance(payload, dict):
+        raise LLMProviderError("provider_error")
+    return payload
 
 
 def _default_openai_base_url(provider: str) -> str | None:
