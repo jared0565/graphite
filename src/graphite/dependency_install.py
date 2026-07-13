@@ -491,7 +491,34 @@ def _mapping_line(content: str) -> tuple[bool, bool]:
     match = _MAPPING_LINE_RE.fullmatch(content)
     if match is None:
         return False, False
-    return True, match.group(1) is None
+    value = match.group(1)
+    if value is not None and _plain_scalar_has_nested_delimiter(value):
+        return False, False
+    return True, value is None
+
+
+def _plain_scalar_has_nested_delimiter(value: str) -> bool:
+    quote: str | None = None
+    bracket_depth = 0
+    for index, character in enumerate(value):
+        if quote is not None:
+            if character == quote:
+                quote = None
+            continue
+        if character in {"'", '"'}:
+            quote = character
+        elif character in "[{(":
+            bracket_depth += 1
+        elif character in "]})":
+            bracket_depth -= 1
+        elif (
+            character == ":"
+            and bracket_depth == 0
+            and index + 1 < len(value)
+            and value[index + 1].isspace()
+        ):
+            return True
+    return False
 
 
 def _validate_mapping_lockfile(lines: list[str], *, berry: bool) -> bool:

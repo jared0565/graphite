@@ -345,6 +345,7 @@ def test_source_policy_rejects_malformed_lockfile_encoding():
         b"lockfileVersion: '9.0'\npackages:\n  x: https\\u00ZZ//evil.example\n",
         b"lockfileVersion: '9.0'\npackages:\n  x: https\\U003A\\U002F\\U002Fevil.example\n",
         b"lockfileVersion: '9.0'\npackages:\n  this is not a field\n",
+        b"lockfileVersion: '9.0'\npackages:\n  x:\n    resolution: x: y\n",
         b"# yarn lockfile v1\n\nx@1.0.0:\n version \"1.0.0\"\n",
         b"# yarn lockfile v1\n\nx@1.0.0:\n  version \"unterminated\n",
         b"# yarn lockfile v1\n\nx@1.0.0:\n  nonsense value\n",
@@ -352,6 +353,7 @@ def test_source_policy_rejects_malformed_lockfile_encoding():
         b"__metadata:\n  version: 8\n",
         b"__metadata:\n    version: 8\n\n\"x@npm:1\":\n  version: 1\n",
         b"__metadata:\n  version: 8\n\n\"x@npm:1\":\n  broken line\n",
+        b"__metadata:\n  version: 8\n\n\"x@npm:1\":\n  version: 1\n  resolution: x: y\n",
     ],
 )
 def test_source_policy_rejects_structurally_malformed_recognized_text_lockfiles(lockfile):
