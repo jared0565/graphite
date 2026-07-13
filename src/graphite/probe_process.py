@@ -10,7 +10,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 OUTPUT_LIMIT_BYTES = 32 * 1024
 INPUT_LIMIT_BYTES = 1024 * 1024
@@ -70,6 +70,33 @@ def sanitized_probe_environment(source: Mapping[str, str] | None = None) -> dict
     return env
 
 
+class _Process(Protocol):
+    pid: int
+    stdin: Any
+    stdout: Any
+    stderr: Any
+    returncode: int | None
+    def wait(self, timeout: float) -> int: ...
+    def kill(self) -> None: ...
+
+
+def _launch_process(argv: list[str], *, cwd: Path, input_data: bytes | None) -> _Process:
+    if os.name == "nt":
+        from .windows_job import launch
+
+        return launch(argv, cwd=cwd, environment=sanitized_probe_environment(), with_stdin=input_data is not None)
+    return subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=sanitized_probe_environment(),
+        shell=False,
+        stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+
 def run_bounded_process(
     argv: list[str],
     *,
@@ -94,23 +121,9 @@ def run_bounded_process(
 
     started = time.monotonic()
     deadline = started + timeout_seconds
-    process_options: dict[str, Any] = {}
-    if os.name == "nt":
-        process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        process_options["start_new_session"] = True
     try:
-        process = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            env=sanitized_probe_environment(),
-            shell=False,
-            stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            **process_options,
-        )
-    except (OSError, ValueError):
+        process = _launch_process(argv, cwd=cwd, input_data=input_data)
+    except Exception:
         raise ProbeProcessError("launch_failed") from None
 
     outputs = {"stdout": bytearray(), "stderr": bytearray()}
@@ -184,13 +197,10 @@ def run_bounded_process(
     finally:
         cleanup_started.set()
         workers = [writer, *readers]
-        if failure_code is not None:
-            _terminate_process_tree(process, deadline)
-        else:
+        _terminate_process_tree(process, deadline)
+        if failure_code is None:
             for thread in workers:
                 thread.join(min(0.05, max(0.0, deadline - time.monotonic())))
-            if any(thread.is_alive() for thread in workers):
-                _terminate_process_tree(process, deadline)
         try:
             process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except (subprocess.TimeoutExpired, OSError, ValueError):
@@ -212,6 +222,9 @@ def run_bounded_process(
                     pipe.close()
                 except (OSError, ValueError):
                     pass
+        close_handles = getattr(process, "close_handles", None)
+        if close_handles is not None:
+            close_handles()
 
     # These events can be set after the direct child exits, so recheck only
     # after cleanup and every bounded join has completed.
@@ -252,30 +265,11 @@ def _cancel_synchronous_io(thread: threading.Thread) -> None:
         pass
 
 
-def _trusted_taskkill() -> Path | None:
-    if os.name != "nt":
-        return None
-    try:
-        import ctypes
-
-        buffer = ctypes.create_unicode_buffer(32768)
-        length = ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer))
-        if length <= 0 or length >= len(buffer):
-            return None
-        system_directory = Path(buffer.value).resolve(strict=True)
-        resolved = (system_directory / "taskkill.exe").resolve(strict=True)
-    except (AttributeError, OSError, ValueError):
-        return None
-    if not resolved.is_absolute() or not resolved.is_file():
-        return None
-    if resolved.name.lower() != "taskkill.exe" or resolved.parent != system_directory:
-        return None
-    return resolved
-
-
-def _gracefully_signal_process_tree(process: subprocess.Popen[bytes]) -> bool:
+def _gracefully_signal_process_tree(process: _Process) -> bool:
     try:
         if os.name == "nt":
+            if getattr(process, "poll", lambda: process.returncode)() is not None:
+                return False
             process.send_signal(signal.CTRL_BREAK_EVENT)
         else:
             os.killpg(process.pid, signal.SIGTERM)
@@ -284,45 +278,22 @@ def _gracefully_signal_process_tree(process: subprocess.Popen[bytes]) -> bool:
         return False
 
 
-def _force_kill_process_tree(process: subprocess.Popen[bytes], deadline: float) -> None:
+def _force_kill_process_tree(process: _Process, deadline: float) -> None:
     if os.name != "nt":
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except (OSError, ValueError):
             pass
-    else:
-        executable = _trusted_taskkill()
-        if executable is not None and deadline > time.monotonic():
-            try:
-                killer = subprocess.Popen(
-                    [str(executable), "/PID", str(process.pid), "/T", "/F"],
-                    shell=False,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=sanitized_probe_environment(),
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-                try:
-                    killer.wait(timeout=min(0.5, max(0.0, deadline - time.monotonic())))
-                except (subprocess.TimeoutExpired, OSError, ValueError):
-                    try:
-                        killer.kill()
-                    except (OSError, ValueError):
-                        pass
-                    try:
-                        killer.wait(timeout=max(0.0, deadline - time.monotonic()))
-                    except (subprocess.TimeoutExpired, OSError, ValueError):
-                        pass
-            except (OSError, ValueError):
-                pass
-    try:
-        process.kill()
-    except (OSError, ValueError):
-        pass
+    elif hasattr(process, "terminate_tree"):
+        process.terminate_tree()
+    if process.returncode is None:
+        try:
+            process.kill()
+        except (OSError, ValueError):
+            pass
 
 
-def _terminate_process_tree(process: subprocess.Popen[bytes], deadline: float) -> None:
+def _terminate_process_tree(process: _Process, deadline: float) -> None:
     """Gracefully signal the process group, then force-kill the tree within the deadline."""
     signaled = _gracefully_signal_process_tree(process)
     if signaled:
