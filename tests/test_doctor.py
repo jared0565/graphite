@@ -94,6 +94,7 @@ def test_doctor_cli_text_is_printed_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.delitem(sys.modules, "graphite.doctor_probes", raising=False)
     assert "graphite.doctor_probes" not in sys.modules
     monkeypatch.setattr("graphite.cli.run_doctor", lambda *args, **kwargs: _cli_report())
     monkeypatch.setattr("graphite.cli.format_doctor_text", lambda report: "doctor text\n")

@@ -52,6 +52,121 @@ def test_workspace_lease_rejects_initial_symlink_or_windows_reparse_without_writ
     assert list(sentinel.iterdir()) == [marker]
 
 
+def test_workspace_lease_never_mutates_or_removes_factory_path_outside_temp_root(tmp_path: Path) -> None:
+    from graphite.probe_workspace import ProbeWorkspaceLease, WorkspaceLeaseError
+
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    outside = tmp_path / "existing-empty-sibling"
+    outside.mkdir(mode=0o755)
+    before = outside.lstat()
+
+    with pytest.raises(WorkspaceLeaseError):
+        ProbeWorkspaceLease.acquire(
+            temp_root=temp_root,
+            _parent_factory=lambda **kwargs: str(outside),
+        )
+
+    after = outside.lstat()
+    assert list(outside.iterdir()) == []
+    assert (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+
+
+def test_workspace_lease_rejects_preexisting_in_root_factory_path_unchanged(tmp_path: Path) -> None:
+    from graphite.probe_workspace import ProbeWorkspaceLease, WorkspaceLeaseError
+
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    preexisting = temp_root / "preexisting"
+    preexisting.mkdir(mode=0o755)
+    before = preexisting.lstat()
+
+    try:
+        lease = ProbeWorkspaceLease.acquire(
+            temp_root=temp_root,
+            _parent_factory=lambda **kwargs: str(preexisting),
+        )
+    except WorkspaceLeaseError:
+        pass
+    else:
+        lease.close()
+        pytest.fail("a factory-returned pre-existing directory must not be acquired")
+
+    after = preexisting.lstat()
+    assert list(preexisting.iterdir()) == []
+    assert (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+
+
+def test_workspace_lease_does_not_remove_parent_swapped_after_owned_creation(tmp_path: Path) -> None:
+    from graphite.probe_workspace import ProbeWorkspaceLease, WorkspaceLeaseError
+
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    replacement: Path | None = None
+    original: Path | None = None
+
+    def swapped_creator(root: Path) -> tuple[Path, tuple[int, int]]:
+        nonlocal replacement, original
+        candidate = root / "owned-candidate"
+        candidate.mkdir(mode=0o700)
+        info = candidate.lstat()
+        original = root / "moved-original"
+        candidate.rename(original)
+        candidate.mkdir(mode=0o700)
+        replacement = candidate
+        (candidate / "sentinel.txt").write_text("keep", encoding="utf-8")
+        return candidate, (info.st_dev, info.st_ino)
+
+    with pytest.raises(WorkspaceLeaseError):
+        ProbeWorkspaceLease.acquire(
+            temp_root=temp_root,
+            _owned_parent_factory=swapped_creator,
+        )
+
+    assert original is not None and original.exists()
+    assert replacement is not None
+    assert (replacement / "sentinel.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_workspace_lease_cleans_still_owned_parent_after_partial_creation_failure(tmp_path: Path) -> None:
+    from graphite.probe_workspace import ProbeWorkspaceLease, WorkspaceLeaseError
+
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    created: list[Path] = []
+
+    def parent_creator(root: Path) -> tuple[Path, tuple[int, int]]:
+        candidate = root / "partial-parent"
+        candidate.mkdir(mode=0o700)
+        created.append(candidate)
+        info = candidate.lstat()
+        return candidate, (info.st_dev, info.st_ino)
+
+    def workspace_failure(parent: Path) -> tuple[Path, tuple[int, int]]:
+        raise OSError("injected workspace creation failure")
+
+    with pytest.raises(WorkspaceLeaseError):
+        ProbeWorkspaceLease.acquire(
+            temp_root=temp_root,
+            _owned_parent_factory=parent_creator,
+            _workspace_factory=workspace_failure,
+        )
+
+    assert created and not created[0].exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission invariant")
 def test_workspace_lease_uses_private_posix_modes(tmp_path: Path) -> None:
     from graphite.probe_workspace import ProbeWorkspaceLease
@@ -94,6 +209,32 @@ def test_windows_workspace_handle_blocks_top_level_rename_and_close_is_idempoten
     lease.cleanup()
     lease.close()
     lease.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows atomic ACL creation invariant")
+def test_windows_owned_creators_use_private_directory_creation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import graphite.probe_workspace as workspace
+
+    calls: list[str | None] = []
+
+    def private_create(parent: Path, name: str | None = None) -> Path:
+        calls.append(name)
+        path = parent / (name or "random-private-parent")
+        path.mkdir(mode=0o700)
+        return path
+
+    monkeypatch.setattr(
+        workspace,
+        "_create_private_windows_directory",
+        private_create,
+        raising=False,
+    )
+
+    parent, _ = workspace._create_owned_parent(tmp_path)
+    child, _ = workspace._create_owned_workspace(parent)
+
+    assert calls == [None, "workspace"]
+    assert child == parent / "workspace"
 
 
 def test_core_probe_blocks_identity_change_before_next_phase_and_preserves_replacement(tmp_path: Path) -> None:

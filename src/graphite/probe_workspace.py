@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import secrets
 import shutil
 import stat
 import tempfile
@@ -37,6 +38,7 @@ class _PathSnapshot:
 
 
 ParentFactory = Callable[..., str]
+OwnedDirectoryFactory = Callable[[Path], tuple[Path, tuple[int, int]]]
 
 
 class ProbeWorkspaceLease:
@@ -75,6 +77,8 @@ class ProbeWorkspaceLease:
         *,
         temp_root: Path | None = None,
         _parent_factory: ParentFactory | None = None,
+        _owned_parent_factory: OwnedDirectoryFactory | None = None,
+        _workspace_factory: OwnedDirectoryFactory | None = None,
     ) -> ProbeWorkspaceLease:
         """Create and pin a private randomized parent with a fixed workspace child."""
         try:
@@ -84,26 +88,50 @@ class ProbeWorkspaceLease:
         except (OSError, RuntimeError) as exc:
             raise WorkspaceLeaseError("workspace_isolation_failed") from exc
 
-        factory = _parent_factory or tempfile.mkdtemp
         parent_path: Path | None = None
         workspace_path: Path | None = None
         parent_handle: int | None = None
         workspace_handle: int | None = None
-        workspace_created = False
+        parent_owned: _PathSnapshot | None = None
+        workspace_owned: _PathSnapshot | None = None
         try:
-            parent_path = Path(factory(prefix="graphite-doctor-", dir=str(root)))
+            if _parent_factory is not None:
+                if _owned_parent_factory is not None:
+                    raise WorkspaceLeaseError("workspace_isolation_failed")
+                parent_path = Path(
+                    _parent_factory(prefix="graphite-doctor-", dir=str(root))
+                )
+                parent_path = Path(os.path.abspath(parent_path))
+                _snapshot(parent_path, root)
+                # A path-only factory provides no proof that this acquisition
+                # created the candidate.  It is safe to inspect, never to adopt.
+                raise WorkspaceLeaseError("workspace_isolation_failed")
+            parent_creator = _owned_parent_factory or _create_owned_parent
+            parent_path, parent_identity = parent_creator(root)
             parent_path = Path(os.path.abspath(parent_path))
-            os.chmod(parent_path, 0o700)
             parent_before = _snapshot(parent_path, root)
-            if os.name == "nt":
+            if parent_before.identity != parent_identity:
+                raise WorkspaceLeaseError("workspace_isolation_failed")
+            parent_owned = parent_before
+            if os.name != "nt" and parent_before.mode != 0o700:
+                raise WorkspaceLeaseError("workspace_isolation_failed")
+            if os.name == "nt" and _owned_parent_factory is not None:
                 _set_private_windows_dacl(parent_path)
             parent_handle, parent_handle_identity = _open_directory_handle(parent_path)
 
             workspace_path = parent_path / "workspace"
-            os.mkdir(workspace_path, 0o700)
-            workspace_created = True
-            os.chmod(workspace_path, 0o700)
-            if os.name == "nt":
+            workspace_creator = _workspace_factory or _create_owned_workspace
+            created_workspace_path, workspace_identity = workspace_creator(parent_path)
+            created_workspace_path = Path(os.path.abspath(created_workspace_path))
+            if created_workspace_path != workspace_path:
+                raise WorkspaceLeaseError("workspace_isolation_failed")
+            workspace_owned = _snapshot(created_workspace_path, root)
+            if workspace_owned.identity != workspace_identity:
+                workspace_owned = None
+                raise WorkspaceLeaseError("workspace_isolation_failed")
+            if os.name != "nt" and workspace_owned.mode != 0o700:
+                raise WorkspaceLeaseError("workspace_isolation_failed")
+            if os.name == "nt" and _workspace_factory is not None:
                 _set_private_windows_dacl(workspace_path)
             workspace_snapshot = _snapshot(workspace_path, root)
             workspace_handle, workspace_handle_identity = _open_directory_handle(workspace_path)
@@ -123,12 +151,12 @@ class ProbeWorkspaceLease:
         except WorkspaceLeaseError:
             _close_raw_handle(workspace_handle)
             _close_raw_handle(parent_handle)
-            _initial_cleanup(parent_path, workspace_path, workspace_created)
+            _initial_cleanup(root, parent_owned, workspace_owned)
             raise
         except (OSError, RuntimeError, ValueError) as exc:
             _close_raw_handle(workspace_handle)
             _close_raw_handle(parent_handle)
-            _initial_cleanup(parent_path, workspace_path, workspace_created)
+            _initial_cleanup(root, parent_owned, workspace_owned)
             raise WorkspaceLeaseError("workspace_isolation_failed") from exc
 
     def validate(self) -> None:
@@ -265,16 +293,40 @@ def _path_is_reparse(info: os.stat_result) -> bool:
     return bool(getattr(info, "st_file_attributes", 0) & 0x400)
 
 
-def _initial_cleanup(parent: Path | None, workspace: Path | None, workspace_created: bool) -> None:
-    if workspace_created and workspace is not None:
+def _create_owned_parent(root: Path) -> tuple[Path, tuple[int, int]]:
+    if os.name == "nt":
+        path = _create_private_windows_directory(root)
+    else:
+        path = Path(tempfile.mkdtemp(prefix="graphite-doctor-", dir=str(root)))
+    info = path.lstat()
+    return path, (info.st_dev, info.st_ino)
+
+
+def _create_owned_workspace(parent: Path) -> tuple[Path, tuple[int, int]]:
+    if os.name == "nt":
+        path = _create_private_windows_directory(parent, "workspace")
+    else:
+        path = parent / "workspace"
+        os.mkdir(path, 0o700)
+    info = path.lstat()
+    return path, (info.st_dev, info.st_ino)
+
+
+def _initial_cleanup(
+    root: Path,
+    parent: _PathSnapshot | None,
+    workspace: _PathSnapshot | None,
+) -> None:
+    for owned in (workspace, parent):
+        if owned is None:
+            continue
         try:
-            os.rmdir(workspace)
-        except OSError:
-            pass
-    if parent is not None:
-        try:
-            os.rmdir(parent)
-        except OSError:
+            current = _snapshot(owned.lexical, root)
+            if _same_binding(current, owned):
+                os.rmdir(owned.lexical)
+        except (OSError, WorkspaceLeaseError):
+            # Acquisition failure cleanup is deliberately best effort.  An
+            # uncertain binding is leaked rather than pathname-deleted.
             pass
 
 
@@ -410,10 +462,8 @@ def _windows_path_is_reparse(path: Path) -> bool:
     return bool(attributes & 0x400)
 
 
-def _set_private_windows_dacl(path: Path) -> None:
-    """Apply a protected DACL granting full control only to the current user."""
-    if os.name != "nt":
-        return
+def _windows_private_security_descriptor() -> int:
+    """Allocate a protected DACL granting full control only to the current user."""
     from ctypes import wintypes
 
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -441,9 +491,6 @@ def _set_private_windows_dacl(path: Path) -> None:
         ctypes.POINTER(wintypes.DWORD),
     ]
     convert_descriptor.restype = wintypes.BOOL
-    set_file_security = advapi32.SetFileSecurityW
-    set_file_security.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID]
-    set_file_security.restype = wintypes.BOOL
     local_free = kernel32.LocalFree
     local_free.argtypes = [wintypes.HLOCAL]
     local_free.restype = wintypes.HLOCAL
@@ -470,11 +517,75 @@ def _set_private_windows_dacl(path: Path) -> None:
         sddl = f"D:P(A;;FA;;;{sid_text.value})"
         if not convert_descriptor(sddl, 1, ctypes.byref(descriptor), None):
             raise ctypes.WinError(ctypes.get_last_error())
-        if not set_file_security(str(path), 0x80000004, descriptor):
-            raise ctypes.WinError(ctypes.get_last_error())
+        result = int(descriptor.value)
+        descriptor = wintypes.LPVOID()
+        return result
     finally:
         if descriptor:
             local_free(descriptor)
         if sid_text:
             local_free(sid_text)
         _close_raw_handle(int(token.value) if token.value else None)
+
+
+def _free_windows_security_descriptor(descriptor: int) -> None:
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [wintypes.HLOCAL]
+    local_free.restype = wintypes.HLOCAL
+    local_free(descriptor)
+
+
+def _create_private_windows_directory(parent: Path, name: str | None = None) -> Path:
+    """Create a Windows directory with its protected DACL applied atomically."""
+    from ctypes import wintypes
+
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.DWORD),
+            ("security_descriptor", wintypes.LPVOID),
+            ("inherit_handle", wintypes.BOOL),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_directory = kernel32.CreateDirectoryW
+    create_directory.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(SecurityAttributes)]
+    create_directory.restype = wintypes.BOOL
+    descriptor = _windows_private_security_descriptor()
+    attributes = SecurityAttributes(
+        ctypes.sizeof(SecurityAttributes),
+        ctypes.c_void_p(descriptor),
+        False,
+    )
+    try:
+        for _ in range(64):
+            child_name = name or f"graphite-doctor-{secrets.token_hex(16)}"
+            path = parent / child_name
+            if create_directory(str(path), ctypes.byref(attributes)):
+                return path
+            error = ctypes.get_last_error()
+            if name is not None or error != 183:
+                raise ctypes.WinError(error)
+        raise FileExistsError("unable to allocate a unique probe workspace parent")
+    finally:
+        _free_windows_security_descriptor(descriptor)
+
+
+def _set_private_windows_dacl(path: Path) -> None:
+    """Apply the protected DACL to an already identity-verified injected path."""
+    if os.name != "nt":
+        return
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    set_file_security = advapi32.SetFileSecurityW
+    set_file_security.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID]
+    set_file_security.restype = wintypes.BOOL
+    descriptor = _windows_private_security_descriptor()
+    try:
+        if not set_file_security(str(path), 0x80000004, descriptor):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        _free_windows_security_descriptor(descriptor)
