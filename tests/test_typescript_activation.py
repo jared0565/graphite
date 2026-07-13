@@ -1348,7 +1348,8 @@ def test_cleanup_timeout_stress_retains_no_workers_or_root_ownership(tmp_path):
         isolated.mkdir()
         details = isolated.lstat()
         lease = typescript_activation._TemporaryDirectoryLease(
-            str(isolated), (details.st_dev, details.st_ino)
+            str(isolated),
+            typescript_activation._temporary_directory_identity(isolated, details),
         )
         deadline = typescript_activation._Deadline(1.0, lambda: 0.0)
         status, expired_before = typescript_activation._bounded_temporary_cleanup(
@@ -1380,7 +1381,8 @@ def test_default_cleanup_uses_exact_bounded_process_contract(tmp_path, monkeypat
     monkeypatch.setattr(typescript_activation, "run_bounded_process", runner)
     details = isolated.lstat()
     lease = typescript_activation._TemporaryDirectoryLease(
-        str(isolated), (details.st_dev, details.st_ino)
+        str(isolated),
+        typescript_activation._temporary_directory_identity(isolated, details),
     )
     result = typescript_activation._cleanup_isolated_home(lease, root, 0.25)
 
@@ -1394,12 +1396,45 @@ def test_default_cleanup_uses_exact_bounded_process_contract(tmp_path, monkeypat
     cleanup_target = Path(argv[3])
     assert cleanup_target.parent == isolated.parent
     assert cleanup_target.name.startswith(f".{isolated.name}.graphite-cleanup-")
-    assert argv[4:] == [str(details.st_dev), str(details.st_ino)]
+    assert argv[4:] == [str(lease.identity[0]), str(lease.identity[1])]
     assert kwargs["cwd"] == isolated.parent
     assert kwargs["stdin"] is None
     assert kwargs["timeout_seconds"] == 0.25
     assert kwargs["check"] is False
     assert "shell" not in kwargs
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native lease identity")
+def test_new_windows_lease_and_worker_argv_preserve_full_native_identity(
+    tmp_path, monkeypatch
+):
+    expected = (
+        0x123456789ABCDEF0,
+        0xFEDCBA98765432100123456789ABCDEF,
+    )
+    calls = []
+    monkeypatch.setattr(
+        typescript_activation,
+        "_windows_directory_identity",
+        lambda _path: expected,
+    )
+
+    def runner(argv, **_kwargs):
+        calls.append(argv)
+        raise ProbeProcessError("timeout")
+
+    monkeypatch.setattr(typescript_activation, "run_bounded_process", runner)
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    lease = typescript_activation._new_temporary_directory()
+    try:
+        assert lease.identity == expected
+        result = typescript_activation._cleanup_isolated_home(lease, root, 0.25)
+        assert result == StepResult(False, "cleanup_timeout")
+        assert calls[0][4:] == [str(expected[0]), str(expected[1])]
+    finally:
+        shutil.rmtree(lease.name, ignore_errors=True)
 
 
 def test_cleanup_rejects_replacement_at_leased_path_without_deleting_it(
@@ -1506,7 +1541,8 @@ def test_isolated_lease_rejects_ancestor_of_selected_root(tmp_path):
     root.mkdir(parents=True)
     details = isolated.lstat()
     lease = typescript_activation._TemporaryDirectoryLease(
-        str(isolated), (details.st_dev, details.st_ino)
+        str(isolated),
+        typescript_activation._temporary_directory_identity(isolated, details),
     )
 
     assert typescript_activation._validated_isolated_lease(lease, root) is None
@@ -1578,6 +1614,10 @@ class _FakeWindowsCleanupBackend:
         self.enumerated = []
         self.deleted = []
         self.closed = []
+        self.entry_batch_calls = []
+        self.pending = {
+            handle: list(record[3]) for handle, record in records.items()
+        }
 
     def open(self, path, *, directory):
         key = str(path)
@@ -1591,6 +1631,14 @@ class _FakeWindowsCleanupBackend:
     def entries(self, handle):
         self.enumerated.append(handle)
         return list(self.records[handle][3])
+
+    def entry_batch(self, handle):
+        self.enumerated.append(handle)
+        pending = self.pending[handle]
+        batch = pending[: cleanup_worker._ENUMERATION_BATCH_SIZE]
+        del pending[: len(batch)]
+        self.entry_batch_calls.append(len(batch))
+        return batch
 
     def mark_delete(self, handle):
         self.deleted.append(handle)
@@ -1654,6 +1702,56 @@ def test_windows_cleanup_backend_closes_every_handle_on_child_identity_race(tmp_
     assert backend.closed == [str(child), str(root)]
 
 
+def test_windows_cleanup_backend_rejects_high_64_bit_file_id_collision(tmp_path):
+    root = tmp_path / "leased"
+    child = root / "child.txt"
+    low_bits = 0xA5A5
+    enumerated_id = (0x1111222233334444 << 64) | low_bits
+    replacement_id = (0x9999AAAABBBBCCCC << 64) | low_bits
+    records = {
+        str(root): (
+            0x123456789ABCDEF0,
+            1 << 96,
+            0x10,
+            [cleanup_worker._WindowsEntry("child.txt", enumerated_id, 0x20)],
+        ),
+        str(child): (0x123456789ABCDEF0, replacement_id, 0x20, []),
+    }
+    backend = _FakeWindowsCleanupBackend(records)
+
+    with pytest.raises(OSError, match="identity changed"):
+        cleanup_worker._delete_windows(
+            root, (0x123456789ABCDEF0, 1 << 96), backend
+        )
+
+    assert backend.deleted == []
+    assert backend.closed == [str(child), str(root)]
+
+
+def test_windows_cleanup_consumes_large_directory_in_bounded_batches(tmp_path):
+    root = tmp_path / "leased"
+    total = cleanup_worker._ENUMERATION_BATCH_SIZE * 4 + 3
+    entries = [
+        cleanup_worker._WindowsEntry(f"file-{index}.txt", 10_000 + index, 0x20)
+        for index in range(total)
+    ]
+    records = {str(root): (7, 100, 0x10, entries)}
+    records.update(
+        {
+            str(root / entry.name): (7, entry.file_id, entry.attributes, [])
+            for entry in entries
+        }
+    )
+    backend = _FakeWindowsCleanupBackend(records)
+
+    cleanup_worker._delete_windows(root, (7, 100), backend)
+
+    assert len(backend.entry_batch_calls) > 2
+    assert max(backend.entry_batch_calls) <= cleanup_worker._ENUMERATION_BATCH_SIZE
+    assert backend.entry_batch_calls[-1] == 0
+    assert len(backend.deleted) == total + 1
+
+
 def test_native_windows_open_uses_reparse_safe_nondelete_sharing(tmp_path):
     calls = []
 
@@ -1672,11 +1770,210 @@ def test_native_windows_open_uses_reparse_safe_nondelete_sharing(tmp_path):
     assert path == str(tmp_path / "leased")
     assert access & 0x00010000  # DELETE
     assert access & 0x00000001  # FILE_LIST_DIRECTORY
+    assert access & 0x00000100  # FILE_WRITE_ATTRIBUTES for readonly fallback
     assert sharing == 0x00000001 | 0x00000002  # no FILE_SHARE_DELETE
     assert security is None and template is None
     assert creation == 3  # OPEN_EXISTING
     assert flags & 0x02000000  # FILE_FLAG_BACKUP_SEMANTICS
     assert flags & 0x00200000  # FILE_FLAG_OPEN_REPARSE_POINT
+
+
+def test_native_windows_readonly_legacy_fallback_has_rights_and_closes_handle(
+    tmp_path, monkeypatch
+):
+    calls = []
+    closed = []
+
+    class FakeApi:
+        last_error = 0
+
+        def CreateFileW(self, *args):
+            calls.append(("open", args))
+            return 321
+
+        def GetFileInformationByHandleEx(
+            self, handle, information_class, buffer, _size
+        ):
+            assert handle == 321
+            assert information_class == 0
+            details = cleanup_worker._FileBasicInformation.from_address(
+                cleanup_worker.ctypes.addressof(buffer._obj)
+            )
+            details.file_attributes = 0x1
+            calls.append(("get-basic", information_class))
+            return 1
+
+        def SetFileInformationByHandle(
+            self, handle, information_class, buffer, _size
+        ):
+            assert handle == 321
+            calls.append(("set", information_class))
+            if information_class == 21:
+                self.last_error = 50
+                return 0
+            if information_class == 0:
+                details = cleanup_worker._FileBasicInformation.from_address(
+                    cleanup_worker.ctypes.addressof(buffer._obj)
+                )
+                assert details.file_attributes & 0x1 == 0
+            return 1
+
+        def CloseHandle(self, handle):
+            closed.append(handle)
+            return 1
+
+    api = FakeApi()
+    monkeypatch.setattr(
+        cleanup_worker.ctypes, "get_last_error", lambda: api.last_error
+    )
+    backend = cleanup_worker._NativeWindowsBackend.__new__(
+        cleanup_worker._NativeWindowsBackend
+    )
+    backend._api = api
+
+    handle = backend.open(tmp_path / "readonly.txt", directory=False)
+    try:
+        backend.mark_delete(handle)
+    finally:
+        backend.close(handle)
+
+    access = calls[0][1][1]
+    assert access & 0x00000100
+    assert [(kind, value) for kind, value in calls[1:]] == [
+        ("set", 21),
+        ("get-basic", 0),
+        ("set", 0),
+        ("set", 4),
+    ]
+    assert closed == [321]
+
+
+def test_native_windows_information_preserves_full_128_bit_file_id():
+    expected_volume = 0x123456789ABCDEF0
+    expected_id = 0xFEDCBA98765432100123456789ABCDEF
+
+    class FakeApi:
+        def GetFileInformationByHandleEx(
+            self, _handle, information_class, buffer, _size
+        ):
+            if information_class == 18:
+                details = cleanup_worker._FileIdInformation.from_address(
+                    cleanup_worker.ctypes.addressof(buffer._obj)
+                )
+                details.volume_serial = expected_volume
+                raw = expected_id.to_bytes(16, "little")
+                for index, value in enumerate(raw):
+                    details.file_id[index] = value
+                return 1
+            assert information_class == 9
+            attributes = cleanup_worker._FileAttributeTagInformation.from_address(
+                cleanup_worker.ctypes.addressof(buffer._obj)
+            )
+            attributes.file_attributes = 0x10
+            return 1
+
+    backend = cleanup_worker._NativeWindowsBackend.__new__(
+        cleanup_worker._NativeWindowsBackend
+    )
+    backend._api = FakeApi()
+
+    assert backend.information(123) == (expected_volume, expected_id, 0x10)
+
+
+def test_native_windows_information_fails_closed_without_file_id_info(
+    monkeypatch,
+):
+    class FakeApi:
+        @staticmethod
+        def GetFileInformationByHandleEx(
+            _handle, information_class, _buffer, _size
+        ):
+            assert information_class == 18
+            return 0
+
+    monkeypatch.setattr(cleanup_worker.ctypes, "get_last_error", lambda: 50)
+    backend = cleanup_worker._NativeWindowsBackend.__new__(
+        cleanup_worker._NativeWindowsBackend
+    )
+    backend._api = FakeApi()
+
+    with pytest.raises(OSError):
+        backend.information(123)
+
+
+def test_native_windows_directory_batch_preserves_128_bit_entry_id():
+    expected_id = 0xABCDEF00112233445566778899AABBCC
+    name = "child.txt"
+
+    class FakeApi:
+        @staticmethod
+        def GetFileInformationByHandleEx(
+            _handle, information_class, buffer, _size
+        ):
+            assert information_class == 20
+            address = cleanup_worker.ctypes.addressof(buffer)
+            entry = cleanup_worker._FileIdExtdDirectoryInformation.from_address(
+                address
+            )
+            encoded_name = name.encode("utf-16-le")
+            entry.next_entry_offset = 0
+            entry.file_attributes = 0x20
+            entry.file_name_length = len(encoded_name)
+            for index, value in enumerate(expected_id.to_bytes(16, "little")):
+                entry.file_id[index] = value
+            cleanup_worker.ctypes.memmove(
+                address
+                + cleanup_worker._FileIdExtdDirectoryInformation.file_name.offset,
+                encoded_name,
+                len(encoded_name),
+            )
+            return 1
+
+    backend = cleanup_worker._NativeWindowsBackend.__new__(
+        cleanup_worker._NativeWindowsBackend
+    )
+    backend._api = FakeApi()
+
+    assert backend.entry_batch(123) == [
+        cleanup_worker._WindowsEntry(name, expected_id, 0x20)
+    ]
+
+
+def test_posix_entry_batch_never_materializes_unbounded_directory(monkeypatch):
+    total = cleanup_worker._ENUMERATION_BATCH_SIZE * 100
+    consumed = 0
+
+    class FakeEntry:
+        name = "entry"
+
+        @staticmethod
+        def stat(*, follow_symlinks):
+            assert not follow_symlinks
+            return object()
+
+    class FakeScandir:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal consumed
+            if consumed >= total:
+                raise StopIteration
+            consumed += 1
+            return FakeEntry()
+
+    monkeypatch.setattr(cleanup_worker.os, "scandir", lambda _fd: FakeScandir())
+
+    batch = cleanup_worker._posix_entry_batch(123)
+
+    assert len(batch) == cleanup_worker._ENUMERATION_BATCH_SIZE
+    assert consumed == cleanup_worker._ENUMERATION_BATCH_SIZE
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows native handle deletion")
@@ -1687,9 +1984,9 @@ def test_windows_cleanup_worker_deletes_nested_readonly_tree_by_handle(tmp_path)
     readonly = nested / "readonly.txt"
     readonly.write_text("content", encoding="utf-8")
     readonly.chmod(0o444)
-    details = isolated.lstat()
+    identity = cleanup_worker._windows_directory_identity(isolated)
 
-    cleanup_worker._delete_windows(isolated, (details.st_dev, details.st_ino))
+    cleanup_worker._delete_windows(isolated, identity)
 
     assert not isolated.exists()
 
@@ -1724,7 +2021,8 @@ def test_cleanup_dependency_malformed_result_is_contained(tmp_path):
     isolated.mkdir()
     details = isolated.lstat()
     lease = typescript_activation._TemporaryDirectoryLease(
-        str(isolated), (details.st_dev, details.st_ino)
+        str(isolated),
+        typescript_activation._temporary_directory_identity(isolated, details),
     )
     deadline = typescript_activation._Deadline(1.0, lambda: 0.0)
 

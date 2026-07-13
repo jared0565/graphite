@@ -22,6 +22,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from ._cleanup_worker import _windows_directory_identity
 from .config import Config
 from .dependency_install import (
     ACTIVATION_MAX_FILES,
@@ -147,7 +148,18 @@ def _new_temporary_directory() -> _TemporaryDirectoryLease:
     details = path.lstat()
     if not stat.S_ISDIR(details.st_mode) or _is_reparse(details):
         raise OSError("temporary_directory_invalid")
-    return _TemporaryDirectoryLease(str(path), (details.st_dev, details.st_ino))
+    return _TemporaryDirectoryLease(
+        str(path), _temporary_directory_identity(path, details)
+    )
+
+
+def _temporary_directory_identity(
+    path: Path, details: os.stat_result | None = None
+) -> tuple[int, int]:
+    if os.name == "nt":
+        return _windows_directory_identity(path)
+    selected = details if details is not None else path.lstat()
+    return selected.st_dev, selected.st_ino
 
 
 def _rename_no_replace(source: Path, destination: Path) -> bool:
@@ -208,7 +220,7 @@ def _cleanup_isolated_home(
     try:
         details = cleanup_target.lstat()
         if (
-            (details.st_dev, details.st_ino) != lease.identity
+            _temporary_directory_identity(cleanup_target, details) != lease.identity
             or not stat.S_ISDIR(details.st_mode)
             or stat.S_ISLNK(details.st_mode)
             or _is_reparse(details)
@@ -1013,7 +1025,7 @@ def _validated_isolated_lease(
         details = lexical.lstat()
         canonical = lexical.resolve(strict=True)
         canonical_root = root.resolve(strict=True)
-        identity = (details.st_dev, details.st_ino)
+        identity = _temporary_directory_identity(canonical, details)
         supplied_identity = getattr(temporary, "identity", None)
         return (
             _TemporaryDirectoryLease(str(canonical), identity)

@@ -10,8 +10,8 @@ import ctypes
 import os
 import stat
 import sys
-from ctypes import wintypes
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Protocol
 
@@ -19,6 +19,8 @@ from typing import Protocol
 EXIT_UNSAFE = 73
 EXIT_FAILED = 74
 EXIT_POSIX_ROOT_RETAINED = 75
+_ENUMERATION_BATCH_SIZE = 64
+_WINDOWS_DIRECTORY_BUFFER_BYTES = 64 * 1024
 
 
 def _same_posix_identity(details: os.stat_result, expected: tuple[int, int]) -> bool:
@@ -57,47 +59,62 @@ def _valid_entry_name(name: str) -> bool:
     return bool(name) and name not in {".", ".."} and "/" not in name and "\0" not in name
 
 
-def _delete_posix_directory(descriptor: int) -> None:
+def _posix_entry_batch(descriptor: int) -> list[tuple[str, os.stat_result]]:
     with os.scandir(descriptor) as entries:
-        snapshot = [(entry.name, entry.stat(follow_symlinks=False)) for entry in entries]
-    for name, observed in snapshot:
-        if not _valid_entry_name(name):
-            raise OSError("unsafe directory entry")
-        expected = (observed.st_dev, observed.st_ino)
-        if stat.S_ISDIR(observed.st_mode) and not stat.S_ISLNK(observed.st_mode):
-            child_fd = _posix_open_directory(descriptor, name)
-            try:
-                if not _same_posix_identity(os.fstat(child_fd), expected):
-                    raise OSError("directory identity changed")
-                _delete_posix_directory(child_fd)
-                current = _posix_stat_at(descriptor, name)
-                if not _same_posix_identity(current, expected) or not stat.S_ISDIR(
-                    current.st_mode
-                ):
-                    raise OSError("directory binding changed")
-                os.rmdir(name, dir_fd=descriptor)
-            finally:
-                os.close(child_fd)
-            continue
+        return [
+            (entry.name, entry.stat(follow_symlinks=False))
+            for entry in islice(entries, _ENUMERATION_BATCH_SIZE)
+        ]
 
-        if stat.S_ISLNK(observed.st_mode):
-            current = _posix_stat_at(descriptor, name)
-            if not _same_posix_identity(current, expected) or not stat.S_ISLNK(current.st_mode):
-                raise OSError("symlink binding changed")
-            os.unlink(name, dir_fd=descriptor)
-            continue
 
-        child_fd = _posix_open_nondirectory(descriptor, name)
+def _delete_posix_entry(
+    descriptor: int, name: str, observed: os.stat_result
+) -> None:
+    if not _valid_entry_name(name):
+        raise OSError("unsafe directory entry")
+    expected = (observed.st_dev, observed.st_ino)
+    if stat.S_ISDIR(observed.st_mode) and not stat.S_ISLNK(observed.st_mode):
+        child_fd = _posix_open_directory(descriptor, name)
         try:
-            opened = os.fstat(child_fd)
-            if not _same_posix_identity(opened, expected) or stat.S_ISDIR(opened.st_mode):
-                raise OSError("file identity changed")
+            if not _same_posix_identity(os.fstat(child_fd), expected):
+                raise OSError("directory identity changed")
+            _delete_posix_directory(child_fd)
             current = _posix_stat_at(descriptor, name)
-            if not _same_posix_identity(current, expected) or stat.S_ISDIR(current.st_mode):
-                raise OSError("file binding changed")
-            os.unlink(name, dir_fd=descriptor)
+            if not _same_posix_identity(current, expected) or not stat.S_ISDIR(
+                current.st_mode
+            ):
+                raise OSError("directory binding changed")
+            os.rmdir(name, dir_fd=descriptor)
         finally:
             os.close(child_fd)
+        return
+
+    if stat.S_ISLNK(observed.st_mode):
+        current = _posix_stat_at(descriptor, name)
+        if not _same_posix_identity(current, expected) or not stat.S_ISLNK(
+            current.st_mode
+        ):
+            raise OSError("symlink binding changed")
+        os.unlink(name, dir_fd=descriptor)
+        return
+
+    child_fd = _posix_open_nondirectory(descriptor, name)
+    try:
+        opened = os.fstat(child_fd)
+        if not _same_posix_identity(opened, expected) or stat.S_ISDIR(opened.st_mode):
+            raise OSError("file identity changed")
+        current = _posix_stat_at(descriptor, name)
+        if not _same_posix_identity(current, expected) or stat.S_ISDIR(current.st_mode):
+            raise OSError("file binding changed")
+        os.unlink(name, dir_fd=descriptor)
+    finally:
+        os.close(child_fd)
+
+
+def _delete_posix_directory(descriptor: int) -> None:
+    while batch := _posix_entry_batch(descriptor):
+        for name, observed in batch:
+            _delete_posix_entry(descriptor, name, observed)
 
 
 def _delete_posix(path: Path, expected: tuple[int, int]) -> None:
@@ -157,29 +174,28 @@ class _WindowsBackend(Protocol):
 
     def information(self, handle: int) -> tuple[int, int, int]: ...
 
-    def entries(self, handle: int) -> list[_WindowsEntry]: ...
+    def entry_batch(self, handle: int) -> list[_WindowsEntry]: ...
 
     def mark_delete(self, handle: int) -> None: ...
 
     def close(self, handle: int) -> None: ...
 
 
-class _ByHandleFileInformation(ctypes.Structure):
+class _FileIdInformation(ctypes.Structure):
     _fields_ = (
-        ("attributes", ctypes.c_uint32),
-        ("creation_time", wintypes.FILETIME),
-        ("access_time", wintypes.FILETIME),
-        ("write_time", wintypes.FILETIME),
-        ("volume_serial", ctypes.c_uint32),
-        ("size_high", ctypes.c_uint32),
-        ("size_low", ctypes.c_uint32),
-        ("links", ctypes.c_uint32),
-        ("file_index_high", ctypes.c_uint32),
-        ("file_index_low", ctypes.c_uint32),
+        ("volume_serial", ctypes.c_uint64),
+        ("file_id", ctypes.c_ubyte * 16),
     )
 
 
-class _FileIdBothDirectoryInformation(ctypes.Structure):
+class _FileAttributeTagInformation(ctypes.Structure):
+    _fields_ = (
+        ("file_attributes", ctypes.c_uint32),
+        ("reparse_tag", ctypes.c_uint32),
+    )
+
+
+class _FileIdExtdDirectoryInformation(ctypes.Structure):
     _fields_ = (
         ("next_entry_offset", ctypes.c_uint32),
         ("file_index", ctypes.c_uint32),
@@ -192,9 +208,8 @@ class _FileIdBothDirectoryInformation(ctypes.Structure):
         ("file_attributes", ctypes.c_uint32),
         ("file_name_length", ctypes.c_uint32),
         ("ea_size", ctypes.c_uint32),
-        ("short_name_length", ctypes.c_ubyte),
-        ("short_name", ctypes.c_uint16 * 12),
-        ("file_id", ctypes.c_int64),
+        ("reparse_tag", ctypes.c_uint32),
+        ("file_id", ctypes.c_ubyte * 16),
         ("file_name", ctypes.c_uint16 * 1),
     )
 
@@ -240,11 +255,6 @@ class _NativeWindowsBackend:
             wintypes.HANDLE,
         )
         self._api.CreateFileW.restype = wintypes.HANDLE
-        self._api.GetFileInformationByHandle.argtypes = (
-            wintypes.HANDLE,
-            ctypes.POINTER(_ByHandleFileInformation),
-        )
-        self._api.GetFileInformationByHandle.restype = wintypes.BOOL
         self._api.GetFileInformationByHandleEx.argtypes = (
             wintypes.HANDLE,
             ctypes.c_int,
@@ -265,6 +275,7 @@ class _NativeWindowsBackend:
     def open(self, path: Path, *, directory: bool) -> int:
         delete = 0x00010000
         read_attributes = 0x00000080
+        write_attributes = 0x00000100
         list_directory = 0x00000001 if directory else 0
         share_read_write = 0x00000001 | 0x00000002
         open_existing = 3
@@ -272,7 +283,7 @@ class _NativeWindowsBackend:
         open_reparse_point = 0x00200000
         handle = self._api.CreateFileW(
             str(path),
-            delete | read_attributes | list_directory,
+            delete | read_attributes | write_attributes | list_directory,
             share_read_write,
             None,
             open_existing,
@@ -283,34 +294,67 @@ class _NativeWindowsBackend:
             raise ctypes.WinError(ctypes.get_last_error())
         return int(handle)
 
-    def information(self, handle: int) -> tuple[int, int, int]:
-        details = _ByHandleFileInformation()
-        if not self._api.GetFileInformationByHandle(handle, ctypes.byref(details)):
+    def open_identity(self, path: Path) -> int:
+        read_attributes = 0x00000080
+        share_all = 0x00000001 | 0x00000002 | 0x00000004
+        open_existing = 3
+        backup_semantics = 0x02000000
+        open_reparse_point = 0x00200000
+        handle = self._api.CreateFileW(
+            str(path),
+            read_attributes,
+            share_all,
+            None,
+            open_existing,
+            backup_semantics | open_reparse_point,
+            None,
+        )
+        if handle == self._invalid_handle:
             raise ctypes.WinError(ctypes.get_last_error())
-        file_id = (details.file_index_high << 32) | details.file_index_low
-        return details.volume_serial, file_id, details.attributes
+        return int(handle)
 
-    def entries(self, handle: int) -> list[_WindowsEntry]:
-        result: list[_WindowsEntry] = []
-        information_class = 11
+    def information(self, handle: int) -> tuple[int, int, int]:
+        identity = _FileIdInformation()
+        if not self._api.GetFileInformationByHandleEx(
+            handle, 18, ctypes.byref(identity), ctypes.sizeof(identity)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        attributes = _FileAttributeTagInformation()
+        if not self._api.GetFileInformationByHandleEx(
+            handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        file_id = int.from_bytes(bytes(identity.file_id), "little")
+        return identity.volume_serial, file_id, attributes.file_attributes
+
+    def entry_batch(self, handle: int) -> list[_WindowsEntry]:
+        information_class = 20
         while True:
-            buffer = ctypes.create_string_buffer(64 * 1024)
+            result: list[_WindowsEntry] = []
+            buffer = ctypes.create_string_buffer(_WINDOWS_DIRECTORY_BUFFER_BYTES)
             if not self._api.GetFileInformationByHandleEx(
                 handle, information_class, buffer, len(buffer)
             ):
                 error = ctypes.get_last_error()
                 if error == self._error_no_more_files:
-                    return result
+                    return []
                 raise ctypes.WinError(error)
-            information_class = 10
+            information_class = 19
             offset = 0
             while True:
                 address = ctypes.addressof(buffer) + offset
-                entry = _FileIdBothDirectoryInformation.from_address(address)
+                entry = _FileIdExtdDirectoryInformation.from_address(address)
                 if entry.file_name_length % 2:
                     raise OSError("directory name encoding invalid")
-                name_address = address + _FileIdBothDirectoryInformation.file_name.offset
+                name_address = (
+                    address + _FileIdExtdDirectoryInformation.file_name.offset
+                )
                 name_units = entry.file_name_length // 2
+                if (
+                    name_address + entry.file_name_length
+                    > ctypes.addressof(buffer) + len(buffer)
+                ):
+                    raise OSError("directory name exceeds enumeration buffer")
                 raw_name = (ctypes.c_uint16 * name_units).from_address(name_address)
                 name = bytes(raw_name).decode("utf-16-le", "strict")
                 if name not in {".", ".."}:
@@ -319,15 +363,21 @@ class _NativeWindowsBackend:
                     result.append(
                         _WindowsEntry(
                             name,
-                            entry.file_id & 0xFFFFFFFFFFFFFFFF,
+                            int.from_bytes(bytes(entry.file_id), "little"),
                             entry.file_attributes,
                         )
                     )
+                    if len(result) >= _ENUMERATION_BATCH_SIZE:
+                        return result
                 if entry.next_entry_offset == 0:
                     break
+                if entry.next_entry_offset < _FileIdExtdDirectoryInformation.file_name.offset:
+                    raise OSError("directory enumeration offset invalid")
                 offset += entry.next_entry_offset
                 if offset >= len(buffer):
                     raise OSError("directory enumeration overflow")
+            if result:
+                return result
 
     def _set_basic_information(self, handle: int, details: _FileBasicInformation) -> None:
         if not self._api.SetFileInformationByHandle(
@@ -386,24 +436,25 @@ def _delete_windows_handle(
         backend.mark_delete(handle)
         return
     if attributes & backend.directory_attribute:
-        for entry in backend.entries(handle):
-            child_path = path / entry.name
-            child_is_directory = bool(
-                entry.attributes & backend.directory_attribute
-                and not entry.attributes & backend.reparse_attribute
-            )
-            child_handle = backend.open(child_path, directory=child_is_directory)
-            try:
-                _delete_windows_handle(
-                    child_path,
-                    child_handle,
-                    expected_volume,
-                    entry.file_id,
-                    entry.attributes,
-                    backend,
+        while batch := backend.entry_batch(handle):
+            for entry in batch:
+                child_path = path / entry.name
+                child_is_directory = bool(
+                    entry.attributes & backend.directory_attribute
+                    and not entry.attributes & backend.reparse_attribute
                 )
-            finally:
-                backend.close(child_handle)
+                child_handle = backend.open(child_path, directory=child_is_directory)
+                try:
+                    _delete_windows_handle(
+                        child_path,
+                        child_handle,
+                        expected_volume,
+                        entry.file_id,
+                        entry.attributes,
+                        backend,
+                    )
+                finally:
+                    backend.close(child_handle)
     backend.mark_delete(handle)
 
 
@@ -419,7 +470,7 @@ def _delete_windows(
     try:
         volume, file_id, attributes = selected.information(handle)
         if (
-            volume != (expected[0] & 0xFFFFFFFF)
+            volume != expected[0]
             or file_id != expected[1]
             or not attributes & selected.directory_attribute
             or attributes & selected.reparse_attribute
@@ -428,6 +479,22 @@ def _delete_windows(
         _delete_windows_handle(path, handle, volume, file_id, attributes, selected)
     finally:
         selected.close(handle)
+
+
+def _windows_directory_identity(path: Path) -> tuple[int, int]:
+    """Capture a directory's 64-bit volume and 128-bit FileIdInfo identity."""
+    backend = _NativeWindowsBackend()
+    handle = backend.open_identity(path)
+    try:
+        volume, file_id, attributes = backend.information(handle)
+        if (
+            not attributes & backend.directory_attribute
+            or attributes & backend.reparse_attribute
+        ):
+            raise OSError("Windows cleanup lease is not a plain directory")
+        return volume, file_id
+    finally:
+        backend.close(handle)
 
 
 def _parse_arguments(argv: list[str]) -> tuple[Path, tuple[int, int]]:
