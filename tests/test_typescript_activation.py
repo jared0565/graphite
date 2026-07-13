@@ -4188,83 +4188,235 @@ def test_revalidation_rejects_new_symlinked_evidence_directory(tmp_path):
     assert not revalidate_activation_detection(root, Config(), expected)
 
 
-def test_activation_orchestration_has_a_single_onboarding_import_and_call_boundary():
-    package = Path(typescript_activation.__file__).resolve().parent
-    importers: set[str] = set()
-
-    for source_path in package.glob("*.py"):
-        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "typescript_activation":
-                if any(alias.name == "activate_typescript" for alias in node.names):
-                    importers.add(source_path.name)
-            elif isinstance(node, ast.Import):
-                if any(
-                    alias.name == "graphite.typescript_activation"
-                    for alias in node.names
-                ):
-                    importers.add(source_path.name)
-
-    activation_tree = ast.parse(
-        (package / "typescript_activation.py").read_text(encoding="utf-8")
+def _resolve_import_module(relative_path: str, node: ast.ImportFrom) -> str:
+    if node.level == 0:
+        return node.module or ""
+    module_parts = ["graphite", *Path(relative_path).with_suffix("").parts]
+    package_parts = (
+        module_parts[:-1] if module_parts[-1] != "__init__" else module_parts[:-1]
     )
-    cli_tree = ast.parse((package / "cli.py").read_text(encoding="utf-8"))
-    activation_definitions = {
-        node.name for node in activation_tree.body if isinstance(node, ast.FunctionDef)
-    }
-    calls_by_function = {
-        node.name: {
-            call.func.id
-            for call in ast.walk(node)
-            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-        }
-        for node in cli_tree.body
-        if isinstance(node, ast.FunctionDef)
-    }
+    ascend = node.level - 1
+    base = package_parts[: len(package_parts) - ascend]
+    return ".".join([*base, *(node.module or "").split(".")]).rstrip(".")
 
-    assert "activate_typescript" in activation_definitions
-    assert importers == {"cli.py"}
-    assert {
-        name
-        for name, calls in calls_by_function.items()
-        if "activate_typescript" in calls
-    } == {"_activate_typescript_for_onboarding"}
-    assert {
-        name
-        for name, calls in calls_by_function.items()
-        if "_activate_typescript_for_onboarding" in calls
-    } == {"cmd_bootstrap", "cmd_init"}
+
+def _activation_boundary_violations(sources: dict[str, str]) -> list[str]:
+    violations: list[str] = []
+
+    for relative_path, source in sources.items():
+        tree = ast.parse(source, filename=relative_path)
+        direct_aliases: set[str] = set()
+        module_aliases: set[str] = set()
+        graphite_aliases: set[str] = set()
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "graphite":
+                        graphite_aliases.add(alias.asname or "graphite")
+                    elif alias.name == "graphite.typescript_activation":
+                        if alias.asname:
+                            module_aliases.add(alias.asname)
+                        else:
+                            graphite_aliases.add("graphite")
+                        if relative_path != "cli.py":
+                            violations.append(f"{relative_path}:{node.lineno}:import")
+                        else:
+                            violations.append(f"{relative_path}:{node.lineno}:module_import")
+            elif isinstance(node, ast.ImportFrom):
+                resolved = _resolve_import_module(relative_path, node)
+                if resolved == "graphite.typescript_activation":
+                    for alias in node.names:
+                        if alias.name in {"activate_typescript", "*"}:
+                            direct_aliases.add(alias.asname or alias.name)
+                            if relative_path != "cli.py" or alias.name == "*":
+                                violations.append(
+                                    f"{relative_path}:{node.lineno}:attribute_import"
+                                )
+                elif resolved == "graphite":
+                    for alias in node.names:
+                        if alias.name == "typescript_activation":
+                            module_aliases.add(alias.asname or alias.name)
+                            violations.append(f"{relative_path}:{node.lineno}:module_import")
+
+        function_stack: list[str] = []
+
+        class ReferenceVisitor(ast.NodeVisitor):
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                function_stack.append(node.name)
+                self.generic_visit(node)
+                function_stack.pop()
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def _allowed(self) -> bool:
+                return relative_path == "typescript_activation.py" or (
+                    relative_path == "cli.py"
+                    and function_stack
+                    and function_stack[-1] == "_activate_typescript_for_onboarding"
+                )
+
+            def _record(self, node: ast.AST, kind: str) -> None:
+                if not self._allowed():
+                    violations.append(
+                        f"{relative_path}:{getattr(node, 'lineno', 0)}:{kind}"
+                    )
+
+            def visit_Name(self, node: ast.Name) -> None:
+                if isinstance(node.ctx, ast.Load) and node.id in direct_aliases:
+                    self._record(node, "attribute_reference")
+                if (
+                    isinstance(node.ctx, ast.Load)
+                    and relative_path == "cli.py"
+                    and node.id == "_activate_typescript_for_onboarding"
+                    and (
+                        not function_stack
+                        or function_stack[-1] not in {"cmd_bootstrap", "cmd_init"}
+                    )
+                ):
+                    violations.append(
+                        f"{relative_path}:{node.lineno}:onboarding_helper_reference"
+                    )
+
+            def visit_Attribute(self, node: ast.Attribute) -> None:
+                dotted: list[str] = []
+                current: ast.expr = node
+                while isinstance(current, ast.Attribute):
+                    dotted.append(current.attr)
+                    current = current.value
+                if isinstance(current, ast.Name):
+                    dotted.append(current.id)
+                    dotted.reverse()
+                    module_reference = (
+                        dotted[0] in module_aliases
+                        and dotted[1:] == ["activate_typescript"]
+                    )
+                    package_reference = (
+                        dotted[0] in graphite_aliases
+                        and dotted[1:]
+                        == ["typescript_activation", "activate_typescript"]
+                    )
+                    if module_reference or package_reference:
+                        self._record(node, "module_attribute_reference")
+                        return
+                self.generic_visit(node)
+
+        ReferenceVisitor().visit(tree)
+
+    return sorted(set(violations))
+
+
+def test_activation_orchestration_has_a_single_alias_safe_recursive_boundary():
+    package = Path(typescript_activation.__file__).resolve().parent
+    sources = {
+        source_path.relative_to(package).as_posix(): source_path.read_text(
+            encoding="utf-8"
+        )
+        for source_path in package.rglob("*.py")
+    }
+    activation_tree = ast.parse(sources["typescript_activation.py"])
+
+    assert any(
+        isinstance(node, ast.FunctionDef) and node.name == "activate_typescript"
+        for node in activation_tree.body
+    )
+    assert _activation_boundary_violations(sources) == []
 
 
 @pytest.mark.parametrize(
-    ("argv", "handler_name"),
+    ("relative_path", "source"),
     [
-        (["build", "."], "cmd_build"),
-        (["report", "."], "cmd_report"),
-        (["check", "."], "cmd_check"),
-        (["doctor", "."], "cmd_doctor"),
-        (["daemon", ".", "--once"], "cmd_daemon"),
+        (
+            "worker.py",
+            "from .typescript_activation import activate_typescript as engage\n"
+            "def run(): return engage\n",
+        ),
+        (
+            "worker.py",
+            "import graphite.typescript_activation as activation\n"
+            "def run(): return activation.activate_typescript(None)\n",
+        ),
+        (
+            "worker.py",
+            "import graphite\n"
+            "run = graphite.typescript_activation.activate_typescript\n",
+        ),
+        (
+            "nested/worker.py",
+            "from ..typescript_activation import activate_typescript as engage\n"
+            "def run(): return engage(None)\n",
+        ),
+        (
+            "cli.py",
+            "from .typescript_activation import activate_typescript as engage\n"
+            "def cmd_build(): return engage\n",
+        ),
+        (
+            "cli.py",
+            "from . import typescript_activation as activation\n"
+            "def _activate_typescript_for_onboarding():\n"
+            "    return activation.activate_typescript(None)\n",
+        ),
+        (
+            "cli.py",
+            "def _activate_typescript_for_onboarding(): return None\n"
+            "def cmd_build(): return _activate_typescript_for_onboarding()\n",
+        ),
     ],
 )
-def test_non_onboarding_parser_paths_never_activate_typescript(
-    monkeypatch, argv, handler_name
+def test_activation_boundary_analyzer_rejects_alias_and_recursive_mutants(
+    relative_path, source
+):
+    assert _activation_boundary_violations({relative_path: source})
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_event"),
+    [
+        (["build"], "build"),
+        (["report"], "build"),
+        (["check"], "check"),
+        (["doctor"], "doctor"),
+        (["daemon", "--once"], "daemon"),
+    ],
+)
+def test_non_onboarding_parser_paths_run_real_handlers_without_activation(
+    tmp_path, monkeypatch, argv, expected_event
 ):
     import graphite.cli as cli
 
-    invoked: list[str] = []
+    events: list[str] = []
 
     def forbidden_activation(*_args, **_kwargs):
         raise AssertionError("non-onboarding command attempted TypeScript activation")
 
-    def handler(_args):
-        invoked.append(handler_name)
-        return 0
+    def build(_root, _cfg):
+        events.append("build")
+
+    def check(_root, _cfg):
+        events.append("check")
+        return {"stale": False, "added": [], "changed": [], "removed": []}
+
+    def doctor(_root, **_kwargs):
+        events.append("doctor")
+        return {"exit_code": 0, "checks": []}
+
+    def daemon(_base, _cfg, _options):
+        events.append("daemon")
+        return {
+            "status": "ok",
+            "project_count": 0,
+            "failing_projects": 0,
+        }
 
     monkeypatch.setattr(cli, "activate_typescript", forbidden_activation)
-    monkeypatch.setattr(cli, handler_name, handler)
+    monkeypatch.setattr(cli, "_build_project", build)
+    monkeypatch.setattr(cli, "check_graph_freshness", check)
+    monkeypatch.setattr(cli, "run_doctor", doctor)
+    monkeypatch.setattr(cli, "run_daemon", daemon)
 
-    assert cli.main(argv) == 0
-    assert invoked == [handler_name]
+    assert cli.main([argv[0], str(tmp_path), *argv[1:]]) == 0
+    assert events == [expected_event]
 
 
 def test_mcp_import_never_reaches_activation_or_executes_a_process(monkeypatch):
@@ -4295,29 +4447,76 @@ def test_mcp_import_never_reaches_activation_or_executes_a_process(monkeypatch):
     assert callable(imported.main)
 
 
-def test_importing_graphite_has_no_process_or_filesystem_mutation(monkeypatch):
-    import graphite
+def test_importing_graphite_in_clean_interpreter_has_no_external_side_effect(tmp_path):
     import subprocess
 
-    def forbidden_side_effect(*_args, **_kwargs):
-        raise AssertionError("importing graphite caused an external side effect")
+    source_root = Path(typescript_activation.__file__).resolve().parents[1]
+    script = f"""
+import builtins
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
 
-    monkeypatch.setattr(subprocess, "Popen", forbidden_side_effect)
-    monkeypatch.setattr(subprocess, "run", forbidden_side_effect)
-    for method_name in (
-        "mkdir",
-        "rename",
-        "replace",
-        "touch",
-        "unlink",
-        "write_bytes",
-        "write_text",
-    ):
-        monkeypatch.setattr(Path, method_name, forbidden_side_effect)
+sys.path.insert(0, {str(source_root)!r})
 
-    reloaded = importlib.reload(graphite)
+def forbidden(*args, **kwargs):
+    raise RuntimeError("forbidden_import_side_effect")
 
-    assert isinstance(reloaded.__version__, str)
+original_open = builtins.open
+def guarded_open(file, mode="r", *args, **kwargs):
+    if any(flag in mode for flag in "wax+"):
+        forbidden()
+    return original_open(file, mode, *args, **kwargs)
+builtins.open = guarded_open
+
+original_os_open = os.open
+def guarded_os_open(path, flags, *args, **kwargs):
+    mutation_flags = (
+        os.O_APPEND | os.O_CREAT | os.O_RDWR | os.O_TRUNC | os.O_WRONLY
+    )
+    if flags & mutation_flags:
+        forbidden()
+    return original_os_open(path, flags, *args, **kwargs)
+os.open = guarded_os_open
+
+for name in ("Popen", "call", "check_call", "check_output", "run"):
+    setattr(subprocess, name, forbidden)
+for name in (
+    "makedirs", "mkdir", "remove", "removedirs", "rename", "renames",
+    "replace", "rmdir", "system", "unlink",
+):
+    setattr(os, name, forbidden)
+for name in dir(os):
+    if name.startswith(("exec", "spawn")):
+        setattr(os, name, forbidden)
+for name in (
+    "mkdir", "rename", "replace", "rmdir", "touch", "unlink",
+    "write_bytes", "write_text",
+):
+    setattr(pathlib.Path, name, forbidden)
+for name in ("NamedTemporaryFile", "TemporaryDirectory", "mkdtemp", "mkstemp"):
+    setattr(tempfile, name, forbidden)
+
+import graphite
+
+assert graphite.__version__
+assert "graphite.typescript_activation" not in sys.modules
+print("side-effect-free")
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "side-effect-free"
 
 
 class _TTYStream(io.StringIO):
@@ -4372,15 +4571,57 @@ def test_noninteractive_onboarding_modes_have_zero_privileged_events(
     )
 
 
-def test_manager_adapters_never_construct_global_install_arguments():
-    forbidden = {"-g", "--global", "global", "--location=global"}
+def _approved_typescript_install_argv(manager: Manager, argv: tuple[str, ...]) -> bool:
+    approved = {
+        Manager.NPM: (
+            "install",
+            "--save-dev",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+            f"--registry={TRUSTED_REGISTRY}",
+            "typescript",
+        ),
+        Manager.PNPM: (
+            "add",
+            "--save-dev",
+            "--ignore-scripts",
+            "--ignore-workspace-root-check",
+            f"--registry={TRUSTED_REGISTRY}",
+            "typescript",
+        ),
+        Manager.YARN: ("add", "--dev", "--mode=skip-build", "typescript"),
+        Manager.BUN: (
+            "add",
+            "--dev",
+            "--ignore-scripts",
+            "--registry",
+            TRUSTED_REGISTRY,
+            "typescript",
+        ),
+    }
+    return argv == approved[manager]
 
+
+def test_manager_adapters_construct_only_exact_approved_local_install_arguments():
     for manager in Manager:
         argv = adapter_for(manager).argument_tail(TRUSTED_REGISTRY)
-        lowered = {argument.casefold() for argument in argv}
 
-        assert lowered.isdisjoint(forbidden)
-        assert argv[-1] == "typescript"
+        assert _approved_typescript_install_argv(manager, argv)
+
+
+@pytest.mark.parametrize(
+    "mutant",
+    [
+        ("install", "-gtypescript"),
+        ("install", "--global=true", "typescript"),
+        ("install", "--location", "global", "typescript"),
+        ("install", "--location=global-prefix", "typescript"),
+        ("install", "--save-dev", "typescript", "--global"),
+    ],
+)
+def test_approved_install_argv_rejects_global_and_combined_mutants(mutant):
+    assert not _approved_typescript_install_argv(Manager.NPM, mutant)
 
 
 def test_unicode_root_and_hostile_process_output_never_enter_serialized_result(tmp_path):
