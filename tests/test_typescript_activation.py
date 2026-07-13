@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -23,6 +25,7 @@ from graphite.dependency_install import (
     Manager,
     ManagerAdapter,
     ProbeProcessError,
+    StepResult,
     TrustedCommand,
     TrustedFile,
     Version,
@@ -163,11 +166,17 @@ def _activation_dependencies(tmp_path, root, events, *, prompt_answer="yes", ins
         "PATH": str(tools),
         "GRAPHITE_PACKAGE_VALIDATOR": str(validator),
     }
+
+    def cleanup(isolated_home, _selected_root, _timeout):
+        shutil.rmtree(isolated_home)
+        return StepResult(True, "cleaned")
+
     return ActivationDependencies(
         prompt=prompt,
         environ=environment,
         runner=runner,
         temporary_directory=lambda: tempfile.TemporaryDirectory(dir=tmp_path),
+        cleanup=cleanup,
     )
 
 
@@ -534,7 +543,7 @@ def test_activate_rejects_isolated_home_inside_root(tmp_path):
     assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
     assert result.reason == "isolation_unavailable"
     assert result.attempted
-    assert temporary.cleaned
+    assert inside.is_dir()
     assert all(event[0] != "install" for event in events)
 
 
@@ -1003,21 +1012,19 @@ def test_activate_cleanup_error_overrides_every_provisional_result(tmp_path, pha
     real_temporary = tempfile.TemporaryDirectory(dir=tmp_path)
     cleanup_calls = 0
 
-    class FailingCleanup:
-        name = real_temporary.name
-
-        def cleanup(self):
-            nonlocal cleanup_calls
-            cleanup_calls += 1
-            real_temporary.cleanup()
-            raise OSError(f"secret cleanup path {tmp_path}")
-
     def factory():
         if phase == "prelaunch_revalidation":
             (root / ".npmrc").write_text("unsafe", encoding="utf-8")
-        return FailingCleanup()
+        return real_temporary
+
+    def cleanup(isolated_home, _selected_root, _timeout):
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        shutil.rmtree(isolated_home)
+        return StepResult(False, "cleanup_failed")
 
     deps.temporary_directory = factory
+    deps.cleanup = cleanup
     result = activate_typescript(
         ActivationRequest(root, Config(), True, True, False, False), deps
     )
@@ -1046,22 +1053,21 @@ def test_activate_cleanup_deadline_overrides_every_provisional_result(tmp_path, 
     now = 0.0
     cleanup_calls = 0
 
-    class SlowCleanup:
-        name = real_temporary.name
-
-        def cleanup(self):
-            nonlocal cleanup_calls, now
-            cleanup_calls += 1
-            real_temporary.cleanup()
-            now = 31.0
-
     def factory():
         if phase == "prelaunch_revalidation":
             (root / ".npmrc").write_text("unsafe", encoding="utf-8")
-        return SlowCleanup()
+        return real_temporary
+
+    def cleanup(isolated_home, _selected_root, _timeout):
+        nonlocal cleanup_calls, now
+        cleanup_calls += 1
+        shutil.rmtree(isolated_home)
+        now = 31.0
+        return StepResult(True, "cleaned")
 
     deps.monotonic = lambda: now
     deps.temporary_directory = factory
+    deps.cleanup = cleanup
     result = activate_typescript(
         ActivationRequest(root, Config(), True, True, False, False, 30), deps
     )
@@ -1074,39 +1080,32 @@ def test_activate_cleanup_deadline_overrides_every_provisional_result(tmp_path, 
     assert [event[0] for event in events].count("install") == expected_installs
 
 
-def test_activate_bounds_blocking_cleanup_without_retaining_more_workers(tmp_path):
+def test_activate_maps_terminated_cleanup_timeout_without_worker_retention(tmp_path):
     root = _activation_root(tmp_path)
     events = []
     deps = _activation_dependencies(tmp_path, root, events)
-    real_temporary = tempfile.TemporaryDirectory(dir=tmp_path)
-    cleanup_started = threading.Event()
-    release_cleanup = threading.Event()
-    cleanup_finished = threading.Event()
+    before_threads = {thread.ident for thread in threading.enumerate()}
+    cleanup_calls = 0
 
-    class BlockingCleanup:
-        name = real_temporary.name
+    def cleanup(_isolated_home, _selected_root, timeout):
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        assert 0 < timeout <= 1
+        return StepResult(False, "cleanup_timeout")
 
-        def cleanup(self):
-            cleanup_started.set()
-            release_cleanup.wait(2)
-            real_temporary.cleanup()
-            cleanup_finished.set()
-
-    deps.temporary_directory = BlockingCleanup
+    deps.cleanup = cleanup
     started = time.monotonic()
-    try:
-        result = activate_typescript(
-            ActivationRequest(root, Config(), True, True, False, False, 0.1), deps
-        )
-        elapsed = time.monotonic() - started
-    finally:
-        release_cleanup.set()
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+    elapsed = time.monotonic() - started
 
-    assert cleanup_started.is_set()
     assert elapsed < 0.75
     assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
     assert result.reason == "operation_timeout"
-    assert cleanup_finished.wait(2)
+    assert cleanup_calls == 1
+    assert {thread.ident for thread in threading.enumerate()} == before_threads
+    assert typescript_activation._ACTIVE_CLEANUP_ROOTS == set()
 
 
 def test_blocked_cleanup_does_not_serialize_separate_roots(tmp_path):
@@ -1122,35 +1121,41 @@ def test_blocked_cleanup_does_not_serialize_separate_roots(tmp_path):
         first_root,
         first_events,
     )
-    real_temporary = tempfile.TemporaryDirectory(dir=first_parent)
     cleanup_started = threading.Event()
     release_cleanup = threading.Event()
-    cleanup_finished = threading.Event()
+    first_result = []
 
-    class BlockingCleanup:
-        name = real_temporary.name
+    def blocking_cleanup(isolated_home, _selected_root, _timeout):
+        cleanup_started.set()
+        assert release_cleanup.wait(5)
+        shutil.rmtree(isolated_home)
+        return StepResult(True, "cleaned")
 
-        def cleanup(self):
-            cleanup_started.set()
-            release_cleanup.wait(2)
-            real_temporary.cleanup()
-            cleanup_finished.set()
-
-    first_dependencies.temporary_directory = BlockingCleanup
-    try:
-        first = activate_typescript(
-            ActivationRequest(
-                first_root,
-                Config(),
-                True,
-                True,
-                False,
-                False,
-                0.1,
-            ),
-            first_dependencies,
+    first_dependencies.cleanup = blocking_cleanup
+    thread = threading.Thread(
+        target=lambda: first_result.append(
+            activate_typescript(
+                ActivationRequest(
+                    first_root,
+                    Config(),
+                    True,
+                    True,
+                    False,
+                    False,
+                ),
+                first_dependencies,
+            )
         )
-        assert cleanup_started.is_set()
+    )
+    thread.start()
+    try:
+        assert cleanup_started.wait(5)
+        same_root = activate_typescript(
+            ActivationRequest(first_root, Config(), True, True, False, False),
+            ActivationDependencies(
+                runner=lambda *_args, **_kwargs: pytest.fail("runner called")
+            ),
+        )
         second_events = []
         second_dependencies = _activation_dependencies(
             second_parent,
@@ -1163,10 +1168,37 @@ def test_blocked_cleanup_does_not_serialize_separate_roots(tmp_path):
         )
     finally:
         release_cleanup.set()
+        thread.join(5)
 
-    assert first.reason == "operation_timeout"
+    assert same_root == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        None,
+        "activation_in_progress",
+    )
+    assert first_result[0].outcome is ActivationOutcome.INSTALLED
     assert second.outcome is ActivationOutcome.INSTALLED
-    assert cleanup_finished.wait(2)
+
+
+def test_cleanup_ownership_blocks_root_before_any_activation_work(tmp_path):
+    root = _activation_root(tmp_path)
+    typescript_activation._mark_cleanup_active(root)
+    try:
+        result = activate_typescript(
+            ActivationRequest(root, Config(), True, True, False, False),
+            ActivationDependencies(
+                prompt=lambda _message: pytest.fail("prompt called"),
+                environ=_RaisingEnvironment({}, "PATH", "environment accessed"),
+                runner=lambda *_args, **_kwargs: pytest.fail("runner called"),
+            ),
+        )
+    finally:
+        typescript_activation._clear_cleanup_active(root)
+
+    assert result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        None,
+        "activation_in_progress",
+    )
 
 
 class _RaisingEnvironment(dict):
@@ -1257,6 +1289,87 @@ def test_activate_contains_monotonic_exception_by_phase(
     assert result.attempted
     assert secret not in repr(result)
     assert all(event[0] != "install" for event in events)
+
+
+def test_verification_dependency_failure_survives_cleanup_clock_failure(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    dependencies = _activation_dependencies(tmp_path, root, events)
+    secret = f"secret verification clock path {tmp_path}"
+    calls = 0
+
+    def monotonic():
+        nonlocal calls
+        calls += 1
+        if calls >= 7:
+            raise RuntimeError(secret)
+        return float(calls)
+
+    dependencies.monotonic = monotonic
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), dependencies
+    )
+
+    assert result.outcome is ActivationOutcome.VERIFICATION_FAILED
+    assert result.reason == "dependency_failed"
+    assert secret not in repr(result)
+
+
+def test_cleanup_timeout_stress_retains_no_workers_or_root_ownership(tmp_path):
+    before_threads = {thread.ident for thread in threading.enumerate()}
+    cleanup_calls = 0
+
+    def terminated_never_returning_cleanup(_isolated_home, _root, timeout):
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        assert 0 < timeout <= 1
+        return StepResult(False, "cleanup_timeout")
+
+    for index in range(64):
+        root = tmp_path / f"root-{index}"
+        isolated = tmp_path / f"isolated-{index}"
+        root.mkdir()
+        isolated.mkdir()
+        deadline = typescript_activation._Deadline(1.0, lambda: 0.0)
+        status, expired_before = typescript_activation._bounded_temporary_cleanup(
+            isolated,
+            deadline,
+            root,
+            terminated_never_returning_cleanup,
+        )
+        assert status == "cleanup_timeout"
+        assert not expired_before
+        isolated.rmdir()
+
+    assert cleanup_calls == 64
+    assert typescript_activation._ACTIVE_CLEANUP_ROOTS == set()
+    assert {thread.ident for thread in threading.enumerate()} == before_threads
+
+
+def test_default_cleanup_uses_exact_bounded_process_contract(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        raise ProbeProcessError("timeout")
+
+    monkeypatch.setattr(typescript_activation, "run_bounded_process", runner)
+    result = typescript_activation._cleanup_isolated_home(isolated, root, 0.25)
+
+    assert result == StepResult(False, "cleanup_timeout")
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv[:3] == [sys.executable, "-I", "-c"]
+    assert argv[-1] == str(isolated)
+    assert kwargs["cwd"] == isolated.parent
+    assert kwargs["stdin"] is None
+    assert kwargs["timeout_seconds"] == 0.25
+    assert kwargs["check"] is False
+    assert "shell" not in kwargs
 
 
 def test_activate_separate_roots_do_not_share_lock(tmp_path):
@@ -1378,16 +1491,15 @@ def test_activate_shared_deadline_includes_temporary_cleanup(tmp_path):
     now = 0.0
     real_temporary = tempfile.TemporaryDirectory(dir=tmp_path)
 
-    class CleanupAdvancesClock:
-        name = real_temporary.name
-
-        def cleanup(self):
-            nonlocal now
-            real_temporary.cleanup()
-            now = 31.0
+    def cleanup(isolated_home, _selected_root, _timeout):
+        nonlocal now
+        shutil.rmtree(isolated_home)
+        now = 31.0
+        return StepResult(True, "cleaned")
 
     deps.monotonic = lambda: now
-    deps.temporary_directory = CleanupAdvancesClock
+    deps.temporary_directory = lambda: real_temporary
+    deps.cleanup = cleanup
 
     result = activate_typescript(
         ActivationRequest(root, Config(), True, True, False, False, 30), deps

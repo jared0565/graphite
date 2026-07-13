@@ -12,6 +12,7 @@ import math
 import os
 import re
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -28,6 +29,7 @@ from .dependency_install import (
     FileSnapshot,
     Manager,
     Runner,
+    StepResult,
     TRUSTED_REGISTRY,
     adapter_for,
     command_for,
@@ -41,7 +43,11 @@ from .dependency_install import (
     run_validator,
     snapshot_control_file,
 )
-from .probe_process import run_bounded_process
+from .probe_process import (
+    ProbeProcessError,
+    run_bounded_process,
+    sanitized_probe_environment,
+)
 from .ingest import SKIP_DIRS
 from .probe_workspace import (
     _close_raw_handle,
@@ -117,25 +123,72 @@ class ActivationRequest:
     timeout_seconds: float = 120.0
 
 
+@dataclass(frozen=True)
+class _TemporaryDirectoryLease:
+    name: str
+
+
+def _new_temporary_directory() -> _TemporaryDirectoryLease:
+    return _TemporaryDirectoryLease(tempfile.mkdtemp(prefix="graphite-typescript-"))
+
+
+_CLEANUP_SCRIPT = (
+    "import pathlib,shutil,sys;"
+    "path=pathlib.Path(sys.argv[1]);"
+    "shutil.rmtree(path)"
+)
+
+
+def _cleanup_isolated_home(
+    isolated_home: Path,
+    root: Path,
+    timeout: float,
+) -> StepResult:
+    if not math.isfinite(timeout) or timeout <= 0:
+        return StepResult(False, "cleanup_timeout")
+    if _isolated_home_path(_TemporaryDirectoryLease(str(isolated_home)), root) is None:
+        return StepResult(False, "cleanup_failed")
+    try:
+        result = run_bounded_process(
+            [sys.executable, "-I", "-c", _CLEANUP_SCRIPT, str(isolated_home)],
+            cwd=isolated_home.parent,
+            stdin=None,
+            timeout_seconds=timeout,
+            max_output_bytes=4096,
+            check=False,
+            environment=sanitized_probe_environment(),
+        )
+    except ProbeProcessError as error:
+        reason = "cleanup_timeout" if error.code == "timeout" else "cleanup_failed"
+        return StepResult(False, reason)
+    except Exception:
+        return StepResult(False, "cleanup_failed")
+    if result.returncode != 0 or _path_is_lexically_present(isolated_home):
+        return StepResult(False, "cleanup_failed")
+    return StepResult(True, "cleaned")
+
+
 @dataclass
 class ActivationDependencies:
     prompt: Callable[[str], str] = input
     environ: Mapping[str, str] = field(default_factory=lambda: os.environ)
     monotonic: Callable[[], float] = time.monotonic
     runner: Runner = run_bounded_process
-    temporary_directory: Callable[[], Any] = tempfile.TemporaryDirectory
+    temporary_directory: Callable[[], Any] = _new_temporary_directory
+    cleanup: Callable[[Path, Path, float], StepResult] = _cleanup_isolated_home
 
 
 _ACTIVATION_LOCKS_GUARD = threading.Lock()
 _ACTIVATION_LOCKS: dict[str, tuple[threading.Lock, int]] = {}
-_CLEANUP_SLOT_GUARD = threading.Lock()
-_CLEANUP_SLOTS: set[str] = set()
+_ACTIVE_CLEANUP_ROOTS: set[str] = set()
 _CLEANUP_MAX_SECONDS = 1.0
 
 
 def _acquire_activation_lock(root: Path) -> tuple[str, threading.Lock] | None:
     key = os.path.normcase(str(root))
     with _ACTIVATION_LOCKS_GUARD:
+        if key in _ACTIVE_CLEANUP_ROOTS:
+            return None
         lock, users = _ACTIVATION_LOCKS.get(key, (threading.Lock(), 0))
         _ACTIVATION_LOCKS[key] = (lock, users + 1)
         if lock.acquire(blocking=False):
@@ -183,28 +236,25 @@ class _Deadline:
         return remaining
 
 
-def _claim_cleanup_slot(root: Path) -> bool:
+def _mark_cleanup_active(root: Path) -> None:
     key = os.path.normcase(str(root))
-    with _CLEANUP_SLOT_GUARD:
-        if key in _CLEANUP_SLOTS:
-            return False
-        _CLEANUP_SLOTS.add(key)
-        return True
+    with _ACTIVATION_LOCKS_GUARD:
+        _ACTIVE_CLEANUP_ROOTS.add(key)
 
 
-def _release_cleanup_slot(root: Path) -> None:
+def _clear_cleanup_active(root: Path) -> None:
     key = os.path.normcase(str(root))
-    with _CLEANUP_SLOT_GUARD:
-        _CLEANUP_SLOTS.discard(key)
+    with _ACTIVATION_LOCKS_GUARD:
+        _ACTIVE_CLEANUP_ROOTS.discard(key)
 
 
 def _bounded_temporary_cleanup(
-    temporary: Any,
+    isolated_home: Path,
     deadline: _Deadline,
     root: Path,
+    cleanup: Callable[[Path, Path, float], StepResult],
 ) -> tuple[str, bool]:
-    """Clean up within the deadline while one worker retains sole ownership."""
-    failures: list[str] = []
+    """Run terminable cleanup while lock acquisition observes its ownership."""
     expired_before_cleanup = False
     dependency_failed = False
     try:
@@ -213,30 +263,25 @@ def _bounded_temporary_cleanup(
         remaining = 0.0
         expired_before_cleanup = True
     except _DependencyFailure:
-        remaining = 0.0
+        remaining = _CLEANUP_MAX_SECONDS
         dependency_failed = True
-
-    def perform() -> None:
-        try:
-            temporary.cleanup()
-        except Exception:
-            failures.append("cleanup_failed")
-        finally:
-            _release_cleanup_slot(root)
-
-    thread = threading.Thread(target=perform, daemon=True)
+    cleanup_timeout = min(_CLEANUP_MAX_SECONDS, max(0.001, remaining))
+    _mark_cleanup_active(root)
     try:
-        thread.start()
-    except RuntimeError:
-        _release_cleanup_slot(root)
-        return "cleanup_failed", expired_before_cleanup
-    thread.join(min(_CLEANUP_MAX_SECONDS, max(0.0, remaining)))
+        cleanup_result = cleanup(isolated_home, root, cleanup_timeout)
+    except Exception:
+        cleanup_result = StepResult(False, "cleanup_failed")
+    finally:
+        _clear_cleanup_active(root)
     if dependency_failed:
         return "dependency_failed", expired_before_cleanup
-    if thread.is_alive():
-        return "cleanup_timeout", expired_before_cleanup
-    if failures:
-        return failures[0], expired_before_cleanup
+    if not cleanup_result.ok:
+        reason = (
+            cleanup_result.reason
+            if cleanup_result.reason in {"cleanup_failed", "cleanup_timeout"}
+            else "cleanup_failed"
+        )
+        return reason, expired_before_cleanup
     try:
         deadline.remaining()
     except _DeadlineExpired:
@@ -1032,19 +1077,13 @@ def _install_with_isolation(
     dependencies: ActivationDependencies,
 ) -> ActivationResult:
     temporary = None
+    isolated_home: Path | None = None
     result = _result_for_detection(
         detection,
         ActivationOutcome.INSTALLATION_FAILED,
         "isolation_unavailable",
         attempted=True,
     )
-    if not _claim_cleanup_slot(root):
-        return _result_for_detection(
-            detection,
-            ActivationOutcome.INSTALLATION_FAILED,
-            "isolation_cleanup_failed",
-            attempted=True,
-        )
     try:
         temporary = dependencies.temporary_directory()
         isolated_home = _isolated_home_path(temporary, root)
@@ -1119,13 +1158,12 @@ def _install_with_isolation(
             attempted=True,
         )
     finally:
-        if temporary is None:
-            _release_cleanup_slot(root)
-        else:
+        if isolated_home is not None:
             cleanup_status, expired_before_cleanup = _bounded_temporary_cleanup(
-                temporary,
+                isolated_home,
                 deadline,
                 root,
+                dependencies.cleanup,
             )
             if cleanup_status == "cleanup_failed":
                 result = _result_for_detection(
@@ -1135,7 +1173,10 @@ def _install_with_isolation(
                     attempted=True,
                     changed_files=result.changed_files,
                 )
-            elif cleanup_status == "dependency_failed":
+            elif (
+                cleanup_status == "dependency_failed"
+                and result.reason != "dependency_failed"
+            ):
                 result = _result_for_detection(
                     detection,
                     ActivationOutcome.INSTALLATION_FAILED,
