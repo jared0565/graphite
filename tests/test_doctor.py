@@ -938,7 +938,7 @@ def test_windows_contract_builders_import_without_msvcrt(tmp_path: Path) -> None
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows native launcher contract")
-@pytest.mark.parametrize("failure", ["job_create", "job_configure", "pipe", "pipe_configure", "attribute_init", "attribute_update", "child_configure", "child_restore", "child_restore_close", "process_create", "assign", "resume", "file_wrap"])
+@pytest.mark.parametrize("failure", ["job_create", "job_configure", "pipe", "pipe_configure", "attribute_init", "attribute_update", "child_configure", "child_configure_restore", "child_restore", "child_restore_close", "process_create", "process_create_restore", "assign", "resume", "file_wrap"])
 def test_windows_job_launch_failures_close_each_owned_handle_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -953,6 +953,7 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
             self.pipe_calls = 0
             self.created: list[int] = []
             self.open_handles: set[int] = set()
+            self.inheritable_handles: set[int] = set()
             self.closed: list[int] = []
             self.close_attempts: list[int] = []
             self.terminated: list[int] = []
@@ -964,6 +965,15 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
             self.legacy_acquired = threading.Event()
             self.legacy_thread: threading.Thread | None = None
             self.legacy_saw_open_handle: bool | None = None
+
+        def start_legacy_launch(self) -> None:
+            def legacy_launch() -> None:
+                with native.WINDOWS_PROCESS_CREATION_LOCK:
+                    self.legacy_saw_open_handle = bool(self.open_handles & self.inheritable_handles)
+                    self.legacy_acquired.set()
+            self.legacy_thread = threading.Thread(target=legacy_launch)
+            self.legacy_thread.start()
+            assert not self.legacy_acquired.wait(0.02)
 
         def CreateJobObjectW(self, security: object, name: object) -> int:
             return 0 if failure == "job_create" else 1
@@ -983,11 +993,22 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
         def SetHandleInformation(self, handle: int, mask: int, flags: int) -> bool:
             self.handle_flags.append((handle, flags))
             child_enables = [entry for entry in self.handle_flags if entry[1] == 1]
-            if failure == "child_configure" and flags == 1 and len(child_enables) == 2:
+            if failure in {"child_configure", "child_configure_restore"} and flags == 1 and len(child_enables) == 2:
+                if failure == "child_configure_restore":
+                    self.start_legacy_launch()
                 return False
             restore_attempts = [entry for entry in self.handle_flags if entry == (13, 0)]
             if failure in {"child_restore", "child_restore_close"} and flags == 0 and child_enables and handle == 13 and len(restore_attempts) == 1:
                 return False
+            first_handle_restores = [entry for entry in self.handle_flags if entry == (10, 0)]
+            if failure == "child_configure_restore" and flags == 0 and handle == 10 and len(first_handle_restores) == 1:
+                return False
+            if failure == "process_create_restore" and flags == 0 and handle == 13 and len(restore_attempts) == 1:
+                return False
+            if flags == 1:
+                self.inheritable_handles.add(handle)
+            else:
+                self.inheritable_handles.discard(handle)
             return failure != "pipe_configure"
         def InitializeProcThreadAttributeList(self, pointer: object, count: int, flags: int, size: object) -> bool:
             if pointer is None:
@@ -1015,15 +1036,9 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
                 "cwd": args[7],
                 "stdio": (startup.hStdInput, startup.hStdOutput, startup.hStdError),
             }
-            if failure in {"resume", "child_restore", "child_restore_close"}:
-                def legacy_launch() -> None:
-                    with native.WINDOWS_PROCESS_CREATION_LOCK:
-                        self.legacy_saw_open_handle = 13 in self.open_handles
-                        self.legacy_acquired.set()
-                self.legacy_thread = threading.Thread(target=legacy_launch)
-                self.legacy_thread.start()
-                assert not self.legacy_acquired.wait(0.02)
-            if failure == "process_create":
+            if failure in {"resume", "child_restore", "child_restore_close", "process_create_restore"}:
+                self.start_legacy_launch()
+            if failure in {"process_create", "process_create_restore"}:
                 return False
             info = args[-1]._obj  # type: ignore[attr-defined]
             info.hProcess, info.hThread, info.dwProcessId = 30, 31, 32
@@ -1031,6 +1046,8 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
         def AssignProcessToJobObject(self, *args: object) -> bool: return failure != "assign"
         def ResumeThread(self, thread: int) -> int: return 0xFFFFFFFF if failure == "resume" else 1
         def TerminateJobObject(self, job: int, code: int) -> bool:
+            if failure in {"process_create_restore", "child_configure_restore"}:
+                assert self.legacy_acquired.wait(1)
             self.terminated.append(job)
             return True
         def TerminateProcess(self, process: int, code: int) -> bool:
@@ -1042,6 +1059,7 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
                 return False
             self.closed.append(handle)
             self.open_handles.discard(handle)
+            self.inheritable_handles.discard(handle)
             return True
 
     api = FakeKernel32()
@@ -1097,6 +1115,10 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
         assert api.legacy_saw_open_handle is False
         assert api.close_attempts.count(13) == 2
         assert api.closed.count(13) == 1
+    if failure in {"process_create_restore", "child_configure_restore"}:
+        assert api.legacy_acquired.wait(1)
+        assert api.legacy_saw_open_handle is False
+        assert api.terminated_processes == []
 
 
 def test_cancel_synchronous_io_preserves_pointer_width_and_closes_handle(monkeypatch: pytest.MonkeyPatch) -> None:

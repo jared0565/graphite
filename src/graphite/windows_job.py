@@ -246,6 +246,7 @@ def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_s
             failed_restores: list[int] = []
             created = False
             assigned = False
+            recovery_failed = False
             try:
                 for child_handle in child_handles:
                     if not api.SetHandleInformation(child_handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT):
@@ -258,24 +259,39 @@ def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_s
             finally:
                 restored = True
                 for child_handle in enabled_handles:
-                    handle_restored = bool(api.SetHandleInformation(child_handle, HANDLE_FLAG_INHERIT, 0))
+                    try:
+                        handle_restored = bool(api.SetHandleInformation(child_handle, HANDLE_FLAG_INHERIT, 0))
+                    except Exception:
+                        handle_restored = False
                     restored = handle_restored and restored
                     if not handle_restored:
                         failed_restores.append(child_handle)
-            if not created:
-                raise OSError("process create failed")
-            process_handle, thread_handle = process_info.hProcess, process_info.hThread
-            if not restored:
-                assigned = bool(api.AssignProcessToJobObject(job, process_handle))
+                if created:
+                    process_handle, thread_handle = process_info.hProcess, process_info.hThread
+                    if failed_restores:
+                        try:
+                            assigned = bool(api.AssignProcessToJobObject(job, process_handle))
+                        except Exception:
+                            assigned = False
+                        recovery_failed = not assigned
                 for failed_handle in failed_restores:
-                    closed = bool(api.CloseHandle(failed_handle))
-                    if not closed:
-                        inheritance_cleared = bool(api.SetHandleInformation(failed_handle, HANDLE_FLAG_INHERIT, 0))
+                    try:
                         closed = bool(api.CloseHandle(failed_handle))
-                        if not closed and not inheritance_cleared:
-                            # Keep ownership for outer cleanup; the launch still
-                            # fails closed, without claiming the local lock invariant.
-                            continue
+                    except Exception:
+                        closed = False
+                    inheritance_cleared = False
+                    if not closed:
+                        try:
+                            inheritance_cleared = bool(
+                                api.SetHandleInformation(failed_handle, HANDLE_FLAG_INHERIT, 0)
+                            )
+                        except Exception:
+                            inheritance_cleared = False
+                        try:
+                            closed = bool(api.CloseHandle(failed_handle))
+                        except Exception:
+                            closed = False
+                    recovery_failed = recovery_failed or (not closed and not inheritance_cleared)
                     if closed:
                         if failed_handle == stdin_read:
                             stdin_read = 0
@@ -283,7 +299,12 @@ def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_s
                             stdout_write = 0
                         elif failed_handle == stderr_write:
                             stderr_write = 0
+            if not created:
+                raise OSError("process create failed")
+            if not restored:
                 raise OSError("child handle restore failed")
+            if recovery_failed:
+                raise OSError("child handle recovery failed")
             if not assigned and not api.AssignProcessToJobObject(job, process_handle):
                 raise OSError("job assignment failed")
             if api.ResumeThread(thread_handle) == 0xFFFFFFFF:
