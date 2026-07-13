@@ -1006,10 +1006,31 @@ def test_probe_local_typescript_requires_resolved_regular_file_under_package(tmp
     assert not probe_local_typescript(root, node, 1, lambda *a, **k: ProbeProcessResult(0, b"not-json secret", b"", 0))
 
 
-@pytest.mark.parametrize("outcome", list(ActivationOutcome))
-def test_activation_result_serialization_and_fatal_mapping_are_exact(outcome):
+def test_activation_outcome_values_and_fatal_mapping_are_exact():
+    assert [outcome.value for outcome in ActivationOutcome] == [
+        "installed",
+        "already_available",
+        "not_applicable",
+        "declined",
+        "guidance_only",
+        "validation_failed",
+        "installation_failed",
+        "verification_failed",
+    ]
+    expected_fatal = {
+        ActivationOutcome.VALIDATION_FAILED,
+        ActivationOutcome.INSTALLATION_FAILED,
+        ActivationOutcome.VERIFICATION_FAILED,
+    }
+    assert FATAL_OUTCOMES == expected_fatal
+    for outcome in ActivationOutcome:
+        result = ActivationResult(outcome, None, "fixed_reason")
+        assert result.fatal is (outcome in expected_fatal)
+
+
+def test_activation_result_serialization_is_exact_and_literal():
     result = ActivationResult(
-        outcome=outcome,
+        outcome=ActivationOutcome.GUIDANCE_ONLY,
         manager=Manager.NPM,
         reason="fixed_reason",
         manifest="package.json",
@@ -1018,9 +1039,8 @@ def test_activation_result_serialization_and_fatal_mapping_are_exact(outcome):
         attempted=True,
     )
 
-    assert result.fatal is (outcome in FATAL_OUTCOMES)
     assert result.to_dict() == {
-        "outcome": outcome.value,
+        "outcome": "guidance_only",
         "manager": "npm",
         "reason": "fixed_reason",
         "manifest": "package.json",
@@ -1071,6 +1091,7 @@ def test_detect_accepts_typescript_and_safe_root_config_evidence(tmp_path, evide
     ("configured", "expected"),
     [
         (None, ACTIVATION_MAX_FILES),
+        (0, ACTIVATION_MAX_FILES),
         (ACTIVATION_MAX_FILES + 1, ACTIVATION_MAX_FILES),
         (17, 17),
     ],
@@ -1329,6 +1350,58 @@ def test_detect_rejects_manager_root_configuration(tmp_path, lockfile, unsafe_pa
     assert detection.result.lockfile == lockfile
 
 
+@pytest.mark.parametrize("broken", [False, True])
+def test_detect_rejects_symlinked_manager_configuration_without_following(
+    tmp_path,
+    broken,
+):
+    root = _activation_root(tmp_path)
+    target = tmp_path / "outside-npm-config"
+    if not broken:
+        target.write_text("secret registry configuration", encoding="utf-8")
+    _symlink_or_skip(root / ".npmrc", target)
+
+    detection = _detect(root)
+
+    assert detection.result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        Manager.NPM,
+        "manager_configuration_unsafe",
+        "package.json",
+        "package-lock.json",
+    )
+    assert str(target) not in repr(detection)
+
+
+def test_detect_rejects_simulated_windows_reparse_manager_configuration(
+    tmp_path,
+    monkeypatch,
+):
+    root = _activation_root(tmp_path)
+    simulated_reparse = root / ".npmrc"
+    observed = []
+    original_present = typescript_activation._path_is_lexically_present
+
+    def simulate_reparse(path):
+        candidate = Path(path)
+        if candidate == simulated_reparse:
+            observed.append(candidate)
+            return True
+        return original_present(candidate)
+
+    monkeypatch.setattr(
+        typescript_activation,
+        "_path_is_lexically_present",
+        simulate_reparse,
+    )
+
+    detection = _detect(root)
+
+    assert detection.result.reason == "manager_configuration_unsafe"
+    assert observed == [simulated_reparse]
+    assert not simulated_reparse.exists()
+
+
 @pytest.mark.parametrize(
     ("manifest", "lockfile_bytes"),
     [
@@ -1439,3 +1512,33 @@ def test_control_file_change_during_read_fails_closed(tmp_path, monkeypatch):
 
     assert detection.result.reason == "manifest_unsafe"
     assert detection.manifest_snapshot is None
+
+
+@pytest.mark.parametrize(
+    ("failing_close_call", "expected_reason"),
+    [(2, "manifest_unsafe"), (5, "lockfile_unsafe")],
+)
+def test_control_file_close_failure_maps_to_fixed_guidance(
+    tmp_path,
+    monkeypatch,
+    failing_close_call,
+    expected_reason,
+):
+    root = _activation_root(tmp_path)
+    original_close = typescript_activation.os.close
+    close_calls = 0
+
+    def fail_selected_close(descriptor):
+        nonlocal close_calls
+        close_calls += 1
+        original_close(descriptor)
+        if close_calls == failing_close_call:
+            raise OSError(f"secret close failure at {tmp_path}")
+
+    monkeypatch.setattr(typescript_activation.os, "close", fail_selected_close)
+
+    detection = _detect(root)
+
+    assert detection.result.outcome is ActivationOutcome.GUIDANCE_ONLY
+    assert detection.result.reason == expected_reason
+    assert str(tmp_path) not in str(detection.result.to_dict())

@@ -109,6 +109,13 @@ def _is_contained(path: Path, root: Path) -> bool:
     return True
 
 
+def _path_is_lexically_present(path: Path) -> bool:
+    try:
+        return os.path.lexists(path)
+    except (OSError, ValueError):
+        return True
+
+
 def _root_file_state(
     root: Path,
     relative_path: str,
@@ -116,7 +123,7 @@ def _root_file_state(
     maximum_size: int | None = None,
 ) -> str:
     path = root / relative_path
-    if not os.path.lexists(path):
+    if not _path_is_lexically_present(path):
         return "missing"
     try:
         details = path.lstat()
@@ -140,6 +147,7 @@ def _read_stable_control_file(
 ) -> tuple[bytes, FileSnapshot] | None:
     path = root / relative_path
     descriptor = -1
+    close_failed = False
     try:
         before_snapshot = snapshot_control_file(root, relative_path)
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -161,7 +169,12 @@ def _read_stable_control_file(
         return None
     finally:
         if descriptor >= 0:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except (OSError, ValueError):
+                close_failed = True
+    if close_failed:
+        return None
     try:
         after_snapshot = snapshot_control_file(root, relative_path)
     except ValueError:
@@ -376,7 +389,10 @@ def detect_activation(
             )
 
     adapter = adapter_for(manager)
-    if any(os.path.lexists(canonical_root / path) for path in adapter.unsafe_root_files):
+    if any(
+        _path_is_lexically_present(canonical_root / path)
+        for path in adapter.unsafe_root_files
+    ):
         return _terminal(
             ActivationOutcome.GUIDANCE_ONLY,
             "manager_configuration_unsafe",
