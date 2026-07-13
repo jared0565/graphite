@@ -268,13 +268,21 @@ def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_s
             if not restored:
                 assigned = bool(api.AssignProcessToJobObject(job, process_handle))
                 for failed_handle in failed_restores:
-                    api.CloseHandle(failed_handle)
-                    if failed_handle == stdin_read:
-                        stdin_read = 0
-                    elif failed_handle == stdout_write:
-                        stdout_write = 0
-                    elif failed_handle == stderr_write:
-                        stderr_write = 0
+                    closed = bool(api.CloseHandle(failed_handle))
+                    if not closed:
+                        inheritance_cleared = bool(api.SetHandleInformation(failed_handle, HANDLE_FLAG_INHERIT, 0))
+                        closed = bool(api.CloseHandle(failed_handle))
+                        if not closed and not inheritance_cleared:
+                            # Keep ownership for outer cleanup; the launch still
+                            # fails closed, without claiming the local lock invariant.
+                            continue
+                    if closed:
+                        if failed_handle == stdin_read:
+                            stdin_read = 0
+                        elif failed_handle == stdout_write:
+                            stdout_write = 0
+                        elif failed_handle == stderr_write:
+                            stderr_write = 0
                 raise OSError("child handle restore failed")
             if not assigned and not api.AssignProcessToJobObject(job, process_handle):
                 raise OSError("job assignment failed")

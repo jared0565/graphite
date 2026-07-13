@@ -4,10 +4,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 import threading
 
-# Same-process invariant: repository-owned Windows launchers that enable handle
-# inheritance must hold this lock. It cannot serialize untrusted third-party
-# native threads or external processes, so child handles remain inheritable only
-# for the CreateProcessW call itself and are constrained by HANDLE_LIST.
+# Cooperative same-process boundary: repository-owned Windows launchers that
+# enable inheritance must hold this lock. Normal launches expose child handles
+# only for CreateProcessW and constrain them with HANDLE_LIST. The lock cannot
+# serialize untrusted native threads; restoration failures are retried and fail
+# the launch, retaining ownership for cleanup rather than claiming isolation.
 WINDOWS_PROCESS_CREATION_LOCK = threading.RLock()
 
 

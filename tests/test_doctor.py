@@ -938,7 +938,7 @@ def test_windows_contract_builders_import_without_msvcrt(tmp_path: Path) -> None
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows native launcher contract")
-@pytest.mark.parametrize("failure", ["job_create", "job_configure", "pipe", "pipe_configure", "attribute_init", "attribute_update", "child_configure", "child_restore", "process_create", "assign", "resume", "file_wrap"])
+@pytest.mark.parametrize("failure", ["job_create", "job_configure", "pipe", "pipe_configure", "attribute_init", "attribute_update", "child_configure", "child_restore", "child_restore_close", "process_create", "assign", "resume", "file_wrap"])
 def test_windows_job_launch_failures_close_each_owned_handle_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -952,7 +952,9 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
             self.next_handle = 10
             self.pipe_calls = 0
             self.created: list[int] = []
+            self.open_handles: set[int] = set()
             self.closed: list[int] = []
+            self.close_attempts: list[int] = []
             self.terminated: list[int] = []
             self.terminated_processes: list[int] = []
             self.launch_contract: dict[str, object] = {}
@@ -975,6 +977,7 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
             read._obj.value = self.next_handle  # type: ignore[attr-defined]
             write._obj.value = self.next_handle + 1  # type: ignore[attr-defined]
             self.created.extend((self.next_handle, self.next_handle + 1))
+            self.open_handles.update((self.next_handle, self.next_handle + 1))
             self.next_handle += 2
             return True
         def SetHandleInformation(self, handle: int, mask: int, flags: int) -> bool:
@@ -982,7 +985,8 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
             child_enables = [entry for entry in self.handle_flags if entry[1] == 1]
             if failure == "child_configure" and flags == 1 and len(child_enables) == 2:
                 return False
-            if failure == "child_restore" and flags == 0 and child_enables and handle == 13:
+            restore_attempts = [entry for entry in self.handle_flags if entry == (13, 0)]
+            if failure in {"child_restore", "child_restore_close"} and flags == 0 and child_enables and handle == 13 and len(restore_attempts) == 1:
                 return False
             return failure != "pipe_configure"
         def InitializeProcThreadAttributeList(self, pointer: object, count: int, flags: int, size: object) -> bool:
@@ -1011,10 +1015,10 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
                 "cwd": args[7],
                 "stdio": (startup.hStdInput, startup.hStdOutput, startup.hStdError),
             }
-            if failure in {"resume", "child_restore"}:
+            if failure in {"resume", "child_restore", "child_restore_close"}:
                 def legacy_launch() -> None:
                     with native.WINDOWS_PROCESS_CREATION_LOCK:
-                        self.legacy_saw_open_handle = 13 not in self.closed
+                        self.legacy_saw_open_handle = 13 in self.open_handles
                         self.legacy_acquired.set()
                 self.legacy_thread = threading.Thread(target=legacy_launch)
                 self.legacy_thread.start()
@@ -1033,7 +1037,11 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
             self.terminated_processes.append(process)
             return True
         def CloseHandle(self, handle: int) -> bool:
+            self.close_attempts.append(handle)
+            if failure == "child_restore_close" and handle == 13 and self.close_attempts.count(13) == 1:
+                return False
             self.closed.append(handle)
+            self.open_handles.discard(handle)
             return True
 
     api = FakeKernel32()
@@ -1076,13 +1084,18 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
         api.legacy_thread.join(1)
     if failure in {"process_create", "assign", "resume"}:
         assert api.terminated == [1]
-    if failure in {"child_restore", "assign", "resume", "file_wrap"}:
+    if failure in {"child_restore", "child_restore_close", "assign", "resume", "file_wrap"}:
         assert api.terminated_processes == [30]
     if failure == "child_configure":
         assert api.handle_flags[-3:] == [(10, 1), (13, 1), (10, 0)]
     if failure == "child_restore":
         assert api.legacy_acquired.wait(1)
         assert api.legacy_saw_open_handle is False
+        assert api.closed.count(13) == 1
+    if failure == "child_restore_close":
+        assert api.legacy_acquired.wait(1)
+        assert api.legacy_saw_open_handle is False
+        assert api.close_attempts.count(13) == 2
         assert api.closed.count(13) == 1
 
 
@@ -1295,11 +1308,22 @@ def test_posix_reap_is_deadline_bounded_when_child_is_not_waitable(monkeypatch: 
     assert not process._reaped
 
 
-def test_posix_observer_uses_macos_kqueue_when_waitid_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("raw_status", "expected", "returned_flags"),
+    [(7 << 8, 7, 0x84000000), (9, -9, 0x84000000), (7 << 8, None, 0x80000000)],
+)
+def test_posix_observer_uses_macos_kqueue_when_waitid_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_status: int,
+    expected: int | None,
+    returned_flags: int,
+) -> None:
     import graphite.probe_process as transport
 
     controls: list[tuple[int, int]] = []
-    event = type("Event", (), {"data": 7 << 8})()
+    note_exit, note_exit_status = 0x80000000, 0x04000000
+    event = type("Event", (), {"data": raw_status, "fflags": returned_flags})()
+    registrations: list[int] = []
     class Kqueue:
         def control(self, changes: object, max_events: int, timeout: int) -> list[object]:
             controls.append((max_events, timeout))
@@ -1307,9 +1331,10 @@ def test_posix_observer_uses_macos_kqueue_when_waitid_is_unavailable(monkeypatch
         def close(self) -> None: controls.append((-1, -1))
     fake_select = type("Select", (), {
         "KQ_FILTER_PROC": -5, "KQ_EV_ADD": 1, "KQ_EV_ENABLE": 2,
-        "KQ_EV_ONESHOT": 4, "KQ_NOTE_EXIT": 8,
+        "KQ_EV_ONESHOT": 4, "KQ_NOTE_EXIT": note_exit,
+        "KQ_NOTE_EXITSTATUS": note_exit_status,
         "kqueue": lambda self: Kqueue(),
-        "kevent": lambda self, *args, **kwargs: object(),
+        "kevent": lambda self, *args, **kwargs: registrations.append(kwargs["fflags"]) or object(),
     })()
     monkeypatch.delattr(transport.os, "waitid", raising=False)
     monkeypatch.setattr(transport.sys, "platform", "darwin")
@@ -1318,7 +1343,12 @@ def test_posix_observer_uses_macos_kqueue_when_waitid_is_unavailable(monkeypatch
 
     process = transport._PosixProcess(leader)  # type: ignore[arg-type]
 
-    assert process.poll() == 7
+    if expected is None:
+        with pytest.raises(OSError):
+            process.poll()
+    else:
+        assert process.poll() == expected
+    assert registrations == [note_exit | note_exit_status]
     assert controls[:2] == [(0, 0), (1, 0)]
 
 

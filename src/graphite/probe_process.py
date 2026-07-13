@@ -95,15 +95,18 @@ class _PosixProcess:
         self.returncode: int | None = None
         self._reaped = False
         self._kqueue: Any | None = None
+        self._kqueue_exit_flags = 0
         if not callable(getattr(os, "waitid", None)):
             if sys.platform != "darwin" or not hasattr(select, "kqueue"):
                 raise RuntimeError("non-reaping process observation unavailable")
             self._kqueue = select.kqueue()
+            note_exit_status = getattr(select, "KQ_NOTE_EXITSTATUS", 0x04000000)
+            self._kqueue_exit_flags = select.KQ_NOTE_EXIT | note_exit_status
             event = select.kevent(
                 self.pid,
                 filter=select.KQ_FILTER_PROC,
                 flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
-                fflags=select.KQ_NOTE_EXIT,
+                fflags=self._kqueue_exit_flags,
             )
             self._kqueue.control([event], 0, 0)
 
@@ -114,7 +117,11 @@ class _PosixProcess:
             events = self._kqueue.control(None, 1, 0)
             if not events:
                 return None
-            self.returncode = os.waitstatus_to_exitcode(events[0].data)
+            if events[0].fflags & self._kqueue_exit_flags != self._kqueue_exit_flags:
+                raise OSError("kqueue exit status unavailable")
+            status = events[0].data
+            signal_number = status & 0x7F
+            self.returncode = -signal_number if signal_number else (status >> 8) & 0xFF
         else:
             result = os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
             if result is None:
