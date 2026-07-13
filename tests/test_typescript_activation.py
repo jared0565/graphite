@@ -5,6 +5,7 @@ import hashlib
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -242,7 +243,7 @@ def test_activate_accepts_consent_and_installs_in_exact_order(tmp_path, monkeypa
     def recording_revalidate(*args, **kwargs):
         nonlocal revalidation_calls
         revalidation_calls += 1
-        events.append(("preinstall_revalidate", 0))
+        events.append(("prelaunch_snapshot", 0))
         return original_revalidate(*args, **kwargs)
 
     def recording_snapshot(*args, **kwargs):
@@ -273,13 +274,12 @@ def test_activate_accepts_consent_and_installs_in_exact_order(tmp_path, monkeypa
         "manager_version",
         "prompt",
         "validator",
-        "preinstall_revalidate",
-        "preinstall_revalidate",
+        "prelaunch_snapshot",
         "install",
         "postinstall_snapshot/safety",
         "verify",
     ]
-    assert revalidation_calls == 2
+    assert revalidation_calls == 1
 
 
 def test_activate_returns_already_available_before_manager_inspection(tmp_path):
@@ -690,7 +690,7 @@ def test_activate_deadline_expiry_during_post_state_is_operation_timeout(tmp_pat
     def monotonic():
         nonlocal calls
         calls += 1
-        return 31.0 if calls >= 7 else 0.0
+        return 31.0 if calls >= 5 else 0.0
 
     deps.monotonic = monotonic
     result = activate_typescript(
@@ -702,10 +702,7 @@ def test_activate_deadline_expiry_during_post_state_is_operation_timeout(tmp_pat
     assert result.changed_files == ("package-lock.json", "package.json")
 
 
-@pytest.mark.parametrize("expiry_call", [4, 5])
-def test_activate_deadline_expiry_before_or_during_install_is_operation_timeout(
-    tmp_path, expiry_call
-):
+def test_activate_deadline_expiry_before_install_is_operation_timeout(tmp_path):
     root = _activation_root(tmp_path)
     events = []
     deps = _activation_dependencies(tmp_path, root, events)
@@ -714,7 +711,7 @@ def test_activate_deadline_expiry_before_or_during_install_is_operation_timeout(
     def monotonic():
         nonlocal calls
         calls += 1
-        return 31.0 if calls >= expiry_call else 0.0
+        return 31.0 if calls >= 4 else 0.0
 
     deps.monotonic = monotonic
     result = activate_typescript(
@@ -735,14 +732,14 @@ def test_activate_deadline_expiry_during_verification_is_operation_timeout(tmp_p
     def monotonic():
         nonlocal calls
         calls += 1
-        return 31.0 if calls >= 9 else 0.0
+        return 31.0 if calls >= 8 else 0.0
 
     deps.monotonic = monotonic
     result = activate_typescript(
         ActivationRequest(root, Config(), True, True, False, False, 30), deps
     )
 
-    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.outcome is ActivationOutcome.VERIFICATION_FAILED
     assert result.reason == "operation_timeout"
     assert result.changed_files == ("package-lock.json", "package.json")
 
@@ -1075,6 +1072,191 @@ def test_activate_cleanup_deadline_overrides_every_provisional_result(tmp_path, 
     assert cleanup_calls == 1
     expected_installs = 0 if phase == "prelaunch_revalidation" else 1
     assert [event[0] for event in events].count("install") == expected_installs
+
+
+def test_activate_bounds_blocking_cleanup_without_retaining_more_workers(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    real_temporary = tempfile.TemporaryDirectory(dir=tmp_path)
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    cleanup_finished = threading.Event()
+
+    class BlockingCleanup:
+        name = real_temporary.name
+
+        def cleanup(self):
+            cleanup_started.set()
+            release_cleanup.wait(2)
+            real_temporary.cleanup()
+            cleanup_finished.set()
+
+    deps.temporary_directory = BlockingCleanup
+    started = time.monotonic()
+    try:
+        result = activate_typescript(
+            ActivationRequest(root, Config(), True, True, False, False, 0.1), deps
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        release_cleanup.set()
+
+    assert cleanup_started.is_set()
+    assert elapsed < 0.75
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "operation_timeout"
+    assert cleanup_finished.wait(2)
+
+
+def test_blocked_cleanup_does_not_serialize_separate_roots(tmp_path):
+    first_parent = tmp_path / "first"
+    second_parent = tmp_path / "second"
+    first_parent.mkdir()
+    second_parent.mkdir()
+    first_root = _activation_root(first_parent)
+    second_root = _activation_root(second_parent)
+    first_events = []
+    first_dependencies = _activation_dependencies(
+        first_parent,
+        first_root,
+        first_events,
+    )
+    real_temporary = tempfile.TemporaryDirectory(dir=first_parent)
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    cleanup_finished = threading.Event()
+
+    class BlockingCleanup:
+        name = real_temporary.name
+
+        def cleanup(self):
+            cleanup_started.set()
+            release_cleanup.wait(2)
+            real_temporary.cleanup()
+            cleanup_finished.set()
+
+    first_dependencies.temporary_directory = BlockingCleanup
+    try:
+        first = activate_typescript(
+            ActivationRequest(
+                first_root,
+                Config(),
+                True,
+                True,
+                False,
+                False,
+                0.1,
+            ),
+            first_dependencies,
+        )
+        assert cleanup_started.is_set()
+        second_events = []
+        second_dependencies = _activation_dependencies(
+            second_parent,
+            second_root,
+            second_events,
+        )
+        second = activate_typescript(
+            ActivationRequest(second_root, Config(), True, True, False, False),
+            second_dependencies,
+        )
+    finally:
+        release_cleanup.set()
+
+    assert first.reason == "operation_timeout"
+    assert second.outcome is ActivationOutcome.INSTALLED
+    assert cleanup_finished.wait(2)
+
+
+class _RaisingEnvironment(dict):
+    def __init__(self, values, failing_key, secret):
+        super().__init__(values)
+        self.failing_key = failing_key
+        self.secret = secret
+
+    def get(self, key, default=None):
+        if key == self.failing_key:
+            raise RuntimeError(self.secret)
+        return super().get(key, default)
+
+
+def test_activate_contains_path_environment_exception_before_consent(tmp_path):
+    root = _activation_root(tmp_path)
+    secret = f"secret environment path {tmp_path}"
+    dependencies = ActivationDependencies(
+        environ=_RaisingEnvironment({}, "PATH", secret),
+        runner=lambda *_args, **_kwargs: pytest.fail("runner called"),
+    )
+
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), dependencies
+    )
+
+    assert result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        None,
+        "dependency_failed",
+    )
+    assert secret not in repr(result)
+
+
+def test_activate_contains_validator_environment_exception_after_consent(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    dependencies = _activation_dependencies(tmp_path, root, events)
+    secret = f"secret validator environment path {tmp_path}"
+    dependencies.environ = _RaisingEnvironment(
+        dependencies.environ,
+        "GRAPHITE_PACKAGE_VALIDATOR",
+        secret,
+    )
+
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), dependencies
+    )
+
+    assert result.outcome is ActivationOutcome.VALIDATION_FAILED
+    assert result.reason == "dependency_failed"
+    assert result.attempted
+    assert secret not in repr(result)
+    assert all(event[0] not in {"validator", "install"} for event in events)
+
+
+@pytest.mark.parametrize(
+    ("failure_call", "outcome"),
+    [
+        (1, ActivationOutcome.VALIDATION_FAILED),
+        (2, ActivationOutcome.VALIDATION_FAILED),
+        (4, ActivationOutcome.INSTALLATION_FAILED),
+    ],
+)
+def test_activate_contains_monotonic_exception_by_phase(
+    tmp_path, failure_call, outcome
+):
+    root = _activation_root(tmp_path)
+    events = []
+    dependencies = _activation_dependencies(tmp_path, root, events)
+    secret = f"secret monotonic path {tmp_path}"
+    calls = 0
+
+    def monotonic():
+        nonlocal calls
+        calls += 1
+        if calls >= failure_call:
+            raise RuntimeError(secret)
+        return float(calls)
+
+    dependencies.monotonic = monotonic
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), dependencies
+    )
+
+    assert result.outcome is outcome
+    assert result.reason == "dependency_failed"
+    assert result.attempted
+    assert secret not in repr(result)
+    assert all(event[0] != "install" for event in events)
 
 
 def test_activate_separate_roots_do_not_share_lock(tmp_path):

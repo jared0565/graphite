@@ -128,6 +128,9 @@ class ActivationDependencies:
 
 _ACTIVATION_LOCKS_GUARD = threading.Lock()
 _ACTIVATION_LOCKS: dict[str, tuple[threading.Lock, int]] = {}
+_CLEANUP_SLOT_GUARD = threading.Lock()
+_CLEANUP_SLOTS: set[str] = set()
+_CLEANUP_MAX_SECONDS = 1.0
 
 
 def _acquire_activation_lock(root: Path) -> tuple[str, threading.Lock] | None:
@@ -159,16 +162,88 @@ class _DeadlineExpired(Exception):
     pass
 
 
+class _DependencyFailure(Exception):
+    pass
+
+
 @dataclass(frozen=True)
 class _Deadline:
     expires_at: float
     monotonic: Callable[[], float]
 
     def remaining(self) -> float:
-        remaining = self.expires_at - self.monotonic()
-        if not math.isfinite(remaining) or remaining <= 0:
+        try:
+            remaining = self.expires_at - self.monotonic()
+            if not math.isfinite(remaining):
+                raise ValueError("clock_invalid")
+        except Exception:
+            raise _DependencyFailure from None
+        if remaining <= 0:
             raise _DeadlineExpired
         return remaining
+
+
+def _claim_cleanup_slot(root: Path) -> bool:
+    key = os.path.normcase(str(root))
+    with _CLEANUP_SLOT_GUARD:
+        if key in _CLEANUP_SLOTS:
+            return False
+        _CLEANUP_SLOTS.add(key)
+        return True
+
+
+def _release_cleanup_slot(root: Path) -> None:
+    key = os.path.normcase(str(root))
+    with _CLEANUP_SLOT_GUARD:
+        _CLEANUP_SLOTS.discard(key)
+
+
+def _bounded_temporary_cleanup(
+    temporary: Any,
+    deadline: _Deadline,
+    root: Path,
+) -> tuple[str, bool]:
+    """Clean up within the deadline while one worker retains sole ownership."""
+    failures: list[str] = []
+    expired_before_cleanup = False
+    dependency_failed = False
+    try:
+        remaining = deadline.remaining()
+    except _DeadlineExpired:
+        remaining = 0.0
+        expired_before_cleanup = True
+    except _DependencyFailure:
+        remaining = 0.0
+        dependency_failed = True
+
+    def perform() -> None:
+        try:
+            temporary.cleanup()
+        except Exception:
+            failures.append("cleanup_failed")
+        finally:
+            _release_cleanup_slot(root)
+
+    thread = threading.Thread(target=perform, daemon=True)
+    try:
+        thread.start()
+    except RuntimeError:
+        _release_cleanup_slot(root)
+        return "cleanup_failed", expired_before_cleanup
+    thread.join(min(_CLEANUP_MAX_SECONDS, max(0.0, remaining)))
+    if dependency_failed:
+        return "dependency_failed", expired_before_cleanup
+    if thread.is_alive():
+        return "cleanup_timeout", expired_before_cleanup
+    if failures:
+        return failures[0], expired_before_cleanup
+    try:
+        deadline.remaining()
+    except _DeadlineExpired:
+        return "cleanup_timeout", expired_before_cleanup
+    except _DependencyFailure:
+        return "dependency_failed", expired_before_cleanup
+    return "cleaned", expired_before_cleanup
 
 
 _PACKAGE_MANAGER_RE = re.compile(r"(npm|pnpm|yarn|bun)@(\S+)")
@@ -837,6 +912,17 @@ def _inspect_post_attempt(
             ),
             changed,
         )
+    except _DependencyFailure:
+        return (
+            _result_for_detection(
+                detection,
+                ActivationOutcome.INSTALLATION_FAILED,
+                "dependency_failed",
+                attempted=True,
+                changed_files=changed,
+            ),
+            changed,
+        )
     try:
         current = detect_activation(root, cfg, local_typescript_available=False)
     except Exception:
@@ -849,6 +935,17 @@ def _inspect_post_attempt(
                 detection,
                 ActivationOutcome.INSTALLATION_FAILED,
                 "operation_timeout",
+                attempted=True,
+                changed_files=changed,
+            ),
+            changed,
+        )
+    except _DependencyFailure:
+        return (
+            _result_for_detection(
+                detection,
+                ActivationOutcome.INSTALLATION_FAILED,
+                "dependency_failed",
                 attempted=True,
                 changed_files=changed,
             ),
@@ -900,6 +997,14 @@ def _verification_result(
     except _DeadlineExpired:
         verified = False
         verification_timed_out = True
+    except _DependencyFailure:
+        return _result_for_detection(
+            detection,
+            ActivationOutcome.VERIFICATION_FAILED,
+            "dependency_failed",
+            attempted=True,
+            changed_files=changed,
+        )
     if not verified:
         return _result_for_detection(
             detection,
@@ -933,6 +1038,13 @@ def _install_with_isolation(
         "isolation_unavailable",
         attempted=True,
     )
+    if not _claim_cleanup_slot(root):
+        return _result_for_detection(
+            detection,
+            ActivationOutcome.INSTALLATION_FAILED,
+            "isolation_cleanup_failed",
+            attempted=True,
+        )
     try:
         temporary = dependencies.temporary_directory()
         isolated_home = _isolated_home_path(temporary, root)
@@ -992,6 +1104,13 @@ def _install_with_isolation(
             "operation_timeout",
             attempted=True,
         )
+    except _DependencyFailure:
+        result = _result_for_detection(
+            detection,
+            ActivationOutcome.INSTALLATION_FAILED,
+            "dependency_failed",
+            attempted=True,
+        )
     except Exception:
         result = _result_for_detection(
             detection,
@@ -1000,10 +1119,15 @@ def _install_with_isolation(
             attempted=True,
         )
     finally:
-        if temporary is not None:
-            try:
-                temporary.cleanup()
-            except Exception:
+        if temporary is None:
+            _release_cleanup_slot(root)
+        else:
+            cleanup_status, expired_before_cleanup = _bounded_temporary_cleanup(
+                temporary,
+                deadline,
+                root,
+            )
+            if cleanup_status == "cleanup_failed":
                 result = _result_for_detection(
                     detection,
                     ActivationOutcome.INSTALLATION_FAILED,
@@ -1011,17 +1135,22 @@ def _install_with_isolation(
                     attempted=True,
                     changed_files=result.changed_files,
                 )
-            else:
-                try:
-                    deadline.remaining()
-                except _DeadlineExpired:
-                    result = _result_for_detection(
-                        detection,
-                        ActivationOutcome.INSTALLATION_FAILED,
-                        "operation_timeout",
-                        attempted=True,
-                        changed_files=result.changed_files,
-                    )
+            elif cleanup_status == "dependency_failed":
+                result = _result_for_detection(
+                    detection,
+                    ActivationOutcome.INSTALLATION_FAILED,
+                    "dependency_failed",
+                    attempted=True,
+                    changed_files=result.changed_files,
+                )
+            elif cleanup_status == "cleanup_timeout" and not expired_before_cleanup:
+                result = _result_for_detection(
+                    detection,
+                    ActivationOutcome.INSTALLATION_FAILED,
+                    "operation_timeout",
+                    attempted=True,
+                    changed_files=result.changed_files,
+                )
     return result
 
 
@@ -1065,7 +1194,14 @@ def activate_typescript(
             and evidence.result.outcome is not ActivationOutcome.ALREADY_AVAILABLE
         ):
             return evidence.result
-        path_source = deps.environ.get("PATH", "")
+        try:
+            path_source = deps.environ.get("PATH", "")
+        except Exception:
+            return ActivationResult(
+                ActivationOutcome.GUIDANCE_ONLY,
+                None,
+                "dependency_failed",
+            )
         if not isinstance(path_source, str):
             path_source = ""
         node = resolve_trusted_executable("node", canonical_root, path_source)
@@ -1163,8 +1299,27 @@ def activate_typescript(
                 ActivationOutcome.DECLINED,
                 "user_declined",
             )
-        deadline = _Deadline(deps.monotonic() + float(timeout), deps.monotonic)
-        validator_value = deps.environ.get("GRAPHITE_PACKAGE_VALIDATOR")
+        try:
+            started = deps.monotonic()
+            if not isinstance(started, (int, float)) or not math.isfinite(started):
+                raise ValueError("clock_invalid")
+            deadline = _Deadline(started + float(timeout), deps.monotonic)
+        except Exception:
+            return _result_for_detection(
+                detection,
+                ActivationOutcome.VALIDATION_FAILED,
+                "dependency_failed",
+                attempted=True,
+            )
+        try:
+            validator_value = deps.environ.get("GRAPHITE_PACKAGE_VALIDATOR")
+        except Exception:
+            return _result_for_detection(
+                detection,
+                ActivationOutcome.VALIDATION_FAILED,
+                "dependency_failed",
+                attempted=True,
+            )
         validator = (
             resolve_trusted_file(Path(validator_value), canonical_root, executable=False)
             if isinstance(validator_value, str) and validator_value
@@ -1193,27 +1348,18 @@ def activate_typescript(
                 "operation_timeout",
                 attempted=True,
             )
+        except _DependencyFailure:
+            return _result_for_detection(
+                detection,
+                ActivationOutcome.VALIDATION_FAILED,
+                "dependency_failed",
+                attempted=True,
+            )
         if not validation.ok:
             return _result_for_detection(
                 detection,
                 ActivationOutcome.VALIDATION_FAILED,
                 validation.reason,
-                attempted=True,
-            )
-        if not revalidate_activation_detection(canonical_root, request.cfg, detection):
-            return _result_for_detection(
-                detection,
-                ActivationOutcome.INSTALLATION_FAILED,
-                "project_state_changed",
-                attempted=True,
-            )
-        try:
-            deadline.remaining()
-        except _DeadlineExpired:
-            return _result_for_detection(
-                detection,
-                ActivationOutcome.INSTALLATION_FAILED,
-                "operation_timeout",
                 attempted=True,
             )
         return _install_with_isolation(
