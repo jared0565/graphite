@@ -524,14 +524,26 @@ def _yaml_scalar_is_valid(value: str) -> bool:
                 if not stack or stack.pop() != pairs[character]:
                     return False
                 if not stack:
-                    return _yaml_scalar_remainder_is_valid(value[index + 1 :])
+                    flow_text = value[: index + 1]
+                    try:
+                        parsed_flow = json.loads(flow_text)
+                    except (json.JSONDecodeError, RecursionError):
+                        return False
+                    expected_type = dict if value[0] == "{" else list
+                    return isinstance(parsed_flow, expected_type) and _yaml_scalar_remainder_is_valid(
+                        value[index + 1 :]
+                    )
         return False
     plain_value = value
     for index, character in enumerate(value):
         if character == "#" and (index == 0 or value[index - 1].isspace()):
             plain_value = value[:index].rstrip()
             break
-    if not plain_value or any(character in plain_value for character in "[]{}"):
+    if (
+        not plain_value
+        or plain_value.endswith(":")
+        or any(character in plain_value for character in "[]{}")
+    ):
         return False
     return not any(
         character == ":" and index + 1 < len(plain_value) and plain_value[index + 1].isspace()
