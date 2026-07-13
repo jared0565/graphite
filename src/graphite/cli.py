@@ -377,14 +377,14 @@ def _project_scoped_config(args: argparse.Namespace, root: Path) -> Config:
 def _activate_typescript_for_onboarding(
     args: argparse.Namespace, root: Path, cfg: Config
 ) -> ActivationResult:
-    ci_mode = bool(os.environ.get("CI"))
+    interactive = _onboarding_is_interactive(args)
     try:
         return activate_typescript(
             ActivationRequest(
                 root=root,
                 cfg=cfg,
-                stdin_is_tty=sys.stdin.isatty() and not ci_mode,
-                stdout_is_tty=sys.stdout.isatty() and not ci_mode,
+                stdin_is_tty=interactive,
+                stdout_is_tty=interactive,
                 assume_yes=bool(getattr(args, "yes", False)),
                 json_mode=bool(getattr(args, "json", False)),
             )
@@ -397,6 +397,19 @@ def _activate_typescript_for_onboarding(
         )
 
 
+def _onboarding_is_interactive(args: argparse.Namespace) -> bool:
+    if (
+        bool(getattr(args, "json", False))
+        or bool(getattr(args, "yes", False))
+        or bool(os.environ.get("CI"))
+    ):
+        return False
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 def _print_typescript_activation(activation: ActivationResult) -> None:
     manager = activation.manager.value if activation.manager else "none"
     changed = ", ".join(activation.changed_files) if activation.changed_files else "none"
@@ -407,7 +420,10 @@ def _print_typescript_activation(activation: ActivationResult) -> None:
     )
     if activation.outcome is ActivationOutcome.GUIDANCE_ONLY:
         print("    1. Set GRAPHITE_PACKAGE_VALIDATOR=<absolute-validator-path>.")
-        print("    2. Confirm it is absolute, present, and a regular file.")
+        print(
+            "    2. Fail closed if GRAPHITE_PACKAGE_VALIDATOR is unset, relative, "
+            "missing, or not a regular file."
+        )
         print("    3. Run: node <absolute-validator-path> typescript")
         print("    4. With <project-manager>, add local dev dependency typescript with scripts disabled.")
         print("    5. Rerun graphite doctor or onboarding to confirm detection.")
@@ -475,7 +491,7 @@ def cmd_init(args: argparse.Namespace) -> int:
                 print(f"{item['key']}: {item['label']}")
         return 0
     root = Path(args.path).resolve()
-    interactive = not args.platform and not args.all and not args.yes and sys.stdin.isatty()
+    interactive = not args.platform and not args.all and _onboarding_is_interactive(args)
     requested = ["all"] if args.all else (args.platform or [])
     platforms = resolve_platform_selection(requested, interactive=interactive)
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
@@ -1208,7 +1224,6 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 
 
 

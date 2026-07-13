@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from graphite.cli import main
 from graphite.init import init_project, resolve_platform_selection
 from graphite.typescript_activation import ActivationOutcome, ActivationResult
@@ -129,3 +131,60 @@ def test_init_fatal_activation_preserves_onboarding_and_returns_one(tmp_path, ca
 
     assert result == 1
     assert (tmp_path / "GRAPHITE.md").exists()
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "ci", "stdin_tty", "stdout_tty"),
+    [
+        (["--json"], False, True, True),
+        ([], True, True, True),
+        ([], False, False, True),
+        ([], False, True, False),
+    ],
+)
+def test_init_noninteractive_boundaries_never_prompt_for_platform_or_activation(
+    tmp_path, capsys, monkeypatch, extra_args, ci, stdin_tty, stdout_tty
+) -> None:
+    calls = []
+    if ci:
+        monkeypatch.setenv("CI", "true")
+    else:
+        monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr("graphite.cli.sys.stdin.isatty", lambda: stdin_tty)
+    monkeypatch.setattr("graphite.cli.sys.stdout.isatty", lambda: stdout_tty)
+    monkeypatch.setattr(
+        "graphite.init._prompt_for_platforms",
+        lambda **kwargs: pytest.fail("platform prompt called"),
+    )
+    monkeypatch.setattr(
+        "graphite.cli.activate_typescript",
+        lambda request: calls.append(request)
+        or ActivationResult(ActivationOutcome.GUIDANCE_ONLY, None, "non_interactive"),
+    )
+
+    result = main(
+        ["init", str(tmp_path), "--no-build", "--no-validate", *extra_args]
+    )
+    capsys.readouterr()
+
+    assert result == 0
+    assert calls and (not calls[0].stdin_is_tty or not calls[0].stdout_is_tty or calls[0].json_mode)
+
+
+def test_init_human_guidance_uses_exact_fixed_workflow(tmp_path, capsys, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "graphite.cli.activate_typescript",
+        lambda request: ActivationResult(ActivationOutcome.GUIDANCE_ONLY, None, "non_interactive"),
+    )
+    main(["init", str(tmp_path), "--yes", "--no-build", "--no-validate"])
+    output = capsys.readouterr().out
+    expected = [
+        "    1. Set GRAPHITE_PACKAGE_VALIDATOR=<absolute-validator-path>.",
+        "    2. Fail closed if GRAPHITE_PACKAGE_VALIDATOR is unset, relative, missing, or not a regular file.",
+        "    3. Run: node <absolute-validator-path> typescript",
+        "    4. With <project-manager>, add local dev dependency typescript with scripts disabled.",
+        "    5. Rerun graphite doctor or onboarding to confirm detection.",
+    ]
+    assert [line for line in output.splitlines() if line.startswith("    ")] == expected
+    assert "global install" not in output.lower()
+    assert str(tmp_path) not in "\n".join(expected)

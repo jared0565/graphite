@@ -173,13 +173,16 @@ def test_bootstrap_human_guidance_is_fixed_and_path_free(tmp_path, capsys, monke
     output = capsys.readouterr().out
 
     assert result == 0
-    assert output.count("    1.") == 1 and output.count("    5.") == 1
-    assert "<absolute-validator-path>" in output
-    assert "<project-manager>" in output
-    assert "global" not in output.lower()
-    assert str(tmp_path) not in "\n".join(
-        line for line in output.splitlines() if "TypeScript activation" in line or line.startswith("    ")
-    )
+    expected = [
+        "    1. Set GRAPHITE_PACKAGE_VALIDATOR=<absolute-validator-path>.",
+        "    2. Fail closed if GRAPHITE_PACKAGE_VALIDATOR is unset, relative, missing, or not a regular file.",
+        "    3. Run: node <absolute-validator-path> typescript",
+        "    4. With <project-manager>, add local dev dependency typescript with scripts disabled.",
+        "    5. Rerun graphite doctor or onboarding to confirm detection.",
+    ]
+    assert [line for line in output.splitlines() if line.startswith("    ")] == expected
+    assert "global install" not in output.lower()
+    assert str(tmp_path) not in "\n".join(expected)
 
 
 def test_bootstrap_ci_masks_terminal_capability(tmp_path, capsys, monkeypatch) -> None:
