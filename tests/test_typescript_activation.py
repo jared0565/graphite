@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -39,9 +41,12 @@ from graphite.dependency_install import (
 from graphite.probe_process import ProbeProcessResult
 from graphite.typescript_activation import (
     FATAL_OUTCOMES,
+    ActivationDependencies,
     ActivationDetection,
     ActivationOutcome,
+    ActivationRequest,
     ActivationResult,
+    activate_typescript,
     detect_activation,
     revalidate_activation_detection,
 )
@@ -81,6 +86,865 @@ def _detect(root: Path, *, available: bool = False, cfg: Config | None = None) -
         cfg or Config(),
         local_typescript_available=available,
     )
+
+
+def test_activate_without_typescript_evidence_is_not_applicable_without_process(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    def runner(*_args, **_kwargs):
+        raise AssertionError("no process should run")
+
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False),
+        ActivationDependencies(runner=runner, environ={"PATH": str(tmp_path)}),
+    )
+
+    assert result == ActivationResult(
+        ActivationOutcome.NOT_APPLICABLE,
+        None,
+        "no_typescript_evidence",
+    )
+
+
+def _activation_dependencies(tmp_path, root, events, *, prompt_answer="yes", install_ok=True, verify_ok=True):
+    tools = tmp_path / "tools"
+    tools.mkdir(exist_ok=True)
+    node_name = "node.exe" if os.name == "nt" else "node"
+    node = tools / node_name
+    node.write_bytes(b"trusted node")
+    validator = tools / "validate-packages.cjs"
+    validator.write_bytes(b"trusted validator")
+    if os.name == "nt":
+        npm_cli = tools / "node_modules" / "npm" / "bin" / "npm-cli.js"
+        npm_cli.parent.mkdir(parents=True, exist_ok=True)
+        npm_cli.write_bytes(b"trusted npm cli")
+    else:
+        npm = tools / "npm"
+        npm.write_bytes(b"trusted npm")
+        node.chmod(0o700)
+        npm.chmod(0o700)
+    probes = 0
+
+    def prompt(message):
+        events.append(("prompt", message))
+        if isinstance(prompt_answer, BaseException):
+            raise prompt_answer
+        return prompt_answer
+
+    def runner(argv, **kwargs):
+        nonlocal probes
+        argv = [str(value) for value in argv]
+        if "-e" in argv:
+            probes += 1
+            phase = "local_probe" if probes == 1 else "verify"
+            events.append((phase, kwargs["timeout_seconds"]))
+            if phase == "verify" and verify_ok:
+                package = root / "node_modules" / "typescript" / "package.json"
+                package.parent.mkdir(parents=True, exist_ok=True)
+                package.write_bytes(b"{}")
+                return ProbeProcessResult(0, json.dumps({"resolved": str(package)}).encode(), b"", 0)
+            return ProbeProcessResult(1, b"", b"secret probe", 0)
+        if argv[-1] == "--version":
+            events.append(("manager_version", kwargs["timeout_seconds"]))
+            return ProbeProcessResult(0, b"10.9.0", b"", 0)
+        if argv[-1] == "typescript" and str(validator) in argv:
+            events.append(("validator", kwargs["timeout_seconds"]))
+            return ProbeProcessResult(0, b"secret validator output", b"", 0)
+        events.append(("install", kwargs["timeout_seconds"]))
+        if install_ok:
+            (root / "package.json").write_bytes(b'{"devDependencies":{"typescript":"^5.0.0"}}')
+            (root / "package-lock.json").write_bytes(b'{"lockfileVersion":3,"packages":{}}')
+            return ProbeProcessResult(0, b"secret install output", b"", 0)
+        return ProbeProcessResult(1, b"secret failure", b"secret failure", 0)
+
+    environment = {
+        "PATH": str(tools),
+        "GRAPHITE_PACKAGE_VALIDATOR": str(validator),
+    }
+    return ActivationDependencies(
+        prompt=prompt,
+        environ=environment,
+        runner=runner,
+        temporary_directory=lambda: tempfile.TemporaryDirectory(dir=tmp_path),
+    )
+
+
+@pytest.mark.parametrize(
+    "request_changes",
+    [
+        {"stdin_is_tty": False},
+        {"stdout_is_tty": False},
+        {"json_mode": True},
+        {"assume_yes": True},
+    ],
+)
+def test_activate_noninteractive_never_prompts_or_installs(tmp_path, request_changes):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    values = dict(
+        root=root,
+        cfg=Config(),
+        stdin_is_tty=True,
+        stdout_is_tty=True,
+        assume_yes=False,
+        json_mode=False,
+    )
+    values.update(request_changes)
+
+    result = activate_typescript(ActivationRequest(**values), deps)
+
+    assert result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        Manager.NPM,
+        "non_interactive",
+        "package.json",
+        "package-lock.json",
+    )
+    assert [event[0] for event in events] == ["local_probe"]
+
+
+@pytest.mark.parametrize("answer", ["", "n", "junk", EOFError()])
+def test_activate_decline_prompts_once_and_stops(tmp_path, answer):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events, prompt_answer=answer)
+
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result == ActivationResult(
+        ActivationOutcome.DECLINED,
+        Manager.NPM,
+        "user_declined",
+        "package.json",
+        "package-lock.json",
+    )
+    assert [event[0] for event in events] == ["local_probe", "manager_version", "prompt"]
+    assert events[-1][1] == (
+        "Project-local TypeScript is missing. Install it with npm as a development "
+        "dependency? [y/N]"
+    )
+
+
+@pytest.mark.parametrize("answer", ["y", " YES "])
+def test_activate_accepts_consent_and_installs_in_exact_order(tmp_path, monkeypatch, answer):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events, prompt_answer=answer)
+    original_revalidate = typescript_activation.revalidate_activation_detection
+    original_snapshot = typescript_activation.snapshot_control_file
+    revalidation_calls = 0
+    snapshot_started = False
+
+    def recording_revalidate(*args, **kwargs):
+        nonlocal revalidation_calls
+        revalidation_calls += 1
+        events.append(("preinstall_revalidate", 0))
+        return original_revalidate(*args, **kwargs)
+
+    def recording_snapshot(*args, **kwargs):
+        nonlocal snapshot_started
+        if not snapshot_started and any(event[0] == "install" for event in events):
+            snapshot_started = True
+            events.append(("postinstall_snapshot/safety", 0))
+        return original_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(typescript_activation, "revalidate_activation_detection", recording_revalidate)
+    monkeypatch.setattr(typescript_activation, "snapshot_control_file", recording_snapshot)
+
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result == ActivationResult(
+        ActivationOutcome.INSTALLED,
+        Manager.NPM,
+        "installed",
+        "package.json",
+        "package-lock.json",
+        ("package-lock.json", "package.json"),
+        True,
+    )
+    assert [event[0] for event in events] == [
+        "local_probe",
+        "manager_version",
+        "prompt",
+        "validator",
+        "preinstall_revalidate",
+        "install",
+        "postinstall_snapshot/safety",
+        "verify",
+    ]
+    assert revalidation_calls == 1
+
+
+def test_activate_returns_already_available_before_manager_inspection(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    package = root / "node_modules" / "typescript" / "package.json"
+    package.parent.mkdir(parents=True)
+    package.write_bytes(b"{}")
+
+    def runner(argv, **kwargs):
+        events.append("local_probe")
+        return ProbeProcessResult(
+            0, json.dumps({"resolved": str(package)}).encode(), b"", 0
+        )
+
+    deps.runner = runner
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result == ActivationResult(
+        ActivationOutcome.ALREADY_AVAILABLE,
+        None,
+        "local_typescript_available",
+    )
+    assert events == ["local_probe"]
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan"), True, "1"])
+def test_activate_rejects_invalid_timeout_without_process(tmp_path, timeout):
+    root = _activation_root(tmp_path)
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False, timeout),
+        ActivationDependencies(runner=lambda *_a, **_k: pytest.fail("runner called")),
+    )
+    assert result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY, None, "invalid_timeout"
+    )
+
+
+def test_activate_guides_when_node_or_manager_is_unavailable(tmp_path):
+    root = _activation_root(tmp_path)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    no_node = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False),
+        ActivationDependencies(environ={"PATH": str(empty)}),
+    )
+    assert no_node.reason == "node_unavailable"
+
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    tools = Path(deps.environ["PATH"])
+    if os.name == "nt":
+        (tools / "node_modules" / "npm" / "bin" / "npm-cli.js").unlink()
+    else:
+        (tools / "npm").unlink()
+    no_manager = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+    assert no_manager.reason == "manager_unavailable"
+    assert [event[0] for event in events] == ["local_probe"]
+
+
+@pytest.mark.parametrize(
+    ("version_result", "reason"),
+    [
+        (ProbeProcessResult(0, b"not-a-version", b"secret", 0), "manager_version_invalid"),
+        (ProbeProcessResult(1, b"secret", b"secret", 0), "manager_version_unavailable"),
+        (ProbeProcessResult(0, b"99.0.0", b"", 0), "manager_version_unsupported"),
+        (ProbeProcessError("timeout"), "manager_version_timeout"),
+    ],
+)
+def test_activate_manager_version_failures_are_sanitized(tmp_path, version_result, reason):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    base_runner = deps.runner
+
+    def runner(argv, **kwargs):
+        if str(argv[-1]) == "--version":
+            if isinstance(version_result, BaseException):
+                raise version_result
+            return version_result
+        return base_runner(argv, **kwargs)
+
+    deps.runner = runner
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.reason == reason
+    assert result.outcome is ActivationOutcome.GUIDANCE_ONLY
+    assert not result.attempted
+    assert "secret" not in repr(result)
+    assert all(event[0] != "prompt" for event in events)
+
+
+@pytest.mark.parametrize("kind", ["unset", "relative", "missing", "inside", "directory"])
+def test_activate_rejects_invalid_validator_after_consent(tmp_path, kind):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    if kind == "unset":
+        deps.environ.pop("GRAPHITE_PACKAGE_VALIDATOR")
+    elif kind == "relative":
+        deps.environ["GRAPHITE_PACKAGE_VALIDATOR"] = "validator.cjs"
+    elif kind == "missing":
+        deps.environ["GRAPHITE_PACKAGE_VALIDATOR"] = str(tmp_path / "missing.cjs")
+    elif kind == "inside":
+        path = root / "validator.cjs"
+        path.write_bytes(b"validator")
+        deps.environ["GRAPHITE_PACKAGE_VALIDATOR"] = str(path)
+    else:
+        path = tmp_path / "validator-dir"
+        path.mkdir()
+        deps.environ["GRAPHITE_PACKAGE_VALIDATOR"] = str(path)
+
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.VALIDATION_FAILED
+    assert result.reason == "validator_invalid"
+    assert result.attempted
+    assert [event[0] for event in events] == ["local_probe", "manager_version", "prompt"]
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        (ProbeProcessResult(1, b"secret", b"secret", 0), "validator_rejected"),
+        (ProbeProcessError("timeout"), "validator_timeout"),
+        (ProbeProcessError("output_limit"), "validator_rejected"),
+    ],
+)
+def test_activate_maps_validator_process_failures(tmp_path, failure, reason):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    base_runner = deps.runner
+    validator = deps.environ["GRAPHITE_PACKAGE_VALIDATOR"]
+
+    def runner(argv, **kwargs):
+        if validator in [str(value) for value in argv]:
+            events.append(("validator", kwargs["timeout_seconds"]))
+            if isinstance(failure, BaseException):
+                raise failure
+            return failure
+        return base_runner(argv, **kwargs)
+
+    deps.runner = runner
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.VALIDATION_FAILED
+    assert result.reason == reason
+    assert result.attempted
+    assert "secret" not in repr(result)
+    assert all(event[0] != "install" for event in events)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["manifest", "lock", "source", "config", "new_lock", "shrinkwrap"],
+)
+def test_activate_revalidates_project_state_after_validator(tmp_path, mutation):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    base_runner = deps.runner
+    validator = deps.environ["GRAPHITE_PACKAGE_VALIDATOR"]
+
+    def runner(argv, **kwargs):
+        result = base_runner(argv, **kwargs)
+        if validator in [str(value) for value in argv]:
+            if mutation == "manifest":
+                (root / "package.json").write_bytes(b'{"dependencies":{"x":"1.0.0"}}')
+            elif mutation == "lock":
+                (root / "package-lock.json").write_bytes(b'{"lockfileVersion":2}')
+            elif mutation == "source":
+                (root / "source.ts").unlink()
+            elif mutation == "config":
+                (root / ".npmrc").write_text("unsafe", encoding="utf-8")
+            elif mutation == "new_lock":
+                (root / "pnpm-lock.yaml").write_bytes(_SAFE_LOCKS["pnpm-lock.yaml"])
+            else:
+                (root / "npm-shrinkwrap.json").write_text("{}", encoding="utf-8")
+        return result
+
+    deps.runner = runner
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "project_state_changed"
+    assert result.attempted
+    assert all(event[0] != "install" for event in events)
+
+
+def test_activate_detects_validator_replacement_before_execution(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    validator = Path(deps.environ["GRAPHITE_PACKAGE_VALIDATOR"])
+
+    monotonic_calls = 0
+
+    def monotonic():
+        nonlocal monotonic_calls
+        monotonic_calls += 1
+        if monotonic_calls == 2:
+            validator.write_bytes(b"replacement validator")
+        return float(monotonic_calls)
+
+    deps.monotonic = monotonic
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.VALIDATION_FAILED
+    assert result.reason == "validator_changed"
+    assert result.attempted
+    assert all(event[0] != "validator" for event in events)
+
+
+class _FakeTemporaryDirectory:
+    def __init__(self, path):
+        self.name = str(path)
+        self.cleaned = False
+
+    def cleanup(self):
+        self.cleaned = True
+
+
+def test_activate_rejects_isolated_home_inside_root(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    inside = root / "isolation"
+    inside.mkdir()
+    temporary = _FakeTemporaryDirectory(inside)
+    deps.temporary_directory = lambda: temporary
+
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "isolation_unavailable"
+    assert result.attempted
+    assert temporary.cleaned
+    assert all(event[0] != "install" for event in events)
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        (ProbeProcessResult(1, b"secret", b"secret", 0), "install_failed"),
+        (ProbeProcessError("timeout"), "install_timeout"),
+        (ProbeProcessError("output_limit"), "install_failed"),
+    ],
+)
+def test_activate_maps_install_failures_without_output_leaks(tmp_path, failure, reason):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    base_runner = deps.runner
+
+    def runner(argv, **kwargs):
+        values = [str(value) for value in argv]
+        if "install" in values or "add" in values:
+            events.append(("install", kwargs["timeout_seconds"]))
+            if isinstance(failure, BaseException):
+                raise failure
+            return failure
+        return base_runner(argv, **kwargs)
+
+    deps.runner = runner
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == reason
+    assert result.changed_files == ()
+    assert "secret" not in repr(result)
+
+
+@pytest.mark.parametrize("mutation", ["manifest_missing", "lock_missing", "new_lock", "config"])
+def test_activate_fails_closed_on_unsafe_postinstall_state(tmp_path, mutation):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    base_runner = deps.runner
+
+    def runner(argv, **kwargs):
+        result = base_runner(argv, **kwargs)
+        values = [str(value) for value in argv]
+        if "install" in values or "add" in values:
+            if mutation == "manifest_missing":
+                (root / "package.json").unlink()
+            elif mutation == "lock_missing":
+                (root / "package-lock.json").unlink()
+            elif mutation == "new_lock":
+                (root / "pnpm-lock.yaml").write_bytes(_SAFE_LOCKS["pnpm-lock.yaml"])
+            else:
+                (root / ".npmrc").write_text("unsafe", encoding="utf-8")
+        return result
+
+    deps.runner = runner
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    expected = "control_file_unsafe" if mutation.endswith("missing") else "project_state_changed"
+    assert result.reason == expected
+    assert result.attempted
+    assert set(result.changed_files) <= {"package.json", "package-lock.json"}
+
+
+@pytest.mark.parametrize("escape", [False, True])
+def test_activate_requires_verified_local_typescript(tmp_path, escape):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events, verify_ok=False)
+    if escape:
+        base_runner = deps.runner
+
+        def runner(argv, **kwargs):
+            result = base_runner(argv, **kwargs)
+            if "-e" in [str(value) for value in argv] and sum(
+                event[0] in {"local_probe", "verify"} for event in events
+            ) == 2:
+                outside = tmp_path / "outside-package.json"
+                outside.write_bytes(b"{}")
+                return ProbeProcessResult(
+                    0, json.dumps({"resolved": str(outside)}).encode(), b"", 0
+                )
+            return result
+
+        deps.runner = runner
+
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.VERIFICATION_FAILED
+    assert result.reason == "typescript_not_available"
+    assert result.attempted
+    assert result.changed_files == ("package-lock.json", "package.json")
+
+
+def test_activate_shared_deadline_passes_positive_decreasing_budgets(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    tick = -1
+
+    def monotonic():
+        nonlocal tick
+        tick += 1
+        return float(tick)
+
+    deps.monotonic = monotonic
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False, 30), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLED
+    budgets = [
+        value
+        for phase, value in events
+        if phase in {"validator", "install", "verify"}
+    ]
+    assert all(value > 0 for value in budgets)
+    assert budgets == sorted(budgets, reverse=True)
+    assert len(set(budgets)) == 3
+
+
+def test_activate_deadline_expiry_before_validator_is_phase_specific(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    values = iter([0.0, 121.0])
+    deps.monotonic = lambda: next(values)
+
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False, 120), deps
+    )
+
+    assert result.outcome is ActivationOutcome.VALIDATION_FAILED
+    assert result.reason == "operation_timeout"
+    assert result.attempted
+    assert all(event[0] != "validator" for event in events)
+
+
+def test_activate_deadline_expiry_during_post_state_is_operation_timeout(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    calls = 0
+
+    def monotonic():
+        nonlocal calls
+        calls += 1
+        return 31.0 if calls >= 7 else 0.0
+
+    deps.monotonic = monotonic
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False, 30), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "operation_timeout"
+    assert result.changed_files == ("package-lock.json", "package.json")
+
+
+@pytest.mark.parametrize("expiry_call", [4, 6])
+def test_activate_deadline_expiry_before_or_during_install_is_operation_timeout(
+    tmp_path, expiry_call
+):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    calls = 0
+
+    def monotonic():
+        nonlocal calls
+        calls += 1
+        return 31.0 if calls >= expiry_call else 0.0
+
+    deps.monotonic = monotonic
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False, 30), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "operation_timeout"
+    assert result.changed_files == ()
+
+
+def test_activate_deadline_expiry_during_verification_is_operation_timeout(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    calls = 0
+
+    def monotonic():
+        nonlocal calls
+        calls += 1
+        return 31.0 if calls >= 9 else 0.0
+
+    deps.monotonic = monotonic
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False, 30), deps
+    )
+
+    assert result.outcome is ActivationOutcome.VERIFICATION_FAILED
+    assert result.reason == "operation_timeout"
+    assert result.changed_files == ("package-lock.json", "package.json")
+
+
+def test_activate_same_root_lock_is_nonblocking_and_released(tmp_path):
+    root = _activation_root(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+
+    def prompt(message):
+        entered.set()
+        assert release.wait(5)
+        return "n"
+
+    deps.prompt = prompt
+    first_result = []
+    thread = threading.Thread(
+        target=lambda: first_result.append(
+            activate_typescript(
+                ActivationRequest(root, Config(), True, True, False, False), deps
+            )
+        )
+    )
+    thread.start()
+    assert entered.wait(5)
+
+    second = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False),
+        ActivationDependencies(runner=lambda *_a, **_k: pytest.fail("runner called")),
+    )
+    release.set()
+    thread.join(5)
+
+    assert second == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY, None, "activation_in_progress"
+    )
+    assert first_result[0].outcome is ActivationOutcome.DECLINED
+    third_events = []
+    third_deps = _activation_dependencies(tmp_path, root, third_events)
+    third = activate_typescript(
+        ActivationRequest(root, Config(), False, False, False, False), third_deps
+    )
+    assert third.reason == "non_interactive"
+
+
+def test_activate_lock_releases_when_prompt_raises(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events, prompt_answer=RuntimeError("secret"))
+    with pytest.raises(RuntimeError, match="secret"):
+        activate_typescript(
+            ActivationRequest(root, Config(), True, True, False, False), deps
+        )
+
+    second_events = []
+    deps = _activation_dependencies(
+        tmp_path, root, second_events, prompt_answer="n"
+    )
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+    assert result.outcome is ActivationOutcome.DECLINED
+
+
+def test_activate_separate_roots_do_not_share_lock(tmp_path):
+    first_parent = tmp_path / "first"
+    second_parent = tmp_path / "second"
+    first_parent.mkdir()
+    second_parent.mkdir()
+    first_root = _activation_root(first_parent)
+    second_root = _activation_root(second_parent)
+    entered = threading.Event()
+    release = threading.Event()
+    first_events = []
+    first_deps = _activation_dependencies(first_parent, first_root, first_events)
+
+    def prompt(_message):
+        entered.set()
+        assert release.wait(5)
+        return "n"
+
+    first_deps.prompt = prompt
+    thread = threading.Thread(
+        target=lambda: activate_typescript(
+            ActivationRequest(first_root, Config(), True, True, False, False),
+            first_deps,
+        )
+    )
+    thread.start()
+    assert entered.wait(5)
+    second_events = []
+    second_deps = _activation_dependencies(second_parent, second_root, second_events)
+
+    second = activate_typescript(
+        ActivationRequest(second_root, Config(), False, False, False, False),
+        second_deps,
+    )
+    release.set()
+    thread.join(5)
+
+    assert second.reason == "non_interactive"
+    assert [event[0] for event in second_events] == ["local_probe"]
+
+
+def test_activate_rejects_symlinked_isolation_directory(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    outside = tmp_path / "outside-isolation"
+    outside.mkdir()
+    link = tmp_path / "isolation-link"
+    _symlink_or_skip(link, outside)
+    temporary = _FakeTemporaryDirectory(link)
+    deps.temporary_directory = lambda: temporary
+
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "isolation_unavailable"
+    assert all(event[0] != "install" for event in events)
+
+
+def test_activate_revalidates_node_after_consent(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    tools = Path(deps.environ["PATH"])
+    node = tools / ("node.exe" if os.name == "nt" else "node")
+
+    def prompt(message):
+        events.append(("prompt", message))
+        node.write_bytes(b"replaced node")
+        return "yes"
+
+    deps.prompt = prompt
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.VALIDATION_FAILED
+    assert result.reason == "executable_changed"
+    assert all(event[0] != "validator" for event in events)
+
+
+def test_activate_revalidates_manager_command_before_install(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    tools = Path(deps.environ["PATH"])
+    manager_file = (
+        tools / "node_modules" / "npm" / "bin" / "npm-cli.js"
+        if os.name == "nt"
+        else tools / "npm"
+    )
+    validator = deps.environ["GRAPHITE_PACKAGE_VALIDATOR"]
+    base_runner = deps.runner
+
+    def runner(argv, **kwargs):
+        result = base_runner(argv, **kwargs)
+        if validator in [str(value) for value in argv]:
+            manager_file.write_bytes(b"replaced manager")
+        return result
+
+    deps.runner = runner
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "command_changed"
+    assert result.attempted
+    assert all(event[0] != "install" for event in events)
+
+
+def test_activate_shared_deadline_includes_temporary_cleanup(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    now = 0.0
+    real_temporary = tempfile.TemporaryDirectory(dir=tmp_path)
+
+    class CleanupAdvancesClock:
+        name = real_temporary.name
+
+        def cleanup(self):
+            nonlocal now
+            real_temporary.cleanup()
+            now = 31.0
+
+    deps.monotonic = lambda: now
+    deps.temporary_directory = CleanupAdvancesClock
+
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False, 30), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "operation_timeout"
+    assert result.changed_files == ("package-lock.json", "package.json")
 
 
 def _file(path: Path, content: bytes = b"tool") -> TrustedFile:
