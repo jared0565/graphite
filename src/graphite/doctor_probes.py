@@ -4,13 +4,16 @@ from __future__ import annotations
 import json
 import math
 import os
-import site
+import platform
+import re
 import shutil
 import sys
 import tempfile
 import threading
 import time
 from collections.abc import Callable
+from functools import lru_cache
+from importlib import machinery, metadata
 from pathlib import Path
 from typing import Any
 
@@ -35,45 +38,147 @@ _TYPESCRIPT_SCRIPT = (
     "process.stdout.write(JSON.stringify({detected:true}));"
 )
 _MCP_BOOTSTRAP = """\
-import importlib.util
+import json
 import pathlib
 import runpy
 import sys
+from importlib import metadata
+from importlib.machinery import PathFinder
 
 trusted = pathlib.Path(sys.argv[1]).resolve(strict=True)
 selected = pathlib.Path(sys.argv[2]).resolve(strict=True)
 if not trusted.is_dir() or not selected.is_dir():
     raise SystemExit(70)
-allowed = []
-for raw in sys.argv[3:]:
-    candidate = pathlib.Path(raw)
-    if not candidate.is_absolute():
-        raise SystemExit(70)
-    candidate = candidate.resolve(strict=True)
-    if not candidate.is_dir():
-        raise SystemExit(70)
+def overlaps_selected(path):
     try:
-        candidate.relative_to(selected)
+        path.relative_to(selected)
+        return True
     except ValueError:
         pass
-    else:
-        raise SystemExit(70)
     try:
-        selected.relative_to(candidate)
-    except ValueError:
-        pass
-    else:
-        raise SystemExit(70)
-    allowed.append(str(candidate))
-sys.path[:] = [str(trusted), *allowed]
-spec = importlib.util.find_spec("graphite.mcp")
-if spec is None or spec.origin is None:
+        selected.relative_to(path)
+        return True
+    except (ValueError, OSError):
+        return False
+manifest = json.loads(sys.stdin.buffer.readline())
+if not isinstance(manifest, dict) or set(manifest) != {"distributions", "files", "packages"}:
     raise SystemExit(70)
-origin = pathlib.Path(spec.origin).resolve(strict=True)
-try:
-    origin.relative_to(trusted)
-except ValueError:
-    raise SystemExit(70) from None
+raw_files = manifest["files"]
+raw_packages = manifest["packages"]
+raw_distributions = manifest["distributions"]
+if not isinstance(raw_files, list) or not isinstance(raw_packages, dict) or not isinstance(raw_distributions, dict):
+    raise SystemExit(70)
+allowed_files = set()
+for raw in raw_files:
+    path = pathlib.Path(raw)
+    if not isinstance(raw, str) or not path.is_absolute():
+        raise SystemExit(70)
+    path = path.resolve(strict=True)
+    if not path.is_file() or overlaps_selected(path):
+        raise SystemExit(70)
+    allowed_files.add(path)
+distributions = {}
+for name, raw in raw_distributions.items():
+    path = pathlib.Path(raw)
+    if not isinstance(name, str) or not isinstance(raw, str) or not path.is_absolute():
+        raise SystemExit(70)
+    path = path.resolve(strict=True)
+    if not path.is_dir() or not path.name.endswith(".dist-info") or overlaps_selected(path):
+        raise SystemExit(70)
+    distribution = metadata.PathDistribution(path)
+    declared = distribution.metadata.get("Name")
+    normalize = lambda value: "-".join(filter(None, __import__("re").split(r"[-_.]+", value.lower())))
+    if not isinstance(declared, str) or normalize(declared) != name:
+        raise SystemExit(70)
+    distributions[name] = distribution
+packages = {}
+for name, raw_entry in raw_packages.items():
+    if not isinstance(name, str) or not name.isidentifier():
+        raise SystemExit(70)
+    if not isinstance(raw_entry, dict) or set(raw_entry) != {"origin", "root", "search"}:
+        raise SystemExit(70)
+    entry = {}
+    for field in ("search",):
+        raw = raw_entry[field]
+        path = pathlib.Path(raw)
+        if not isinstance(raw, str) or not path.is_absolute():
+            raise SystemExit(70)
+        entry[field] = path.resolve(strict=True)
+    raw_origin = raw_entry["origin"]
+    if raw_origin is not None:
+        origin = pathlib.Path(raw_origin)
+        if not isinstance(raw_origin, str) or not origin.is_absolute():
+            raise SystemExit(70)
+        entry["origin"] = origin.resolve(strict=True)
+    else:
+        entry["origin"] = None
+    raw_root = raw_entry["root"]
+    if raw_root is not None:
+        root = pathlib.Path(raw_root)
+        if not isinstance(raw_root, str) or not root.is_absolute():
+            raise SystemExit(70)
+        entry["root"] = root.resolve(strict=True)
+    else:
+        entry["root"] = None
+    if (
+        (entry["origin"] is not None and entry["origin"] not in allowed_files)
+        or not entry["search"].is_dir()
+        or overlaps_selected(entry["search"])
+        or (entry["root"] is not None and overlaps_selected(entry["root"]))
+    ):
+        raise SystemExit(70)
+    packages[name] = entry
+
+class GuardedDistributionFinder:
+    @staticmethod
+    def find_distributions(context=metadata.DistributionFinder.Context()):
+        requested = context.name
+        if requested is None:
+            return iter(distributions.values())
+        normalized = "-".join(filter(None, __import__("re").split(r"[-_.]+", requested.lower())))
+        distribution = distributions.get(normalized)
+        return iter(()) if distribution is None else iter((distribution,))
+
+    @staticmethod
+    def find_spec(fullname, path=None, target=None):
+        del target
+        top_level = fullname.partition(".")[0]
+        entry = packages.get(top_level)
+        if entry is None:
+            return None
+        search = [str(entry["search"])] if fullname == top_level else path
+        if search is None:
+            raise ModuleNotFoundError(fullname)
+        spec = PathFinder.find_spec(fullname, search)
+        if spec is None or spec.origin in ("built-in", "frozen"):
+            raise ModuleNotFoundError(fullname)
+        locations = spec.submodule_search_locations
+        origin = None if spec.origin is None else pathlib.Path(spec.origin).resolve(strict=True)
+        if origin is not None and origin not in allowed_files:
+            raise ModuleNotFoundError(fullname)
+        if fullname == top_level and origin != entry["origin"]:
+            raise ModuleNotFoundError(fullname)
+        if locations is not None:
+            resolved = [pathlib.Path(item).resolve(strict=True) for item in locations]
+            if len(resolved) != 1:
+                raise ModuleNotFoundError(fullname)
+            package_root = entry["root"]
+            if package_root is None:
+                raise ModuleNotFoundError(fullname)
+            try:
+                resolved[0].relative_to(package_root)
+            except ValueError:
+                raise ModuleNotFoundError(fullname) from None
+        elif origin is None:
+            raise ModuleNotFoundError(fullname)
+        return spec
+
+stdlib_path = list(sys.path)
+sys.path[:] = [str(trusted), *stdlib_path]
+sys.meta_path.insert(0, GuardedDistributionFinder)
+expected_graphite_mcp = (trusted / "graphite" / "mcp.py").resolve(strict=True)
+if not expected_graphite_mcp.is_file():
+    raise SystemExit(70)
 runpy.run_module("graphite.mcp", run_name="__main__")
 """
 _TYPESCRIPT_REMEDIATION = (
@@ -339,55 +444,223 @@ def _path_is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def _mcp_import_roots(selected_root: Path) -> tuple[Path, Path, list[Path]]:
-    """Build a parent-validated import allowlist without repository-local paths."""
+def _normalized_distribution_name(value: str) -> str:
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def _marker_value(name: str) -> str:
+    values = {
+        "platform_python_implementation": platform.python_implementation(),
+        "platform_system": platform.system(),
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "sys_platform": sys.platform,
+    }
+    if name not in values:
+        raise ValueError
+    return values[name]
+
+
+def _requirement_applies(raw_requirement: str) -> bool:
+    _, separator, raw_marker = raw_requirement.partition(";")
+    if not separator:
+        return True
+    marker = raw_marker.strip()
+    if re.search(r"\bextra\b", marker):
+        return False
+    while marker.startswith("(") and marker.endswith(")"):
+        marker = marker[1:-1].strip()
+    match = re.fullmatch(
+        r"(python_version|sys_platform|platform_system|platform_python_implementation)"
+        r"\s*(==|!=|<=|>=|<|>)\s*(['\"])([^'\"]+)\3",
+        marker,
+    )
+    if match is None:
+        raise ValueError
+    actual = _marker_value(match.group(1))
+    expected = match.group(4)
+    if match.group(1) == "python_version":
+        actual_value: object = tuple(int(part) for part in actual.split("."))
+        expected_value: object = tuple(int(part) for part in expected.split("."))
+    else:
+        actual_value = actual
+        expected_value = expected
+    operator = match.group(2)
+    comparisons = {
+        "==": actual_value == expected_value,
+        "!=": actual_value != expected_value,
+        "<": actual_value < expected_value,
+        "<=": actual_value <= expected_value,
+        ">": actual_value > expected_value,
+        ">=": actual_value >= expected_value,
+    }
+    return comparisons[operator]
+
+
+def _mcp_distribution_closure() -> dict[str, metadata.Distribution]:
+    pending = ["mcp", "networkx"]
+    distributions: dict[str, metadata.Distribution] = {}
+    while pending:
+        requested = pending.pop()
+        normalized = _normalized_distribution_name(requested)
+        if normalized in distributions:
+            continue
+        distribution = metadata.distribution(requested)
+        declared_name = distribution.metadata.get("Name")
+        if not isinstance(declared_name, str) or _normalized_distribution_name(declared_name) != normalized:
+            raise ValueError
+        distributions[normalized] = distribution
+        for requirement in distribution.requires or ():
+            if not _requirement_applies(requirement):
+                continue
+            match = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", requirement)
+            if match is None:
+                raise ValueError
+            pending.append(match.group(0))
+    return distributions
+
+
+@lru_cache(maxsize=1)
+def _mcp_import_inventory() -> tuple[
+    dict[str, str],
+    dict[str, frozenset[Path]],
+    dict[str, dict[str, Path]],
+    dict[str, frozenset[str]],
+    frozenset[Path],
+]:
+    """Cache immutable installed-distribution records, never ambient import resolution."""
+    distributions = _mcp_distribution_closure()
+    distribution_paths: dict[str, str] = {}
+    for name, distribution in distributions.items():
+        raw_path = getattr(distribution, "_path", None)
+        if raw_path is None:
+            raise ValueError
+        path = Path(raw_path).resolve(strict=True)
+        if not path.is_dir() or not path.name.endswith(".dist-info"):
+            raise ValueError
+        distribution_paths[name] = str(path)
+    suffixes = tuple(machinery.all_suffixes())
+    files_by_distribution: dict[str, set[Path]] = {}
+    top_directories: dict[str, dict[str, Path]] = {}
+    ownership: dict[str, set[str]] = {}
+    all_files: set[Path] = set()
+    for name, distribution in distributions.items():
+        declared_files: set[Path] = set()
+        declared_directories: dict[str, Path] = {}
+        if distribution.files is None:
+            raise ValueError
+        for declared in distribution.files:
+            first = str(declared).replace("\\", "/").partition("/")[0]
+            top_level = first.partition(".")[0] if first.endswith(suffixes) else first
+            if top_level.isidentifier() and first == top_level:
+                try:
+                    top_path = Path(distribution.locate_file(first)).resolve(strict=True)
+                except OSError:
+                    pass
+                else:
+                    if top_path.is_dir():
+                        declared_directories[top_level] = top_path
+            if not str(declared).endswith(suffixes):
+                continue
+            try:
+                candidate = Path(distribution.locate_file(declared)).resolve(strict=True)
+            except OSError:
+                continue
+            if not candidate.is_file():
+                continue
+            declared_files.add(candidate)
+        if not declared_files:
+            raise ValueError
+        files_by_distribution[name] = declared_files
+        top_directories[name] = declared_directories
+        all_files.update(declared_files)
+        raw_top_level = distribution.read_text("top_level.txt") or ""
+        top_levels: set[str] = set()
+        for raw in raw_top_level.splitlines():
+            normalized = raw.strip().replace("\\", "/")
+            if normalized:
+                top_levels.add(normalized.partition("/")[0])
+                top_levels.add(normalized.rpartition("/")[2])
+        for declared in distribution.files:
+            first = str(declared).replace("\\", "/").partition("/")[0]
+            if first.endswith(suffixes):
+                first = first.partition(".")[0]
+            top_levels.add(first)
+        for top_level in top_levels:
+            if top_level.isidentifier() and top_level != "__pycache__":
+                ownership.setdefault(top_level, set()).add(name)
+
+    return (
+        distribution_paths,
+        {name: frozenset(files) for name, files in files_by_distribution.items()},
+        top_directories,
+        {name: frozenset(owners) for name, owners in ownership.items()},
+        frozenset(all_files),
+    )
+
+
+def _mcp_import_manifest(selected_root: Path) -> dict[str, object]:
+    """Describe only import files declared by the verified MCP dependency closure."""
     selected = selected_root.resolve(strict=True)
     if not selected.is_dir():
         raise OSError
-    trusted = Path(__file__).resolve(strict=True).parent.parent
-    runtime_prefixes: list[Path] = []
-    for raw_prefix in {sys.base_prefix, sys.prefix}:
-        try:
-            runtime_prefixes.append(Path(raw_prefix).resolve(strict=True))
-        except OSError:
+    (
+        distribution_paths,
+        files_by_distribution,
+        top_directories,
+        ownership,
+        all_files,
+    ) = _mcp_import_inventory()
+    if any(_path_is_within(path, selected) for path in all_files):
+        raise ValueError
+    if any(_paths_overlap(Path(path), selected) for path in distribution_paths.values()):
+        raise ValueError
+
+    packages: dict[str, dict[str, str | None]] = {}
+    for top_level, raw_owners in ownership.items():
+        if len(raw_owners) != 1:
+            raise ValueError
+        owner = next(iter(raw_owners))
+        spec = machinery.PathFinder.find_spec(top_level, sys.path)
+        if spec is None or spec.origin in {"built-in", "frozen"}:
             continue
-    site_roots: set[Path] = set()
-    try:
-        raw_site_roots = [*site.getsitepackages(), site.getusersitepackages()]
-    except (AttributeError, OSError):
-        raw_site_roots = []
-    for raw_site_root in raw_site_roots:
-        try:
-            site_root = Path(raw_site_root).resolve(strict=True)
-        except OSError:
-            continue
-        if site_root.is_dir():
-            site_roots.add(site_root)
-    roots: list[Path] = []
-    seen = {os.path.normcase(str(trusted))}
-    for raw in sys.path:
-        if not raw:
-            continue
-        candidate = Path(raw)
-        if not candidate.is_absolute():
-            continue
-        try:
-            candidate = candidate.resolve(strict=True)
-        except OSError:
-            continue
-        is_runtime_root = any(_path_is_within(candidate, prefix) for prefix in runtime_prefixes)
-        is_site_root = any(_path_is_within(candidate, root) for root in site_roots)
-        if (
-            not candidate.is_dir()
-            or _paths_overlap(candidate, selected)
-            or (not is_runtime_root and not is_site_root)
-        ):
-            continue
-        normalized = os.path.normcase(str(candidate))
-        if normalized not in seen:
-            seen.add(normalized)
-            roots.append(candidate)
-    return trusted, selected, roots
+        raw_locations = spec.submodule_search_locations
+        root: Path | None = None
+        origin: Path | None = None
+        if raw_locations is not None:
+            locations = [Path(raw).resolve(strict=True) for raw in raw_locations]
+            if len(locations) != 1 or not locations[0].is_dir():
+                raise ValueError
+            root = locations[0]
+            search = root.parent
+            if spec.origin is None:
+                if top_directories[owner].get(top_level) != root:
+                    raise ValueError
+        else:
+            if spec.origin is None:
+                raise ValueError
+            origin = Path(spec.origin).resolve(strict=True)
+            if origin not in files_by_distribution[owner]:
+                raise ValueError
+            search = origin.parent
+        if spec.origin is not None:
+            origin = Path(spec.origin).resolve(strict=True)
+            if origin not in files_by_distribution[owner]:
+                raise ValueError
+        if _paths_overlap(search, selected) or (root is not None and _paths_overlap(root, selected)):
+            raise ValueError
+        packages[top_level] = {
+            "origin": str(origin) if origin is not None else None,
+            "root": str(root) if root is not None else None,
+            "search": str(search),
+        }
+    for required in ("mcp", "networkx"):
+        if required not in packages:
+            raise ValueError
+    return {
+        "distributions": distribution_paths,
+        "files": [str(path) for path in sorted(all_files, key=lambda item: os.path.normcase(str(item)))],
+        "packages": packages,
+    }
 
 
 def _validate_json_nesting(text: str) -> None:
@@ -423,6 +696,13 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError
 
 
+def _parse_finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError
+    return parsed
+
+
 def _json_object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
@@ -446,6 +726,7 @@ def _parse_mcp_responses(output: bytes, stderr: bytes) -> dict[int, dict[str, An
         envelope = json.loads(
             text,
             parse_constant=_reject_json_constant,
+            parse_float=_parse_finite_json_float,
             object_pairs_hook=_json_object_without_duplicate_keys,
         )
         if not isinstance(envelope, dict) or envelope.get("jsonrpc") != "2.0":
@@ -480,10 +761,15 @@ def probe_mcp(
     root: Path,
     *,
     python_executable: str = sys.executable,
-    timeout_seconds: float = 10.0,
+    timeout_seconds: float = 20.0,
     _runner: Callable[..., ProbeProcessResult] = run_bounded_process,
+    _manifest_builder: Callable[[Path], dict[str, object]] = _mcp_import_manifest,
 ) -> DoctorCheck:
     """Initialize the MCP server and inspect its read-only tool inventory."""
+    started = time.monotonic()
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        return _degraded_probe("deep_mcp", "MCP", "invalid_timeout")
+    deadline = started + timeout_seconds
     requests = (
         {
             "jsonrpc": "2.0",
@@ -498,12 +784,18 @@ def probe_mcp(
         {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
     )
-    stdin = b"".join(
+    protocol_input = b"".join(
         json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
         for request in requests
     )
     try:
-        trusted, selected, import_roots = _mcp_import_roots(root)
+        trusted = Path(__file__).resolve(strict=True).parent.parent
+        selected = root.resolve(strict=True)
+        manifest = _manifest_builder(selected)
+        stdin = json.dumps(manifest, separators=(",", ":")).encode("utf-8") + b"\n" + protocol_input
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProbeProcessError("timeout")
         result = _runner(
             [
                 python_executable,
@@ -514,11 +806,10 @@ def probe_mcp(
                 _MCP_BOOTSTRAP,
                 str(trusted),
                 str(selected),
-                *(str(path) for path in import_roots),
             ],
             cwd=root,
             stdin=stdin,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=remaining,
             max_output_bytes=_MCP_OUTPUT_LIMIT_BYTES,
         )
     except ProbeProcessError as exc:

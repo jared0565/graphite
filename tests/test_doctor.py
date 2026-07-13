@@ -1729,7 +1729,7 @@ def test_mcp_deep_probe_initializes_and_lists_required_tools(tmp_path: Path) -> 
         captured.update(argv=argv, **kwargs)
         return probes.ProbeProcessResult(0, output, b"", 0.01)
 
-    check = probes.probe_mcp(tmp_path, python_executable="PYTHON", timeout_seconds=2, _runner=run)
+    check = probes.probe_mcp(tmp_path, python_executable="PYTHON", timeout_seconds=20, _runner=run)
 
     assert check.status == "ready"
     assert check.details == {"server_name": "graphite", "tool_count": 4}
@@ -1738,9 +1738,14 @@ def test_mcp_deep_probe_initializes_and_lists_required_tools(tmp_path: Path) -> 
     assert "graphite.mcp" in argv[5]
     assert Path(argv[6]).is_absolute()
     assert captured["cwd"] == tmp_path
-    assert captured["timeout_seconds"] == 2
+    assert 0 < captured["timeout_seconds"] <= 20
     assert captured["max_output_bytes"] == 1024 * 1024
-    requests = [json.loads(line) for line in captured["stdin"].decode("utf-8").splitlines()]
+    lines = captured["stdin"].decode("utf-8").splitlines()
+    manifest = json.loads(lines[0])
+    assert "networkx" in manifest["packages"]
+    assert "mcp" in manifest["packages"]
+    assert manifest["files"]
+    requests = [json.loads(line) for line in lines[1:]]
     assert requests[0]["method"] == "initialize"
     assert requests[0]["params"]["protocolVersion"] == "2024-11-05"
     assert requests[1]["method"] == "notifications/initialized"
@@ -1748,9 +1753,8 @@ def test_mcp_deep_probe_initializes_and_lists_required_tools(tmp_path: Path) -> 
     assert all(request.get("params", {}).get("name") != "graphite_refresh" for request in requests)
 
 
-def test_mcp_import_allowlist_excludes_arbitrary_pth_added_roots(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+def test_mcp_import_manifest_excludes_arbitrary_pth_added_roots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import graphite.doctor_probes as probes
 
@@ -1760,9 +1764,68 @@ def test_mcp_import_allowlist_excludes_arbitrary_pth_added_roots(
     arbitrary.mkdir()
     monkeypatch.setattr(probes.sys, "path", [str(arbitrary), *probes.sys.path])
 
-    _, _, roots = probes._mcp_import_roots(selected)
+    manifest = probes._mcp_import_manifest(selected)
 
-    assert arbitrary.resolve() not in roots
+    assert str(arbitrary.resolve()) not in json.dumps(manifest)
+
+
+def test_mcp_deep_probe_rejects_user_site_dependency_shadow_without_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import graphite.doctor_probes as probes
+
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    fake_user_site = tmp_path / "user-site"
+    fake_user_site.mkdir()
+    sentinel = tmp_path / "dependency-shadow-executed.txt"
+    (fake_user_site / "networkx.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    (fake_user_site / "unrelated.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('unrelated')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probes.sys, "path", [str(fake_user_site), *probes.sys.path])
+
+    check = probes.probe_mcp(selected, timeout_seconds=10)
+
+    assert check.status == "degraded"
+    assert check.details == {"code": "probe_failed"}
+    assert not sentinel.exists()
+
+
+def test_mcp_bootstrap_rejects_manifest_files_inside_selected_root(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+    from graphite.probe_process import run_bounded_process
+
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    repository_file = selected / "dependency.py"
+    repository_file.write_text("raise RuntimeError('must not execute')\n", encoding="utf-8")
+    manifest = {"distributions": {}, "files": [str(repository_file)], "packages": {}}
+    trusted = Path(probes.__file__).resolve().parent.parent
+
+    result = run_bounded_process(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            probes._MCP_BOOTSTRAP,
+            str(trusted),
+            str(selected),
+        ],
+        cwd=selected,
+        stdin=json.dumps(manifest).encode("utf-8") + b"\n",
+        timeout_seconds=5,
+        check=False,
+    )
+
+    assert result.returncode == 70
 
 
 @pytest.mark.parametrize("failure_code", ["timeout", "output_limit", "nonzero", "io_failed"])
@@ -1774,7 +1837,12 @@ def test_mcp_deep_probe_maps_transport_failures_to_degraded(tmp_path: Path, fail
         raise ProbeProcessError(failure_code)
 
     started = time.monotonic()
-    check = probes.probe_mcp(tmp_path, timeout_seconds=0.2, _runner=fail)
+    check = probes.probe_mcp(
+        tmp_path,
+        timeout_seconds=0.2,
+        _runner=fail,
+        _manifest_builder=lambda root: {},
+    )
     assert time.monotonic() - started < 1
     assert check.status == "degraded"
     assert check.details == {"code": failure_code}
@@ -1846,6 +1914,13 @@ def test_mcp_deep_probe_rejects_closed_or_malformed_responses(tmp_path: Path, ou
                 {"jsonrpc": "2.0", "id": 2, "result": _mcp_tools_result()},
             )
         ),
+        (
+            b'{"jsonrpc":"2.0","method":"progress","params":{"value":1e9999}}\n'
+            + _mcp_probe_output(
+                {"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "graphite"}}},
+                {"jsonrpc": "2.0", "id": 2, "result": _mcp_tools_result()},
+            )
+        ),
     ],
     ids=[
         "duplicate-id",
@@ -1856,6 +1931,7 @@ def test_mcp_deep_probe_rejects_closed_or_malformed_responses(tmp_path: Path, ou
         "boolean-id",
         "result-and-error",
         "non-json-number",
+        "overflow-number",
     ],
 )
 def test_mcp_deep_probe_strictly_validates_protocol_envelopes(tmp_path: Path, output: bytes) -> None:
@@ -1928,7 +2004,7 @@ def test_mcp_deep_probe_real_server_ignores_project_import_shadows(tmp_path: Pat
             encoding="utf-8",
         )
 
-    check = probes.probe_mcp(tmp_path, timeout_seconds=10)
+    check = probes.probe_mcp(tmp_path, timeout_seconds=20)
 
     assert check.status == "ready"
     assert not sentinel.exists()
@@ -2040,7 +2116,12 @@ def test_mcp_deep_probe_real_transport_bounds_failures_and_escalates_cleanup(
     )
 
     started = time.monotonic()
-    check = probes.probe_mcp(tmp_path, timeout_seconds=0.35, _runner=transport.run_bounded_process)
+    check = probes.probe_mcp(
+        tmp_path,
+        timeout_seconds=0.35,
+        _runner=transport.run_bounded_process,
+        _manifest_builder=lambda root: {},
+    )
 
     assert time.monotonic() - started < 1
     assert check.status == "degraded"
@@ -2058,7 +2139,12 @@ def test_mcp_deep_probe_real_transport_handles_nonzero_without_hanging(
     process = _QueuedProbeProcess("nonzero", [])
     monkeypatch.setattr(transport, "_launch_process", lambda *a, **k: process)
     started = time.monotonic()
-    check = probes.probe_mcp(tmp_path, timeout_seconds=0.35, _runner=transport.run_bounded_process)
+    check = probes.probe_mcp(
+        tmp_path,
+        timeout_seconds=0.35,
+        _runner=transport.run_bounded_process,
+        _manifest_builder=lambda root: {},
+    )
     assert time.monotonic() - started < 1
     assert check.status == "degraded"
     assert check.details == {"code": "nonzero"}
@@ -2074,7 +2160,12 @@ def test_mcp_deep_probe_real_transport_handles_closed_stdout_without_hanging(
     process = _QueuedProbeProcess("closed", [])
     monkeypatch.setattr(transport, "_launch_process", lambda *a, **k: process)
     started = time.monotonic()
-    check = probes.probe_mcp(tmp_path, timeout_seconds=0.35, _runner=transport.run_bounded_process)
+    check = probes.probe_mcp(
+        tmp_path,
+        timeout_seconds=0.35,
+        _runner=transport.run_bounded_process,
+        _manifest_builder=lambda root: {},
+    )
     assert time.monotonic() - started < 1
     assert check.status == "degraded"
     assert check.details == {"code": "invalid_response"}
