@@ -476,3 +476,67 @@ def test_daemon_health_schema_issue_cap_does_not_skip_later_valid_projects(tmp_p
     schema_issues = [issue for issue in report["errors"] if issue["code"] == "status_schema_invalid"]
     assert len(schema_issues) == 20
     assert [project["root"] for project in report["projects"]["failing"]] == ["F:/Projects/later-valid"]
+
+
+def test_daemon_health_bounds_project_processing_and_category_details(tmp_path: Path) -> None:
+    projects = [
+        _project(f"F:/Projects/failing-{index}", last_error="failed")
+        for index in range(1_100)
+    ]
+    projects.append(_project("F:/Projects/after-cap", last_error="must-not-be-processed"))
+    payload = _status("2026-06-23T12:00:00+00:00", projects=projects)
+    _write_status(tmp_path, payload)
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+
+    assert report["ok"] is False
+    assert any(issue["code"] == "status_truncated" for issue in report["errors"])
+    assert report["summary"]["projects_processed_count"] == 1_000
+    assert report["summary"]["projects_truncated_count"] == 101
+    assert report["summary"]["failing_count"] == 1_000
+    assert len(report["projects"]["failing"]) == 50
+    assert len(report["errors"]) + len(report["warnings"]) <= 100
+    assert "after-cap" not in json.dumps(report)
+    assert len(json.dumps(report)) < 100_000
+
+
+def test_daemon_health_rejects_oversized_or_controlled_project_strings_without_leak(tmp_path: Path) -> None:
+    secret = "SECRET-OVERSIZED-" + ("X" * 10_000)
+    projects = [
+        _project(secret, last_error="failed"),
+        _project("F:/Projects/control\nINJECT", last_error="failed"),
+        _project("F:/Projects/error", last_error=secret),
+        _project("F:/Projects/time", last_success_at=secret),
+    ]
+    _write_status(tmp_path, _status("2026-06-23T12:00:00+00:00", projects=projects))
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+    text = format_health_text(report)
+    encoded = json.dumps(report)
+
+    assert len([issue for issue in report["errors"] if issue["code"] == "status_schema_invalid"]) == 4
+    assert "SECRET-OVERSIZED" not in encoded
+    assert "INJECT" not in encoded
+    assert "SECRET-OVERSIZED" not in text
+    assert "INJECT" not in text
+    assert len(encoded) < 20_000
+
+
+def test_daemon_health_text_escapes_control_characters_from_daemon_status(tmp_path: Path) -> None:
+    payload = _status("2026-06-23T12:00:00+00:00", status="bad\nFORGED\tLINE")
+    _write_status(tmp_path, payload)
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+    text = format_health_text(report)
+
+    assert "bad\\nFORGED\\tLINE" in text
+    assert "bad\nFORGED" not in text
