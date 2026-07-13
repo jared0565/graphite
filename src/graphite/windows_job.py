@@ -5,12 +5,11 @@ import ctypes
 import io
 import os
 import signal
-import threading
 from ctypes import wintypes
 from pathlib import Path
 from typing import BinaryIO, Mapping
 
-from .process_contracts import build_windows_environment_block
+from .process_contracts import WINDOWS_PROCESS_CREATION_LOCK, build_windows_environment_block
 
 CREATE_SUSPENDED = 0x00000004
 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -76,9 +75,6 @@ class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
     )
 
 
-_launch_lock = threading.Lock()
-
-
 def _kernel32() -> ctypes.WinDLL:
     api = ctypes.WinDLL("kernel32", use_last_error=True)
     api.CreateJobObjectW.argtypes = (ctypes.POINTER(SECURITY_ATTRIBUTES), wintypes.LPCWSTR)
@@ -137,7 +133,7 @@ class JobProcess:
         if not self._api.GetExitCodeProcess(self._process_handle, ctypes.byref(code)):
             raise OSError("process query failed")
         if code.value != STILL_ACTIVE:
-            self.returncode = ctypes.c_long(code.value).value
+            self.returncode = code.value
         return self.returncode
 
     def wait(self, timeout: float | None = None) -> int:
@@ -159,22 +155,25 @@ class JobProcess:
             raise ValueError("unsupported signal")
         os.kill(self.pid, signal_number)
 
-    def kill(self) -> None:
+    def kill(self) -> bool:
         if self._job_handle:
-            self._api.TerminateJobObject(self._job_handle, 1)
+            return bool(self._api.TerminateJobObject(self._job_handle, 1))
         elif self._process_handle:
-            self._api.TerminateProcess(self._process_handle, 1)
+            return bool(self._api.TerminateProcess(self._process_handle, 1))
+        return True
 
-    def terminate_tree(self) -> None:
-        self.kill()
+    def terminate_tree(self) -> bool:
+        return self.kill()
 
-    def close_handles(self) -> None:
+    def close_handles(self) -> bool:
+        closed = True
         if self._job_handle:
-            self._api.CloseHandle(self._job_handle)
+            closed = bool(self._api.CloseHandle(self._job_handle)) and closed
             self._job_handle = 0
         if self._process_handle:
-            self._api.CloseHandle(self._process_handle)
+            closed = bool(self._api.CloseHandle(self._process_handle)) and closed
             self._process_handle = 0
+        return closed
 
 
 def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_stdin: bool) -> JobProcess:
@@ -199,8 +198,8 @@ def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_s
         if not api.SetInformationJobObject(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(limits), ctypes.sizeof(limits)):
             raise OSError("job configure failed")
 
-        security = SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), None, True)
-        with _launch_lock:
+        security = SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), None, False)
+        with WINDOWS_PROCESS_CREATION_LOCK:
             for pipe_index in range(3):
                 read_handle, write_handle = wintypes.HANDLE(), wintypes.HANDLE()
                 if not api.CreatePipe(ctypes.byref(read_handle), ctypes.byref(write_handle), ctypes.byref(security), 0):
@@ -242,21 +241,38 @@ def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_s
             command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
             environment_block = ctypes.create_unicode_buffer(build_windows_environment_block(environment))
             flags = CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT
-            if not api.CreateProcessW(
-                None, command_line, None, None, True, flags, environment_block, str(cwd),
-                ctypes.cast(ctypes.byref(startup), ctypes.POINTER(STARTUPINFOW)), ctypes.byref(process_info),
-            ):
+            child_handles = (stdin_read, stdout_write, stderr_write)
+            enabled_handles: list[int] = []
+            created = False
+            try:
+                for child_handle in child_handles:
+                    if not api.SetHandleInformation(child_handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT):
+                        raise OSError("child handle configure failed")
+                    enabled_handles.append(child_handle)
+                created = api.CreateProcessW(
+                    None, command_line, None, None, True, flags, environment_block, str(cwd),
+                    ctypes.cast(ctypes.byref(startup), ctypes.POINTER(STARTUPINFOW)), ctypes.byref(process_info),
+                )
+            finally:
+                restored = True
+                for child_handle in enabled_handles:
+                    restored = bool(api.SetHandleInformation(child_handle, HANDLE_FLAG_INHERIT, 0)) and restored
+            if not created:
                 raise OSError("process create failed")
             process_handle, thread_handle = process_info.hProcess, process_info.hThread
+            if not restored:
+                raise OSError("child handle restore failed")
             if not api.AssignProcessToJobObject(job, process_handle):
                 raise OSError("job assignment failed")
             if api.ResumeThread(thread_handle) == 0xFFFFFFFF:
                 raise OSError("thread resume failed")
-            api.CloseHandle(thread_handle)
+            if not api.CloseHandle(thread_handle):
+                raise OSError("thread handle close failed")
             thread_handle = 0
             for handle_name in ("stdin_read", "stdout_write", "stderr_write"):
                 handle = locals()[handle_name]
-                api.CloseHandle(handle)
+                if not api.CloseHandle(handle):
+                    raise OSError("child handle close failed")
                 if handle_name == "stdin_read":
                     stdin_read = 0
                 elif handle_name == "stdout_write":

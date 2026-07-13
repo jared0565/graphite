@@ -691,6 +691,83 @@ def test_probe_transport_cleans_process_tree_after_success(monkeypatch: pytest.M
     assert cleaned == [123]
 
 
+@pytest.mark.parametrize("failed_start", [1, 2, 3])
+def test_probe_transport_thread_start_failure_cleans_every_resource(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failed_start: int,
+) -> None:
+    import graphite.probe_process as transport
+
+    class Pipe:
+        closed = False
+        def read(self, size: int) -> bytes: return b""
+        def close(self) -> None: self.closed = True
+    class Process:
+        pid = 123
+        returncode = None
+        stdin, stdout, stderr = Pipe(), Pipe(), Pipe()
+        terminated = False
+        handles_closed = False
+        def poll(self) -> None: return None
+        def wait(self, timeout: float) -> int: raise subprocess.TimeoutExpired("fake", timeout)
+        def kill(self) -> None: self.returncode = -9
+        def terminate_tree(self) -> bool:
+            self.terminated = True
+            self.returncode = -9
+            return True
+        def close_handles(self) -> bool:
+            self.handles_closed = True
+            return True
+    process = Process()
+    real_thread = transport.threading.Thread
+    starts = 0
+    class FailingThread(real_thread):
+        def start(self) -> None:
+            nonlocal starts
+            starts += 1
+            if starts == failed_start:
+                raise RuntimeError("injected thread start failure")
+            super().start()
+    monkeypatch.setattr(transport, "_launch_process", lambda *args, **kwargs: process)
+    monkeypatch.setattr(transport.threading, "Thread", FailingThread)
+
+    with pytest.raises(transport.ProbeProcessError) as exc_info:
+        transport.run_bounded_process(["python"], cwd=tmp_path, timeout_seconds=1)
+
+    assert exc_info.value.code == "io_failed"
+    assert process.terminated and process.handles_closed
+    assert all(pipe.closed for pipe in (process.stdin, process.stdout, process.stderr))
+
+
+@pytest.mark.parametrize("failure", ["terminate", "close"])
+def test_probe_transport_cleanup_failure_never_returns_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    import graphite.probe_process as transport
+
+    class Pipe:
+        def read(self, size: int) -> bytes: return b""
+        def close(self) -> None: pass
+    class Process:
+        pid = 123
+        returncode = 0
+        stdin = None
+        stdout, stderr = Pipe(), Pipe()
+        def wait(self, timeout: float) -> int: return 0
+        def kill(self) -> bool: return False
+        def terminate_tree(self) -> bool: return failure != "terminate"
+        def close_handles(self) -> bool: return failure != "close"
+    monkeypatch.setattr(transport, "_launch_process", lambda *args, **kwargs: Process())
+
+    with pytest.raises(transport.ProbeProcessError) as exc_info:
+        transport.run_bounded_process(["python"], cwd=tmp_path, timeout_seconds=1)
+
+    assert exc_info.value.code == "cleanup_failed"
+
+
 def test_probe_transport_accepts_small_input(tmp_path: Path) -> None:
     from graphite.probe_process import run_bounded_process
 
@@ -718,9 +795,32 @@ def test_probe_transport_can_return_a_bounded_nonzero_result_when_requested(tmp_
 def _pid_exists(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-    except OSError:
+    except ProcessLookupError:
         return False
+    except (PermissionError, OSError):
+        return True
     return True
+
+
+def _process_identity_exited(pid: int) -> bool:
+    if os.name != "nt":
+        return not _pid_exists(pid)
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x00100000, False, pid)
+    if not handle:
+        return ctypes.get_last_error() == 87
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == 0
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def test_deep_bounded_runner_terminates_descendant_tree(tmp_path: Path) -> None:
@@ -735,28 +835,49 @@ def test_deep_bounded_runner_terminates_descendant_tree(tmp_path: Path) -> None:
         "time.sleep(10)"
     )
     errors: queue.Queue[ProbeProcessError] = queue.Queue()
+    transport_timeout = 2.0
     def run() -> None:
         try:
-            run_bounded_process([sys.executable, "-c", parent], cwd=tmp_path, timeout_seconds=1)
+            run_bounded_process([sys.executable, "-c", parent], cwd=tmp_path, timeout_seconds=transport_timeout)
         except ProbeProcessError as error:
             errors.put(error)
     runner = threading.Thread(target=run)
     runner.start()
-    ready_deadline = time.monotonic() + 0.8
+    ready_deadline = time.monotonic() + transport_timeout * 0.75
     while not pid_file.exists() and time.monotonic() < ready_deadline:
         time.sleep(0.01)
     assert pid_file.exists(), "parent did not publish descendant PID before its bounded deadline"
-    runner.join(1.5)
+    pid = int(pid_file.read_text(encoding="utf-8"))
+    retained_handle = None
+    kernel32 = None
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        retained_handle = kernel32.OpenProcess(0x00100000, False, pid)
+        assert retained_handle
+    runner.join(transport_timeout + 0.5)
     assert not runner.is_alive()
     assert errors.get_nowait().code == "timeout"
-    pid = int(pid_file.read_text(encoding="utf-8"))
+    if retained_handle is not None and kernel32 is not None:
+        try:
+            assert kernel32.WaitForSingleObject(retained_handle, 1000) == 0
+        finally:
+            kernel32.CloseHandle(retained_handle)
+        return
     try:
         deadline = time.monotonic() + 1
-        while _pid_exists(pid) and time.monotonic() < deadline:
+        while not _process_identity_exited(pid) and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert not _pid_exists(pid)
+        assert _process_identity_exited(pid)
     finally:
-        if _pid_exists(pid):
+        if os.name != "nt" and _pid_exists(pid):
             try:
                 os.kill(pid, signal.SIGTERM)
             except OSError:
@@ -782,11 +903,11 @@ def test_deep_bounded_runner_kills_descendant_after_leader_exits(tmp_path: Path,
     pid = int(pid_file.read_text(encoding="utf-8"))
     try:
         deadline = time.monotonic() + 1
-        while _pid_exists(pid) and time.monotonic() < deadline:
+        while not _process_identity_exited(pid) and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert not _pid_exists(pid)
+        assert _process_identity_exited(pid)
     finally:
-        if _pid_exists(pid):
+        if os.name != "nt" and _pid_exists(pid):
             try:
                 os.kill(pid, signal.SIGTERM)
             except OSError:
@@ -817,7 +938,7 @@ def test_windows_contract_builders_import_without_msvcrt(tmp_path: Path) -> None
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows native launcher contract")
-@pytest.mark.parametrize("failure", ["job_create", "job_configure", "pipe", "pipe_configure", "attribute_init", "attribute_update", "process_create", "assign", "resume", "file_wrap"])
+@pytest.mark.parametrize("failure", ["job_create", "job_configure", "pipe", "pipe_configure", "attribute_init", "attribute_update", "child_configure", "child_restore", "process_create", "assign", "resume", "file_wrap"])
 def test_windows_job_launch_failures_close_each_owned_handle_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -837,12 +958,16 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
             self.launch_contract: dict[str, object] = {}
             self.handle_list: tuple[int, ...] = ()
             self.environment_block = ""
+            self.handle_flags: list[tuple[int, int]] = []
+            self.legacy_acquired = threading.Event()
+            self.legacy_thread: threading.Thread | None = None
 
         def CreateJobObjectW(self, security: object, name: object) -> int:
             return 0 if failure == "job_create" else 1
         def SetInformationJobObject(self, *args: object) -> bool:
             return failure != "job_configure"
         def CreatePipe(self, read: object, write: object, security: object, size: int) -> bool:
+            assert not security._obj.bInheritHandle  # type: ignore[attr-defined]
             self.pipe_calls += 1
             if failure == "pipe" and self.pipe_calls == 2:
                 return False
@@ -851,7 +976,14 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
             self.created.extend((self.next_handle, self.next_handle + 1))
             self.next_handle += 2
             return True
-        def SetHandleInformation(self, *args: object) -> bool: return failure != "pipe_configure"
+        def SetHandleInformation(self, handle: int, mask: int, flags: int) -> bool:
+            self.handle_flags.append((handle, flags))
+            child_enables = [entry for entry in self.handle_flags if entry[1] == 1]
+            if failure == "child_configure" and flags == 1 and len(child_enables) == 2:
+                return False
+            if failure == "child_restore" and flags == 0 and child_enables and handle == 13:
+                return False
+            return failure != "pipe_configure"
         def InitializeProcThreadAttributeList(self, pointer: object, count: int, flags: int, size: object) -> bool:
             if pointer is None:
                 size._obj.value = 128  # type: ignore[attr-defined]
@@ -878,6 +1010,13 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
                 "cwd": args[7],
                 "stdio": (startup.hStdInput, startup.hStdOutput, startup.hStdError),
             }
+            if failure == "resume":
+                def legacy_launch() -> None:
+                    with native.WINDOWS_PROCESS_CREATION_LOCK:
+                        self.legacy_acquired.set()
+                self.legacy_thread = threading.Thread(target=legacy_launch)
+                self.legacy_thread.start()
+                assert not self.legacy_acquired.wait(0.02)
             if failure == "process_create":
                 return False
             info = args[-1]._obj  # type: ignore[attr-defined]
@@ -929,10 +1068,16 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
         }
         assert api.handle_list == (10, 13, 15)
         assert api.environment_block == "A=1\0\0"
+        assert api.handle_flags[-6:] == [(10, 1), (13, 1), (15, 1), (10, 0), (13, 0), (15, 0)]
+        assert api.legacy_acquired.wait(1)
+        assert api.legacy_thread is not None
+        api.legacy_thread.join(1)
     if failure in {"process_create", "assign", "resume"}:
         assert api.terminated == [1]
-    if failure in {"assign", "resume", "file_wrap"}:
+    if failure in {"child_restore", "assign", "resume", "file_wrap"}:
         assert api.terminated_processes == [30]
+    if failure == "child_configure":
+        assert api.handle_flags[-3:] == [(10, 1), (13, 1), (10, 0)]
 
 
 def test_cancel_synchronous_io_preserves_pointer_width_and_closes_handle(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1065,6 +1210,60 @@ def test_windows_native_launcher_does_not_inherit_unrelated_inheritable_handle(t
         os.close(write_fd)
 
     assert result.stdout.strip() == b"0"
+
+
+def test_windows_job_process_is_idempotent_and_preserves_unsigned_exit_status() -> None:
+    import ctypes
+    import graphite.windows_job as native
+
+    calls: list[tuple[str, int]] = []
+    class API:
+        def GetExitCodeProcess(self, handle: int, code: object) -> bool:
+            calls.append(("poll", handle))
+            ctypes.cast(code, ctypes.POINTER(native.wintypes.DWORD)).contents.value = 0xFFFFFFFE
+            return True
+        def WaitForSingleObject(self, handle: int, timeout: int) -> int: return native.WAIT_OBJECT_0
+        def TerminateJobObject(self, handle: int, code: int) -> bool:
+            calls.append(("kill", handle))
+            return True
+        def CloseHandle(self, handle: int) -> bool:
+            calls.append(("close", handle))
+            return True
+    pipe = type("Pipe", (), {})()
+    process = native.JobProcess(API(), 0x1_0000_0002, 0x1_0000_0001, 7, None, pipe, pipe)
+
+    assert process.poll() == 0xFFFFFFFE
+    assert process.poll() == 0xFFFFFFFE
+    assert process.wait(0) == 0xFFFFFFFE
+    assert process.kill()
+    assert process.close_handles()
+    assert process.close_handles()
+    assert calls.count(("poll", 0x1_0000_0002)) == 1
+    assert calls.count(("close", 0x1_0000_0001)) == 1
+    assert calls.count(("close", 0x1_0000_0002)) == 1
+
+
+def test_posix_process_observes_before_cleanup_and_reaps_afterward(monkeypatch: pytest.MonkeyPatch) -> None:
+    import graphite.probe_process as transport
+
+    events: list[str] = []
+    leader = type("Leader", (), {"pid": 44, "stdin": None, "stdout": None, "stderr": None, "returncode": None})()
+    observed = type("WaitId", (), {"si_status": 0, "si_code": 1})()
+    monkeypatch.setattr(transport.os, "CLD_EXITED", 1, raising=False)
+    monkeypatch.setattr(transport.os, "P_PID", 1, raising=False)
+    monkeypatch.setattr(transport.os, "WEXITED", 1, raising=False)
+    monkeypatch.setattr(transport.os, "WNOHANG", 2, raising=False)
+    monkeypatch.setattr(transport.os, "WNOWAIT", 4, raising=False)
+    monkeypatch.setattr(transport.os, "waitid", lambda *args: events.append("observe") or observed, raising=False)
+    monkeypatch.setattr(transport.os, "waitpid", lambda *args: events.append("reap") or (44, 0), raising=False)
+    monkeypatch.setattr(transport.os, "waitstatus_to_exitcode", lambda status: 0, raising=False)
+    process = transport._PosixProcess(leader)  # type: ignore[arg-type]
+    assert process.wait(0) == 0
+    monkeypatch.setattr(transport, "_terminate_process_tree", lambda *args: events.append("contain") or True)
+
+    assert transport._cleanup_process_transport(process, [], [], time.monotonic() + 1)
+
+    assert events == ["observe", "contain", "reap"]
 
 
 def test_core_deep_probe_runs_real_pipeline_without_touching_selected_root(tmp_path: Path) -> None:
