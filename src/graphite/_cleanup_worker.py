@@ -367,8 +367,6 @@ class _NativeWindowsBackend:
                             entry.file_attributes,
                         )
                     )
-                    if len(result) >= _ENUMERATION_BATCH_SIZE:
-                        return result
                 if entry.next_entry_offset == 0:
                     break
                 if entry.next_entry_offset < _FileIdExtdDirectoryInformation.file_name.offset:

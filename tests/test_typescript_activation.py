@@ -1635,8 +1635,8 @@ class _FakeWindowsCleanupBackend:
     def entry_batch(self, handle):
         self.enumerated.append(handle)
         pending = self.pending[handle]
-        batch = pending[: cleanup_worker._ENUMERATION_BATCH_SIZE]
-        del pending[: len(batch)]
+        batch = list(pending)
+        pending.clear()
         self.entry_batch_calls.append(len(batch))
         return batch
 
@@ -1728,7 +1728,7 @@ def test_windows_cleanup_backend_rejects_high_64_bit_file_id_collision(tmp_path)
     assert backend.closed == [str(child), str(root)]
 
 
-def test_windows_cleanup_consumes_large_directory_in_bounded_batches(tmp_path):
+def test_windows_cleanup_consumes_every_entry_from_large_kernel_batch(tmp_path):
     root = tmp_path / "leased"
     total = cleanup_worker._ENUMERATION_BATCH_SIZE * 4 + 3
     entries = [
@@ -1746,10 +1746,9 @@ def test_windows_cleanup_consumes_large_directory_in_bounded_batches(tmp_path):
 
     cleanup_worker._delete_windows(root, (7, 100), backend)
 
-    assert len(backend.entry_batch_calls) > 2
-    assert max(backend.entry_batch_calls) <= cleanup_worker._ENUMERATION_BATCH_SIZE
-    assert backend.entry_batch_calls[-1] == 0
+    assert backend.entry_batch_calls == [total, 0]
     assert len(backend.deleted) == total + 1
+    assert len(set(backend.deleted)) == total + 1
 
 
 def test_native_windows_open_uses_reparse_safe_nondelete_sharing(tmp_path):
@@ -1937,6 +1936,75 @@ def test_native_windows_directory_batch_preserves_128_bit_entry_id():
     assert backend.entry_batch(123) == [
         cleanup_worker._WindowsEntry(name, expected_id, 0x20)
     ]
+
+
+def test_native_windows_directory_batch_returns_every_record_from_kernel_buffer(
+    monkeypatch,
+):
+    total = cleanup_worker._ENUMERATION_BATCH_SIZE + 17
+    expected = [
+        cleanup_worker._WindowsEntry(f"f{index:03}.txt", 1 << 96 | index, 0x20)
+        for index in range(total)
+    ]
+    calls = []
+
+    def write_records(buffer, records):
+        base = cleanup_worker.ctypes.addressof(buffer)
+        offset = 0
+        for index, record in enumerate(records):
+            encoded_name = record.name.encode("utf-16-le")
+            used = (
+                cleanup_worker._FileIdExtdDirectoryInformation.file_name.offset
+                + len(encoded_name)
+            )
+            record_size = (used + 7) & ~7
+            entry = cleanup_worker._FileIdExtdDirectoryInformation.from_address(
+                base + offset
+            )
+            entry.next_entry_offset = record_size if index + 1 < len(records) else 0
+            entry.file_attributes = record.attributes
+            entry.file_name_length = len(encoded_name)
+            for byte_index, value in enumerate(record.file_id.to_bytes(16, "little")):
+                entry.file_id[byte_index] = value
+            cleanup_worker.ctypes.memmove(
+                base
+                + offset
+                + cleanup_worker._FileIdExtdDirectoryInformation.file_name.offset,
+                encoded_name,
+                len(encoded_name),
+            )
+            offset += record_size
+
+    class FakeApi:
+        @staticmethod
+        def GetFileInformationByHandleEx(
+            _handle, information_class, buffer, _size
+        ):
+            calls.append(information_class)
+            if calls == [20]:
+                write_records(
+                    buffer,
+                    [cleanup_worker._WindowsEntry(".", 1, 0x10)],
+                )
+                return 1
+            if calls == [20, 19]:
+                write_records(buffer, expected)
+                return 1
+            assert information_class == 20
+            return 0
+
+    monkeypatch.setattr(cleanup_worker.ctypes, "get_last_error", lambda: 18)
+    backend = cleanup_worker._NativeWindowsBackend.__new__(
+        cleanup_worker._NativeWindowsBackend
+    )
+    backend._api = FakeApi()
+
+    returned = backend.entry_batch(123)
+
+    assert returned == expected
+    assert len({(entry.name, entry.file_id) for entry in returned}) == total
+    assert backend.entry_batch(123) == []
+    assert calls == [20, 19, 20]
 
 
 def test_posix_entry_batch_never_materializes_unbounded_directory(monkeypatch):
