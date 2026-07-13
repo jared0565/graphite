@@ -1,7 +1,7 @@
 # Interactive TypeScript Activation Design
 
 **Date:** 2026-07-13  
-**Status:** Draft — awaiting written-spec review
+**Status:** Approved — implementation planning
 
 ## Objective
 
