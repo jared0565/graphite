@@ -140,7 +140,6 @@ if (
     or expected_init.parent != trusted / "graphite"
     or expected_doctor.parent != trusted / "graphite"
     or expected_mcp.parent != trusted / "graphite"
-    or overlaps(trusted, selected)
 ):
     raise SystemExit(70)
 stdlib_path = list(sys.path)
@@ -167,6 +166,7 @@ sys.path[:] = [str(trusted), *stdlib_path]
 from graphite import doctor_probes
 if pathlib.Path(doctor_probes.__file__).resolve(strict=True) != expected_doctor:
     raise SystemExit(70)
+cached_payload = sys.stdin.buffer.read()
 raw_metadata_roots = json.loads(sys.argv[3])
 if not isinstance(raw_metadata_roots, list) or len(raw_metadata_roots) > 64:
     raise SystemExit(70)
@@ -183,12 +183,17 @@ for raw in raw_metadata_roots:
     if not canonical_candidate.is_dir():
         continue
     _, lexical, root = bind_path(raw, True)
+    if root == trusted:
+        continue
+    if overlaps(root, selected):
+        if any(doctor_probes.metadata.Distribution.discover(path=[str(lexical)])):
+            raise SystemExit(70)
+        continue
     normalized = os.path.normcase(str(root))
-    if overlaps(root, selected) or normalized in seen_roots:
+    if normalized in seen_roots:
         raise SystemExit(70)
     seen_roots.add(normalized)
     metadata_roots.append(lexical)
-cached_payload = sys.stdin.buffer.read()
 if cached_payload:
     manifest = json.loads(cached_payload.decode("utf-8"))
     manifest = doctor_probes._validate_mcp_manifest(manifest, selected)
@@ -257,9 +262,9 @@ if not isinstance(selected_raw, dict):
     raise SystemExit(70)
 selected = pathlib.Path(selected_raw.get("canonical", "."))
 _, selected = validate_binding(selected_raw, True, False)
-trusted_lexical, trusted = validate_binding(json.loads(sys.argv[1]), True)
-init_lexical, expected_graphite_init = validate_binding(json.loads(sys.argv[2]), False)
-mcp_lexical, expected_graphite_mcp = validate_binding(json.loads(sys.argv[3]), False)
+trusted_lexical, trusted = validate_binding(json.loads(sys.argv[1]), True, False)
+init_lexical, expected_graphite_init = validate_binding(json.loads(sys.argv[2]), False, False)
+mcp_lexical, expected_graphite_mcp = validate_binding(json.loads(sys.argv[3]), False, False)
 if (
     init_lexical != trusted_lexical / "graphite" / "__init__.py"
     or mcp_lexical != trusted_lexical / "graphite" / "mcp.py"

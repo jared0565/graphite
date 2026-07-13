@@ -2458,6 +2458,36 @@ def test_mcp_manifest_builder_never_imports_metadata_root_shadows(
         assert check.details == {"code": "probe_failed"}
 
 
+def test_mcp_manifest_builder_rejects_metadata_root_inside_selected_without_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import graphite.doctor_probes as probes
+
+    selected = tmp_path / "selected"
+    metadata_root = selected / "metadata-root"
+    metadata_root.mkdir(parents=True)
+    dist_info = metadata_root / "attacker-1.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: attacker\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
+    sentinel = tmp_path / "selected-metadata-shadow-executed.txt"
+    (metadata_root / "platform.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probes.sys, "path", [str(metadata_root), *probes.sys.path])
+
+    check = probes.probe_mcp(selected, timeout_seconds=20)
+
+    assert check.status == "degraded"
+    assert check.details == {"code": "probe_failed"}
+    assert not sentinel.exists()
+
+
 def test_mcp_bootstrap_rejects_manifest_files_inside_selected_root(tmp_path: Path) -> None:
     import graphite.doctor_probes as probes
     from graphite.probe_process import run_bounded_process
@@ -2968,6 +2998,18 @@ def test_mcp_deep_probe_real_server_ignores_project_import_shadows(tmp_path: Pat
 
     assert check.status == "ready"
     assert not sentinel.exists()
+
+
+def test_mcp_deep_probe_real_server_supports_trusted_source_inside_selected_repo() -> None:
+    import graphite.doctor_probes as probes
+
+    trusted_source = Path(probes.__file__).resolve(strict=True).parent.parent
+    selected_repo = trusted_source.parent
+
+    check = probes.probe_mcp(selected_repo, timeout_seconds=20)
+
+    assert check.status == "ready", check.details
+    assert check.details["server_name"] == "graphite"
 
 
 class _QueuedProbePipe:
