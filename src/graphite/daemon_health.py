@@ -4,13 +4,14 @@ from __future__ import annotations
 import json
 import platform
 import subprocess
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .daemon import read_daemon_status
+from .daemon import DaemonStatusTooLargeError, read_daemon_status
 from .windows_task import DEFAULT_TASK_NAME
 from .windows_startup import startup_status
 
@@ -76,14 +77,30 @@ def evaluate_daemon_health(
             startup={"checked": False},
             project_health={"failing": [], "pending": [], "not_built_recently": []},
         )
-    except (OSError, json.JSONDecodeError) as exc:
+    except DaemonStatusTooLargeError:
         return _finalize(
             base,
             status_path,
             current_time,
             status=None,
             status_age_seconds=None,
-            errors=[{"code": "status_unreadable", "message": str(exc)}],
+            errors=[{
+                "code": "status_too_large",
+                "message": "daemon status exceeds the maximum allowed size",
+            }],
+            warnings=[],
+            process={"checked": False},
+            startup={"checked": False},
+            project_health={"failing": [], "pending": [], "not_built_recently": []},
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _finalize(
+            base,
+            status_path,
+            current_time,
+            status=None,
+            status_age_seconds=None,
+            errors=[{"code": "status_unreadable", "message": "daemon status is unreadable"}],
             warnings=[],
             process={"checked": False},
             startup={"checked": False},
@@ -299,7 +316,7 @@ def _bounded_clean_string(value: object, limit: int, *, nullable: bool) -> bool:
     return (
         isinstance(value, str)
         and len(value) <= limit
-        and all(ord(character) >= 32 and ord(character) != 127 for character in value)
+        and all(unicodedata.category(character) not in {"Cc", "Cf"} for character in value)
     )
 
 
@@ -319,8 +336,11 @@ def _safe_text(value: object) -> str:
             escaped.append("\\r")
         elif character == "\t":
             escaped.append("\\t")
-        elif codepoint < 32 or codepoint == 127:
-            escaped.append(f"\\x{codepoint:02x}")
+        elif unicodedata.category(character) in {"Cc", "Cf"}:
+            if codepoint <= 0xFFFF:
+                escaped.append(f"\\u{codepoint:04x}")
+            else:
+                escaped.append(f"\\U{codepoint:08x}")
         else:
             escaped.append(character)
     if len(raw) > _MAX_TEXT_FIELD_LENGTH:
@@ -357,7 +377,11 @@ def _normalize_status(
             "truncated_count": 0,
         }
 
-    status = dict(raw_status)
+    status = {
+        "status": raw_status.get("status"),
+        "updated_at": raw_status.get("updated_at"),
+        "project_count": raw_status.get("project_count"),
+    }
     issues: list[dict[str, Any]] = []
     raw_projects = raw_status.get("projects")
     valid_projects: list[dict[str, Any]] = []
@@ -380,7 +404,15 @@ def _normalize_status(
                 if len(issues) < _MAX_SCHEMA_ISSUES:
                     issues.append(_schema_issue(invalid_field, index))
                 continue
-            valid_projects.append(dict(item))
+            valid_projects.append({
+                "root": item["root"],
+                "file_count": item["file_count"],
+                "build_count": item["build_count"],
+                "failure_count": item["failure_count"],
+                "last_error": item["last_error"],
+                "last_success_at": item["last_success_at"],
+                "needs_initial_build": item["needs_initial_build"],
+            })
         if truncated_count:
             issues.insert(0, {
                 "code": "status_truncated",
@@ -403,6 +435,12 @@ def _normalize_status(
         if len(issues) < _MAX_SCHEMA_ISSUES:
             issues.append(_schema_issue("status"))
         status["status"] = None
+
+    raw_updated_at = raw_status.get("updated_at")
+    if not _bounded_clean_string(raw_updated_at, _MAX_TIMESTAMP_LENGTH, nullable=False):
+        if len(issues) < _MAX_SCHEMA_ISSUES:
+            issues.append(_schema_issue("updated_at"))
+        status["updated_at"] = None
 
     status["projects"] = valid_projects
     return status, issues[:_MAX_REPORT_ISSUES], {

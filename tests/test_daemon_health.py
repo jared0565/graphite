@@ -8,7 +8,15 @@ from pathlib import Path
 import pytest
 
 from graphite.cli import main
-from graphite.daemon_health import HealthOptions, evaluate_daemon_health, format_health_text
+from graphite.daemon import read_daemon_status
+from graphite.daemon_health import (
+    HealthOptions,
+    _normalize_status,
+    evaluate_daemon_health,
+    format_health_text,
+)
+
+MAX_DAEMON_STATUS_BYTES = 4 * 1024 * 1024
 
 
 def _write_status(base: Path, payload: object) -> None:
@@ -540,3 +548,140 @@ def test_daemon_health_text_escapes_control_characters_from_daemon_status(tmp_pa
 
     assert "bad\\nFORGED\\tLINE" in text
     assert "bad\nFORGED" not in text
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+def test_daemon_health_rejects_oversized_status_before_json_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sparse: bool,
+) -> None:
+    state = tmp_path / ".graphite-daemon"
+    state.mkdir()
+    status_path = state / "status.json"
+    with status_path.open("wb") as stream:
+        if sparse:
+            stream.truncate(MAX_DAEMON_STATUS_BYTES + 1)
+        else:
+            stream.write(b"X" * (MAX_DAEMON_STATUS_BYTES + 1))
+    monkeypatch.setattr(
+        "graphite.daemon.json.loads",
+        lambda value: (_ for _ in ()).throw(AssertionError("oversized status must not parse")),
+    )
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+
+    assert [issue["code"] for issue in report["errors"]] == ["status_too_large"]
+    assert str(status_path) not in json.dumps(report)
+
+
+def test_daemon_status_stream_requests_at_most_limit_plus_one() -> None:
+    class RecordingStream:
+        def __init__(self) -> None:
+            self.requests: list[int] = []
+
+        def read(self, size: int = -1) -> bytes:
+            self.requests.append(size)
+            return b"X" * (MAX_DAEMON_STATUS_BYTES + 1 if size < 0 else size)
+
+        def __enter__(self) -> RecordingStream:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    stream = RecordingStream()
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr("builtins.open", lambda *args, **kwargs: stream)
+        with pytest.raises((OSError, json.JSONDecodeError)):
+            read_daemon_status(Path("."))
+    assert stream.requests == [MAX_DAEMON_STATUS_BYTES + 1]
+
+
+def test_daemon_health_accepts_exact_limit_utf8_and_rejects_exact_limit_malformed(tmp_path: Path) -> None:
+    base_payload = _status("2026-06-23T12:00:00+00:00")
+    prefix = json.dumps(base_payload, ensure_ascii=False)[:-1] + ',"padding":"'
+    suffix = 'é"}'
+    padding_bytes = MAX_DAEMON_STATUS_BYTES - len(prefix.encode()) - len(suffix.encode())
+    assert padding_bytes >= 0
+    valid = (prefix + ("a" * padding_bytes) + suffix).encode("utf-8")
+    assert len(valid) == MAX_DAEMON_STATUS_BYTES
+    state = tmp_path / ".graphite-daemon"
+    state.mkdir()
+    status_path = state / "status.json"
+    status_path.write_bytes(valid)
+
+    valid_report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+    assert not any(issue["code"] in {"status_too_large", "status_unreadable"} for issue in valid_report["errors"])
+
+    status_path.write_bytes(b"{" + (b" " * (MAX_DAEMON_STATUS_BYTES - 1)))
+    malformed_report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+    assert [issue["code"] for issue in malformed_report["errors"]] == ["status_unreadable"]
+
+
+def test_daemon_health_rejects_invalid_utf8_at_multibyte_boundary(tmp_path: Path) -> None:
+    state = tmp_path / ".graphite-daemon"
+    state.mkdir()
+    (state / "status.json").write_bytes(b'{}' + (b" " * 10) + b"\xe2\x82")
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+
+    assert [issue["code"] for issue in report["errors"]] == ["status_unreadable"]
+
+
+@pytest.mark.parametrize("spoof", ["\u009b", "\u202e", "\u2066"])
+@pytest.mark.parametrize("field", ["root", "last_error", "last_success_at"])
+def test_daemon_health_rejects_unicode_control_and_format_project_strings(
+    tmp_path: Path,
+    spoof: str,
+    field: str,
+) -> None:
+    project = _project("F:/Projects/safe")
+    project[field] = f"safe{spoof}forged"
+    _write_status(tmp_path, _status("2026-06-23T12:00:00+00:00", projects=[project]))
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+
+    assert any(issue.get("field") == field for issue in report["errors"])
+    assert "forged" not in json.dumps(report)
+
+
+def test_daemon_health_text_escapes_unicode_terminal_spoofing(tmp_path: Path) -> None:
+    spoofed = "bad\u009bCSI\u202eRTL\u2066ISOLATE"
+    _write_status(tmp_path, _status("2026-06-23T12:00:00+00:00", status=spoofed))
+
+    text = format_health_text(evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    ))
+
+    assert "\\u009b" in text and "\\u202e" in text and "\\u2066" in text
+    assert "\u009b" not in text and "\u202e" not in text and "\u2066" not in text
+
+
+def test_daemon_status_normalization_whitelists_known_fields_only() -> None:
+    secret = "UNKNOWN-SECRET-" + ("X" * 10_000)
+    raw = _status("2026-06-23T12:00:00+00:00")
+    raw["unknown_blob"] = secret
+    raw["projects"][0]["unknown_blob"] = secret
+
+    normalized, _, _ = _normalize_status(raw)
+
+    assert "unknown_blob" not in normalized
+    assert "unknown_blob" not in normalized["projects"][0]
+    assert secret not in json.dumps(normalized)

@@ -28,6 +28,12 @@ PROJECT_MARKERS: tuple[str, ...] = (
     "next.config.mjs",
 )
 
+MAX_DAEMON_STATUS_BYTES = 4 * 1024 * 1024
+
+
+class DaemonStatusTooLargeError(OSError):
+    """Raised when a daemon status snapshot exceeds the parsing limit."""
+
 DISCOVERY_SKIP_DIRS: frozenset[str] = frozenset({
     ".cache",
     ".git",
@@ -360,8 +366,11 @@ def _write_status(state_dir: Path, base: Path, states: dict[Path, ProjectRuntime
 def read_daemon_status(base: Path, state_dir: Path | None = None) -> dict[str, object]:
     base = base.resolve()
     path = (state_dir or (base / ".graphite-daemon")) / "status.json"
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    with open(path, "rb") as f:
+        payload = f.read(MAX_DAEMON_STATUS_BYTES + 1)
+    if len(payload) > MAX_DAEMON_STATUS_BYTES:
+        raise DaemonStatusTooLargeError("daemon status exceeds size limit")
+    return json.loads(payload.decode("utf-8", errors="strict"))
 
 
 def _record_build_result(state: ProjectRuntime, change: WatchChange, result: BuildResult) -> None:
@@ -474,7 +483,6 @@ def run_daemon(
             logger.event("daemon_stop", reason="max_cycles", cycle=cycle)
             return last_status
         sleep(options.scan_interval_seconds)
-
 
 
 
