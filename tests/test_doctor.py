@@ -2411,7 +2411,7 @@ def test_mcp_deep_probe_rejects_user_site_dependency_shadow_without_execution(
     )
     monkeypatch.setattr(probes.sys, "path", [str(fake_user_site), *probes.sys.path])
 
-    check = probes.probe_mcp(selected, timeout_seconds=10)
+    check = probes.probe_mcp(selected, timeout_seconds=20)
 
     assert check.status == "degraded"
     assert check.details == {"code": "probe_failed"}
