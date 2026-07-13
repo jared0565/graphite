@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import graphite.dependency_install as dependency_install
+import graphite.ingest as ingest
 import graphite.typescript_activation as typescript_activation
 
 from graphite.config import Config
@@ -1168,11 +1169,23 @@ def test_evidence_scan_reads_no_file_contents_or_hashes(tmp_path, monkeypatch):
     root = tmp_path / "repo"
     root.mkdir()
     (root / "source.tsx").write_text("content must not be read", encoding="utf-8")
+    original_open = typescript_activation.os.open
+    directory_flag = getattr(typescript_activation.os, "O_DIRECTORY", 0)
 
-    def content_open_forbidden(*_args, **_kwargs):
-        raise AssertionError("evidence collection must be metadata-only")
+    def directory_only_open(path, flags, *args, **kwargs):
+        if directory_flag and flags & directory_flag:
+            return original_open(path, flags, *args, **kwargs)
+        raise AssertionError("evidence file content was opened")
 
-    monkeypatch.setattr(typescript_activation.os, "open", content_open_forbidden)
+    def content_read_forbidden(*_args, **_kwargs):
+        raise AssertionError("evidence file content was read")
+
+    def content_hash_forbidden(*_args, **_kwargs):
+        raise AssertionError("evidence file content was hashed")
+
+    monkeypatch.setattr(typescript_activation.os, "open", directory_only_open)
+    monkeypatch.setattr(typescript_activation.os, "read", content_read_forbidden)
+    monkeypatch.setattr(ingest, "file_hash", content_hash_forbidden)
 
     detection = _detect(root, available=True)
 
@@ -1503,17 +1516,29 @@ def test_available_compiler_performs_no_package_control_inspection(
 ):
     root = _activation_root(tmp_path)
     original_root_file_state = typescript_activation._root_file_state
+    original_open = typescript_activation.os.open
+    directory_flag = getattr(typescript_activation.os, "O_DIRECTORY", 0)
 
     def guard_root_file_state(selected_root, relative_path, **kwargs):
         if relative_path != "tsconfig.json":
             raise AssertionError(f"package control inspected: {relative_path}")
         return original_root_file_state(selected_root, relative_path, **kwargs)
 
-    def content_open_forbidden(*_args, **_kwargs):
-        raise AssertionError("package control opened")
+    def directory_only_open(path, flags, *args, **kwargs):
+        if directory_flag and flags & directory_flag:
+            return original_open(path, flags, *args, **kwargs)
+        raise AssertionError("package control content opened")
+
+    def stable_control_read_forbidden(*_args, **_kwargs):
+        raise AssertionError("package control content read")
 
     monkeypatch.setattr(typescript_activation, "_root_file_state", guard_root_file_state)
-    monkeypatch.setattr(typescript_activation.os, "open", content_open_forbidden)
+    monkeypatch.setattr(typescript_activation.os, "open", directory_only_open)
+    monkeypatch.setattr(
+        typescript_activation,
+        "_read_stable_control_file",
+        stable_control_read_forbidden,
+    )
 
     detection = _detect(root, available=True)
 
