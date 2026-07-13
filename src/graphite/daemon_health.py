@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .daemon import DaemonStatusTooLargeError, read_daemon_status
+from .daemon import DaemonStatusInvalidError, DaemonStatusTooLargeError, read_daemon_status
 from .windows_task import DEFAULT_TASK_NAME
 from .windows_startup import startup_status
 
@@ -93,7 +93,7 @@ def evaluate_daemon_health(
             startup={"checked": False},
             project_health={"failing": [], "pending": [], "not_built_recently": []},
         )
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, DaemonStatusInvalidError):
         return _finalize(
             base,
             status_path,

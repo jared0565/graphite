@@ -641,6 +641,42 @@ def test_daemon_health_rejects_invalid_utf8_at_multibyte_boundary(tmp_path: Path
     assert [issue["code"] for issue in report["errors"]] == ["status_unreadable"]
 
 
+def test_daemon_health_handles_json_integer_digit_limit_as_unreadable(tmp_path: Path) -> None:
+    oversized_integer = "9" * 5_000
+    state = tmp_path / ".graphite-daemon"
+    state.mkdir()
+    (state / "status.json").write_text(
+        '{"untrusted_integer":' + oversized_integer + "}",
+        encoding="utf-8",
+    )
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+    )
+
+    assert [issue["code"] for issue in report["errors"]] == ["status_unreadable"]
+    assert report["errors"][0]["message"] == "daemon status is unreadable"
+    assert oversized_integer not in json.dumps(report)
+
+
+def test_daemon_health_does_not_hide_downstream_value_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_status(tmp_path, _status("2026-06-23T12:00:00+00:00"))
+    monkeypatch.setattr(
+        "graphite.daemon_health._normalize_status",
+        lambda value: (_ for _ in ()).throw(ValueError("programmer error")),
+    )
+
+    with pytest.raises(ValueError, match="programmer error"):
+        evaluate_daemon_health(
+            tmp_path,
+            options=HealthOptions(require_process=False, require_startup=False),
+        )
+
+
 @pytest.mark.parametrize("spoof", ["\u009b", "\u202e", "\u2066"])
 @pytest.mark.parametrize("field", ["root", "last_error", "last_success_at"])
 def test_daemon_health_rejects_unicode_control_and_format_project_strings(

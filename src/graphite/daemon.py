@@ -34,6 +34,11 @@ MAX_DAEMON_STATUS_BYTES = 4 * 1024 * 1024
 class DaemonStatusTooLargeError(OSError):
     """Raised when a daemon status snapshot exceeds the parsing limit."""
 
+
+class DaemonStatusInvalidError(ValueError):
+    """Raised when a bounded daemon status snapshot cannot be parsed safely."""
+
+
 DISCOVERY_SKIP_DIRS: frozenset[str] = frozenset({
     ".cache",
     ".git",
@@ -370,7 +375,13 @@ def read_daemon_status(base: Path, state_dir: Path | None = None) -> dict[str, o
         payload = f.read(MAX_DAEMON_STATUS_BYTES + 1)
     if len(payload) > MAX_DAEMON_STATUS_BYTES:
         raise DaemonStatusTooLargeError("daemon status exceeds size limit")
-    return json.loads(payload.decode("utf-8", errors="strict"))
+    decoded = payload.decode("utf-8", errors="strict")
+    try:
+        return json.loads(decoded)
+    except json.JSONDecodeError:
+        raise
+    except ValueError:
+        raise DaemonStatusInvalidError("daemon status is invalid") from None
 
 
 def _record_build_result(state: ProjectRuntime, change: WatchChange, result: BuildResult) -> None:
@@ -483,6 +494,4 @@ def run_daemon(
             logger.event("daemon_stop", reason="max_cycles", cycle=cycle)
             return last_status
         sleep(options.scan_interval_seconds)
-
-
 
