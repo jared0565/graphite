@@ -638,6 +638,50 @@ def test_daemon_preserves_global_health_failures(
     assert "RAW" not in json.dumps(result.to_dict())
 
 
+def test_daemon_treats_permission_limited_process_observation_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "selected"
+    root.mkdir()
+    monkeypatch.setattr(
+        "graphite.doctor.read_daemon_status",
+        lambda *a, **k: {
+            "projects": [{"root": str(root), "build_count": 1, "last_error": None}]
+        },
+    )
+    monkeypatch.setattr(
+        "graphite.doctor.evaluate_daemon_health",
+        lambda *a, **k: {
+            "ok": True,
+            "status": "warning",
+            "daemon_status": "ok",
+            "errors": [],
+            "warnings": [
+                {
+                    "code": "daemon_process_check_unavailable",
+                    "message": "RAW C:/secret",
+                }
+            ],
+            "process": {
+                "checked": True,
+                "running": False,
+                "error": "RAW C:/secret",
+            },
+            "startup": {"checked": True},
+            "projects": {"failing": [], "pending": [], "not_built_recently": []},
+        },
+    )
+
+    result = check_daemon(root, tmp_path)
+
+    assert result.status == "ready"
+    assert result.details["process_running"] is False
+    assert result.details["process_observation_available"] is False
+    assert result.details["global_warning_count"] == 0
+    assert "RAW" not in json.dumps(result.to_dict())
+
+
 def test_deep_probe_result_is_immutable_and_error_is_safe() -> None:
     from graphite.probe_process import ProbeProcessError, ProbeProcessResult
 

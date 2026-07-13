@@ -156,7 +156,12 @@ def evaluate_daemon_health(
     if opts.require_process:
         checker = process_checker or check_daemon_process
         process = checker(base)
-        if not process.get("running"):
+        if process.get("error"):
+            warnings.append({
+                "code": "daemon_process_check_unavailable",
+                "message": "Graphite daemon process observation is unavailable",
+            })
+        elif not process.get("running"):
             errors.append({"code": "daemon_process_not_running", "message": "Graphite daemon process is not running"})
 
     startup = {"checked": False}

@@ -192,6 +192,8 @@ graphite daemon-health F:/Projects --fail-on-error
 
 Health checks include status age, daemon process presence, startup launcher installation, failing projects, pending initial builds, and projects that have not built successfully within the configured age window.
 
+On Windows, process enumeration may require elevated CIM access. If the operating system denies that read-only observation, daemon health reports `daemon_process_check_unavailable` as a warning rather than claiming the daemon is stopped. Fresh status updates and selected-project health remain usable; run the same health command from an elevated shell when a definitive process-presence check is required.
+
 
 ## AI platform initialization
 

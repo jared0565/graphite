@@ -95,6 +95,35 @@ def test_daemon_health_reports_stale_status_and_missing_process(tmp_path: Path) 
     assert "daemon_process_not_running" in codes
 
 
+def test_daemon_health_warns_when_process_observation_is_unavailable(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 23, 12, 1, tzinfo=timezone.utc)
+    _write_status(tmp_path, _status("2026-06-23T12:00:30+00:00"))
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(
+            max_status_age_seconds=120,
+            max_project_success_age_seconds=3600,
+            require_startup=False,
+        ),
+        now=now,
+        process_checker=lambda base: {
+            "checked": True,
+            "supported": True,
+            "running": False,
+            "processes": [],
+            "error": "process observation denied",
+        },
+    )
+
+    assert report["ok"] is True
+    assert report["status"] == "warning"
+    assert report["summary"]["error_count"] == 0
+    assert {issue["code"] for issue in report["warnings"]} == {
+        "daemon_process_check_unavailable"
+    }
+
+
 def test_daemon_health_reports_failing_pending_and_old_projects(tmp_path: Path) -> None:
     now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
     projects = [
