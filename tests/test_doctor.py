@@ -802,8 +802,10 @@ def test_windows_job_environment_block_is_sorted_double_nul_and_rejects_nul() ->
 
 
 def test_windows_contract_builders_import_without_msvcrt(tmp_path: Path) -> None:
+    trusted_source = str((Path(__file__).resolve().parents[1] / "src").resolve())
     script = (
-        "import builtins; original=builtins.__import__;"
+        f"import sys;sys.path.insert(0,{trusted_source!r});"
+        "import builtins;original=builtins.__import__;"
         "builtins.__import__=lambda name,*a,**k: (_ for _ in ()).throw(ImportError('blocked')) "
         "if name=='msvcrt' else original(name,*a,**k);"
         "import graphite.process_contracts as contracts;"
