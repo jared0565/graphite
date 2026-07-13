@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -593,10 +594,89 @@ def test_deep_bounded_runner_handles_nonzero_and_held_descendant_pipe(tmp_path: 
     assert exc_info.value.code == "nonzero"
 
     held_pipe = "import subprocess,sys; subprocess.Popen([sys.executable,'-c','import time;time.sleep(5)'])"
+    threads_before = {thread.ident for thread in threading.enumerate()}
     started = time.monotonic()
     result = _run_bounded([sys.executable, "-c", held_pipe], cwd=tmp_path, timeout_seconds=2)
     assert result.returncode == 0
     assert time.monotonic() - started < 2
+    assert [thread for thread in threading.enumerate() if thread.ident not in threads_before] == []
+
+
+@pytest.mark.parametrize("timeout", [0, -1, math.nan, math.inf, -math.inf])
+def test_deep_bounded_runner_rejects_nonfinite_or_nonpositive_timeout(tmp_path: Path, timeout: float) -> None:
+    from graphite.doctor_probes import DoctorProbeError, _run_bounded
+
+    started = time.monotonic()
+    with pytest.raises(DoctorProbeError) as exc_info:
+        _run_bounded([sys.executable, "-c", "raise AssertionError('must not launch')"], cwd=tmp_path, timeout_seconds=timeout)
+    assert exc_info.value.code == "invalid_timeout"
+    assert time.monotonic() - started < 0.5
+
+
+def test_deep_bounded_runner_limits_stdin_and_times_out_nonreader(tmp_path: Path) -> None:
+    from graphite.doctor_probes import DoctorProbeError, _run_bounded
+
+    with pytest.raises(DoctorProbeError) as exc_info:
+        _run_bounded([sys.executable, "-c", "pass"], cwd=tmp_path, stdin=b"x" * (1024 * 1024 + 1), timeout_seconds=5)
+    assert exc_info.value.code == "input_limit"
+
+    started = time.monotonic()
+    with pytest.raises(DoctorProbeError) as exc_info:
+        _run_bounded(
+            [sys.executable, "-c", "import time;time.sleep(5)"],
+            cwd=tmp_path,
+            stdin=b"x" * (1024 * 1024),
+            timeout_seconds=0.25,
+        )
+    assert exc_info.value.code == "timeout"
+    assert time.monotonic() - started < 1.5
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def test_deep_bounded_runner_terminates_descendant_tree(tmp_path: Path) -> None:
+    from graphite.doctor_probes import DoctorProbeError, _run_bounded
+
+    pid_file = tmp_path / "descendant.pid"
+    child = "import time;time.sleep(10)"
+    parent = (
+        "import pathlib,subprocess,sys,time;"
+        f"p=subprocess.Popen([sys.executable,'-c',{child!r}]);"
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(p.pid));"
+        "time.sleep(10)"
+    )
+    with pytest.raises(DoctorProbeError) as exc_info:
+        _run_bounded([sys.executable, "-c", parent], cwd=tmp_path, timeout_seconds=0.5)
+    assert exc_info.value.code == "timeout"
+    pid = int(pid_file.read_text(encoding="utf-8"))
+    try:
+        deadline = time.monotonic() + 1
+        while _pid_exists(pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not _pid_exists(pid)
+    finally:
+        if _pid_exists(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+
+def test_deep_probe_taskkill_path_does_not_trust_ambient_systemroot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+
+    poisoned = tmp_path / "System32" / "taskkill.exe"
+    poisoned.parent.mkdir()
+    poisoned.write_bytes(b"not trusted")
+    monkeypatch.setenv("SystemRoot", str(tmp_path))
+    monkeypatch.setenv("WINDIR", str(tmp_path))
+    assert probes._trusted_taskkill() != poisoned.resolve()
 
 
 def test_core_deep_probe_runs_real_pipeline_without_touching_selected_root(tmp_path: Path) -> None:
@@ -616,6 +696,32 @@ def test_core_deep_probe_runs_real_pipeline_without_touching_selected_root(tmp_p
     assert set(check.details) == {"node_count", "edge_count", "duration_ms", "commands_completed"}
     assert before == after
     assert str(tmp_path) not in json.dumps(check.to_dict())
+
+
+def test_core_deep_probe_uses_exact_offline_command_contract(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    calls: list[tuple[list[str], Path]] = []
+    outputs = iter([
+        b"",
+        b'{"ok":true,"error_count":0,"errors":[],"node_count":2}',
+        b'{"node_count":2,"edge_count":1}',
+    ])
+    def run(argv: list[str], *, cwd: Path, **kwargs: object) -> object:
+        calls.append((argv, cwd))
+        return probes.ProbeProcessResult(0, next(outputs), b"", 0.01)
+    check = probes.probe_core_pipeline(selected, python_executable="PYTHON", _runner=run)
+    assert check.status == "ready"
+    work = calls[0][1]
+    repo, out, cache, graph = work / "repo", work / "out", work / "cache", work / "out" / "graph.json"
+    assert calls == [
+        (["PYTHON", "-B", "-m", "graphite", "--output-dir", str(out), "--cache-dir", str(cache), "--llm", "none", "build", str(repo)], work),
+        (["PYTHON", "-B", "-m", "graphite", "validate", "--graph-json", str(graph), "--json"], work),
+        (["PYTHON", "-B", "-m", "graphite", "query", "stats", "--graph-json", str(graph)], work),
+    ]
+    assert all("include-llm" not in argv for argv, _cwd in calls)
 
 
 @pytest.mark.parametrize(("failure_code", "expected_type"), [("timeout", "timeout"), ("output_limit", "output_limit"), ("nonzero", "process")])
@@ -647,6 +753,8 @@ def test_core_deep_probe_blocks_malformed_and_invalid_validation(tmp_path: Path)
 def test_core_deep_probe_rejects_temp_path_outside_os_temp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import graphite.doctor_probes as probes
 
+    selected = tmp_path / "selected"
+    selected.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
     class UnsafeTemporaryDirectory:
@@ -654,13 +762,88 @@ def test_core_deep_probe_rejects_temp_path_outside_os_temp(monkeypatch: pytest.M
         def __enter__(self) -> str: return str(outside)
         def __exit__(self, *args: object) -> None: pass
     check = probes.probe_core_pipeline(
-        tmp_path,
+        selected,
         _temp_factory=UnsafeTemporaryDirectory,
         _temp_root_resolver=lambda: tmp_path / "claimed-temp",
     )
     assert check.status == "blocked"
     assert check.details == {"error_type": "isolation", "code": "unsafe_temp_path"}
     assert list(outside.iterdir()) == []
+
+
+def test_core_deep_probe_rejects_work_overlapping_selected_before_writes(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    work = selected / "work"
+    work.mkdir()
+    class OverlappingTemporaryDirectory:
+        def __init__(self, **kwargs: object) -> None: pass
+        def __enter__(self) -> str: return str(work)
+        def __exit__(self, *args: object) -> None: pass
+    check = probes.probe_core_pipeline(
+        selected,
+        _temp_factory=OverlappingTemporaryDirectory,
+        _temp_root_resolver=lambda: tmp_path,
+    )
+    assert check.status == "blocked"
+    assert check.details == {"error_type": "isolation", "code": "overlapping_temp_path"}
+    assert list(work.iterdir()) == []
+
+
+@pytest.mark.parametrize("relationship", ["equal", "ancestor"])
+def test_core_deep_probe_rejects_selected_root_containing_temp_before_creation(tmp_path: Path, relationship: str) -> None:
+    import graphite.doctor_probes as probes
+
+    selected = tmp_path
+    temp_root = tmp_path if relationship == "equal" else tmp_path / "os-temp"
+    temp_root.mkdir(exist_ok=True)
+    created = False
+    def factory(**kwargs: object) -> object:
+        nonlocal created
+        created = True
+        raise AssertionError("temporary directory must not be created")
+    check = probes.probe_core_pipeline(selected, _temp_factory=factory, _temp_root_resolver=lambda: temp_root)
+    assert check.status == "blocked"
+    assert check.details == {"error_type": "isolation", "code": "selected_contains_temp"}
+    assert created is False
+
+
+def test_core_deep_probe_allows_selected_sibling_under_temp(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    real_factory = probes.tempfile.TemporaryDirectory
+    outputs = iter([b"", b'{"ok":true,"error_count":0,"errors":[],"node_count":2}', b'{"node_count":2,"edge_count":1}'])
+    def factory(**kwargs: object) -> object:
+        return real_factory(dir=tmp_path, **kwargs)
+    def run(*args: object, **kwargs: object) -> object:
+        return probes.ProbeProcessResult(0, next(outputs), b"", 0.01)
+    check = probes.probe_core_pipeline(selected, _runner=run, _temp_factory=factory, _temp_root_resolver=lambda: tmp_path)
+    assert check.status == "ready"
+    assert list(selected.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "validation",
+    [
+        {"ok": False, "valid": False, "error_count": 1, "errors": []},
+        {"ok": True, "error_count": 0, "errors": [{"code": "RAW"}], "node_count": 2},
+        {"ok": True, "error_count": 0, "errors": []},
+        {"ok": True, "error_count": 0, "errors": [], "node_count": 0},
+        {"ok": True, "error_count": 0, "errors": [], "node_count": "2"},
+    ],
+)
+def test_core_deep_probe_rejects_invalid_validation_contract(tmp_path: Path, validation: dict[str, object]) -> None:
+    import graphite.doctor_probes as probes
+
+    outputs = iter([b"", json.dumps(validation).encode(), b'{"node_count":2,"edge_count":1}'])
+    check = probes.probe_core_pipeline(tmp_path, _runner=lambda *a, **k: probes.ProbeProcessResult(0, next(outputs), b"", 0.01))
+    assert check.status == "blocked"
+    assert check.details == {"error_type": "validation", "code": "validation_failed"}
+    assert "RAW" not in json.dumps(check.to_dict())
 
 
 def test_core_deep_probe_cleans_temp_after_success_and_failure(tmp_path: Path) -> None:
