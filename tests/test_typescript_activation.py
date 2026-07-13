@@ -8,6 +8,7 @@ import pytest
 
 from graphite.dependency_install import (
     INSTALL_OUTPUT_LIMIT,
+    TRUSTED_REGISTRY,
     Manager,
     ProbeProcessError,
     TrustedCommand,
@@ -119,28 +120,98 @@ def test_parse_version_accepts_semver_suffix_and_outer_whitespace():
     assert parse_version(" v1.2.3-rc.1+build.7\n") == Version(1, 2, 3)
 
 
-def test_install_environment_is_exact_and_strips_credentials(tmp_path, monkeypatch):
-    monkeypatch.setenv("NPM_TOKEN", "secret")
+@pytest.mark.parametrize(
+    ("manager", "manager_environment"),
+    [
+        (
+            Manager.NPM,
+            {
+                "NPM_CONFIG_USERCONFIG": "npmrc",
+                "NPM_CONFIG_REGISTRY": TRUSTED_REGISTRY,
+                "NPM_CONFIG_IGNORE_SCRIPTS": "true",
+                "NPM_CONFIG_AUDIT": "false",
+                "NPM_CONFIG_FUND": "false",
+                "npm_config_registry": TRUSTED_REGISTRY,
+                "npm_config_ignore_scripts": "true",
+            },
+        ),
+        (
+            Manager.PNPM,
+            {
+                "NPM_CONFIG_USERCONFIG": "npmrc",
+                "NPM_CONFIG_REGISTRY": TRUSTED_REGISTRY,
+                "NPM_CONFIG_IGNORE_SCRIPTS": "true",
+                "NPM_CONFIG_AUDIT": "false",
+                "NPM_CONFIG_FUND": "false",
+                "npm_config_registry": TRUSTED_REGISTRY,
+                "npm_config_ignore_scripts": "true",
+            },
+        ),
+        (
+            Manager.YARN,
+            {
+                "YARN_NPM_REGISTRY_SERVER": TRUSTED_REGISTRY,
+                "YARN_ENABLE_SCRIPTS": "false",
+                "YARN_ENABLE_TELEMETRY": "0",
+                "YARN_GLOBAL_FOLDER": "yarn-global",
+            },
+        ),
+        (Manager.BUN, {"BUN_INSTALL_CACHE_DIR": "bun-cache"}),
+    ],
+)
+def test_install_environment_is_exact_for_each_manager(tmp_path, manager, manager_environment):
     source = {
         "SYSTEMROOT": r"C:\Windows",
         "LANG": "en_GB.UTF-8",
         "PATH": str(tmp_path / "repo-controlled"),
         "NPM_TOKEN": "secret",
         "NODE_AUTH_TOKEN": "secret",
+        "HTTP_PROXY": "http://secret",
         "HTTPS_PROXY": "http://secret",
+        "ALL_PROXY": "http://secret",
         "GRAPHITE_API_KEY": "secret",
+        "GRAPHITE_LLM_API_KEY": "secret",
+        "OPENAI_API_KEY": "secret",
     }
     tools = tmp_path / "tools"
     tools.mkdir()
     home = tmp_path / "isolated"
-    env = build_install_environment(Manager.NPM, home, (tools,), "https://registry.npmjs.org/", source)
-    assert env["PATH"].split(os.pathsep)[0] == str(tools.resolve())
+    base = home.resolve()
+    env = build_install_environment(manager, home, (tools,), TRUSTED_REGISTRY, source)
+    expected_path = [str(tools.resolve())]
+    expected_path.extend(
+        [str(Path(source["SYSTEMROOT"]) / "System32")] if os.name == "nt" else ["/usr/bin", "/bin"]
+    )
+    common = {
+        "SYSTEMROOT": source["SYSTEMROOT"],
+        "LANG": source["LANG"],
+        "PATH": os.pathsep.join(expected_path),
+        "HOME": str(base / "home"),
+        "USERPROFILE": str(base / "home"),
+        "XDG_CONFIG_HOME": str(base / "config"),
+        "XDG_CACHE_HOME": str(base / "cache"),
+        "TEMP": str(base / "tmp"),
+        "TMP": str(base / "tmp"),
+    }
+    expected_manager = {
+        key: str(base / value) if value in {"npmrc", "yarn-global", "bun-cache"} else value
+        for key, value in manager_environment.items()
+    }
+    assert env == common | expected_manager
     assert str(tmp_path / "repo-controlled") not in env["PATH"]
-    assert env["HOME"] == str((home / "home").resolve())
-    assert env["NPM_CONFIG_USERCONFIG"] == str((home / "npmrc").resolve())
-    assert env["NPM_CONFIG_REGISTRY"] == "https://registry.npmjs.org/"
-    assert env["npm_config_ignore_scripts"] == "true"
-    assert not ({"NPM_TOKEN", "NODE_AUTH_TOKEN", "HTTPS_PROXY", "GRAPHITE_API_KEY"} & env.keys())
+    assert not (
+        {
+            "NPM_TOKEN",
+            "NODE_AUTH_TOKEN",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "GRAPHITE_API_KEY",
+            "GRAPHITE_LLM_API_KEY",
+            "OPENAI_API_KEY",
+        }
+        & env.keys()
+    )
 
 
 def test_resolve_and_revalidate_external_executable(tmp_path):
@@ -163,6 +234,22 @@ def test_resolve_trusted_external_regular_file(tmp_path):
     inside = root / "package.json"
     _file(inside)
     assert resolve_trusted_file(inside, root, executable=False) is None
+
+
+def test_provenance_rejects_non_file_and_escaping_symlink(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    directory = tmp_path / "external-directory"
+    directory.mkdir()
+    assert resolve_trusted_file(directory, root, executable=False) is None
+    target = tmp_path / "external-tool"
+    _file(target)
+    link = root / "escaping-tool"
+    try:
+        link.symlink_to(target)
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+    assert resolve_trusted_file(link, root, executable=False) is None
 
 
 def test_windows_resolution_rejects_batch_and_builds_npm_node_prefix(tmp_path):
@@ -202,13 +289,34 @@ def test_snapshot_control_file_rejects_symlink_and_detects_content(tmp_path):
 @pytest.mark.parametrize(
     ("manifest", "lockfile", "expected"),
     [
-        (b'{"dependencies":{"x":"^1.0.0"},"devDependencies":{"typescript":"latest"}}', b'{"resolved":"https://registry.npmjs.org/x/-/x-1.0.0.tgz"}', True),
+        (b'{"dependencies":{"x":"^1.0.0"},"devDependencies":{"typescript":"latest"}}', b'{"lockfileVersion":3,"resolved":"https://registry.npmjs.org/x/-/x-1.0.0.tgz"}', True),
         (b'{"dependencies":{"x":"file:../x"}}', b"", False),
         (b'{"dependencies":{"x":"../x"}}', b"", False),
+        (b'{"dependencies":{"x":"./../outside"}}', b"", False),
+        (b'{"dependencies":{"x":"git@github.com:org/repo.git"}}', b"", False),
+        (b'{"dependencies":{"x":"org/repo"}}', b"", False),
+        (b'{"dependencies":{"x":"C:\\\\outside"}}', b"", False),
+        (b'{"dependencies":{"x":"\\\\\\\\server\\\\share"}}', b"", False),
         (b'{"workspaces":["packages/*"]}', b"", False),
-        (b'{"dependencies":{"x":"1.0.0"}}', b'{"resolved":"https://evil.example/x.tgz"}', False),
-        (b'{"dependencies":{"x":"1.0.0"}}', b'{"resolved":"https:\\/\\/evil.example/x.tgz"}', False),
-        (b'{"dependencies":{"x":"1.0.0"}}', b'{"resolved":"git+ssh://example/x"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"https://evil.example/x.tgz"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"https:\\/\\/evil.example/x.tgz"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"https\\u003a//evil.example/x.tgz"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', json.dumps({"lockfileVersion": 3, "resolved": r"https:\\evil.example\x"}).encode(), False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"git+ssh://example/x"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"git://example/x"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"ssh://example/x"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"file:../x"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"link:../x"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"local:../x"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"../x"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"{}", False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"lockfileVersion: '9.0'\npackages: {}\n", True),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"lockfileVersion: nope\npackages: {}\n", False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"# yarn lockfile v1\n\nx@1.0.0:\n  version \"1.0.0\"\n", True),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"# yarn lockfile v1\nnot-an-entry\n", False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"__metadata:\n  version: 8\n", True),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"__metadata:\n  malformed: yes\n", False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"not a lockfile at all", False),
         (b"not-json", b"", False),
     ],
 )
@@ -256,6 +364,62 @@ def test_manager_version_and_install_use_fixed_argv(tmp_path):
     install = run_install(root, command, adapter_for(Manager.NPM), "https://registry.npmjs.org/", tmp_path / "home", 2, version_runner)
     assert install.reason == "installed_command"
     assert calls[1][0] == [*command.argv, *adapter_for(Manager.NPM).argument_tail("https://registry.npmjs.org/")]
+
+
+def test_install_rejects_untrusted_registry_without_launch(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    command = _command(tmp_path / "bin" / ("npm.exe" if os.name == "nt" else "npm"))
+    called = False
+
+    def runner(*args, **kwargs):
+        nonlocal called
+        called = True
+        return ProbeProcessResult(0, b"", b"", 0)
+
+    result = run_install(
+        root,
+        command,
+        adapter_for(Manager.NPM),
+        "https://evil.example/",
+        tmp_path / "home",
+        1,
+        runner,
+    )
+    assert result.reason == "install_failed"
+    assert not called
+
+
+def test_windows_npm_install_path_uses_only_executable_parent(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    node = _file(tmp_path / "node" / "node.exe")
+    cli = _file(tmp_path / "node" / "node_modules" / "npm" / "bin" / "npm-cli.js")
+    command = TrustedCommand((str(node.path), str(cli.path)), (node, cli))
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return ProbeProcessResult(0, b"", b"", 0)
+
+    assert run_install(
+        root,
+        command,
+        adapter_for(Manager.NPM),
+        TRUSTED_REGISTRY,
+        tmp_path / "home",
+        1,
+        runner,
+    ).ok
+    path_entries = calls[0][1]["environment"]["PATH"].split(os.pathsep)
+    expected_system = (
+        str(Path(os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows") / "System32")
+        if os.name == "nt"
+        else "/usr/bin"
+    )
+    assert path_entries[:2] == [str(node.path.parent), expected_system]
+    assert str(cli.path.parent) not in path_entries
+    assert calls[0][0][-1] == "typescript"
 
 
 def test_manager_nonzero_is_unavailable_not_a_version_parse_failure(tmp_path):
@@ -316,6 +480,12 @@ def test_windows_batch_prefix_cannot_be_constructed(tmp_path):
 
     assert run_validator(root, batch, validator, 1, runner).reason == "executable_changed"
     assert not called
+
+
+def test_trusted_command_rejects_unproven_prefix_arguments(tmp_path):
+    executable = _file(tmp_path / ("npm.exe" if os.name == "nt" else "npm"))
+    with pytest.raises(ValueError, match="trusted_command_invalid"):
+        TrustedCommand((str(executable.path), "--config=untrusted"), (executable,))
 
 
 @pytest.mark.parametrize(

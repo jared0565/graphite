@@ -36,7 +36,7 @@ _DEPENDENCY_FIELDS = ("dependencies", "devDependencies", "optionalDependencies",
 _FORBIDDEN_MANIFEST_FIELDS = frozenset(
     {"workspaces", "resolutions", "overrides", "pnpm", "installConfig", "publishConfig"}
 )
-_URL_RE = re.compile(rb"https?://[^\s\"'<>]+", re.IGNORECASE)
+_URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 _LOCAL_TYPESCRIPT_SCRIPT = (
     "const p=require.resolve('typescript/package.json',{paths:[process.cwd()]});"
     "process.stdout.write(JSON.stringify({resolved:p}));"
@@ -115,7 +115,7 @@ class TrustedCommand:
         if (
             not self.argv
             or not self.references
-            or self.argv[: len(self.references)] != reference_arguments
+            or self.argv != reference_arguments
             or (os.name == "nt" and self.references[0].path.suffix.lower() not in {".exe", ".com"})
         ):
             raise ValueError("trusted_command_invalid")
@@ -424,11 +424,94 @@ def _dependency_spec_is_safe(specification: str) -> bool:
         return False
     if lower.startswith(("file:", "link:", "git:", "git+", "ssh:", "http:", "https:", "workspace:")):
         return False
-    if value.startswith(("/", "\\", "../", "..\\")) or re.match(r"^[A-Za-z]:[\\/]", value):
+    if lower.startswith("git@") or any(separator in value for separator in ("/", "\\", ":")):
         return False
-    if value.startswith("//") or value.startswith("\\\\"):
+    if value.startswith("."):
         return False
-    return not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value)
+    return True
+
+
+def _normalized_lockfile_text(lockfile_bytes: bytes) -> str | None:
+    """Return decoded text only for a conservatively recognized lockfile format."""
+    try:
+        text = lockfile_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if "\x00" in text:
+        return None
+    stripped = text.lstrip("\ufeff \t\r\n")
+    if not stripped:
+        return ""
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(stripped)
+        except (json.JSONDecodeError, RecursionError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        lockfile_version = parsed.get("lockfileVersion")
+        if isinstance(lockfile_version, bool) or not (
+            isinstance(lockfile_version, int)
+            or (isinstance(lockfile_version, str) and re.fullmatch(r"\d+(?:\.\d+)?", lockfile_version))
+        ):
+            return None
+        return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+    lines = stripped.splitlines()
+    if lines[0].startswith("lockfileVersion:"):
+        if not re.fullmatch(r"lockfileVersion:\s*['\"]?\d+(?:\.\d+)?['\"]?\s*", lines[0]):
+            return None
+        if len(lines) < 2 or not any(
+            line.lstrip().startswith(("importers:", "packages:", "snapshots:")) for line in lines[1:]
+        ):
+            return None
+        return stripped
+    if lines[0].strip() == "# yarn lockfile v1":
+        entries = [line for line in lines[1:] if line.strip()]
+        if not any(not line[0].isspace() and line.rstrip().endswith(":") for line in entries):
+            return None
+        if not any(line[0].isspace() and line.lstrip().startswith("version ") for line in entries):
+            return None
+        return stripped
+    first_content_lines = [line.strip() for line in lines[:10] if line.strip() and not line.lstrip().startswith("#")]
+    if first_content_lines and first_content_lines[0] == "__metadata:":
+        return stripped if any(re.fullmatch(r"\s+version:\s*\d+\s*", line) for line in lines[1:]) else None
+    return None
+
+
+def _lockfile_uses_trusted_sources(lockfile_bytes: bytes) -> bool:
+    normalized = _normalized_lockfile_text(lockfile_bytes)
+    if normalized is None:
+        return False
+    normalized = normalized.replace("\\/", "/")
+    lower = normalized.lower()
+    if any(
+        marker in lower
+        for marker in ("git+", "git://", "git@", "ssh:", "file:", "link:", "local:")
+    ):
+        return False
+    if re.search(r"[\"'](?:\.\.?[/\\]|[/\\]|[A-Za-z]:[/\\])", normalized) or re.search(
+        r"(?m)^\s*[A-Za-z][\w-]*:\s*(?:\.\.?[/\\]|[/\\]{1,2}|[A-Za-z]:[/\\])",
+        normalized,
+    ):
+        return False
+    url_matches = tuple(_URL_RE.finditer(normalized))
+    for match in url_matches:
+        try:
+            parsed = urlsplit(match.group())
+        except ValueError:
+            return False
+        if (
+            parsed.scheme.lower() != "https"
+            or parsed.hostname != "registry.npmjs.org"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port is not None
+        ):
+            return False
+    without_valid_url_shapes = _URL_RE.sub("", normalized).lower()
+    if "http:" in without_valid_url_shapes or "https:" in without_valid_url_shapes:
+        return False
+    return True
 
 
 def control_files_use_trusted_sources(manifest_bytes: bytes, lockfile_bytes: bytes) -> bool:
@@ -440,36 +523,13 @@ def control_files_use_trusted_sources(manifest_bytes: bytes, lockfile_bytes: byt
         return False
     if not isinstance(manifest, dict) or _FORBIDDEN_MANIFEST_FIELDS.intersection(manifest):
         return False
-    try:
-        lockfile_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        return False
-    if b"\x00" in lockfile_bytes:
-        return False
     for field in _DEPENDENCY_FIELDS:
         dependencies = manifest.get(field, {})
         if not isinstance(dependencies, dict):
             return False
         if any(not isinstance(name, str) or not isinstance(spec, str) or not _dependency_spec_is_safe(spec) for name, spec in dependencies.items()):
             return False
-    normalized_lockfile = lockfile_bytes.replace(b"\\/", b"/")
-    lower_lockfile = normalized_lockfile.lower()
-    if any(marker in lower_lockfile for marker in (b"git+", b"ssh:", b"file:")):
-        return False
-    for match in _URL_RE.finditer(normalized_lockfile):
-        try:
-            parsed = urlsplit(match.group().decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            return False
-        if (
-            parsed.scheme.lower() != "https"
-            or parsed.hostname != "registry.npmjs.org"
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.port is not None
-        ):
-            return False
-    return True
+    return _lockfile_uses_trusted_sources(lockfile_bytes)
 
 
 def _minimal_node_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -562,14 +622,18 @@ def run_install(
 ) -> StepResult:
     if not math.isfinite(timeout) or timeout <= 0:
         return StepResult(False, "install_failed")
+    if registry != TRUSTED_REGISTRY:
+        return StepResult(False, "install_failed")
     provenance_reason = _command_revalidation_reason(command, root)
     if provenance_reason is not None:
         return StepResult(False, provenance_reason)
-    directories = tuple(dict.fromkeys(reference.path.parent for reference in command.references))
-    environment = build_install_environment(adapter.manager, isolated_home, directories, registry, os.environ)
+    directories = (command.references[0].path.parent,)
+    environment = build_install_environment(
+        adapter.manager, isolated_home, directories, TRUSTED_REGISTRY, os.environ
+    )
     try:
         result = runner(
-            [*command.argv, *adapter.argument_tail(registry)],
+            [*command.argv, *adapter.argument_tail(TRUSTED_REGISTRY)],
             cwd=root,
             stdin=None,
             timeout_seconds=timeout,
