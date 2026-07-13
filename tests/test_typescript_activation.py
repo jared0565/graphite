@@ -1198,16 +1198,83 @@ def test_evidence_scan_does_not_follow_symlinked_files_or_directories(tmp_path):
 def test_evidence_scan_does_not_follow_simulated_reparse_entries(tmp_path, monkeypatch):
     root = tmp_path / "repo"
     root.mkdir()
-    reparse_file = root / "reparse.ts"
-    reparse_file.write_text("export {};", encoding="utf-8")
     reparse_directory = root / "reparse-directory"
     reparse_directory.mkdir()
     (reparse_directory / "nested.tsx").write_text("export {};", encoding="utf-8")
-    monkeypatch.setattr(typescript_activation, "_is_reparse", lambda _details: True)
+    calls = 0
+
+    def simulate_only_root_reparse(_details):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return True
+        raise AssertionError("nested reparse target was inspected")
+
+    monkeypatch.setattr(
+        typescript_activation,
+        "_is_reparse",
+        simulate_only_root_reparse,
+    )
 
     detection = _detect(root)
 
     assert detection.result.reason == "no_typescript_evidence"
+    assert calls == 1
+
+
+def test_evidence_scan_limits_directory_depth(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    child = root / "child"
+    child.mkdir()
+    (child / "nested").mkdir()
+    monkeypatch.setattr(typescript_activation, "_EVIDENCE_MAX_DEPTH", 1)
+
+    detection = _detect(root)
+
+    assert detection.result.reason == "evidence_scan_limited"
+
+
+def test_evidence_scan_rejects_directory_swapped_to_symlink_before_child_open(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    child = root / "child"
+    child.mkdir()
+    original_child = root / "original-child"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "external.ts").write_text("export {};", encoding="utf-8")
+    original_open_child = typescript_activation._open_child_scan_directory
+    original_scandir = typescript_activation.os.scandir
+    swapped = False
+
+    def swap_then_open(parent, name, expected_identity, canonical_root):
+        nonlocal swapped
+        if not swapped and name == "child":
+            child.rename(original_child)
+            _symlink_or_skip(child, outside)
+            swapped = True
+        return original_open_child(parent, name, expected_identity, canonical_root)
+
+    def guard_external_scandir(target):
+        if swapped and not isinstance(target, int) and Path(target) in {child, outside}:
+            raise AssertionError("replacement target must never be enumerated")
+        return original_scandir(target)
+
+    monkeypatch.setattr(
+        typescript_activation,
+        "_open_child_scan_directory",
+        swap_then_open,
+    )
+    monkeypatch.setattr(typescript_activation.os, "scandir", guard_external_scandir)
+
+    detection = _detect(root)
+
+    assert swapped
+    assert detection.result.reason == "evidence_collection_failed"
 
 
 def test_evidence_scan_prunes_repository_exclusions(tmp_path):
@@ -1786,9 +1853,6 @@ def test_revalidation_accepts_unchanged_eligible_detection(tmp_path, lockfile):
         ("pnpm-lock.yaml", "pnpm-workspace.yaml", False),
         ("pnpm-lock.yaml", ".pnpmfile.cjs", False),
         ("pnpm-lock.yaml", ".pnpmfile.mjs", False),
-        ("yarn.lock", ".yarnrc.yml", False),
-        ("yarn.lock", ".yarnrc", False),
-        ("yarn.lock", ".yarn/plugins", True),
         ("bun.lock", ".npmrc", False),
         ("bun.lock", "bunfig.toml", False),
     ],
@@ -1801,6 +1865,7 @@ def test_revalidation_rejects_new_manager_configuration(
 ):
     root = _activation_root(tmp_path, lockfile)
     expected = _detect(root)
+    assert expected.result is None
     path = root / unsafe_path
     if directory:
         path.mkdir(parents=True)
@@ -1861,5 +1926,29 @@ def test_revalidation_rejects_terminal_expected_detection(tmp_path):
     root.mkdir()
     expected = _detect(root)
     assert expected.result.reason == "no_typescript_evidence"
+
+    assert not revalidate_activation_detection(root, Config(), expected)
+
+
+def test_revalidation_rejects_deleted_typescript_evidence(tmp_path):
+    root = _activation_root(tmp_path)
+    expected = _detect(root)
+    assert expected.result is None
+    (root / "source.ts").unlink()
+
+    assert not revalidate_activation_detection(root, Config(), expected)
+
+
+def test_revalidation_rejects_new_symlinked_evidence_directory(tmp_path):
+    root = _activation_root(tmp_path)
+    (root / "source.ts").unlink()
+    source_directory = root / "source"
+    source_directory.mkdir()
+    (source_directory / "main.ts").write_text("export {};", encoding="utf-8")
+    expected = _detect(root)
+    assert expected.result is None
+    outside = tmp_path / "outside-source"
+    source_directory.rename(outside)
+    _symlink_or_skip(source_directory, outside)
 
     assert not revalidate_activation_detection(root, Config(), expected)

@@ -29,6 +29,11 @@ from .dependency_install import (
     snapshot_control_file,
 )
 from .ingest import SKIP_DIRS
+from .probe_workspace import (
+    _close_raw_handle,
+    _open_directory_handle,
+    _windows_handle_final_path,
+)
 
 
 class ActivationOutcome(StrEnum):
@@ -90,6 +95,7 @@ class ActivationDetection:
 _PACKAGE_MANAGER_RE = re.compile(r"(npm|pnpm|yarn|bun)@(\S+)")
 _STABLE_STAT_FIELDS = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
 _EVIDENCE_SCAN_SECONDS = 1.0
+_EVIDENCE_MAX_DEPTH = 128
 _SUPPORTED_LOCKFILES = tuple(
     (lockfile, manager)
     for manager in Manager
@@ -102,6 +108,20 @@ class _EvidenceScanOutcome(StrEnum):
     ABSENT = "absent"
     LIMITED = "limited"
     UNSAFE = "unsafe"
+
+
+@dataclass(frozen=True)
+class _ScanDirectory:
+    path: Path
+    handle: int
+    identity: tuple[int, int]
+
+
+@dataclass
+class _EvidenceScanState:
+    entry_limit: int
+    deadline: float
+    visited: int = 0
 
 
 def _is_reparse(details: os.stat_result) -> bool:
@@ -183,47 +203,165 @@ def _is_excluded_path(
     )
 
 
+def _windows_identity(raw_identity: tuple[int, int, int]) -> tuple[int, int]:
+    return raw_identity[0], (raw_identity[1] << 32) | raw_identity[2]
+
+
+def _same_windows_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
+def _open_root_scan_directory(root: Path) -> _ScanDirectory | None:
+    handle = -1
+    try:
+        if os.name == "nt":
+            handle, raw_identity = _open_directory_handle(root)
+            final_path = _windows_handle_final_path(handle)
+            if not _same_windows_path(final_path, root):
+                raise OSError("directory_binding_changed")
+            return _ScanDirectory(root, handle, _windows_identity(raw_identity))
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        handle = os.open(root, flags)
+        os.set_inheritable(handle, False)
+        details = os.fstat(handle)
+        if not stat.S_ISDIR(details.st_mode):
+            raise OSError("directory_invalid")
+        return _ScanDirectory(root, handle, (details.st_dev, details.st_ino))
+    except (OSError, RuntimeError, ValueError):
+        if handle >= 0:
+            _close_raw_handle(handle)
+        return None
+
+
+def _open_child_scan_directory(
+    parent: _ScanDirectory,
+    name: str,
+    expected_identity: tuple[int, int],
+    canonical_root: Path,
+) -> _ScanDirectory | None:
+    handle = -1
+    child_path = parent.path / name
+    try:
+        if os.name == "nt":
+            handle, raw_identity = _open_directory_handle(child_path)
+            identity = _windows_identity(raw_identity)
+            final_path = _windows_handle_final_path(handle)
+            if (
+                identity[1] != expected_identity[1]
+                or not _is_contained(final_path, canonical_root)
+                or not _same_windows_path(final_path, child_path)
+            ):
+                raise OSError("directory_binding_changed")
+            return _ScanDirectory(child_path, handle, identity)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        handle = os.open(name, flags, dir_fd=parent.handle)
+        os.set_inheritable(handle, False)
+        details = os.fstat(handle)
+        identity = (details.st_dev, details.st_ino)
+        if not stat.S_ISDIR(details.st_mode) or identity != expected_identity:
+            raise OSError("directory_binding_changed")
+        return _ScanDirectory(child_path, handle, identity)
+    except (OSError, RuntimeError, ValueError):
+        if handle >= 0:
+            _close_raw_handle(handle)
+        return None
+
+
+def _scan_open_directory(
+    directory: _ScanDirectory,
+    root: Path,
+    cfg: Config,
+    exclusions: tuple[tuple[str, ...], ...],
+    state: _EvidenceScanState,
+    *,
+    depth: int,
+) -> _EvidenceScanOutcome:
+    if time.monotonic() >= state.deadline:
+        return _EvidenceScanOutcome.LIMITED
+    scan_target: int | Path = directory.path if os.name == "nt" else directory.handle
+    try:
+        with os.scandir(scan_target) as entries:
+            for entry in entries:
+                state.visited += 1
+                if (
+                    state.visited > state.entry_limit
+                    or time.monotonic() >= state.deadline
+                ):
+                    return _EvidenceScanOutcome.LIMITED
+                details = (
+                    os.lstat(directory.path / entry.name)
+                    if os.name == "nt"
+                    else entry.stat(follow_symlinks=False)
+                )
+                if stat.S_ISLNK(details.st_mode) or _is_reparse(details):
+                    continue
+                parts = (*directory.path.relative_to(root).parts, entry.name)
+                if stat.S_ISDIR(details.st_mode):
+                    if (
+                        entry.name in SKIP_DIRS
+                        or (not cfg.include_dotfiles and entry.name.startswith("."))
+                        or _is_excluded_path(parts, exclusions)
+                    ):
+                        continue
+                    if depth >= _EVIDENCE_MAX_DEPTH:
+                        return _EvidenceScanOutcome.LIMITED
+                    child = _open_child_scan_directory(
+                        directory,
+                        entry.name,
+                        (details.st_dev, details.st_ino),
+                        root,
+                    )
+                    if child is None:
+                        return _EvidenceScanOutcome.UNSAFE
+                    try:
+                        child_outcome = _scan_open_directory(
+                            child,
+                            root,
+                            cfg,
+                            exclusions,
+                            state,
+                            depth=depth + 1,
+                        )
+                    finally:
+                        _close_raw_handle(child.handle)
+                    if child_outcome is not _EvidenceScanOutcome.ABSENT:
+                        return child_outcome
+                    continue
+                if not stat.S_ISREG(details.st_mode):
+                    continue
+                if not cfg.include_dotfiles and entry.name.startswith("."):
+                    continue
+                if Path(entry.name).suffix.lower() in {".ts", ".tsx"}:
+                    return _EvidenceScanOutcome.FOUND
+    except (OSError, RuntimeError, ValueError):
+        return _EvidenceScanOutcome.UNSAFE
+    return _EvidenceScanOutcome.ABSENT
+
+
 def _scan_typescript_evidence(
     root: Path,
     cfg: Config,
     entry_limit: int,
 ) -> _EvidenceScanOutcome:
-    deadline = time.monotonic() + _EVIDENCE_SCAN_SECONDS
+    state = _EvidenceScanState(
+        entry_limit=entry_limit,
+        deadline=time.monotonic() + _EVIDENCE_SCAN_SECONDS,
+    )
     exclusions = _configured_exclusions(root, cfg)
-    stack: list[tuple[Path, tuple[str, ...]]] = [(root, ())]
-    visited = 0
-    while stack:
-        if time.monotonic() >= deadline:
-            return _EvidenceScanOutcome.LIMITED
-        directory, directory_parts = stack.pop()
-        try:
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    visited += 1
-                    if visited > entry_limit or time.monotonic() >= deadline:
-                        return _EvidenceScanOutcome.LIMITED
-                    details = entry.stat(follow_symlinks=False)
-                    if stat.S_ISLNK(details.st_mode) or _is_reparse(details):
-                        continue
-                    parts = (*directory_parts, entry.name)
-                    if stat.S_ISDIR(details.st_mode):
-                        if (
-                            entry.name in SKIP_DIRS
-                            or (not cfg.include_dotfiles and entry.name.startswith("."))
-                            or _is_excluded_path(parts, exclusions)
-                        ):
-                            continue
-                        stack.append((Path(entry.path), parts))
-                        continue
-                    if not stat.S_ISREG(details.st_mode):
-                        continue
-                    if not cfg.include_dotfiles and entry.name.startswith("."):
-                        continue
-                    if Path(entry.name).suffix.lower() in {".ts", ".tsx"}:
-                        return _EvidenceScanOutcome.FOUND
-        except (OSError, RuntimeError, ValueError):
-            return _EvidenceScanOutcome.UNSAFE
-    return _EvidenceScanOutcome.ABSENT
+    root_directory = _open_root_scan_directory(root)
+    if root_directory is None:
+        return _EvidenceScanOutcome.UNSAFE
+    try:
+        return _scan_open_directory(
+            root_directory,
+            root,
+            cfg,
+            exclusions,
+            state,
+            depth=0,
+        )
+    finally:
+        _close_raw_handle(root_directory.handle)
 
 
 def _read_stable_control_file(
