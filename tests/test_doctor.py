@@ -1705,6 +1705,67 @@ def _mcp_tools_result() -> dict[str, object]:
     }
 
 
+def _bounded_manifest_builder_runner(selected: Path) -> object:
+    import graphite.doctor_probes as probes
+
+    dependency_root = selected.parent / f".{selected.name}-bounded-mcp-dependencies"
+    dependency_root.mkdir()
+    files: list[Path] = []
+    package_roots: dict[str, Path] = {}
+    metadata_roots: dict[str, Path] = {}
+    packages: dict[str, dict[str, object]] = {}
+    distributions: dict[str, dict[str, object]] = {}
+    for name in ("mcp", "networkx"):
+        package_root = dependency_root / name
+        package_root.mkdir()
+        package_roots[name] = package_root
+        origin = package_root / "__init__.py"
+        origin.write_text("", encoding="utf-8")
+        files.append(origin)
+        metadata_root = dependency_root / f"{name}-1.0.dist-info"
+        metadata_root.mkdir()
+        metadata_roots[name] = metadata_root
+    search_binding = probes._path_binding(dependency_root, require_directory=True)
+    for name, origin in zip(("mcp", "networkx"), files, strict=True):
+        package_root = package_roots[name]
+        metadata_root = metadata_roots[name]
+        distributions[name] = probes._path_binding(metadata_root, require_directory=True)
+        packages[name] = {
+            "origin": probes._path_binding(origin, require_directory=False),
+            "root": probes._path_binding(package_root, require_directory=True),
+            "search": search_binding,
+        }
+    entries: list[list[object]] = []
+    for path in files:
+        stat = path.stat()
+        entries.append(
+            [
+                path.relative_to(dependency_root).as_posix(),
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_size,
+                stat.st_mtime_ns,
+            ]
+        )
+    manifest = {
+        "distributions": distributions,
+        "files": [
+            {
+                "root": probes._path_binding(dependency_root, require_directory=True),
+                "entries": entries,
+            }
+        ],
+        "packages": packages,
+    }
+    payload = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+
+    def run(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        return probes.ProbeProcessResult(0, payload, b"", 0.01)
+
+    return run
+
+
 def test_mcp_deep_probe_initializes_and_lists_required_tools(tmp_path: Path) -> None:
     import graphite.doctor_probes as probes
 
@@ -1736,7 +1797,11 @@ def test_mcp_deep_probe_initializes_and_lists_required_tools(tmp_path: Path) -> 
     argv = captured["argv"]
     assert argv[0:5] == ["PYTHON", "-I", "-S", "-B", "-c"]
     assert "graphite.mcp" in argv[5]
-    assert Path(argv[6]).is_absolute()
+    trusted_binding = json.loads(argv[6])
+    selected_binding = json.loads(argv[9])
+    assert Path(trusted_binding["lexical"]).is_absolute()
+    assert Path(trusted_binding["canonical"]).is_absolute()
+    assert Path(selected_binding["canonical"]) == tmp_path.resolve()
     assert captured["cwd"] == tmp_path
     assert 0 < captured["timeout_seconds"] <= 20
     assert captured["max_output_bytes"] == 1024 * 1024
@@ -1805,8 +1870,27 @@ def test_mcp_bootstrap_rejects_manifest_files_inside_selected_root(tmp_path: Pat
     selected.mkdir()
     repository_file = selected / "dependency.py"
     repository_file.write_text("raise RuntimeError('must not execute')\n", encoding="utf-8")
-    manifest = {"distributions": {}, "files": [str(repository_file)], "packages": {}}
-    trusted = Path(probes.__file__).resolve().parent.parent
+    stat = repository_file.stat()
+    manifest = {
+        "distributions": {},
+        "files": [
+            {
+                "root": probes._path_binding(selected, require_directory=True),
+                "entries": [
+                    [
+                        repository_file.name,
+                        stat.st_dev,
+                        stat.st_ino,
+                        stat.st_size,
+                        stat.st_mtime_ns,
+                    ]
+                ],
+            }
+        ],
+        "packages": {},
+    }
+    trusted, package_init, _, mcp_source = probes._trusted_graphite_bindings()
+    selected_binding = probes._path_binding(selected, require_directory=True)
 
     result = run_bounded_process(
         [
@@ -1816,8 +1900,211 @@ def test_mcp_bootstrap_rejects_manifest_files_inside_selected_root(tmp_path: Pat
             "-B",
             "-c",
             probes._MCP_BOOTSTRAP,
-            str(trusted),
-            str(selected),
+            json.dumps(trusted, separators=(",", ":")),
+            json.dumps(package_init, separators=(",", ":")),
+            json.dumps(mcp_source, separators=(",", ":")),
+            json.dumps(selected_binding, separators=(",", ":")),
+        ],
+        cwd=selected,
+        stdin=json.dumps(manifest).encode("utf-8") + b"\n",
+        timeout_seconds=5,
+        check=False,
+    )
+
+    assert result.returncode == 70
+
+
+def test_mcp_manifest_builder_is_hard_bounded_and_leaves_no_orphan(
+    tmp_path: Path,
+) -> None:
+    import graphite.doctor_probes as probes
+
+    sentinel = tmp_path / "slow-builder-survived.txt"
+    script = (
+        "import time;from pathlib import Path;time.sleep(0.3);"
+        f"Path({str(sentinel)!r}).write_text('orphan')"
+    )
+    started = time.monotonic()
+
+    check = probes.probe_mcp(tmp_path, timeout_seconds=0.05, _builder_script=script)
+
+    assert time.monotonic() - started < 0.3
+    assert check.status == "degraded"
+    assert check.details == {"code": "timeout"}
+    time.sleep(0.35)
+    assert not sentinel.exists()
+
+
+def test_cached_path_binding_rejects_symlink_retarget(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+
+    approved = tmp_path / "approved.py"
+    replacement = tmp_path / "replacement.py"
+    approved.write_text("VALUE = 'approved'\n", encoding="utf-8")
+    replacement.write_text("VALUE = 'replacement'\n", encoding="utf-8")
+    link = tmp_path / "dependency.py"
+    try:
+        link.symlink_to(approved)
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
+    binding = probes._path_binding(link, require_directory=False)
+    probes._validate_path_binding(binding, require_directory=False)
+    link.unlink()
+    link.symlink_to(replacement)
+
+    with pytest.raises(ValueError):
+        probes._validate_path_binding(binding, require_directory=False)
+
+
+def test_mcp_manifest_fits_bounded_child_input(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+    from graphite.probe_process import INPUT_LIMIT_BYTES
+
+    manifest = probes._mcp_import_manifest(tmp_path)
+    protocol_reserve = 4096
+
+    assert len(json.dumps(manifest, separators=(",", ":")).encode("utf-8")) < (
+        INPUT_LIMIT_BYTES - protocol_reserve
+    )
+
+
+def test_mcp_manifest_builder_rejects_trusted_source_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    import graphite.doctor_probes as probes
+    from graphite.probe_process import run_bounded_process
+
+    trusted = tmp_path / "trusted"
+    package = trusted / "graphite"
+    package.mkdir(parents=True)
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "mcp.py").write_text("", encoding="utf-8")
+    sentinel = tmp_path / "trusted-source-executed.txt"
+    outside = tmp_path / "outside-doctor-probes.py"
+    outside.write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    try:
+        (package / "doctor_probes.py").symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
+
+    bindings = [
+        probes._path_binding(trusted, require_directory=True),
+        probes._path_binding(package / "__init__.py", require_directory=False),
+        probes._path_binding(package / "doctor_probes.py", require_directory=False),
+        probes._path_binding(selected, require_directory=True),
+    ]
+    result = run_bounded_process(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            probes._MCP_MANIFEST_BUILDER_BOOTSTRAP,
+            *(json.dumps(binding, separators=(",", ":")) for binding in bindings),
+            "[]",
+        ],
+        cwd=selected,
+        timeout_seconds=5,
+        check=False,
+    )
+
+    assert result.returncode == 70
+    assert not sentinel.exists()
+
+
+def test_mcp_bootstrap_rejects_mcp_symlink_escape(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+    from graphite.probe_process import run_bounded_process
+
+    trusted = tmp_path / "trusted"
+    package = trusted / "graphite"
+    package.mkdir(parents=True)
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    sentinel = tmp_path / "escaped-mcp-executed.txt"
+    outside = tmp_path / "outside-mcp.py"
+    outside.write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    try:
+        (package / "mcp.py").symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
+
+    bindings = [
+        probes._path_binding(trusted, require_directory=True),
+        probes._path_binding(package / "__init__.py", require_directory=False),
+        probes._path_binding(package / "mcp.py", require_directory=False),
+        probes._path_binding(selected, require_directory=True),
+    ]
+    result = run_bounded_process(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            probes._MCP_BOOTSTRAP,
+            *(json.dumps(binding, separators=(",", ":")) for binding in bindings),
+        ],
+        cwd=selected,
+        stdin=b'{"distributions":{},"files":[],"packages":{}}\n',
+        timeout_seconds=5,
+        check=False,
+    )
+
+    assert result.returncode == 70
+    assert not sentinel.exists()
+
+
+def test_mcp_bootstrap_rejects_canonical_binding_mismatch(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+    from graphite.probe_process import run_bounded_process
+
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    lexical = tmp_path / "dependency.py"
+    canonical = tmp_path / "different.py"
+    lexical.write_text("VALUE = 1\n", encoding="utf-8")
+    canonical.write_text("VALUE = 2\n", encoding="utf-8")
+    stat = canonical.stat()
+    manifest = {
+        "distributions": {},
+        "files": [
+            {
+                "root": {
+                    "lexical": str(lexical),
+                    "canonical": str(canonical),
+                    "identity": [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns],
+                },
+                "entries": [],
+            }
+        ],
+        "packages": {},
+    }
+    trusted, package_init, _, mcp_source = probes._trusted_graphite_bindings()
+    selected_binding = probes._path_binding(selected, require_directory=True)
+
+    result = run_bounded_process(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            probes._MCP_BOOTSTRAP,
+            json.dumps(trusted, separators=(",", ":")),
+            json.dumps(package_init, separators=(",", ":")),
+            json.dumps(mcp_source, separators=(",", ":")),
+            json.dumps(selected_binding, separators=(",", ":")),
         ],
         cwd=selected,
         stdin=json.dumps(manifest).encode("utf-8") + b"\n",
@@ -1836,12 +2123,14 @@ def test_mcp_deep_probe_maps_transport_failures_to_degraded(tmp_path: Path, fail
     def fail(*args: object, **kwargs: object) -> object:
         raise ProbeProcessError(failure_code)
 
+    builder_runner = _bounded_manifest_builder_runner(tmp_path)
     started = time.monotonic()
     check = probes.probe_mcp(
         tmp_path,
         timeout_seconds=0.2,
         _runner=fail,
-        _manifest_builder=lambda root: {},
+        _builder_script="pass",
+        _builder_runner=builder_runner,
     )
     assert time.monotonic() - started < 1
     assert check.status == "degraded"
@@ -2115,12 +2404,14 @@ def test_mcp_deep_probe_real_transport_bounds_failures_and_escalates_cleanup(
         lambda target, deadline: target.kill(),
     )
 
+    builder_runner = _bounded_manifest_builder_runner(tmp_path)
     started = time.monotonic()
     check = probes.probe_mcp(
         tmp_path,
         timeout_seconds=0.35,
         _runner=transport.run_bounded_process,
-        _manifest_builder=lambda root: {},
+        _builder_script="pass",
+        _builder_runner=builder_runner,
     )
 
     assert time.monotonic() - started < 1
@@ -2138,12 +2429,14 @@ def test_mcp_deep_probe_real_transport_handles_nonzero_without_hanging(
 
     process = _QueuedProbeProcess("nonzero", [])
     monkeypatch.setattr(transport, "_launch_process", lambda *a, **k: process)
+    builder_runner = _bounded_manifest_builder_runner(tmp_path)
     started = time.monotonic()
     check = probes.probe_mcp(
         tmp_path,
         timeout_seconds=0.35,
         _runner=transport.run_bounded_process,
-        _manifest_builder=lambda root: {},
+        _builder_script="pass",
+        _builder_runner=builder_runner,
     )
     assert time.monotonic() - started < 1
     assert check.status == "degraded"
@@ -2159,12 +2452,14 @@ def test_mcp_deep_probe_real_transport_handles_closed_stdout_without_hanging(
 
     process = _QueuedProbeProcess("closed", [])
     monkeypatch.setattr(transport, "_launch_process", lambda *a, **k: process)
+    builder_runner = _bounded_manifest_builder_runner(tmp_path)
     started = time.monotonic()
     check = probes.probe_mcp(
         tmp_path,
         timeout_seconds=0.35,
         _runner=transport.run_bounded_process,
-        _manifest_builder=lambda root: {},
+        _builder_script="pass",
+        _builder_runner=builder_runner,
     )
     assert time.monotonic() - started < 1
     assert check.status == "degraded"

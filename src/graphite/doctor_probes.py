@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from importlib import machinery, metadata
 from pathlib import Path
@@ -26,6 +27,8 @@ _MCP_OUTPUT_LIMIT_BYTES = 1024 * 1024
 _MCP_LINE_LIMIT = 64
 _MCP_RESPONSE_LIMIT = 8
 _MCP_NESTING_LIMIT = 32
+_MCP_METADATA_ROOT_LIMIT = 64
+_MCP_BUILDER_ARGUMENT_LIMIT_BYTES = 16 * 1024
 _MCP_PROTOCOL_VERSION = "2024-11-05"
 _REQUIRED_MCP_TOOLS = frozenset(
     {"graphite_query", "graphite_summary", "graphite_community", "graphite_refresh"}
@@ -37,18 +40,105 @@ _TYPESCRIPT_SCRIPT = (
     "process.exit(4)}"
     "process.stdout.write(JSON.stringify({detected:true}));"
 )
+_MCP_MANIFEST_BUILDER_BOOTSTRAP = """\
+import os
+import json
+import pathlib
+import sys
+from importlib.machinery import PathFinder
+
+sys.excepthook = lambda *_: os._exit(70)
+def validate_binding(raw, require_directory):
+    if not isinstance(raw, dict) or set(raw) != {"canonical", "identity", "lexical"}:
+        raise SystemExit(70)
+    lexical = pathlib.Path(raw["lexical"])
+    canonical = pathlib.Path(raw["canonical"])
+    identity = raw["identity"]
+    if (
+        not isinstance(raw["lexical"], str)
+        or not isinstance(raw["canonical"], str)
+        or not lexical.is_absolute()
+        or not canonical.is_absolute()
+        or not isinstance(identity, list)
+        or len(identity) != 4
+        or any(not isinstance(item, int) or isinstance(item, bool) for item in identity)
+    ):
+        raise SystemExit(70)
+    if lexical.resolve(strict=True) != canonical or canonical.resolve(strict=True) != canonical:
+        raise SystemExit(70)
+    stat = canonical.stat()
+    if [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns] != identity:
+        raise SystemExit(70)
+    if canonical.is_dir() != require_directory:
+        raise SystemExit(70)
+    return lexical, canonical
+def overlaps(left, right):
+    try:
+        left.relative_to(right)
+        return True
+    except ValueError:
+        pass
+    try:
+        right.relative_to(left)
+        return True
+    except ValueError:
+        return False
+trusted_lexical, trusted = validate_binding(json.loads(sys.argv[1]), True)
+init_lexical, expected_init = validate_binding(json.loads(sys.argv[2]), False)
+doctor_lexical, expected_doctor = validate_binding(json.loads(sys.argv[3]), False)
+_, selected = validate_binding(json.loads(sys.argv[4]), True)
+if (
+    init_lexical != trusted_lexical / "graphite" / "__init__.py"
+    or doctor_lexical != trusted_lexical / "graphite" / "doctor_probes.py"
+    or expected_init.parent != trusted / "graphite"
+    or expected_doctor.parent != trusted / "graphite"
+    or overlaps(trusted, selected)
+):
+    raise SystemExit(70)
+stdlib_path = list(sys.path)
+metadata_roots = []
+for raw in json.loads(sys.argv[5]):
+    _, root = validate_binding(raw, True)
+    if overlaps(root, selected):
+        raise SystemExit(70)
+    metadata_roots.append(root)
+graphite_spec = PathFinder.find_spec("graphite", [str(trusted)])
+if (
+    graphite_spec is None
+    or graphite_spec.origin is None
+    or pathlib.Path(graphite_spec.origin).resolve(strict=True) != expected_init
+    or graphite_spec.submodule_search_locations is None
+    or [pathlib.Path(item).resolve(strict=True) for item in graphite_spec.submodule_search_locations]
+    != [expected_init.parent]
+):
+    raise SystemExit(70)
+doctor_spec = PathFinder.find_spec(
+    "graphite.doctor_probes", list(graphite_spec.submodule_search_locations)
+)
+if (
+    doctor_spec is None
+    or doctor_spec.origin is None
+    or pathlib.Path(doctor_spec.origin).resolve(strict=True) != expected_doctor
+):
+    raise SystemExit(70)
+sys.path[:] = [str(trusted), *(str(root) for root in metadata_roots), *stdlib_path]
+from graphite import doctor_probes
+if pathlib.Path(doctor_probes.__file__).resolve(strict=True) != expected_doctor:
+    raise SystemExit(70)
+doctor_probes.sys.path[:] = [str(root) for root in metadata_roots]
+manifest = doctor_probes._mcp_import_manifest(selected)
+sys.stdout.write(json.dumps(manifest, separators=(",", ":")))
+"""
 _MCP_BOOTSTRAP = """\
 import json
+import os
 import pathlib
 import runpy
 import sys
 from importlib import metadata
 from importlib.machinery import PathFinder
 
-trusted = pathlib.Path(sys.argv[1]).resolve(strict=True)
-selected = pathlib.Path(sys.argv[2]).resolve(strict=True)
-if not trusted.is_dir() or not selected.is_dir():
-    raise SystemExit(70)
+sys.excepthook = lambda *_: os._exit(70)
 def overlaps_selected(path):
     try:
         path.relative_to(selected)
@@ -60,6 +150,46 @@ def overlaps_selected(path):
         return True
     except (ValueError, OSError):
         return False
+def validate_binding(raw, require_directory, reject_selected=True):
+    if not isinstance(raw, dict) or set(raw) != {"canonical", "identity", "lexical"}:
+        raise SystemExit(70)
+    if not isinstance(raw["lexical"], str) or not isinstance(raw["canonical"], str):
+        raise SystemExit(70)
+    lexical = pathlib.Path(raw["lexical"])
+    canonical = pathlib.Path(raw["canonical"])
+    identity = raw["identity"]
+    if (
+        not lexical.is_absolute()
+        or not canonical.is_absolute()
+        or not isinstance(identity, list)
+        or len(identity) != 4
+        or any(not isinstance(item, int) or isinstance(item, bool) for item in identity)
+    ):
+        raise SystemExit(70)
+    resolved = lexical.resolve(strict=True)
+    if resolved != canonical or canonical.resolve(strict=True) != canonical:
+        raise SystemExit(70)
+    stat = canonical.stat()
+    if [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns] != identity:
+        raise SystemExit(70)
+    if require_directory != canonical.is_dir() or (reject_selected and overlaps_selected(canonical)):
+        raise SystemExit(70)
+    return lexical, canonical
+selected_raw = json.loads(sys.argv[4])
+if not isinstance(selected_raw, dict):
+    raise SystemExit(70)
+selected = pathlib.Path(selected_raw.get("canonical", "."))
+_, selected = validate_binding(selected_raw, True, False)
+trusted_lexical, trusted = validate_binding(json.loads(sys.argv[1]), True)
+init_lexical, expected_graphite_init = validate_binding(json.loads(sys.argv[2]), False)
+mcp_lexical, expected_graphite_mcp = validate_binding(json.loads(sys.argv[3]), False)
+if (
+    init_lexical != trusted_lexical / "graphite" / "__init__.py"
+    or mcp_lexical != trusted_lexical / "graphite" / "mcp.py"
+    or expected_graphite_init.parent != trusted / "graphite"
+    or expected_graphite_mcp.parent != trusted / "graphite"
+):
+    raise SystemExit(70)
 manifest = json.loads(sys.stdin.buffer.readline())
 if not isinstance(manifest, dict) or set(manifest) != {"distributions", "files", "packages"}:
     raise SystemExit(70)
@@ -69,21 +199,38 @@ raw_distributions = manifest["distributions"]
 if not isinstance(raw_files, list) or not isinstance(raw_packages, dict) or not isinstance(raw_distributions, dict):
     raise SystemExit(70)
 allowed_files = set()
-for raw in raw_files:
-    path = pathlib.Path(raw)
-    if not isinstance(raw, str) or not path.is_absolute():
+for raw_group in raw_files:
+    if not isinstance(raw_group, dict) or set(raw_group) != {"entries", "root"}:
         raise SystemExit(70)
-    path = path.resolve(strict=True)
-    if not path.is_file() or overlaps_selected(path):
+    root_lexical, root = validate_binding(raw_group["root"], True)
+    entries = raw_group["entries"]
+    if not isinstance(entries, list):
         raise SystemExit(70)
-    allowed_files.add(path)
+    for entry in entries:
+        if (
+            not isinstance(entry, list)
+            or len(entry) != 5
+            or not isinstance(entry[0], str)
+            or any(not isinstance(item, int) or isinstance(item, bool) for item in entry[1:])
+        ):
+            raise SystemExit(70)
+        relative = pathlib.PurePath(entry[0])
+        if relative.is_absolute() or not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
+            raise SystemExit(70)
+        lexical = root_lexical.joinpath(*relative.parts)
+        canonical = root.joinpath(*relative.parts)
+        if lexical.resolve(strict=True) != canonical or canonical.resolve(strict=True) != canonical:
+            raise SystemExit(70)
+        stat = canonical.stat()
+        if not canonical.is_file() or [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns] != entry[1:]:
+            raise SystemExit(70)
+        allowed_files.add(canonical)
 distributions = {}
 for name, raw in raw_distributions.items():
-    path = pathlib.Path(raw)
-    if not isinstance(name, str) or not isinstance(raw, str) or not path.is_absolute():
+    if not isinstance(name, str):
         raise SystemExit(70)
-    path = path.resolve(strict=True)
-    if not path.is_dir() or not path.name.endswith(".dist-info") or overlaps_selected(path):
+    _, path = validate_binding(raw, True)
+    if not path.name.endswith(".dist-info"):
         raise SystemExit(70)
     distribution = metadata.PathDistribution(path)
     declared = distribution.metadata.get("Name")
@@ -98,26 +245,15 @@ for name, raw_entry in raw_packages.items():
     if not isinstance(raw_entry, dict) or set(raw_entry) != {"origin", "root", "search"}:
         raise SystemExit(70)
     entry = {}
-    for field in ("search",):
-        raw = raw_entry[field]
-        path = pathlib.Path(raw)
-        if not isinstance(raw, str) or not path.is_absolute():
-            raise SystemExit(70)
-        entry[field] = path.resolve(strict=True)
+    _, entry["search"] = validate_binding(raw_entry["search"], True)
     raw_origin = raw_entry["origin"]
     if raw_origin is not None:
-        origin = pathlib.Path(raw_origin)
-        if not isinstance(raw_origin, str) or not origin.is_absolute():
-            raise SystemExit(70)
-        entry["origin"] = origin.resolve(strict=True)
+        _, entry["origin"] = validate_binding(raw_origin, False)
     else:
         entry["origin"] = None
     raw_root = raw_entry["root"]
     if raw_root is not None:
-        root = pathlib.Path(raw_root)
-        if not isinstance(raw_root, str) or not root.is_absolute():
-            raise SystemExit(70)
-        entry["root"] = root.resolve(strict=True)
+        _, entry["root"] = validate_binding(raw_root, True)
     else:
         entry["root"] = None
     if (
@@ -176,8 +312,18 @@ class GuardedDistributionFinder:
 stdlib_path = list(sys.path)
 sys.path[:] = [str(trusted), *stdlib_path]
 sys.meta_path.insert(0, GuardedDistributionFinder)
-expected_graphite_mcp = (trusted / "graphite" / "mcp.py").resolve(strict=True)
-if not expected_graphite_mcp.is_file():
+graphite_spec = PathFinder.find_spec("graphite", [str(trusted)])
+if (
+    graphite_spec is None
+    or graphite_spec.origin is None
+    or pathlib.Path(graphite_spec.origin).resolve(strict=True) != expected_graphite_init
+    or graphite_spec.submodule_search_locations is None
+    or [pathlib.Path(item).resolve(strict=True) for item in graphite_spec.submodule_search_locations]
+    != [expected_graphite_init.parent]
+):
+    raise SystemExit(70)
+mcp_spec = PathFinder.find_spec("graphite.mcp", list(graphite_spec.submodule_search_locations))
+if mcp_spec is None or mcp_spec.origin is None or pathlib.Path(mcp_spec.origin).resolve(strict=True) != expected_graphite_mcp:
     raise SystemExit(70)
 runpy.run_module("graphite.mcp", run_name="__main__")
 """
@@ -444,6 +590,153 @@ def _path_is_within(path: Path, root: Path) -> bool:
         return False
 
 
+def _path_binding(path: Path, *, require_directory: bool) -> dict[str, object]:
+    lexical = Path(os.path.abspath(path))
+    canonical = lexical.resolve(strict=True)
+    if canonical.is_dir() != require_directory:
+        raise ValueError
+    stat = canonical.stat()
+    return {
+        "lexical": str(lexical),
+        "canonical": str(canonical),
+        "identity": [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns],
+    }
+
+
+def _validate_path_binding(
+    binding: object,
+    *,
+    require_directory: bool,
+) -> tuple[Path, Path]:
+    if not isinstance(binding, dict) or set(binding) != {"canonical", "identity", "lexical"}:
+        raise ValueError
+    raw_lexical = binding["lexical"]
+    raw_canonical = binding["canonical"]
+    identity = binding["identity"]
+    if (
+        not isinstance(raw_lexical, str)
+        or not isinstance(raw_canonical, str)
+        or not isinstance(identity, list)
+        or len(identity) != 4
+        or any(not isinstance(item, int) or isinstance(item, bool) for item in identity)
+    ):
+        raise ValueError
+    lexical = Path(raw_lexical)
+    canonical = Path(raw_canonical)
+    if not lexical.is_absolute() or not canonical.is_absolute():
+        raise ValueError
+    if lexical.resolve(strict=True) != canonical or canonical.resolve(strict=True) != canonical:
+        raise ValueError
+    stat = canonical.stat()
+    if [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns] != identity:
+        raise ValueError
+    if canonical.is_dir() != require_directory:
+        raise ValueError
+    return lexical, canonical
+
+
+def _compact_manifest_files(
+    distribution_paths: dict[str, dict[str, object]],
+    all_files: dict[Path, dict[str, object]],
+) -> list[dict[str, object]]:
+    roots: dict[tuple[str, str], tuple[dict[str, object], Path, Path]] = {}
+    for binding in distribution_paths.values():
+        lexical, canonical = _validate_path_binding(binding, require_directory=True)
+        root_binding = _path_binding(lexical.parent, require_directory=True)
+        root_lexical, root_canonical = _validate_path_binding(
+            root_binding,
+            require_directory=True,
+        )
+        if canonical.parent != root_canonical:
+            raise ValueError
+        key = (os.path.normcase(str(root_lexical)), os.path.normcase(str(root_canonical)))
+        roots[key] = (root_binding, root_lexical, root_canonical)
+
+    grouped: dict[tuple[str, str], list[list[object]]] = {key: [] for key in roots}
+    file_bindings = list(all_files.values())
+    with ThreadPoolExecutor(max_workers=min(32, max(1, len(file_bindings)))) as executor:
+        validated_files = executor.map(
+            lambda binding: _validate_path_binding(binding, require_directory=False),
+            file_bindings,
+        )
+        bound_files = list(zip(file_bindings, validated_files, strict=True))
+    for binding, (lexical, canonical) in bound_files:
+        matches: list[tuple[tuple[str, str], Path]] = []
+        for key, (_, root_lexical, root_canonical) in roots.items():
+            try:
+                lexical_relative = lexical.relative_to(root_lexical)
+                canonical_relative = canonical.relative_to(root_canonical)
+            except ValueError:
+                continue
+            if lexical_relative == canonical_relative:
+                matches.append((key, lexical_relative))
+        if len(matches) != 1:
+            raise ValueError
+        key, relative = matches[0]
+        if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+            raise ValueError
+        identity = binding["identity"]
+        if not isinstance(identity, list) or len(identity) != 4:
+            raise ValueError
+        grouped[key].append([relative.as_posix(), *identity])
+
+    compact: list[dict[str, object]] = []
+    for key in sorted(grouped):
+        entries = sorted(grouped[key], key=lambda entry: os.path.normcase(str(entry[0])))
+        if entries:
+            compact.append({"root": roots[key][0], "entries": entries})
+    return compact
+
+
+def _validate_manifest_file_groups(
+    raw_groups: object,
+    selected: Path,
+) -> set[Path]:
+    if not isinstance(raw_groups, list):
+        raise ValueError
+    allowed_files: set[Path] = set()
+    for raw_group in raw_groups:
+        if not isinstance(raw_group, dict) or set(raw_group) != {"entries", "root"}:
+            raise ValueError
+        root_lexical, root = _validate_path_binding(
+            raw_group["root"],
+            require_directory=True,
+        )
+        if _paths_overlap(root, selected):
+            raise ValueError
+        entries = raw_group["entries"]
+        if not isinstance(entries, list):
+            raise ValueError
+        for entry in entries:
+            if (
+                not isinstance(entry, list)
+                or len(entry) != 5
+                or not isinstance(entry[0], str)
+                or any(not isinstance(item, int) or isinstance(item, bool) for item in entry[1:])
+            ):
+                raise ValueError
+            relative = Path(entry[0])
+            if (
+                relative.is_absolute()
+                or not relative.parts
+                or any(part in {"", ".", ".."} for part in relative.parts)
+            ):
+                raise ValueError
+            lexical = root_lexical.joinpath(*relative.parts)
+            canonical = root.joinpath(*relative.parts)
+            if lexical.resolve(strict=True) != canonical or canonical.resolve(strict=True) != canonical:
+                raise ValueError
+            stat = canonical.stat()
+            if (
+                not canonical.is_file()
+                or [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns] != entry[1:]
+                or _path_is_within(canonical, selected)
+            ):
+                raise ValueError
+            allowed_files.add(canonical)
+    return allowed_files
+
+
 def _normalized_distribution_name(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
 
@@ -521,33 +814,40 @@ def _mcp_distribution_closure() -> dict[str, metadata.Distribution]:
 
 @lru_cache(maxsize=1)
 def _mcp_import_inventory() -> tuple[
-    dict[str, str],
+    dict[str, dict[str, object]],
     dict[str, frozenset[Path]],
     dict[str, dict[str, Path]],
     dict[str, frozenset[str]],
-    frozenset[Path],
+    dict[Path, dict[str, object]],
 ]:
     """Cache immutable installed-distribution records, never ambient import resolution."""
     distributions = _mcp_distribution_closure()
-    distribution_paths: dict[str, str] = {}
+    distribution_paths: dict[str, dict[str, object]] = {}
     for name, distribution in distributions.items():
         raw_path = getattr(distribution, "_path", None)
         if raw_path is None:
             raise ValueError
-        path = Path(raw_path).resolve(strict=True)
+        binding = _path_binding(Path(raw_path), require_directory=True)
+        path = Path(str(binding["canonical"]))
         if not path.is_dir() or not path.name.endswith(".dist-info"):
             raise ValueError
-        distribution_paths[name] = str(path)
+        distribution_paths[name] = binding
     suffixes = tuple(machinery.all_suffixes())
     files_by_distribution: dict[str, set[Path]] = {}
     top_directories: dict[str, dict[str, Path]] = {}
     ownership: dict[str, set[str]] = {}
-    all_files: set[Path] = set()
+    all_files: dict[Path, dict[str, object]] = {}
     for name, distribution in distributions.items():
+        _, metadata_path = _validate_path_binding(
+            distribution_paths[name],
+            require_directory=True,
+        )
+        import_root = metadata_path.parent
         declared_files: set[Path] = set()
         declared_directories: dict[str, Path] = {}
         if distribution.files is None:
             raise ValueError
+        raw_import_files: list[Path] = []
         for declared in distribution.files:
             first = str(declared).replace("\\", "/").partition("/")[0]
             top_level = first.partition(".")[0] if first.endswith(suffixes) else first
@@ -561,18 +861,30 @@ def _mcp_import_inventory() -> tuple[
                         declared_directories[top_level] = top_path
             if not str(declared).endswith(suffixes):
                 continue
-            try:
-                candidate = Path(distribution.locate_file(declared)).resolve(strict=True)
-            except OSError:
+            declared_parts = str(declared).replace("\\", "/").split("/")
+            if "__pycache__" in declared_parts:
                 continue
-            if not candidate.is_file():
+            raw_import_files.append(Path(distribution.locate_file(declared)))
+        def bind_candidate(path: Path) -> dict[str, object] | None:
+            try:
+                return _path_binding(path, require_directory=False)
+            except (OSError, ValueError):
+                return None
+        with ThreadPoolExecutor(max_workers=min(32, max(1, len(raw_import_files)))) as executor:
+            bound_candidates = executor.map(bind_candidate, raw_import_files)
+            candidate_bindings = list(bound_candidates)
+        for binding in candidate_bindings:
+            if binding is None:
+                continue
+            candidate = Path(str(binding["canonical"]))
+            if not candidate.is_file() or not _path_is_within(candidate, import_root):
                 continue
             declared_files.add(candidate)
+            all_files[candidate] = binding
         if not declared_files:
             raise ValueError
         files_by_distribution[name] = declared_files
         top_directories[name] = declared_directories
-        all_files.update(declared_files)
         raw_top_level = distribution.read_text("top_level.txt") or ""
         top_levels: set[str] = set()
         for raw in raw_top_level.splitlines():
@@ -594,7 +906,7 @@ def _mcp_import_inventory() -> tuple[
         {name: frozenset(files) for name, files in files_by_distribution.items()},
         top_directories,
         {name: frozenset(owners) for name, owners in ownership.items()},
-        frozenset(all_files),
+        all_files,
     )
 
 
@@ -610,10 +922,10 @@ def _mcp_import_manifest(selected_root: Path) -> dict[str, object]:
         ownership,
         all_files,
     ) = _mcp_import_inventory()
-    if any(_path_is_within(path, selected) for path in all_files):
-        raise ValueError
-    if any(_paths_overlap(Path(path), selected) for path in distribution_paths.values()):
-        raise ValueError
+    for binding in distribution_paths.values():
+        _, canonical = _validate_path_binding(binding, require_directory=True)
+        if _paths_overlap(canonical, selected):
+            raise ValueError
 
     packages: dict[str, dict[str, str | None]] = {}
     for top_level, raw_owners in ownership.items():
@@ -649,18 +961,220 @@ def _mcp_import_manifest(selected_root: Path) -> dict[str, object]:
         if _paths_overlap(search, selected) or (root is not None and _paths_overlap(root, selected)):
             raise ValueError
         packages[top_level] = {
-            "origin": str(origin) if origin is not None else None,
-            "root": str(root) if root is not None else None,
-            "search": str(search),
+            "origin": _path_binding(Path(spec.origin), require_directory=False)
+            if spec.origin is not None
+            else None,
+            "root": _path_binding(Path(next(iter(raw_locations))), require_directory=True)
+            if raw_locations is not None
+            else None,
+            "search": _path_binding(search, require_directory=True),
         }
     for required in ("mcp", "networkx"):
         if required not in packages:
             raise ValueError
     return {
         "distributions": distribution_paths,
-        "files": [str(path) for path in sorted(all_files, key=lambda item: os.path.normcase(str(item)))],
+        "files": _compact_manifest_files(distribution_paths, all_files),
         "packages": packages,
     }
+
+
+def _validate_mcp_manifest(manifest: object, selected_root: Path) -> dict[str, object]:
+    if not isinstance(manifest, dict) or set(manifest) != {"distributions", "files", "packages"}:
+        raise ValueError
+    raw_distributions = manifest["distributions"]
+    raw_files = manifest["files"]
+    raw_packages = manifest["packages"]
+    if not isinstance(raw_distributions, dict) or not isinstance(raw_packages, dict):
+        raise ValueError
+    selected = selected_root.resolve(strict=True)
+    allowed_files = _validate_manifest_file_groups(raw_files, selected)
+    for name, binding in raw_distributions.items():
+        if not isinstance(name, str):
+            raise ValueError
+        _, canonical = _validate_path_binding(binding, require_directory=True)
+        if not canonical.name.endswith(".dist-info") or _paths_overlap(canonical, selected):
+            raise ValueError
+    for name, entry in raw_packages.items():
+        if not isinstance(name, str) or not name.isidentifier() or not isinstance(entry, dict):
+            raise ValueError
+        if set(entry) != {"origin", "root", "search"}:
+            raise ValueError
+        _, search = _validate_path_binding(entry["search"], require_directory=True)
+        if _paths_overlap(search, selected):
+            raise ValueError
+        root: Path | None = None
+        if entry["root"] is not None:
+            _, root = _validate_path_binding(entry["root"], require_directory=True)
+            if _paths_overlap(root, selected) or root.parent != search:
+                raise ValueError
+        if entry["origin"] is not None:
+            _, origin = _validate_path_binding(entry["origin"], require_directory=False)
+            if origin not in allowed_files:
+                raise ValueError
+            if root is not None and not _path_is_within(origin, root):
+                raise ValueError
+        elif root is None:
+            raise ValueError
+    if not {"mcp", "networkx"}.issubset(raw_packages):
+        raise ValueError
+    return manifest
+
+
+def _metadata_search_roots(selected_root: Path) -> list[Path]:
+    selected = selected_root.resolve(strict=True)
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for raw in sys.path:
+        if not raw:
+            continue
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            continue
+        try:
+            candidate = Path(os.path.abspath(candidate))
+            canonical = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        normalized = os.path.normcase(str(canonical))
+        if canonical.is_dir() and not _paths_overlap(canonical, selected) and normalized not in seen:
+            seen.add(normalized)
+            roots.append(candidate)
+    return roots
+
+
+_MCP_MANIFEST_CACHE_LOCK = threading.Lock()
+_MCP_MANIFEST_CACHE: tuple[tuple[object, ...], dict[str, object]] | None = None
+
+
+def _frozen_path_binding(binding: dict[str, object], *, require_directory: bool) -> tuple[object, ...]:
+    lexical, canonical = _validate_path_binding(binding, require_directory=require_directory)
+    identity = binding["identity"]
+    if not isinstance(identity, list):
+        raise ValueError
+    return (str(lexical), str(canonical), tuple(identity))
+
+
+def _trusted_graphite_bindings() -> tuple[
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+    dict[str, object],
+]:
+    trusted_lexical = Path(os.path.abspath(Path(__file__).parent.parent))
+    trusted = _path_binding(trusted_lexical, require_directory=True)
+    package_init = _path_binding(
+        trusted_lexical / "graphite" / "__init__.py",
+        require_directory=False,
+    )
+    doctor_source = _path_binding(
+        trusted_lexical / "graphite" / "doctor_probes.py",
+        require_directory=False,
+    )
+    mcp_source = _path_binding(
+        trusted_lexical / "graphite" / "mcp.py",
+        require_directory=False,
+    )
+    root_lexical, root = _validate_path_binding(trusted, require_directory=True)
+    init_lexical, init_canonical = _validate_path_binding(package_init, require_directory=False)
+    doctor_lexical, doctor_canonical = _validate_path_binding(
+        doctor_source,
+        require_directory=False,
+    )
+    mcp_lexical, mcp_canonical = _validate_path_binding(mcp_source, require_directory=False)
+    if (
+        init_lexical != root_lexical / "graphite" / "__init__.py"
+        or doctor_lexical != root_lexical / "graphite" / "doctor_probes.py"
+        or mcp_lexical != root_lexical / "graphite" / "mcp.py"
+        or init_canonical.parent != root / "graphite"
+        or doctor_canonical.parent != root / "graphite"
+        or mcp_canonical.parent != root / "graphite"
+    ):
+        raise ValueError
+    return trusted, package_init, doctor_source, mcp_source
+
+
+def _manifest_cache_key(
+    trusted_bindings: tuple[dict[str, object], ...],
+    metadata_bindings: list[dict[str, object]],
+) -> tuple[object, ...]:
+    return (
+        tuple(
+            _frozen_path_binding(binding, require_directory=index == 0)
+            for index, binding in enumerate(trusted_bindings)
+        ),
+        tuple(
+            _frozen_path_binding(binding, require_directory=True)
+            for binding in metadata_bindings
+        ),
+    )
+
+
+def _build_mcp_manifest_bounded(
+    selected: Path,
+    *,
+    selected_binding: dict[str, object],
+    python_executable: str,
+    timeout_seconds: float,
+    builder_script: str,
+    runner: Callable[..., ProbeProcessResult],
+) -> dict[str, object]:
+    global _MCP_MANIFEST_CACHE
+    trusted, package_init, doctor_source, mcp_source = _trusted_graphite_bindings()
+    _, bound_selected = _validate_path_binding(selected_binding, require_directory=True)
+    if bound_selected != selected:
+        raise ValueError
+    metadata_roots = _metadata_search_roots(selected)
+    if len(metadata_roots) > _MCP_METADATA_ROOT_LIMIT:
+        raise ValueError
+    metadata_bindings = [
+        _path_binding(root, require_directory=True)
+        for root in metadata_roots
+    ]
+    metadata_payload = json.dumps(metadata_bindings, separators=(",", ":"))
+    if len(metadata_payload.encode("utf-8")) > _MCP_BUILDER_ARGUMENT_LIMIT_BYTES:
+        raise ValueError
+    use_cache = builder_script == _MCP_MANIFEST_BUILDER_BOOTSTRAP
+    cache_key = _manifest_cache_key(
+        (trusted, package_init, doctor_source, mcp_source),
+        metadata_bindings,
+    )
+    if use_cache:
+        with _MCP_MANIFEST_CACHE_LOCK:
+            cached = _MCP_MANIFEST_CACHE
+        if cached is not None and cached[0] == cache_key:
+            return _validate_mcp_manifest(cached[1], selected)
+    try:
+        result = runner(
+            [
+                python_executable,
+                "-I",
+                "-S",
+                "-B",
+                "-c",
+                builder_script,
+                json.dumps(trusted, separators=(",", ":")),
+                json.dumps(package_init, separators=(",", ":")),
+                json.dumps(doctor_source, separators=(",", ":")),
+                json.dumps(selected_binding, separators=(",", ":")),
+                metadata_payload,
+            ],
+            cwd=selected,
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=_MCP_OUTPUT_LIMIT_BYTES,
+        )
+    except ProbeProcessError as exc:
+        if exc.code == "nonzero":
+            raise ValueError from None
+        raise
+    if len(result.stdout) + len(result.stderr) > _MCP_OUTPUT_LIMIT_BYTES:
+        raise ProbeProcessError("output_limit")
+    manifest = _json_object(result.stdout)
+    verified = _validate_mcp_manifest(manifest, selected)
+    if use_cache:
+        with _MCP_MANIFEST_CACHE_LOCK:
+            _MCP_MANIFEST_CACHE = (cache_key, verified)
+    return verified
 
 
 def _validate_json_nesting(text: str) -> None:
@@ -763,7 +1277,8 @@ def probe_mcp(
     python_executable: str = sys.executable,
     timeout_seconds: float = 20.0,
     _runner: Callable[..., ProbeProcessResult] = run_bounded_process,
-    _manifest_builder: Callable[[Path], dict[str, object]] = _mcp_import_manifest,
+    _builder_script: str = _MCP_MANIFEST_BUILDER_BOOTSTRAP,
+    _builder_runner: Callable[..., ProbeProcessResult] = run_bounded_process,
 ) -> DoctorCheck:
     """Initialize the MCP server and inspect its read-only tool inventory."""
     started = time.monotonic()
@@ -789,13 +1304,25 @@ def probe_mcp(
         for request in requests
     )
     try:
-        trusted = Path(__file__).resolve(strict=True).parent.parent
-        selected = root.resolve(strict=True)
-        manifest = _manifest_builder(selected)
+        selected_binding = _path_binding(root, require_directory=True)
+        _, selected = _validate_path_binding(selected_binding, require_directory=True)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProbeProcessError("timeout")
+        manifest = _build_mcp_manifest_bounded(
+            selected,
+            selected_binding=selected_binding,
+            python_executable=python_executable,
+            timeout_seconds=remaining,
+            builder_script=_builder_script,
+            runner=_builder_runner,
+        )
+        _, selected = _validate_path_binding(selected_binding, require_directory=True)
         stdin = json.dumps(manifest, separators=(",", ":")).encode("utf-8") + b"\n" + protocol_input
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ProbeProcessError("timeout")
+        trusted, package_init, _, mcp_source = _trusted_graphite_bindings()
         result = _runner(
             [
                 python_executable,
@@ -804,10 +1331,12 @@ def probe_mcp(
                 "-B",
                 "-c",
                 _MCP_BOOTSTRAP,
-                str(trusted),
-                str(selected),
+                json.dumps(trusted, separators=(",", ":")),
+                json.dumps(package_init, separators=(",", ":")),
+                json.dumps(mcp_source, separators=(",", ":")),
+                json.dumps(selected_binding, separators=(",", ":")),
             ],
-            cwd=root,
+            cwd=selected,
             stdin=stdin,
             timeout_seconds=remaining,
             max_output_bytes=_MCP_OUTPUT_LIMIT_BYTES,
