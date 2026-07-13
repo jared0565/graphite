@@ -6,6 +6,7 @@ from pathlib import Path
 
 from graphite.cli import main
 from graphite.init import init_project, resolve_platform_selection
+from graphite.typescript_activation import ActivationOutcome, ActivationResult
 
 
 def _write(path: Path, text: str) -> None:
@@ -103,3 +104,28 @@ def test_init_cli_list_platforms(capsys) -> None:
     assert "codex" in out
     assert "claude" in out
     assert "visual-studio" in out
+
+
+def test_init_json_includes_noninteractive_typescript_activation(tmp_path, capsys, monkeypatch) -> None:
+    calls = []
+    expected = ActivationResult(ActivationOutcome.GUIDANCE_ONLY, None, "non_interactive")
+    monkeypatch.setattr("graphite.cli.activate_typescript", lambda request: calls.append(request) or expected)
+
+    result = main(["init", str(tmp_path), "--platform", "codex", "--no-build", "--no-validate", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert result == 0
+    assert payload["typescript_activation"] == expected.to_dict()
+    assert calls[0].json_mode is True
+    assert calls[0].stdin_is_tty is False or calls[0].stdout_is_tty is False
+
+
+def test_init_fatal_activation_preserves_onboarding_and_returns_one(tmp_path, capsys, monkeypatch) -> None:
+    expected = ActivationResult(ActivationOutcome.VALIDATION_FAILED, None, "validator_missing")
+    monkeypatch.setattr("graphite.cli.activate_typescript", lambda request: expected)
+
+    result = main(["init", str(tmp_path), "--platform", "codex", "--no-build", "--no-validate", "--json"])
+    capsys.readouterr()
+
+    assert result == 1
+    assert (tmp_path / "GRAPHITE.md").exists()

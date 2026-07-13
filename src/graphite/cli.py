@@ -41,6 +41,12 @@ from .review import (
     normalize_explicit_changes,
 )
 from .validation import assert_valid_graph_bundle, validate_graph_bundle
+from .typescript_activation import (
+    ActivationOutcome,
+    ActivationRequest,
+    ActivationResult,
+    activate_typescript,
+)
 from .watch import WatchChange, WatchOptions, watch_loop
 from .windows_task import (
     DEFAULT_TASK_NAME,
@@ -368,11 +374,51 @@ def _project_scoped_config(args: argparse.Namespace, root: Path) -> Config:
     return Config(**data)
 
 
+def _activate_typescript_for_onboarding(
+    args: argparse.Namespace, root: Path, cfg: Config
+) -> ActivationResult:
+    ci_mode = bool(os.environ.get("CI"))
+    try:
+        return activate_typescript(
+            ActivationRequest(
+                root=root,
+                cfg=cfg,
+                stdin_is_tty=sys.stdin.isatty() and not ci_mode,
+                stdout_is_tty=sys.stdout.isatty() and not ci_mode,
+                assume_yes=bool(getattr(args, "yes", False)),
+                json_mode=bool(getattr(args, "json", False)),
+            )
+        )
+    except Exception:
+        return ActivationResult(
+            ActivationOutcome.INSTALLATION_FAILED,
+            None,
+            "dependency_failed",
+        )
+
+
+def _print_typescript_activation(activation: ActivationResult) -> None:
+    manager = activation.manager.value if activation.manager else "none"
+    changed = ", ".join(activation.changed_files) if activation.changed_files else "none"
+    print(
+        "  - TypeScript activation: "
+        f"{activation.outcome.value} (manager={manager}, "
+        f"reason={activation.reason}, changed={changed})"
+    )
+    if activation.outcome is ActivationOutcome.GUIDANCE_ONLY:
+        print("    1. Set GRAPHITE_PACKAGE_VALIDATOR=<absolute-validator-path>.")
+        print("    2. Confirm it is absolute, present, and a regular file.")
+        print("    3. Run: node <absolute-validator-path> typescript")
+        print("    4. With <project-manager>, add local dev dependency typescript with scripts disabled.")
+        print("    5. Rerun graphite doctor or onboarding to confirm detection.")
+
+
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
     result = bootstrap_project(root, daemon_base=daemon_base).to_dict()
     cfg = _project_scoped_config(args, root)
+    activation = _activate_typescript_for_onboarding(args, root, cfg)
     build: dict[str, Any] = {"requested": not args.no_build, "ok": None}
     validation: dict[str, Any] = {"requested": not args.no_validate, "ok": None}
 
@@ -393,7 +439,12 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         else:
             validation.update({"ok": False, "error": f"graph not found: {graph_path}"})
 
-    payload = {**result, "build": build, "validation": validation}
+    payload = {
+        **result,
+        "typescript_activation": activation.to_dict(),
+        "build": build,
+        "validation": validation,
+    }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
@@ -405,11 +456,12 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         daemon = result["daemon"]
         daemon_note = "listed" if daemon.get("project_listed") else "not listed yet"
         print(f"  - daemon: {daemon_note} ({daemon.get('status_path')})")
+        _print_typescript_activation(activation)
         if build["requested"]:
             print(f"  - build: {'ok' if build['ok'] else 'failed'}")
         if validation["requested"]:
             print(f"  - validation: {'ok' if validation.get('ok') else 'failed'}")
-    return 0 if (validation.get("ok") is not False) else 1
+    return 1 if activation.fatal or validation.get("ok") is False else 0
 
 
 
@@ -429,6 +481,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
     result = init_project(root, platforms=platforms, daemon_base=daemon_base).to_dict()
     cfg = _project_scoped_config(args, root)
+    activation = _activate_typescript_for_onboarding(args, root, cfg)
     build: dict[str, Any] = {"requested": not args.no_build, "ok": None}
     validation: dict[str, Any] = {"requested": not args.no_validate, "ok": None}
 
@@ -449,7 +502,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         else:
             validation.update({"ok": False, "error": f"graph not found: {graph_path}"})
 
-    payload = {**result, "build": build, "validation": validation}
+    payload = {
+        **result,
+        "typescript_activation": activation.to_dict(),
+        "build": build,
+        "validation": validation,
+    }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
@@ -466,11 +524,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         daemon = result["daemon"]
         daemon_note = "listed" if daemon.get("project_listed") else "not listed yet"
         print(f"  - daemon: {daemon_note} ({daemon.get('status_path')})")
+        _print_typescript_activation(activation)
         if build["requested"]:
             print(f"  - build: {'ok' if build['ok'] else 'failed'}")
         if validation["requested"]:
             print(f"  - validation: {'ok' if validation.get('ok') else 'failed'}")
-    return 0 if (validation.get("ok") is not False) else 1
+    return 1 if activation.fatal or validation.get("ok") is False else 0
 
 def cmd_audit_replacement(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
@@ -948,7 +1007,7 @@ def main(argv: list[str] | None = None) -> int:
     p_init.add_argument("path", nargs="?", default=".", help="Project path (default: current directory)")
     p_init.add_argument("--platform", action="append", default=[], help="Platform to configure: codex, claude, antigravity, visual-studio, cursor, windsurf, or all. Can be repeated or comma-separated.")
     p_init.add_argument("--all", action="store_true", help="Configure every supported platform")
-    p_init.add_argument("--yes", action="store_true", help="Use default platforms without prompting when --platform is omitted")
+    p_init.add_argument("--yes", action="store_true", help="Use default platforms and suppress optional dependency prompts")
     p_init.add_argument("--daemon-base", default=None, help="Daemon base folder for visibility check, default auto-detects F:/Projects")
     p_init.add_argument("--no-build", action="store_true", help="Only update instruction files; do not build graph")
     p_init.add_argument("--no-validate", action="store_true", help="Skip graph validation after init")
@@ -962,6 +1021,7 @@ def main(argv: list[str] | None = None) -> int:
     p_bootstrap.add_argument("--no-build", action="store_true", help="Only update project workflow files; do not build graph")
     p_bootstrap.add_argument("--no-validate", action="store_true", help="Skip graph validation after bootstrap")
     p_bootstrap.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_bootstrap.add_argument("--yes", action="store_true", help="Run non-interactively and never offer dependency installation")
     p_bootstrap.set_defaults(func=cmd_bootstrap)
 
     p_audit_replacement = sub.add_parser("audit-replacement", help="Audit whether Graphite is ready to replace Graphify in a project")
@@ -1148,7 +1208,6 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 
 
 

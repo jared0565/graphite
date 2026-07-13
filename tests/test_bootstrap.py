@@ -4,8 +4,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from graphite.bootstrap import bootstrap_project
 from graphite.cli import main
+from graphite.typescript_activation import ActivationOutcome, ActivationResult
 
 
 def _write(path: Path, text: str) -> None:
@@ -110,3 +113,87 @@ def test_bootstrap_cli_no_build_skips_validation(tmp_path: Path, capsys) -> None
     assert payload["validation"]["requested"] is False
     assert not (tmp_path / "graph-out").exists()
 
+
+def test_bootstrap_json_includes_activation_and_yes_is_noninteractive(tmp_path, capsys, monkeypatch) -> None:
+    calls = []
+    expected = ActivationResult(ActivationOutcome.GUIDANCE_ONLY, None, "non_interactive")
+    monkeypatch.setattr("graphite.cli.activate_typescript", lambda request: calls.append(request) or expected)
+
+    result = main(["bootstrap", str(tmp_path), "--yes", "--no-build", "--no-validate", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert result == 0
+    assert payload["typescript_activation"] == expected.to_dict()
+    assert calls[0].assume_yes is True
+
+
+def test_bootstrap_orders_onboarding_activation_then_build(tmp_path, capsys, monkeypatch) -> None:
+    events = []
+    real_bootstrap = bootstrap_project
+    monkeypatch.setattr("graphite.cli.bootstrap_project", lambda *a, **k: events.append("onboarding") or real_bootstrap(*a, **k))
+    monkeypatch.setattr("graphite.cli.activate_typescript", lambda request: events.append("activation") or ActivationResult(ActivationOutcome.NOT_APPLICABLE, None, "no_typescript_evidence"))
+    monkeypatch.setattr("graphite.cli._build_project", lambda *a, **k: events.append("build"))
+
+    main(["bootstrap", str(tmp_path), "--no-validate", "--json"])
+    capsys.readouterr()
+    assert events == ["onboarding", "activation", "build"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        ActivationOutcome.VALIDATION_FAILED,
+        ActivationOutcome.INSTALLATION_FAILED,
+        ActivationOutcome.VERIFICATION_FAILED,
+    ],
+)
+def test_bootstrap_fatal_activation_still_builds_and_returns_one(
+    tmp_path, capsys, monkeypatch, outcome
+) -> None:
+    built = []
+    monkeypatch.setattr(
+        "graphite.cli.activate_typescript",
+        lambda request: ActivationResult(outcome, None, "dependency_failed"),
+    )
+    monkeypatch.setattr("graphite.cli._build_project", lambda *a, **k: built.append(True))
+
+    result = main(["bootstrap", str(tmp_path), "--no-validate", "--json"])
+    capsys.readouterr()
+    assert result == 1
+    assert built == [True]
+    assert (tmp_path / "AGENTS.md").exists()
+
+
+def test_bootstrap_human_guidance_is_fixed_and_path_free(tmp_path, capsys, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "graphite.cli.activate_typescript",
+        lambda request: ActivationResult(ActivationOutcome.GUIDANCE_ONLY, None, "non_interactive"),
+    )
+    result = main(["bootstrap", str(tmp_path), "--yes", "--no-build", "--no-validate"])
+    output = capsys.readouterr().out
+
+    assert result == 0
+    assert output.count("    1.") == 1 and output.count("    5.") == 1
+    assert "<absolute-validator-path>" in output
+    assert "<project-manager>" in output
+    assert "global" not in output.lower()
+    assert str(tmp_path) not in "\n".join(
+        line for line in output.splitlines() if "TypeScript activation" in line or line.startswith("    ")
+    )
+
+
+def test_bootstrap_ci_masks_terminal_capability(tmp_path, capsys, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setattr("graphite.cli.sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("graphite.cli.sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr(
+        "graphite.cli.activate_typescript",
+        lambda request: calls.append(request)
+        or ActivationResult(ActivationOutcome.GUIDANCE_ONLY, None, "non_interactive"),
+    )
+
+    main(["bootstrap", str(tmp_path), "--no-build", "--no-validate", "--json"])
+    capsys.readouterr()
+    assert calls[0].stdin_is_tty is False
+    assert calls[0].stdout_is_tty is False
