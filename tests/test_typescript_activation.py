@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 
 import pytest
+import graphite.dependency_install as dependency_install
 
 from graphite.dependency_install import (
     INSTALL_OUTPUT_LIMIT,
     TRUSTED_REGISTRY,
     Manager,
+    ManagerAdapter,
     ProbeProcessError,
     TrustedCommand,
     TrustedFile,
@@ -35,7 +38,13 @@ def _file(path: Path, content: bytes = b"tool") -> TrustedFile:
     path.write_bytes(content)
     path.chmod(0o755)
     stat = path.stat()
-    return TrustedFile(path.resolve(), (stat.st_dev, stat.st_ino))
+    return TrustedFile(
+        path.resolve(),
+        (stat.st_dev, stat.st_ino),
+        stat.st_size,
+        stat.st_mtime_ns,
+        hashlib.sha256(content).hexdigest(),
+    )
 
 
 def _command(path: Path) -> TrustedCommand:
@@ -127,6 +136,9 @@ def test_parse_version_accepts_semver_suffix_and_outer_whitespace():
             Manager.NPM,
             {
                 "NPM_CONFIG_USERCONFIG": "npmrc",
+                "NPM_CONFIG_GLOBALCONFIG": "npm-globalconfig",
+                "NPM_CONFIG_CACHE": "npm-cache",
+                "NPM_CONFIG_PREFIX": "npm-prefix",
                 "NPM_CONFIG_REGISTRY": TRUSTED_REGISTRY,
                 "NPM_CONFIG_IGNORE_SCRIPTS": "true",
                 "NPM_CONFIG_AUDIT": "false",
@@ -139,12 +151,19 @@ def test_parse_version_accepts_semver_suffix_and_outer_whitespace():
             Manager.PNPM,
             {
                 "NPM_CONFIG_USERCONFIG": "npmrc",
+                "NPM_CONFIG_GLOBALCONFIG": "npm-globalconfig",
+                "NPM_CONFIG_CACHE": "npm-cache",
+                "NPM_CONFIG_PREFIX": "npm-prefix",
                 "NPM_CONFIG_REGISTRY": TRUSTED_REGISTRY,
                 "NPM_CONFIG_IGNORE_SCRIPTS": "true",
                 "NPM_CONFIG_AUDIT": "false",
                 "NPM_CONFIG_FUND": "false",
                 "npm_config_registry": TRUSTED_REGISTRY,
                 "npm_config_ignore_scripts": "true",
+                "PNPM_HOME": "pnpm-home",
+                "PNPM_STORE_DIR": "pnpm-store",
+                "PNPM_CONFIG_DIR": "pnpm-config",
+                "npm_config_store_dir": "pnpm-store",
             },
         ),
         (
@@ -159,9 +178,22 @@ def test_parse_version_accepts_semver_suffix_and_outer_whitespace():
         (Manager.BUN, {"BUN_INSTALL_CACHE_DIR": "bun-cache"}),
     ],
 )
-def test_install_environment_is_exact_for_each_manager(tmp_path, manager, manager_environment):
+def test_install_environment_is_exact_for_each_manager(
+    tmp_path, manager, manager_environment, monkeypatch
+):
+    trusted_windows = {
+        "SYSTEMROOT": r"C:\TrustedWindows",
+        "WINDIR": r"C:\TrustedWindows",
+        "COMSPEC": r"C:\TrustedWindows\System32\cmd.exe",
+        "PATHEXT": ".COM;.EXE",
+    }
+    monkeypatch.setattr(
+        dependency_install, "_trusted_windows_system_environment", lambda: trusted_windows
+    )
     source = {
-        "SYSTEMROOT": r"C:\Windows",
+        "SYSTEMROOT": r"C:\hostile",
+        "WINDIR": r"C:\hostile",
+        "COMSPEC": str(tmp_path / "repo-controlled" / "cmd.exe"),
         "LANG": "en_GB.UTF-8",
         "PATH": str(tmp_path / "repo-controlled"),
         "NPM_TOKEN": "secret",
@@ -180,10 +212,11 @@ def test_install_environment_is_exact_for_each_manager(tmp_path, manager, manage
     env = build_install_environment(manager, home, (tools,), TRUSTED_REGISTRY, source)
     expected_path = [str(tools.resolve())]
     expected_path.extend(
-        [str(Path(source["SYSTEMROOT"]) / "System32")] if os.name == "nt" else ["/usr/bin", "/bin"]
+        [str(Path(trusted_windows["SYSTEMROOT"]) / "System32")]
+        if os.name == "nt"
+        else ["/usr/bin", "/bin"]
     )
     common = {
-        "SYSTEMROOT": source["SYSTEMROOT"],
         "LANG": source["LANG"],
         "PATH": os.pathsep.join(expected_path),
         "HOME": str(base / "home"),
@@ -192,9 +225,30 @@ def test_install_environment_is_exact_for_each_manager(tmp_path, manager, manage
         "XDG_CACHE_HOME": str(base / "cache"),
         "TEMP": str(base / "tmp"),
         "TMP": str(base / "tmp"),
+        "APPDATA": str(base / "appdata"),
+        "LOCALAPPDATA": str(base / "localappdata"),
     }
+    if os.name == "nt":
+        common |= trusted_windows
     expected_manager = {
-        key: str(base / value) if value in {"npmrc", "yarn-global", "bun-cache"} else value
+        key: (
+            str(base / "npm-config" / "user.npmrc")
+            if value == "npmrc"
+            else str(base / "npm-config" / "global.npmrc")
+            if value == "npm-globalconfig"
+            else str(base / value)
+            if value
+            in {
+                "npm-cache",
+                "npm-prefix",
+                "pnpm-home",
+                "pnpm-store",
+                "pnpm-config",
+                "yarn-global",
+                "bun-cache",
+            }
+            else value
+        )
         for key, value in manager_environment.items()
     }
     assert env == common | expected_manager
@@ -295,6 +349,7 @@ def test_snapshot_control_file_rejects_symlink_and_detects_content(tmp_path):
         (b'{"dependencies":{"x":"./../outside"}}', b"", False),
         (b'{"dependencies":{"x":"git@github.com:org/repo.git"}}', b"", False),
         (b'{"dependencies":{"x":"org/repo"}}', b"", False),
+        (b'{"dependencies":{"x":"payload.tgz"}}', b'{"lockfileVersion":3}', False),
         (b'{"dependencies":{"x":"C:\\\\outside"}}', b"", False),
         (b'{"dependencies":{"x":"\\\\\\\\server\\\\share"}}', b"", False),
         (b'{"workspaces":["packages/*"]}', b"", False),
@@ -311,12 +366,16 @@ def test_snapshot_control_file_rejects_symlink_and_detects_content(tmp_path):
         (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"link:../x"}', False),
         (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"local:../x"}', False),
         (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"../x"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"payload.tgz"}', False),
         (b'{"dependencies":{"x":"1.0.0"}}', b"{}", False),
         (b'{"dependencies":{"x":"1.0.0"}}', b"lockfileVersion: '9.0'\npackages: {}\n", True),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"lockfileVersion: '9.0'\npackages:\n  x:\n    tarball: payload.tgz\n", False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"lockfileVersion: '9.0'\npackages:\n  x:\n    fetch: mystery\n", False),
         (b'{"dependencies":{"x":"1.0.0"}}', b"lockfileVersion: '9.0'\npackages:\n  x:\n    resolution: {\"tarball\":\"https://registry.npmjs.org/x.tgz\"}\n", True),
         (b'{"dependencies":{"x":"1.0.0"}}', b"lockfileVersion: '9.0'\npackages:\n  x:\n    resolution: {\"tarball\":\"https\\u003a//evil.example/x.tgz\"}\n", False),
         (b'{"dependencies":{"x":"1.0.0"}}', b"lockfileVersion: nope\npackages: {}\n", False),
         (b'{"dependencies":{"x":"1.0.0"}}', b"# yarn lockfile v1\n\nx@1.0.0:\n  version \"1.0.0\"\n  resolved \"https://registry.npmjs.org/x.tgz\"\n", True),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"# yarn lockfile v1\n\nx@1.0.0:\n  version \"1.0.0\"\n  resolved \"payload.tgz\"\n", False),
         (b'{"dependencies":{"x":"1.0.0"}}', b"# yarn lockfile v1\n\nx@1.0.0:\n  version \"1.0.0\"\n  resolved \"https\\u003a//evil.example/x.tgz\"\n", False),
         (b'{"dependencies":{"x":"1.0.0"}}', b"# yarn lockfile v1\nnot-an-entry\n", False),
         (b'{"dependencies":{"x":"1.0.0"}}', b"__metadata:\n  version: 8\n\n\"x@npm:^1.0.0\":\n  version: 1.0.0\n  resolution: \"x@npm:1.0.0\"\n", True),
@@ -333,6 +392,23 @@ def test_source_policy(manifest, lockfile, expected):
 
 def test_source_policy_rejects_malformed_lockfile_encoding():
     assert not control_files_use_trusted_sources(b"{}", b"\xff\x00")
+
+
+@pytest.mark.parametrize(
+    ("manifest", "lockfile"),
+    [
+        (b'{"dependencies":{},"score":NaN}', b'{"lockfileVersion":3}'),
+        (b'{"dependencies":{},"score":Infinity}', b'{"lockfileVersion":3}'),
+        (b'{"dependencies":{},"score":1,"score":2}', b'{"lockfileVersion":3}'),
+        (b'{"dependencies":{},"score":' + b"9" * 5000 + b"}", b'{"lockfileVersion":3}'),
+        (b'{"dependencies":{}}', b'{"lockfileVersion":3,"score":NaN}'),
+        (b'{"dependencies":{}}', b'{"lockfileVersion":3,"score":Infinity}'),
+        (b'{"dependencies":{}}', b'{"lockfileVersion":3,"score":1,"score":2}'),
+        (b'{"dependencies":{}}', b'{"lockfileVersion":' + b"9" * 5000 + b"}"),
+    ],
+)
+def test_source_policy_strict_json_never_accepts_or_raises(manifest, lockfile):
+    assert not control_files_use_trusted_sources(manifest, lockfile)
 
 
 @pytest.mark.parametrize(
@@ -410,6 +486,7 @@ def test_validator_exact_argv_and_fixed_results(tmp_path):
     assert calls[0][0] == [str(node.path), str(validator.path), "typescript"]
     assert calls[0][1]["stdin"] is None
     assert calls[0][1]["max_output_bytes"] == INSTALL_OUTPUT_LIMIT
+    assert calls[0][1]["check"] is False
     assert "NPM_TOKEN" not in calls[0][1]["environment"]
 
 
@@ -427,10 +504,12 @@ def test_manager_version_and_install_use_fixed_argv(tmp_path):
     assert version.ok and version.version == Version(11, 2, 0) and version.reason == "manager_versioned"
     assert calls[0][0] == [*command.argv, "--version"]
     assert calls[0][1]["max_output_bytes"] == 64
+    assert calls[0][1]["check"] is False
 
     install = run_install(root, command, adapter_for(Manager.NPM), "https://registry.npmjs.org/", tmp_path / "home", 2, version_runner)
     assert install.reason == "installed_command"
     assert calls[1][0] == [*command.argv, *adapter_for(Manager.NPM).argument_tail("https://registry.npmjs.org/")]
+    assert calls[1][1]["check"] is False
 
 
 def test_install_rejects_untrusted_registry_without_launch(tmp_path):
@@ -457,6 +536,149 @@ def test_install_rejects_untrusted_registry_without_launch(tmp_path):
     assert not called
 
 
+def test_install_rejects_repo_or_symlink_isolated_home_before_launch(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    command = _command(tmp_path / "bin" / ("npm.exe" if os.name == "nt" else "npm"))
+    called = False
+
+    def runner(*args, **kwargs):
+        nonlocal called
+        called = True
+        return ProbeProcessResult(0, b"", b"", 0)
+
+    assert not run_install(
+        root, command, adapter_for(Manager.NPM), TRUSTED_REGISTRY, root / "home", 1, runner
+    ).ok
+    external = tmp_path / "external"
+    external.mkdir()
+    link = tmp_path / "linked-home"
+    try:
+        link.symlink_to(external, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlink unavailable: {error.__class__.__name__}")
+    assert not run_install(
+        root, command, adapter_for(Manager.NPM), TRUSTED_REGISTRY, link, 1, runner
+    ).ok
+    assert not called
+
+
+def test_install_creates_only_external_isolated_npm_locations(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    command = _command(tmp_path / "bin" / ("npm.exe" if os.name == "nt" else "npm"))
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return ProbeProcessResult(0, b"", b"", 0)
+
+    isolated = tmp_path / "isolated"
+    assert run_install(
+        root, command, adapter_for(Manager.NPM), TRUSTED_REGISTRY, isolated, 1, runner
+    ).ok
+    environment = calls[0][1]["environment"]
+    for name in (
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "TEMP",
+        "TMP",
+        "NPM_CONFIG_CACHE",
+        "NPM_CONFIG_PREFIX",
+    ):
+        path = Path(environment[name]).resolve(strict=True)
+        assert isolated.resolve() in path.parents or path == isolated.resolve()
+        assert root.resolve() not in path.parents
+        assert path.is_dir() and not path.is_symlink()
+    for name in ("NPM_CONFIG_USERCONFIG", "NPM_CONFIG_GLOBALCONFIG"):
+        path = Path(environment[name]).resolve(strict=True)
+        assert isolated.resolve() in path.parents
+        assert path.is_file() and path.read_bytes() == b""
+
+
+def test_install_rejects_noncanonical_adapter_before_launch(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    command = _command(tmp_path / "bin" / ("npm.exe" if os.name == "nt" else "npm"))
+    canonical = adapter_for(Manager.NPM)
+    adversarial = ManagerAdapter(
+        canonical.manager,
+        canonical.lockfiles,
+        canonical.supported_majors,
+        lambda registry: ("--config=hostile", "typescript"),
+        canonical.unsafe_root_files,
+    )
+    called = False
+
+    def runner(*args, **kwargs):
+        nonlocal called
+        called = True
+        return ProbeProcessResult(0, b"", b"", 0)
+
+    assert not run_install(
+        root, command, adversarial, TRUSTED_REGISTRY, tmp_path / "isolated", 1, runner
+    ).ok
+    assert not called
+
+
+def test_install_rejects_linked_config_without_mutating_target(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    command = _command(tmp_path / "bin" / ("npm.exe" if os.name == "nt" else "npm"))
+    isolated = tmp_path / "isolated"
+    config_dir = isolated / "npm-config"
+    config_dir.mkdir(parents=True)
+    target = tmp_path / "sensitive"
+    target.write_bytes(b"must-survive")
+    try:
+        os.link(target, config_dir / "user.npmrc")
+    except OSError as error:
+        pytest.skip(f"hard links unavailable: {error.__class__.__name__}")
+    called = False
+
+    def runner(*args, **kwargs):
+        nonlocal called
+        called = True
+        return ProbeProcessResult(0, b"", b"", 0)
+
+    assert not run_install(
+        root, command, adapter_for(Manager.NPM), TRUSTED_REGISTRY, isolated, 1, runner
+    ).ok
+    assert target.read_bytes() == b"must-survive"
+    assert not called
+
+
+def test_install_rejects_symlinked_config_without_mutating_target(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    command = _command(tmp_path / "bin" / ("npm.exe" if os.name == "nt" else "npm"))
+    isolated = tmp_path / "isolated"
+    config_dir = isolated / "npm-config"
+    config_dir.mkdir(parents=True)
+    target = tmp_path / "sensitive"
+    target.write_bytes(b"must-survive")
+    try:
+        (config_dir / "user.npmrc").symlink_to(target)
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error.__class__.__name__}")
+    called = False
+
+    def runner(*args, **kwargs):
+        nonlocal called
+        called = True
+        return ProbeProcessResult(0, b"", b"", 0)
+
+    assert not run_install(
+        root, command, adapter_for(Manager.NPM), TRUSTED_REGISTRY, isolated, 1, runner
+    ).ok
+    assert target.read_bytes() == b"must-survive"
+    assert not called
+
+
 def test_windows_npm_install_path_uses_only_executable_parent(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
@@ -480,7 +702,10 @@ def test_windows_npm_install_path_uses_only_executable_parent(tmp_path):
     ).ok
     path_entries = calls[0][1]["environment"]["PATH"].split(os.pathsep)
     expected_system = (
-        str(Path(os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows") / "System32")
+        str(
+            Path(dependency_install._trusted_windows_system_environment()["SYSTEMROOT"])
+            / "System32"
+        )
         if os.name == "nt"
         else "/usr/bin"
     )
@@ -602,6 +827,47 @@ def test_identity_replacement_fails_closed(tmp_path):
     assert not called
 
 
+def test_in_place_executable_mutation_fails_closed(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    node = _file(tmp_path / "bin" / ("node.exe" if os.name == "nt" else "node"), b"original")
+    validator = _file(tmp_path / "validate-packages.cjs")
+    node.path.write_bytes(b"mutated!")
+    node.path.chmod(0o755)
+    called = False
+
+    def runner(*args, **kwargs):
+        nonlocal called
+        called = True
+        return ProbeProcessResult(0, b"", b"", 0)
+
+    assert run_validator(root, node, validator, 1, runner).reason == "executable_changed"
+    assert not called
+
+
+def test_hard_link_mutation_setup_fails_closed(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    node = _file(tmp_path / "bin" / ("node.exe" if os.name == "nt" else "node"), b"original")
+    validator = _file(tmp_path / "validate-packages.cjs")
+    link = tmp_path / "linked-node"
+    try:
+        os.link(node.path, link)
+    except OSError as error:
+        pytest.skip(f"hard links unavailable: {error.__class__.__name__}")
+    link.write_bytes(b"mutated!")
+    called = False
+
+    def runner(*args, **kwargs):
+        nonlocal called
+        called = True
+        return ProbeProcessResult(0, b"", b"", 0)
+
+    assert run_validator(root, node, validator, 1, runner).reason == "executable_changed"
+    assert resolve_trusted_file(node.path, root, executable=True) is None
+    assert not called
+
+
 def test_probe_local_typescript_requires_resolved_regular_file_under_package(tmp_path):
     root = tmp_path / "repo"
     package_json = root / "node_modules" / "typescript" / "package.json"
@@ -618,4 +884,5 @@ def test_probe_local_typescript_requires_resolved_regular_file_under_package(tmp
     assert calls[0][0][:2] == [str(node.path), "-e"]
     assert "require.resolve('typescript/package.json'" in calls[0][0][2]
     assert calls[0][1]["max_output_bytes"] <= 4096
+    assert calls[0][1]["check"] is False
     assert not probe_local_typescript(root, node, 1, lambda *a, **k: ProbeProcessResult(0, b"not-json secret", b"", 0))

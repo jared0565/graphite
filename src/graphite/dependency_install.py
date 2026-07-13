@@ -31,7 +31,7 @@ _VERSION_RE = re.compile(
     r"(?:-(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*))*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 )
-_ESSENTIAL_ENVIRONMENT = ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL")
+_LOCALE_ENVIRONMENT = ("LANG", "LC_ALL")
 _DEPENDENCY_FIELDS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")
 _FORBIDDEN_MANIFEST_FIELDS = frozenset(
     {"workspaces", "resolutions", "overrides", "pnpm", "installConfig", "publishConfig"}
@@ -81,6 +81,9 @@ class ManagerAdapter:
 class TrustedFile:
     path: Path
     identity: tuple[int, int]
+    size: int
+    mtime_ns: int
+    sha256: str
 
 
 @dataclass(frozen=True)
@@ -235,22 +238,49 @@ def _trusted_file(path: Path, root: Path, *, executable: bool) -> TrustedFile | 
             return None
         canonical = lexical.resolve(strict=True)
         root_path = root.resolve(strict=True)
-        details = canonical.stat()
+        initial = canonical.lstat()
     except (OSError, RuntimeError):
         return None
-    if _is_under(canonical, root_path) or not stat.S_ISREG(details.st_mode) or _is_reparse(details):
+    if _is_under(canonical, root_path) or not stat.S_ISREG(initial.st_mode) or _is_reparse(initial):
         return None
     if executable:
         if os.name == "nt" and canonical.suffix.lower() not in {".exe", ".com"}:
             return None
         if os.name != "nt" and not os.access(canonical, os.X_OK):
             return None
-    return TrustedFile(canonical, (details.st_dev, details.st_ino))
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(canonical, flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or getattr(before, "st_nlink", 1) != 1:
+            return None
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 64 * 1024):
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+    except OSError:
+        return None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_nlink")
+    if any(getattr(initial, field, 1) != getattr(before, field, 1) for field in stable_fields) or any(
+        getattr(before, field, 1) != getattr(after, field, 1) for field in stable_fields
+    ):
+        return None
+    return TrustedFile(
+        canonical,
+        (before.st_dev, before.st_ino),
+        before.st_size,
+        before.st_mtime_ns,
+        digest.hexdigest(),
+    )
 
 
 def revalidate_trusted_file(reference: TrustedFile, root: Path, executable: bool) -> bool:
     current = _trusted_file(reference.path, root, executable=executable)
-    return current is not None and current.path == reference.path and current.identity == reference.identity
+    return current == reference
 
 
 def resolve_trusted_file(path: Path, root: Path, *, executable: bool) -> TrustedFile | None:
@@ -316,6 +346,31 @@ def command_for(reference: TrustedFile) -> TrustedCommand:
     return TrustedCommand((str(reference.path),), (reference,))
 
 
+def _trusted_windows_system_environment() -> dict[str, str]:
+    if os.name != "nt":
+        return {}
+    try:
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetWindowsDirectoryW(buffer, len(buffer))
+        if length <= 0 or length >= len(buffer):
+            raise OSError("windows_directory_unavailable")
+        windows = Path(buffer.value).resolve(strict=True)
+        system32 = (windows / "System32").resolve(strict=True)
+        command = (system32 / "cmd.exe").resolve(strict=True)
+        if not system32.is_dir() or not command.is_file():
+            raise OSError("windows_system_paths_invalid")
+    except (AttributeError, OSError, RuntimeError):
+        raise ValueError("windows_system_paths_unavailable") from None
+    return {
+        "SYSTEMROOT": str(windows),
+        "WINDIR": str(windows),
+        "COMSPEC": str(command),
+        "PATHEXT": ".COM;.EXE",
+    }
+
+
 def build_install_environment(
     manager: Manager,
     isolated_home: Path,
@@ -324,7 +379,7 @@ def build_install_environment(
     source: Mapping[str, str],
 ) -> dict[str, str]:
     base = isolated_home.resolve()
-    environment = {name: source[name] for name in _ESSENTIAL_ENVIRONMENT if name in source}
+    environment = {name: source[name] for name in _LOCALE_ENVIRONMENT if name in source}
     trusted_directories: list[str] = []
     for directory in executable_directories:
         if not directory.is_absolute():
@@ -336,8 +391,9 @@ def build_install_environment(
         if canonical.is_dir() and str(canonical) not in trusted_directories:
             trusted_directories.append(str(canonical))
     if os.name == "nt":
-        windows_root = source.get("SYSTEMROOT") or source.get("WINDIR") or r"C:\Windows"
-        trusted_directories.append(str(Path(windows_root) / "System32"))
+        trusted_windows = _trusted_windows_system_environment()
+        environment.update(trusted_windows)
+        trusted_directories.append(str(Path(trusted_windows["SYSTEMROOT"]) / "System32"))
     else:
         trusted_directories.extend(("/usr/bin", "/bin"))
     environment["PATH"] = os.pathsep.join(trusted_directories)
@@ -349,13 +405,18 @@ def build_install_environment(
             "XDG_CACHE_HOME": str(base / "cache"),
             "TEMP": str(base / "tmp"),
             "TMP": str(base / "tmp"),
+            "APPDATA": str(base / "appdata"),
+            "LOCALAPPDATA": str(base / "localappdata"),
         }
     )
     selected = Manager(manager)
     if selected in {Manager.NPM, Manager.PNPM}:
         environment.update(
             {
-                "NPM_CONFIG_USERCONFIG": str(base / "npmrc"),
+                "NPM_CONFIG_USERCONFIG": str(base / "npm-config" / "user.npmrc"),
+                "NPM_CONFIG_GLOBALCONFIG": str(base / "npm-config" / "global.npmrc"),
+                "NPM_CONFIG_CACHE": str(base / "npm-cache"),
+                "NPM_CONFIG_PREFIX": str(base / "npm-prefix"),
                 "NPM_CONFIG_REGISTRY": registry,
                 "NPM_CONFIG_IGNORE_SCRIPTS": "true",
                 "NPM_CONFIG_AUDIT": "false",
@@ -364,6 +425,15 @@ def build_install_environment(
                 "npm_config_ignore_scripts": "true",
             }
         )
+        if selected is Manager.PNPM:
+            environment.update(
+                {
+                    "PNPM_HOME": str(base / "pnpm-home"),
+                    "PNPM_STORE_DIR": str(base / "pnpm-store"),
+                    "PNPM_CONFIG_DIR": str(base / "pnpm-config"),
+                    "npm_config_store_dir": str(base / "pnpm-store"),
+                }
+            )
     elif selected is Manager.YARN:
         environment.update(
             {
@@ -376,6 +446,86 @@ def build_install_environment(
     else:
         environment["BUN_INSTALL_CACHE_DIR"] = str(base / "bun-cache")
     return environment
+
+
+def _prepare_isolated_install_home(root: Path, isolated_home: Path, manager: Manager) -> bool:
+    if not isolated_home.is_absolute():
+        return False
+    try:
+        canonical_root = root.resolve(strict=True)
+        lexical_base = isolated_home.absolute()
+        if _is_under(lexical_base, canonical_root):
+            return False
+        parent = lexical_base.parent.resolve(strict=True)
+        if _path_has_symlink(parent) or _is_under(parent, canonical_root):
+            return False
+        if lexical_base.exists() or lexical_base.is_symlink():
+            details = lexical_base.lstat()
+            if stat.S_ISLNK(details.st_mode) or _is_reparse(details) or not stat.S_ISDIR(details.st_mode):
+                return False
+        else:
+            lexical_base.mkdir(mode=0o700)
+        canonical_base = lexical_base.resolve(strict=True)
+        if canonical_base != lexical_base or _is_under(canonical_base, canonical_root):
+            return False
+        directory_names = {
+            "home",
+            "config",
+            "cache",
+            "tmp",
+            "appdata",
+            "localappdata",
+        }
+        selected = Manager(manager)
+        if selected in {Manager.NPM, Manager.PNPM}:
+            directory_names.update({"npm-config", "npm-cache", "npm-prefix"})
+        if selected is Manager.PNPM:
+            directory_names.update({"pnpm-home", "pnpm-store", "pnpm-config"})
+        elif selected is Manager.YARN:
+            directory_names.add("yarn-global")
+        elif selected is Manager.BUN:
+            directory_names.add("bun-cache")
+        for name in directory_names:
+            directory = canonical_base / name
+            directory.mkdir(mode=0o700, exist_ok=True)
+            details = directory.lstat()
+            if (
+                directory.resolve(strict=True) != directory
+                or not _is_under(directory, canonical_base)
+                or stat.S_ISLNK(details.st_mode)
+                or _is_reparse(details)
+                or not stat.S_ISDIR(details.st_mode)
+            ):
+                return False
+        if selected in {Manager.NPM, Manager.PNPM}:
+            for name in ("user.npmrc", "global.npmrc"):
+                config = canonical_base / "npm-config" / name
+                if config.exists() or config.is_symlink():
+                    existing = config.lstat()
+                    if (
+                        stat.S_ISLNK(existing.st_mode)
+                        or _is_reparse(existing)
+                        or not stat.S_ISREG(existing.st_mode)
+                        or getattr(existing, "st_nlink", 1) != 1
+                    ):
+                        return False
+                flags = (
+                    os.O_RDWR
+                    | os.O_CREAT
+                    | getattr(os, "O_BINARY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                descriptor = os.open(config, flags, 0o600)
+                try:
+                    details = os.fstat(descriptor)
+                    if not stat.S_ISREG(details.st_mode) or getattr(details, "st_nlink", 1) != 1:
+                        return False
+                    os.ftruncate(descriptor, 0)
+                finally:
+                    os.close(descriptor)
+        return True
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def snapshot_control_file(root: Path, relative_path: str) -> FileSnapshot:
@@ -428,10 +578,63 @@ def _dependency_spec_is_safe(specification: str) -> bool:
         return False
     if lower.startswith(("file:", "link:", "git:", "git+", "ssh:", "http:", "https:", "workspace:")):
         return False
+    if lower.endswith((".tgz", ".tar.gz")):
+        return False
     if lower.startswith("git@") or any(separator in value for separator in ("/", "\\", ":")):
         return False
     if value.startswith("."):
         return False
+    return True
+
+
+def _is_canonical_registry_url(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc == "registry.npmjs.org"
+        and parsed.path.startswith("/")
+        and not parsed.query
+        and not parsed.fragment
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.port is None
+    )
+
+
+def _json_source_fields_are_trusted(value: Any) -> bool:
+    if isinstance(value, list):
+        return all(_json_source_fields_are_trusted(item) for item in value)
+    if not isinstance(value, dict):
+        return True
+    for key, item in value.items():
+        lowered = key.lower()
+        if lowered in {"resolved", "tarball", "fetch", "source", "url"}:
+            if not isinstance(item, str) or not _is_canonical_registry_url(item):
+                return False
+        elif lowered == "resolution" and isinstance(item, dict):
+            if any(nested.lower() not in {"integrity", "tarball"} for nested in item):
+                return False
+        if not _json_source_fields_are_trusted(item):
+            return False
+    return True
+
+
+def _text_source_fields_are_trusted(text: str) -> bool:
+    for line in text.splitlines():
+        content = line.strip()
+        match = re.match(
+            r"(?i)^(?:resolved|tarball|fetch|source|url)(?::\s+|\s+)(.+)$", content
+        )
+        if match is None:
+            continue
+        source = match.group(1).strip()
+        if source.startswith(("'", '"')) and source.endswith(source[0]) and len(source) >= 2:
+            source = source[1:-1]
+        if not _is_canonical_registry_url(source):
+            return False
     return True
 
 
@@ -505,6 +708,38 @@ def _reject_json_constant(_constant: str) -> None:
     raise ValueError("invalid_json_constant")
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate_json_key")
+        result[key] = value
+    return result
+
+
+def _parse_bounded_json_int(value: str) -> int:
+    if len(value.lstrip("-")) > 1024:
+        raise ValueError("json_integer_too_long")
+    return int(value)
+
+
+def _parse_finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("json_float_not_finite")
+    return parsed
+
+
+def _strict_json_loads(value: bytes | str) -> Any:
+    return json.loads(
+        value,
+        parse_constant=_reject_json_constant,
+        object_pairs_hook=_reject_duplicate_json_keys,
+        parse_int=_parse_bounded_json_int,
+        parse_float=_parse_finite_json_float,
+    )
+
+
 def _yaml_scalar_is_valid(value: str) -> bool:
     if not value:
         return False
@@ -530,12 +765,14 @@ def _yaml_scalar_is_valid(value: str) -> bool:
                 if not stack:
                     flow_text = value[: index + 1]
                     try:
-                        parsed_flow = json.loads(flow_text, parse_constant=_reject_json_constant)
+                        parsed_flow = _strict_json_loads(flow_text)
                     except (ValueError, RecursionError):
                         return False
                     expected_type = dict if value[0] == "{" else list
-                    return isinstance(parsed_flow, expected_type) and _yaml_scalar_remainder_is_valid(
-                        value[index + 1 :]
+                    return (
+                        isinstance(parsed_flow, expected_type)
+                        and _json_source_fields_are_trusted(parsed_flow)
+                        and _yaml_scalar_remainder_is_valid(value[index + 1 :])
                     )
         return False
     plain_value = value
@@ -651,10 +888,12 @@ def _normalized_lockfile_text(lockfile_bytes: bytes) -> str | None:
         return None
     if stripped.startswith("{"):
         try:
-            parsed = json.loads(stripped)
-        except (json.JSONDecodeError, RecursionError):
+            parsed = _strict_json_loads(stripped)
+        except (UnicodeDecodeError, ValueError, RecursionError):
             return None
         if not isinstance(parsed, dict):
+            return None
+        if not _json_source_fields_are_trusted(parsed):
             return None
         lockfile_version = parsed.get("lockfileVersion")
         if isinstance(lockfile_version, bool) or not (
@@ -687,6 +926,8 @@ def _lockfile_uses_trusted_sources(lockfile_bytes: bytes) -> bool:
         return False
     normalized = normalized.replace("\\/", "/")
     lower = normalized.lower()
+    if not _text_source_fields_are_trusted(normalized):
+        return False
     if any(
         marker in lower
         for marker in ("git+", "git://", "git@", "ssh:", "file:", "link:", "local:")
@@ -722,8 +963,8 @@ def control_files_use_trusted_sources(manifest_bytes: bytes, lockfile_bytes: byt
     if len(manifest_bytes) > MAX_CONTROL_FILE_BYTES or len(lockfile_bytes) > MAX_CONTROL_FILE_BYTES:
         return False
     try:
-        manifest = json.loads(manifest_bytes)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        manifest = _strict_json_loads(manifest_bytes)
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return False
     if not isinstance(manifest, dict) or _FORBIDDEN_MANIFEST_FIELDS.intersection(manifest):
         return False
@@ -738,10 +979,11 @@ def control_files_use_trusted_sources(manifest_bytes: bytes, lockfile_bytes: byt
 
 def _minimal_node_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
     ambient = os.environ if source is None else source
-    environment = {name: ambient[name] for name in _ESSENTIAL_ENVIRONMENT if name in ambient}
+    environment = {name: ambient[name] for name in _LOCALE_ENVIRONMENT if name in ambient}
     if os.name == "nt":
-        windows_root = ambient.get("SYSTEMROOT") or ambient.get("WINDIR") or r"C:\Windows"
-        environment["PATH"] = str(Path(windows_root) / "System32")
+        trusted_windows = _trusted_windows_system_environment()
+        environment.update(trusted_windows)
+        environment["PATH"] = str(Path(trusted_windows["SYSTEMROOT"]) / "System32")
     else:
         environment["PATH"] = "/usr/bin:/bin"
     return environment
@@ -774,6 +1016,7 @@ def run_validator(
             stdin=None,
             timeout_seconds=timeout,
             max_output_bytes=INSTALL_OUTPUT_LIMIT,
+            check=False,
             environment=_minimal_node_environment(),
         )
     except ProbeProcessError as error:
@@ -800,6 +1043,7 @@ def run_manager_version(
             stdin=None,
             timeout_seconds=timeout,
             max_output_bytes=64,
+            check=False,
             environment=_minimal_node_environment(),
         )
     except ProbeProcessError as error:
@@ -828,13 +1072,23 @@ def run_install(
         return StepResult(False, "install_failed")
     if registry != TRUSTED_REGISTRY:
         return StepResult(False, "install_failed")
+    try:
+        if adapter is not adapter_for(adapter.manager):
+            return StepResult(False, "install_failed")
+    except (KeyError, ValueError):
+        return StepResult(False, "install_failed")
+    if not _prepare_isolated_install_home(root, isolated_home, adapter.manager):
+        return StepResult(False, "install_failed")
+    directories = (command.references[0].path.parent,)
+    try:
+        environment = build_install_environment(
+            adapter.manager, isolated_home, directories, TRUSTED_REGISTRY, os.environ
+        )
+    except (OSError, RuntimeError, ValueError):
+        return StepResult(False, "install_failed")
     provenance_reason = _command_revalidation_reason(command, root)
     if provenance_reason is not None:
         return StepResult(False, provenance_reason)
-    directories = (command.references[0].path.parent,)
-    environment = build_install_environment(
-        adapter.manager, isolated_home, directories, TRUSTED_REGISTRY, os.environ
-    )
     try:
         result = runner(
             [*command.argv, *adapter.argument_tail(TRUSTED_REGISTRY)],
@@ -842,6 +1096,7 @@ def run_install(
             stdin=None,
             timeout_seconds=timeout,
             max_output_bytes=INSTALL_OUTPUT_LIMIT,
+            check=False,
             environment=environment,
         )
     except ProbeProcessError as error:
@@ -868,6 +1123,7 @@ def probe_local_typescript(
             stdin=None,
             timeout_seconds=timeout,
             max_output_bytes=4096,
+            check=False,
             environment=_minimal_node_environment(),
         )
         payload: Any = json.loads(result.stdout)
