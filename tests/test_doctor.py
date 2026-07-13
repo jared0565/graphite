@@ -728,6 +728,26 @@ def test_bounded_process_accepts_an_exact_environment(monkeypatch: pytest.Monkey
     assert result.stdout.decode().splitlines() == ["safe", "None"]
 
 
+def test_bounded_process_treats_an_empty_environment_as_exact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from graphite.probe_process import run_bounded_process
+
+    monkeypatch.setenv("GRAPHITE_EMPTY_ENV_SENTINEL", "must-not-inherit")
+    names = ("GRAPHITE_EMPTY_ENV_SENTINEL", "PYTHONPATH", "PYTHONIOENCODING", "PYTHONUTF8")
+    script = f"import json,os;print(json.dumps({{name:os.environ.get(name) for name in {names!r}}}))"
+
+    result = run_bounded_process(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        environment={},
+        timeout_seconds=5,
+    )
+
+    assert json.loads(result.stdout) == {name: None for name in names}
+
+
 def test_bounded_process_copies_an_exact_environment_before_launch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

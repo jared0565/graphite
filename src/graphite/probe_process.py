@@ -1,4 +1,4 @@
-"""Bounded, environment-sanitized subprocess transport for readiness probes."""
+"""Bounded subprocess transport with sanitized defaults or exact child environments."""
 from __future__ import annotations
 
 import math
@@ -237,7 +237,11 @@ def run_bounded_process(
     check: bool = True,
     environment: Mapping[str, str] | None = None,
 ) -> ProbeProcessResult:
-    """Run one isolated process tree under a single hard transport deadline."""
+    """Run one isolated process tree under a single hard transport deadline.
+
+    ``environment=None`` selects the sanitized probe default. An explicit mapping is the
+    complete, non-inheriting child environment, including when the mapping is empty.
+    """
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0 or max_output_bytes <= 0:
         raise ProbeProcessError("invalid_timeout")
     if isinstance(stdin, str):
