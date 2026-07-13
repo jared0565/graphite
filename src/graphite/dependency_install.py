@@ -36,7 +36,11 @@ _DEPENDENCY_FIELDS = ("dependencies", "devDependencies", "optionalDependencies",
 _FORBIDDEN_MANIFEST_FIELDS = frozenset(
     {"workspaces", "resolutions", "overrides", "pnpm", "installConfig", "publishConfig"}
 )
-_URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+_URI_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*)://[^\s\"'<>}\]]+")
+_LOCKFILE_LINE_LIMIT = 64 * 1024
+_MAPPING_LINE_RE = re.compile(
+    r"^(?:\"[^\"]+\"|'[^']+'|[A-Za-z0-9_./@+*^~<>=,!|()-]+):(?:\s+(.+)|\s*)$"
+)
 _LOCAL_TYPESCRIPT_SCRIPT = (
     "const p=require.resolve('typescript/package.json',{paths:[process.cwd()]});"
     "process.stdout.write(JSON.stringify({resolved:p}));"
@@ -431,17 +435,159 @@ def _dependency_spec_is_safe(specification: str) -> bool:
     return True
 
 
+def _normalize_text_lockfile_escapes(text: str) -> str | None:
+    """Decode a bounded subset of JSON escapes exactly once, rejecting ambiguity."""
+    output: list[str] = []
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character != "\\":
+            output.append(character)
+            index += 1
+            continue
+        if index + 1 >= len(text):
+            return None
+        escape = text[index + 1]
+        if escape in {"/", "\\"}:
+            output.append(escape)
+            index += 2
+            continue
+        if escape not in {"u", "U"} or index + 6 > len(text):
+            return None
+        digits = text[index + 2 : index + 6]
+        if re.fullmatch(r"[0-9A-Fa-f]{4}", digits) is None:
+            return None
+        decoded = chr(int(digits, 16))
+        if ord(decoded) < 32 or 0xD800 <= ord(decoded) <= 0xDFFF:
+            return None
+        output.append(decoded)
+        index += 6
+    normalized = "".join(output)
+    if re.search(r"\\[uU][0-9A-Fa-f]{4}", normalized):
+        return None
+    return normalized
+
+
+def _line_has_balanced_structures(content: str) -> bool:
+    quote: str | None = None
+    brackets: list[str] = []
+    pairs = {")": "(", "]": "[", "}": "{"}
+    for character in content:
+        if quote is not None:
+            if character == quote:
+                quote = None
+            continue
+        if character in {"'", '"'}:
+            quote = character
+        elif character in "([{":
+            brackets.append(character)
+        elif character in ")]}":
+            if not brackets or brackets.pop() != pairs[character]:
+                return False
+    return quote is None and not brackets
+
+
+def _mapping_line(content: str) -> tuple[bool, bool]:
+    match = _MAPPING_LINE_RE.fullmatch(content)
+    if match is None:
+        return False, False
+    return True, match.group(1) is None
+
+
+def _validate_mapping_lockfile(lines: list[str], *, berry: bool) -> bool:
+    previous_indent = 0
+    previous_opens = False
+    saw_significant = False
+    saw_pnpm_section = False
+    saw_metadata_version = False
+    saw_package_entry = False
+    saw_package_version = False
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        content = line[indent:].rstrip()
+        if indent % 2 or indent > 40 or not _line_has_balanced_structures(content):
+            return False
+        if saw_significant and indent > previous_indent:
+            if indent != previous_indent + 2 or not previous_opens:
+                return False
+        valid, opens = _mapping_line(content)
+        if not valid:
+            return False
+        if indent == 0 and content.split(":", 1)[0] in {"importers", "packages", "snapshots"}:
+            saw_pnpm_section = True
+        if berry:
+            if indent == 2 and re.fullmatch(r"version:\s*\d+(?:\.\d+)*", content):
+                if not saw_package_entry:
+                    saw_metadata_version = True
+                else:
+                    saw_package_version = True
+            if indent == 0 and content != "__metadata:":
+                saw_package_entry = True
+        previous_indent = indent
+        previous_opens = opens
+        saw_significant = True
+    if berry:
+        return saw_metadata_version and saw_package_entry and saw_package_version
+    return saw_pnpm_section
+
+
+def _validate_yarn_classic(lines: list[str]) -> bool:
+    previous_indent = 0
+    previous_opens = False
+    saw_significant = False
+    saw_entry = False
+    current_entry_has_version = False
+    for line in lines[1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        content = line[indent:].rstrip()
+        if indent not in {0, 2, 4} or not _line_has_balanced_structures(content):
+            return False
+        if saw_significant and indent > previous_indent:
+            if indent != previous_indent + 2 or not previous_opens:
+                return False
+        opens = False
+        if indent == 0:
+            if saw_entry and not current_entry_has_version:
+                return False
+            valid, opens = _mapping_line(content)
+            if not valid or not opens:
+                return False
+            saw_entry = True
+            current_entry_has_version = False
+        elif indent == 2:
+            block_match = re.fullmatch(r"(?:dependencies|optionalDependencies|peerDependencies):", content)
+            field_match = re.fullmatch(r"(?:version|resolved|integrity|uid)\s+\S.*", content)
+            if block_match is None and field_match is None:
+                return False
+            opens = block_match is not None
+            if content.startswith("version "):
+                current_entry_has_version = True
+        elif re.fullmatch(r"(?:\"[^\"]+\"|'[^']+'|[^\s:]+)\s+\S.*", content) is None:
+            return False
+        previous_indent = indent
+        previous_opens = opens
+        saw_significant = True
+    return saw_entry and current_entry_has_version
+
+
 def _normalized_lockfile_text(lockfile_bytes: bytes) -> str | None:
     """Return decoded text only for a conservatively recognized lockfile format."""
     try:
         text = lockfile_bytes.decode("utf-8")
     except UnicodeDecodeError:
         return None
-    if "\x00" in text:
+    if any(ord(character) < 32 and character not in "\r\n" for character in text):
         return None
-    stripped = text.lstrip("\ufeff \t\r\n")
+    text = text.replace("\r\n", "\n")
+    if "\r" in text:
+        return None
+    stripped = text.lstrip("\ufeff \n")
     if not stripped:
-        return ""
+        return None
     if stripped.startswith("{"):
         try:
             parsed = json.loads(stripped)
@@ -456,25 +602,21 @@ def _normalized_lockfile_text(lockfile_bytes: bytes) -> str | None:
         ):
             return None
         return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+    stripped = _normalize_text_lockfile_escapes(stripped)
+    if stripped is None:
+        return None
     lines = stripped.splitlines()
+    if any(len(line) > _LOCKFILE_LINE_LIMIT for line in lines):
+        return None
     if lines[0].startswith("lockfileVersion:"):
         if not re.fullmatch(r"lockfileVersion:\s*['\"]?\d+(?:\.\d+)?['\"]?\s*", lines[0]):
             return None
-        if len(lines) < 2 or not any(
-            line.lstrip().startswith(("importers:", "packages:", "snapshots:")) for line in lines[1:]
-        ):
-            return None
-        return stripped
+        return stripped if _validate_mapping_lockfile(lines, berry=False) else None
     if lines[0].strip() == "# yarn lockfile v1":
-        entries = [line for line in lines[1:] if line.strip()]
-        if not any(not line[0].isspace() and line.rstrip().endswith(":") for line in entries):
-            return None
-        if not any(line[0].isspace() and line.lstrip().startswith("version ") for line in entries):
-            return None
-        return stripped
+        return stripped if _validate_yarn_classic(lines) else None
     first_content_lines = [line.strip() for line in lines[:10] if line.strip() and not line.lstrip().startswith("#")]
     if first_content_lines and first_content_lines[0] == "__metadata:":
-        return stripped if any(re.fullmatch(r"\s+version:\s*\d+\s*", line) for line in lines[1:]) else None
+        return stripped if _validate_mapping_lockfile(lines, berry=True) else None
     return None
 
 
@@ -494,21 +636,22 @@ def _lockfile_uses_trusted_sources(lockfile_bytes: bytes) -> bool:
         normalized,
     ):
         return False
-    url_matches = tuple(_URL_RE.finditer(normalized))
-    for match in url_matches:
+    uri_matches = tuple(_URI_RE.finditer(normalized))
+    for match in uri_matches:
         try:
             parsed = urlsplit(match.group())
         except ValueError:
             return False
         if (
-            parsed.scheme.lower() != "https"
+            match.group(1).lower() != "https"
+            or parsed.scheme.lower() != "https"
             or parsed.hostname != "registry.npmjs.org"
             or parsed.username is not None
             or parsed.password is not None
             or parsed.port is not None
         ):
             return False
-    without_valid_url_shapes = _URL_RE.sub("", normalized).lower()
+    without_valid_url_shapes = _URI_RE.sub("", normalized).lower()
     if "http:" in without_valid_url_shapes or "https:" in without_valid_url_shapes:
         return False
     return True

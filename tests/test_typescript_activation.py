@@ -299,6 +299,8 @@ def test_snapshot_control_file_rejects_symlink_and_detects_content(tmp_path):
         (b'{"dependencies":{"x":"\\\\\\\\server\\\\share"}}', b"", False),
         (b'{"workspaces":["packages/*"]}', b"", False),
         (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"https://evil.example/x.tgz"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"ftp://registry.npmjs.org/x.tgz"}', False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"custom://registry.npmjs.org/x.tgz"}', False),
         (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"https:\\/\\/evil.example/x.tgz"}', False),
         (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"https\\u003a//evil.example/x.tgz"}', False),
         (b'{"dependencies":{"x":"1.0.0"}}', json.dumps({"lockfileVersion": 3, "resolved": r"https:\\evil.example\x"}).encode(), False),
@@ -311,11 +313,16 @@ def test_snapshot_control_file_rejects_symlink_and_detects_content(tmp_path):
         (b'{"dependencies":{"x":"1.0.0"}}', b'{"lockfileVersion":3,"resolved":"../x"}', False),
         (b'{"dependencies":{"x":"1.0.0"}}', b"{}", False),
         (b'{"dependencies":{"x":"1.0.0"}}', b"lockfileVersion: '9.0'\npackages: {}\n", True),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"lockfileVersion: '9.0'\npackages:\n  x:\n    resolution: {tarball: https://registry.npmjs.org/x.tgz}\n", True),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"lockfileVersion: '9.0'\npackages:\n  x:\n    resolution: {tarball: https\\u003a//evil.example/x.tgz}\n", False),
         (b'{"dependencies":{"x":"1.0.0"}}', b"lockfileVersion: nope\npackages: {}\n", False),
-        (b'{"dependencies":{"x":"1.0.0"}}', b"# yarn lockfile v1\n\nx@1.0.0:\n  version \"1.0.0\"\n", True),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"# yarn lockfile v1\n\nx@1.0.0:\n  version \"1.0.0\"\n  resolved \"https://registry.npmjs.org/x.tgz\"\n", True),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"# yarn lockfile v1\n\nx@1.0.0:\n  version \"1.0.0\"\n  resolved \"https\\u003a//evil.example/x.tgz\"\n", False),
         (b'{"dependencies":{"x":"1.0.0"}}', b"# yarn lockfile v1\nnot-an-entry\n", False),
-        (b'{"dependencies":{"x":"1.0.0"}}', b"__metadata:\n  version: 8\n", True),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"__metadata:\n  version: 8\n\n\"x@npm:^1.0.0\":\n  version: 1.0.0\n  resolution: \"x@npm:1.0.0\"\n", True),
         (b'{"dependencies":{"x":"1.0.0"}}', b"__metadata:\n  malformed: yes\n", False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b"", False),
+        (b'{"dependencies":{"x":"1.0.0"}}', b" \r\n\t", False),
         (b'{"dependencies":{"x":"1.0.0"}}', b"not a lockfile at all", False),
         (b"not-json", b"", False),
     ],
@@ -326,6 +333,29 @@ def test_source_policy(manifest, lockfile, expected):
 
 def test_source_policy_rejects_malformed_lockfile_encoding():
     assert not control_files_use_trusted_sources(b"{}", b"\xff\x00")
+
+
+@pytest.mark.parametrize(
+    "lockfile",
+    [
+        b"lockfileVersion: '9.0'\npackages:\n\tx: {}\n",
+        b"lockfileVersion: '9.0'\npackages:\n   x: {}\n",
+        b"lockfileVersion: '9.0'\npackages:\n    x: {}\n",
+        b"lockfileVersion: '9.0'\npackages:\n  x: [unterminated\n",
+        b"lockfileVersion: '9.0'\npackages:\n  x: https\\u00ZZ//evil.example\n",
+        b"lockfileVersion: '9.0'\npackages:\n  x: https\\U003A\\U002F\\U002Fevil.example\n",
+        b"lockfileVersion: '9.0'\npackages:\n  this is not a field\n",
+        b"# yarn lockfile v1\n\nx@1.0.0:\n version \"1.0.0\"\n",
+        b"# yarn lockfile v1\n\nx@1.0.0:\n  version \"unterminated\n",
+        b"# yarn lockfile v1\n\nx@1.0.0:\n  nonsense value\n",
+        b"# yarn lockfile v1\n\nx@1.0.0:\n  resolved \"https://registry.npmjs.org/x.tgz\"\n",
+        b"__metadata:\n  version: 8\n",
+        b"__metadata:\n    version: 8\n\n\"x@npm:1\":\n  version: 1\n",
+        b"__metadata:\n  version: 8\n\n\"x@npm:1\":\n  broken line\n",
+    ],
+)
+def test_source_policy_rejects_structurally_malformed_recognized_text_lockfiles(lockfile):
+    assert not control_files_use_trusted_sources(b'{"dependencies":{"x":"1.0.0"}}', lockfile)
 
 
 def test_validator_exact_argv_and_fixed_results(tmp_path):
