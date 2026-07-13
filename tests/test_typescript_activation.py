@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-import json
+import ast
+import builtins
 import hashlib
+import importlib
+import io
+import json
 import os
 import shutil
 import sys
@@ -4182,3 +4186,222 @@ def test_revalidation_rejects_new_symlinked_evidence_directory(tmp_path):
     _symlink_or_skip(source_directory, outside)
 
     assert not revalidate_activation_detection(root, Config(), expected)
+
+
+def test_activation_orchestration_has_a_single_onboarding_import_and_call_boundary():
+    package = Path(typescript_activation.__file__).resolve().parent
+    importers: set[str] = set()
+
+    for source_path in package.glob("*.py"):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "typescript_activation":
+                if any(alias.name == "activate_typescript" for alias in node.names):
+                    importers.add(source_path.name)
+            elif isinstance(node, ast.Import):
+                if any(
+                    alias.name == "graphite.typescript_activation"
+                    for alias in node.names
+                ):
+                    importers.add(source_path.name)
+
+    activation_tree = ast.parse(
+        (package / "typescript_activation.py").read_text(encoding="utf-8")
+    )
+    cli_tree = ast.parse((package / "cli.py").read_text(encoding="utf-8"))
+    activation_definitions = {
+        node.name for node in activation_tree.body if isinstance(node, ast.FunctionDef)
+    }
+    calls_by_function = {
+        node.name: {
+            call.func.id
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        }
+        for node in cli_tree.body
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    assert "activate_typescript" in activation_definitions
+    assert importers == {"cli.py"}
+    assert {
+        name
+        for name, calls in calls_by_function.items()
+        if "activate_typescript" in calls
+    } == {"_activate_typescript_for_onboarding"}
+    assert {
+        name
+        for name, calls in calls_by_function.items()
+        if "_activate_typescript_for_onboarding" in calls
+    } == {"cmd_bootstrap", "cmd_init"}
+
+
+@pytest.mark.parametrize(
+    ("argv", "handler_name"),
+    [
+        (["build", "."], "cmd_build"),
+        (["report", "."], "cmd_report"),
+        (["check", "."], "cmd_check"),
+        (["doctor", "."], "cmd_doctor"),
+        (["daemon", ".", "--once"], "cmd_daemon"),
+    ],
+)
+def test_non_onboarding_parser_paths_never_activate_typescript(
+    monkeypatch, argv, handler_name
+):
+    import graphite.cli as cli
+
+    invoked: list[str] = []
+
+    def forbidden_activation(*_args, **_kwargs):
+        raise AssertionError("non-onboarding command attempted TypeScript activation")
+
+    def handler(_args):
+        invoked.append(handler_name)
+        return 0
+
+    monkeypatch.setattr(cli, "activate_typescript", forbidden_activation)
+    monkeypatch.setattr(cli, handler_name, handler)
+
+    assert cli.main(argv) == 0
+    assert invoked == [handler_name]
+
+
+def test_mcp_import_never_reaches_activation_or_executes_a_process(monkeypatch):
+    import subprocess
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "graphite.typescript_activation" or name.endswith(
+            ".typescript_activation"
+        ):
+            raise AssertionError("MCP import reached activation orchestration")
+        return original_import(name, *args, **kwargs)
+
+    def forbidden_process(*_args, **_kwargs):
+        raise AssertionError("MCP import executed a subprocess")
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    monkeypatch.setattr(subprocess, "Popen", forbidden_process)
+    for module_name in ("graphite.mcp", "graphite.mcp_server"):
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    try:
+        imported = importlib.import_module("graphite.mcp")
+    except ImportError as error:
+        pytest.skip(f"optional MCP dependencies unavailable: {error.__class__.__name__}")
+
+    assert callable(imported.main)
+
+
+def test_importing_graphite_has_no_process_or_filesystem_mutation(monkeypatch):
+    import graphite
+    import subprocess
+
+    def forbidden_side_effect(*_args, **_kwargs):
+        raise AssertionError("importing graphite caused an external side effect")
+
+    monkeypatch.setattr(subprocess, "Popen", forbidden_side_effect)
+    monkeypatch.setattr(subprocess, "run", forbidden_side_effect)
+    for method_name in (
+        "mkdir",
+        "rename",
+        "replace",
+        "touch",
+        "unlink",
+        "write_bytes",
+        "write_text",
+    ):
+        monkeypatch.setattr(Path, method_name, forbidden_side_effect)
+
+    reloaded = importlib.reload(graphite)
+
+    assert isinstance(reloaded.__version__, str)
+
+
+class _TTYStream(io.StringIO):
+    def __init__(self, is_tty: bool):
+        super().__init__()
+        self._is_tty = is_tty
+
+    def isatty(self) -> bool:
+        return self._is_tty
+
+
+@pytest.mark.parametrize("command", ["init", "bootstrap"])
+@pytest.mark.parametrize(
+    "mode",
+    ["redirected_stdin", "redirected_stdout", "ci", "json", "yes"],
+)
+def test_noninteractive_onboarding_modes_have_zero_privileged_events(
+    tmp_path, monkeypatch, command, mode
+):
+    import graphite.cli as cli
+
+    root = _activation_root(tmp_path)
+    events: list[tuple[str, object]] = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    requests: list[ActivationRequest] = []
+
+    def activate_with_fakes(request):
+        requests.append(request)
+        return activate_typescript(request, deps)
+
+    monkeypatch.setattr(cli, "activate_typescript", activate_with_fakes)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(sys, "stdin", _TTYStream(mode != "redirected_stdin"))
+    monkeypatch.setattr(sys, "stdout", _TTYStream(mode != "redirected_stdout"))
+
+    argv = [command, str(root), "--no-build", "--no-validate"]
+    if command == "init":
+        argv.extend(["--platform", "codex"])
+    if mode == "ci":
+        monkeypatch.setenv("CI", "0")
+    elif mode == "json":
+        argv.append("--json")
+    elif mode == "yes":
+        argv.append("--yes")
+
+    assert cli.main(argv) == 0
+    assert len(requests) == 1
+    assert requests[0].stdin_is_tty is False
+    assert requests[0].stdout_is_tty is False
+    assert not {"prompt", "manager_version", "validator", "install"}.intersection(
+        event[0] for event in events
+    )
+
+
+def test_manager_adapters_never_construct_global_install_arguments():
+    forbidden = {"-g", "--global", "global", "--location=global"}
+
+    for manager in Manager:
+        argv = adapter_for(manager).argument_tail(TRUSTED_REGISTRY)
+        lowered = {argument.casefold() for argument in argv}
+
+        assert lowered.isdisjoint(forbidden)
+        assert argv[-1] == "typescript"
+
+
+def test_unicode_root_and_hostile_process_output_never_enter_serialized_result(tmp_path):
+    root = tmp_path / "repo-项目-Δ-🚀"
+    root.mkdir()
+    (root / "source.ts").write_text("export {};", encoding="utf-8")
+    (root / "package.json").write_bytes(b"{}")
+    (root / "package-lock.json").write_bytes(_SAFE_LOCKS["package-lock.json"])
+    events: list[tuple[str, object]] = []
+    deps = _activation_dependencies(
+        tmp_path,
+        root,
+        events,
+        install_ok=False,
+    )
+
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+    serialized = json.dumps(result.to_dict(), ensure_ascii=False)
+
+    assert result.reason == "install_failed"
+    assert str(root) not in serialized
+    assert "secret failure" not in serialized
