@@ -501,6 +501,10 @@ def _yaml_scalar_remainder_is_valid(remainder: str) -> bool:
     return not remainder or (remainder[0].isspace() and remainder.lstrip().startswith("#"))
 
 
+def _reject_json_constant(_constant: str) -> None:
+    raise ValueError("invalid_json_constant")
+
+
 def _yaml_scalar_is_valid(value: str) -> bool:
     if not value:
         return False
@@ -526,8 +530,8 @@ def _yaml_scalar_is_valid(value: str) -> bool:
                 if not stack:
                     flow_text = value[: index + 1]
                     try:
-                        parsed_flow = json.loads(flow_text)
-                    except (json.JSONDecodeError, RecursionError):
+                        parsed_flow = json.loads(flow_text, parse_constant=_reject_json_constant)
+                    except (ValueError, RecursionError):
                         return False
                     expected_type = dict if value[0] == "{" else list
                     return isinstance(parsed_flow, expected_type) and _yaml_scalar_remainder_is_valid(

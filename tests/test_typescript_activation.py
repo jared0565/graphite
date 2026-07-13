@@ -373,8 +373,12 @@ def test_source_policy_rejects_structurally_malformed_recognized_text_lockfiles(
         ('{"x":"y"}', True),
         ('{"x":"y"} # comment', True),
         ('["x","y"]', True),
+        ('{"number":1.25,"enabled":true,"missing":null}', True),
         ('{"x":"y",,}', False),
         ('["x",,"y"]', False),
+        ('{"x":NaN}', False),
+        ('{"x":Infinity}', False),
+        ('{"x":-Infinity}', False),
         ("x:", False),
     ],
 )
