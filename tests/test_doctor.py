@@ -1694,6 +1694,17 @@ def _mcp_probe_output(*messages: dict[str, object]) -> bytes:
     return b"".join(json.dumps(pending.get_nowait()).encode("utf-8") + b"\n" for _ in messages)
 
 
+def _mcp_tools_result() -> dict[str, object]:
+    return {
+        "tools": [
+            {"name": "graphite_query"},
+            {"name": "graphite_summary"},
+            {"name": "graphite_community"},
+            {"name": "graphite_refresh"},
+        ]
+    }
+
+
 def test_mcp_deep_probe_initializes_and_lists_required_tools(tmp_path: Path) -> None:
     import graphite.doctor_probes as probes
 
@@ -1722,7 +1733,10 @@ def test_mcp_deep_probe_initializes_and_lists_required_tools(tmp_path: Path) -> 
 
     assert check.status == "ready"
     assert check.details == {"server_name": "graphite", "tool_count": 4}
-    assert captured["argv"] == ["PYTHON", "-B", "-m", "graphite.mcp"]
+    argv = captured["argv"]
+    assert argv[0:5] == ["PYTHON", "-I", "-S", "-B", "-c"]
+    assert "graphite.mcp" in argv[5]
+    assert Path(argv[6]).is_absolute()
     assert captured["cwd"] == tmp_path
     assert captured["timeout_seconds"] == 2
     assert captured["max_output_bytes"] == 1024 * 1024
@@ -1732,6 +1746,23 @@ def test_mcp_deep_probe_initializes_and_lists_required_tools(tmp_path: Path) -> 
     assert requests[1]["method"] == "notifications/initialized"
     assert requests[2]["method"] == "tools/list"
     assert all(request.get("params", {}).get("name") != "graphite_refresh" for request in requests)
+
+
+def test_mcp_import_allowlist_excludes_arbitrary_pth_added_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import graphite.doctor_probes as probes
+
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    arbitrary = tmp_path / "external-package-source"
+    arbitrary.mkdir()
+    monkeypatch.setattr(probes.sys, "path", [str(arbitrary), *probes.sys.path])
+
+    _, _, roots = probes._mcp_import_roots(selected)
+
+    assert arbitrary.resolve() not in roots
 
 
 @pytest.mark.parametrize("failure_code", ["timeout", "output_limit", "nonzero", "io_failed"])
@@ -1766,6 +1797,141 @@ def test_mcp_deep_probe_rejects_closed_or_malformed_responses(tmp_path: Path, ou
     )
     assert check.status == "degraded"
     assert check.details == {"code": "invalid_response"}
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        _mcp_probe_output(
+            {"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "graphite"}}},
+            {"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "graphite"}}},
+            {"jsonrpc": "2.0", "id": 2, "result": _mcp_tools_result()},
+        ),
+        _mcp_probe_output(
+            {"jsonrpc": "1.0", "id": 1, "result": {"serverInfo": {"name": "graphite"}}},
+            {"jsonrpc": "2.0", "id": 2, "result": _mcp_tools_result()},
+        ),
+        _mcp_probe_output(
+            {"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": "secret"}},
+            {"jsonrpc": "2.0", "id": 2, "result": _mcp_tools_result()},
+        ),
+        _mcp_probe_output(
+            {"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "graphite"}}},
+            {"jsonrpc": "2.0", "id": 2, "result": _mcp_tools_result()},
+            {"jsonrpc": "2.0", "id": 3, "result": {}},
+        ),
+        _mcp_probe_output(
+            {"jsonrpc": "2.0", "method": 7, "params": {}},
+            {"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "graphite"}}},
+            {"jsonrpc": "2.0", "id": 2, "result": _mcp_tools_result()},
+        ),
+        _mcp_probe_output(
+            {"jsonrpc": "2.0", "id": True, "result": {}},
+            {"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "graphite"}}},
+            {"jsonrpc": "2.0", "id": 2, "result": _mcp_tools_result()},
+        ),
+        _mcp_probe_output(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"serverInfo": {"name": "graphite"}},
+                "error": {"code": -1},
+            },
+            {"jsonrpc": "2.0", "id": 2, "result": _mcp_tools_result()},
+        ),
+        (
+            b'{"jsonrpc":"2.0","method":"progress","params":[NaN]}\n'
+            + _mcp_probe_output(
+                {"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "graphite"}}},
+                {"jsonrpc": "2.0", "id": 2, "result": _mcp_tools_result()},
+            )
+        ),
+    ],
+    ids=[
+        "duplicate-id",
+        "wrong-jsonrpc-version",
+        "error-response",
+        "unexpected-id",
+        "malformed-notification",
+        "boolean-id",
+        "result-and-error",
+        "non-json-number",
+    ],
+)
+def test_mcp_deep_probe_strictly_validates_protocol_envelopes(tmp_path: Path, output: bytes) -> None:
+    import graphite.doctor_probes as probes
+
+    check = probes.probe_mcp(
+        tmp_path,
+        _runner=lambda *a, **k: probes.ProbeProcessResult(0, output, b"", 0.01),
+    )
+    assert check.status == "degraded"
+    assert check.details == {"code": "invalid_response"}
+    assert "secret" not in check.summary
+
+
+def test_mcp_deep_probe_rejects_excessive_lines_and_nesting_before_json_decode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import graphite.doctor_probes as probes
+
+    too_many_lines = _mcp_probe_output(
+        *({"jsonrpc": "2.0", "method": "progress", "params": {}} for _ in range(65))
+    )
+    assert probes.probe_mcp(
+        tmp_path,
+        _runner=lambda *a, **k: probes.ProbeProcessResult(0, too_many_lines, b"", 0.01),
+    ).status == "degraded"
+
+    deeply_nested = (
+        b'{"jsonrpc":"2.0","method":"progress","params":'
+        + b"[" * 80
+        + b"0"
+        + b"]" * 80
+        + b"}\n"
+    )
+    called = False
+    real_loads = probes.json.loads
+
+    def tracked_loads(value: object, *args: object, **kwargs: object) -> object:
+        nonlocal called
+        called = True
+        return real_loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(probes.json, "loads", tracked_loads)
+    check = probes.probe_mcp(
+        tmp_path,
+        _runner=lambda *a, **k: probes.ProbeProcessResult(0, deeply_nested, b"", 0.01),
+    )
+    assert check.status == "degraded"
+    assert called is False
+
+
+def test_mcp_deep_probe_real_server_ignores_project_import_shadows(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+
+    sentinel = tmp_path / "executed.txt"
+    shadow = tmp_path / "graphite"
+    shadow.mkdir()
+    (shadow / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('package')\n",
+        encoding="utf-8",
+    )
+    (shadow / "mcp.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('mcp')\n",
+        encoding="utf-8",
+    )
+    for customization in ("sitecustomize.py", "usercustomize.py"):
+        (tmp_path / customization).write_text(
+            f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('customize')\n",
+            encoding="utf-8",
+        )
+
+    check = probes.probe_mcp(tmp_path, timeout_seconds=10)
+
+    assert check.status == "ready"
+    assert not sentinel.exists()
 
 
 class _QueuedProbePipe:
@@ -1922,6 +2088,23 @@ def test_typescript_deep_probe_is_optional_when_node_is_missing(tmp_path: Path) 
     assert check.details == {}
 
 
+def test_typescript_deep_probe_rejects_node_from_selected_root_ancestor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import graphite.doctor_probes as probes
+
+    selected = tmp_path / "repo"
+    selected.mkdir()
+    node = tmp_path / ("node.exe" if os.name == "nt" else "node")
+    node.write_bytes(b"")
+    if os.name != "nt":
+        node.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    assert probes._resolve_external_node(selected) is None
+
+
 def test_typescript_deep_probe_gives_exact_activation_guidance_when_module_is_missing(tmp_path: Path) -> None:
     import graphite.doctor_probes as probes
 
@@ -1949,13 +2132,13 @@ def test_typescript_deep_probe_runtime_exit_one_is_degraded(tmp_path: Path) -> N
     assert check.details == {"code": "invalid_result"}
 
 
-def test_typescript_deep_probe_transpiles_synthetic_constant_and_reports_version_only(tmp_path: Path) -> None:
+def test_typescript_deep_probe_detects_module_without_loading_it(tmp_path: Path) -> None:
     import graphite.doctor_probes as probes
 
     captured: dict[str, object] = {}
     def run(argv: list[str], **kwargs: object) -> object:
         captured.update(argv=argv, **kwargs)
-        return probes.ProbeProcessResult(0, b'{"version":"5.8.2"}', b"", 0.01)
+        return probes.ProbeProcessResult(0, b'{"detected":true}', b"", 0.01)
 
     check = probes.probe_typescript(
         tmp_path,
@@ -1963,24 +2146,21 @@ def test_typescript_deep_probe_transpiles_synthetic_constant_and_reports_version
         _node_resolver=lambda root: Path("NODE"),
         _runner=run,
     )
-    assert check.status == "ready"
-    assert check.details == {"version": "5.8.2"}
-    assert captured["argv"][0:2] == ["NODE", "-e"]
-    assert captured["argv"][2] == (
-        "try{require.resolve('typescript')}catch(error){"
-        "if(error&&error.code==='MODULE_NOT_FOUND'){"
-        "process.stdout.write(JSON.stringify({missing_module:'typescript'}));process.exit(0)}"
-        "process.exit(4)} "
-        "const ts=require('typescript'); const source='const value: number = 1'; "
-        "const result=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022}}); "
-        "if(!result.outputText.includes('const value = 1')) process.exit(3); "
-        "process.stdout.write(JSON.stringify({version:ts.version}));"
+    assert check.status == "optional"
+    assert check.details == {}
+    assert check.summary == (
+        "TypeScript was detected but intentionally not executed because project dependencies "
+        "are outside the doctor trust boundary."
     )
+    assert captured["argv"][0:2] == ["NODE", "-e"]
+    assert "require.resolve('typescript')" in captured["argv"][2]
+    assert "require('typescript')" not in captured["argv"][2]
+    assert "import('typescript')" not in captured["argv"][2]
     assert captured["cwd"] == tmp_path
     assert captured["timeout_seconds"] == 3
 
 
-@pytest.mark.parametrize("result", [b"not-json", b'{}', b'{"version":1}'])
+@pytest.mark.parametrize("result", [b"not-json", b'{}', b'{"detected":1}', b'{"detected":true,"path":"secret"}'])
 def test_typescript_deep_probe_invalid_result_is_degraded(tmp_path: Path, result: bytes) -> None:
     import graphite.doctor_probes as probes
 
@@ -1990,6 +2170,61 @@ def test_typescript_deep_probe_invalid_result_is_degraded(tmp_path: Path, result
         _runner=lambda *a, **k: probes.ProbeProcessResult(0, result, b"", 0.01),
     )
     assert check.status == "degraded"
+
+
+def test_typescript_deep_probe_real_fake_package_is_never_executed(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+
+    if probes._resolve_external_node(tmp_path) is None:
+        pytest.skip("external Node is unavailable")
+    sentinel = tmp_path / "typescript-executed.txt"
+    package = tmp_path / "node_modules" / "typescript"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text('{"name":"typescript","main":"index.js"}', encoding="utf-8")
+    (package / "index.js").write_text(
+        f"require('fs').writeFileSync({str(sentinel)!r}, 'executed'); module.exports={{}};",
+        encoding="utf-8",
+    )
+
+    check = probes.probe_typescript(tmp_path, timeout_seconds=5)
+
+    assert check.status == "optional"
+    assert "node_modules" not in check.summary
+    assert not sentinel.exists()
+
+
+def test_run_deep_probes_contains_each_probe_failure_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import graphite.doctor_probes as probes
+
+    observed: list[str] = []
+
+    def fail_core(root: Path) -> DoctorCheck:
+        del root
+        observed.append("core")
+        raise MemoryError("sensitive")
+
+    def fail_mcp(root: Path) -> DoctorCheck:
+        del root
+        observed.append("mcp")
+        raise RecursionError("sensitive")
+
+    def typescript(root: Path) -> DoctorCheck:
+        del root
+        observed.append("typescript")
+        return DoctorCheck("deep_typescript", "TypeScript", "optional", "ok")
+
+    monkeypatch.setattr(probes, "probe_core_pipeline", fail_core)
+    monkeypatch.setattr(probes, "probe_mcp", fail_mcp)
+    monkeypatch.setattr(probes, "probe_typescript", typescript)
+
+    checks = probes.run_deep_probes(tmp_path, cfg=Config(), include_llm=False)
+
+    assert observed == ["core", "mcp", "typescript"]
+    assert [check.status for check in checks] == ["blocked", "degraded", "optional"]
+    assert all("sensitive" not in check.summary for check in checks)
 
 
 def test_typescript_deep_probe_timeout_is_degraded(tmp_path: Path) -> None:

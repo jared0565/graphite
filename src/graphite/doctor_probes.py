@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import site
 import shutil
 import sys
 import tempfile
@@ -19,6 +20,9 @@ from .probe_process import ProbeProcessError, ProbeProcessResult, run_bounded_pr
 
 _CLEANUP_RESERVE_SECONDS = 1.0
 _MCP_OUTPUT_LIMIT_BYTES = 1024 * 1024
+_MCP_LINE_LIMIT = 64
+_MCP_RESPONSE_LIMIT = 8
+_MCP_NESTING_LIMIT = 32
 _MCP_PROTOCOL_VERSION = "2024-11-05"
 _REQUIRED_MCP_TOOLS = frozenset(
     {"graphite_query", "graphite_summary", "graphite_community", "graphite_refresh"}
@@ -27,12 +31,51 @@ _TYPESCRIPT_SCRIPT = (
     "try{require.resolve('typescript')}catch(error){"
     "if(error&&error.code==='MODULE_NOT_FOUND'){"
     "process.stdout.write(JSON.stringify({missing_module:'typescript'}));process.exit(0)}"
-    "process.exit(4)} "
-    "const ts=require('typescript'); const source='const value: number = 1'; "
-    "const result=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022}}); "
-    "if(!result.outputText.includes('const value = 1')) process.exit(3); "
-    "process.stdout.write(JSON.stringify({version:ts.version}));"
+    "process.exit(4)}"
+    "process.stdout.write(JSON.stringify({detected:true}));"
 )
+_MCP_BOOTSTRAP = """\
+import importlib.util
+import pathlib
+import runpy
+import sys
+
+trusted = pathlib.Path(sys.argv[1]).resolve(strict=True)
+selected = pathlib.Path(sys.argv[2]).resolve(strict=True)
+if not trusted.is_dir() or not selected.is_dir():
+    raise SystemExit(70)
+allowed = []
+for raw in sys.argv[3:]:
+    candidate = pathlib.Path(raw)
+    if not candidate.is_absolute():
+        raise SystemExit(70)
+    candidate = candidate.resolve(strict=True)
+    if not candidate.is_dir():
+        raise SystemExit(70)
+    try:
+        candidate.relative_to(selected)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit(70)
+    try:
+        selected.relative_to(candidate)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit(70)
+    allowed.append(str(candidate))
+sys.path[:] = [str(trusted), *allowed]
+spec = importlib.util.find_spec("graphite.mcp")
+if spec is None or spec.origin is None:
+    raise SystemExit(70)
+origin = pathlib.Path(spec.origin).resolve(strict=True)
+try:
+    origin.relative_to(trusted)
+except ValueError:
+    raise SystemExit(70) from None
+runpy.run_module("graphite.mcp", run_name="__main__")
+"""
 _TYPESCRIPT_REMEDIATION = (
     "Validate package: node C:/Users/fbmac/atlas/Codex/.codex_state/user_home/scripts/validate-packages.cjs typescript",
     "Then add typescript with the target project's existing package manager.",
@@ -275,6 +318,164 @@ def _degraded_probe(code: str, label: str, failure: str) -> DoctorCheck:
     )
 
 
+def _paths_overlap(left: Path, right: Path) -> bool:
+    try:
+        left.relative_to(right)
+        return True
+    except ValueError:
+        pass
+    try:
+        right.relative_to(left)
+        return True
+    except ValueError:
+        return False
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _mcp_import_roots(selected_root: Path) -> tuple[Path, Path, list[Path]]:
+    """Build a parent-validated import allowlist without repository-local paths."""
+    selected = selected_root.resolve(strict=True)
+    if not selected.is_dir():
+        raise OSError
+    trusted = Path(__file__).resolve(strict=True).parent.parent
+    runtime_prefixes: list[Path] = []
+    for raw_prefix in {sys.base_prefix, sys.prefix}:
+        try:
+            runtime_prefixes.append(Path(raw_prefix).resolve(strict=True))
+        except OSError:
+            continue
+    site_roots: set[Path] = set()
+    try:
+        raw_site_roots = [*site.getsitepackages(), site.getusersitepackages()]
+    except (AttributeError, OSError):
+        raw_site_roots = []
+    for raw_site_root in raw_site_roots:
+        try:
+            site_root = Path(raw_site_root).resolve(strict=True)
+        except OSError:
+            continue
+        if site_root.is_dir():
+            site_roots.add(site_root)
+    roots: list[Path] = []
+    seen = {os.path.normcase(str(trusted))}
+    for raw in sys.path:
+        if not raw:
+            continue
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            continue
+        try:
+            candidate = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        is_runtime_root = any(_path_is_within(candidate, prefix) for prefix in runtime_prefixes)
+        is_site_root = any(_path_is_within(candidate, root) for root in site_roots)
+        if (
+            not candidate.is_dir()
+            or _paths_overlap(candidate, selected)
+            or (not is_runtime_root and not is_site_root)
+        ):
+            continue
+        normalized = os.path.normcase(str(candidate))
+        if normalized not in seen:
+            seen.add(normalized)
+            roots.append(candidate)
+    return trusted, selected, roots
+
+
+def _validate_json_nesting(text: str) -> None:
+    """Reject excessive or mismatched JSON nesting without interpreting string data."""
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    pairs = {"}": "{", "]": "["}
+    for character in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            stack.append(character)
+            if len(stack) > _MCP_NESTING_LIMIT:
+                raise ValueError
+        elif character in "]}":
+            if not stack or stack.pop() != pairs[character]:
+                raise ValueError
+    if in_string or stack:
+        raise ValueError
+
+
+def _reject_json_constant(value: str) -> None:
+    del value
+    raise ValueError
+
+
+def _json_object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError
+        value[key] = item
+    return value
+
+
+def _parse_mcp_responses(output: bytes, stderr: bytes) -> dict[int, dict[str, Any]]:
+    if len(output) + len(stderr) > _MCP_OUTPUT_LIMIT_BYTES:
+        raise ValueError
+    raw_lines = output.splitlines()
+    if not raw_lines or len(raw_lines) > _MCP_LINE_LIMIT:
+        raise ValueError
+    responses: dict[int, dict[str, Any]] = {}
+    response_count = 0
+    for raw_line in raw_lines:
+        text = raw_line.decode("utf-8")
+        _validate_json_nesting(text)
+        envelope = json.loads(
+            text,
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_json_object_without_duplicate_keys,
+        )
+        if not isinstance(envelope, dict) or envelope.get("jsonrpc") != "2.0":
+            raise ValueError
+        if "id" not in envelope:
+            if not set(envelope).issubset({"jsonrpc", "method", "params"}):
+                raise ValueError
+            method = envelope.get("method")
+            params = envelope.get("params", {})
+            if not isinstance(method, str) or not method or not isinstance(params, (dict, list)):
+                raise ValueError
+            continue
+        response_count += 1
+        if response_count > _MCP_RESPONSE_LIMIT:
+            raise ValueError
+        if not set(envelope).issubset({"jsonrpc", "id", "result", "error"}):
+            raise ValueError
+        response_id = envelope["id"]
+        if not isinstance(response_id, int) or isinstance(response_id, bool):
+            raise ValueError
+        if response_id not in {1, 2} or response_id in responses:
+            raise ValueError
+        if "result" not in envelope or "error" in envelope:
+            raise ValueError
+        responses[response_id] = envelope
+    if set(responses) != {1, 2} or response_count != 2:
+        raise ValueError
+    return responses
+
+
 def probe_mcp(
     root: Path,
     *,
@@ -302,8 +503,19 @@ def probe_mcp(
         for request in requests
     )
     try:
+        trusted, selected, import_roots = _mcp_import_roots(root)
         result = _runner(
-            [python_executable, "-B", "-m", "graphite.mcp"],
+            [
+                python_executable,
+                "-I",
+                "-S",
+                "-B",
+                "-c",
+                _MCP_BOOTSTRAP,
+                str(trusted),
+                str(selected),
+                *(str(path) for path in import_roots),
+            ],
             cwd=root,
             stdin=stdin,
             timeout_seconds=timeout_seconds,
@@ -315,14 +527,7 @@ def probe_mcp(
         return _degraded_probe("deep_mcp", "MCP", "probe_failed")
 
     try:
-        responses: dict[int, dict[str, Any]] = {}
-        for raw_line in result.stdout.splitlines():
-            response = json.loads(raw_line.decode("utf-8"))
-            if not isinstance(response, dict):
-                raise ValueError
-            response_id = response.get("id")
-            if isinstance(response_id, int) and not isinstance(response_id, bool):
-                responses[response_id] = response
+        responses = _parse_mcp_responses(result.stdout, result.stderr)
         initialize = responses[1]["result"]
         tools_result = responses[2]["result"]
         if not isinstance(initialize, dict) or not isinstance(tools_result, dict):
@@ -340,7 +545,7 @@ def probe_mcp(
         }
         if not _REQUIRED_MCP_TOOLS.issubset(tool_names):
             raise ValueError
-    except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+    except Exception:
         return _degraded_probe("deep_mcp", "MCP", "invalid_response")
     return DoctorCheck(
         "deep_mcp",
@@ -366,9 +571,7 @@ def _resolve_external_node(root: Path) -> Path | None:
             candidate = (directory / name).resolve(strict=True)
             if not candidate.is_file() or (os.name != "nt" and not os.access(candidate, os.X_OK)):
                 continue
-            try:
-                candidate.relative_to(selected)
-            except ValueError:
+            if not _paths_overlap(candidate.parent, selected):
                 return candidate
         except OSError:
             continue
@@ -382,7 +585,7 @@ def probe_typescript(
     _node_resolver: Callable[[Path], Path | None] = _resolve_external_node,
     _runner: Callable[..., ProbeProcessResult] = run_bounded_process,
 ) -> DoctorCheck:
-    """Load TypeScript and transpile one in-memory constant without repository writes."""
+    """Detect TypeScript statically without executing project-controlled JavaScript."""
     node = _node_resolver(root)
     if node is None:
         return DoctorCheck(
@@ -406,7 +609,7 @@ def probe_typescript(
         return _degraded_probe("deep_typescript", "TypeScript", "invalid_result")
     try:
         payload = _json_object(result.stdout)
-    except ProbeProcessError:
+    except Exception:
         return _degraded_probe("deep_typescript", "TypeScript", "invalid_result")
     if payload == {"missing_module": "typescript"}:
         return DoctorCheck(
@@ -416,22 +619,32 @@ def probe_typescript(
             "The TypeScript compiler module is unavailable.",
             remediation=_TYPESCRIPT_REMEDIATION,
         )
-    try:
-        version = payload.get("version")
-        if not isinstance(version, str) or not version or len(version) > 64:
-            raise ValueError
-    except (ProbeProcessError, ValueError):
+    if set(payload) != {"detected"} or payload["detected"] is not True:
         return _degraded_probe("deep_typescript", "TypeScript", "invalid_result")
     return DoctorCheck(
         "deep_typescript",
         "TypeScript",
-        "ready",
-        "The TypeScript compiler transpiles the synthetic source.",
-        {"version": version},
+        "optional",
+        "TypeScript was detected but intentionally not executed because project dependencies "
+        "are outside the doctor trust boundary.",
     )
 
 
 def run_deep_probes(root: Path, *, cfg: Config, include_llm: bool) -> list[DoctorCheck]:
     """Return the deep capabilities implemented in this release."""
     del cfg, include_llm
-    return [probe_core_pipeline(root), probe_mcp(root), probe_typescript(root)]
+    probes: tuple[tuple[Callable[[Path], DoctorCheck], Callable[[], DoctorCheck]], ...] = (
+        (probe_core_pipeline, lambda: _blocked("unexpected", "probe_failed")),
+        (probe_mcp, lambda: _degraded_probe("deep_mcp", "MCP", "probe_failed")),
+        (
+            probe_typescript,
+            lambda: _degraded_probe("deep_typescript", "TypeScript", "probe_failed"),
+        ),
+    )
+    checks: list[DoctorCheck] = []
+    for probe, fallback in probes:
+        try:
+            checks.append(probe(root))
+        except Exception:
+            checks.append(fallback())
+    return checks
