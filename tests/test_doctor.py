@@ -961,6 +961,7 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
             self.handle_flags: list[tuple[int, int]] = []
             self.legacy_acquired = threading.Event()
             self.legacy_thread: threading.Thread | None = None
+            self.legacy_saw_open_handle: bool | None = None
 
         def CreateJobObjectW(self, security: object, name: object) -> int:
             return 0 if failure == "job_create" else 1
@@ -1010,9 +1011,10 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
                 "cwd": args[7],
                 "stdio": (startup.hStdInput, startup.hStdOutput, startup.hStdError),
             }
-            if failure == "resume":
+            if failure in {"resume", "child_restore"}:
                 def legacy_launch() -> None:
                     with native.WINDOWS_PROCESS_CREATION_LOCK:
+                        self.legacy_saw_open_handle = 13 not in self.closed
                         self.legacy_acquired.set()
                 self.legacy_thread = threading.Thread(target=legacy_launch)
                 self.legacy_thread.start()
@@ -1078,6 +1080,10 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
         assert api.terminated_processes == [30]
     if failure == "child_configure":
         assert api.handle_flags[-3:] == [(10, 1), (13, 1), (10, 0)]
+    if failure == "child_restore":
+        assert api.legacy_acquired.wait(1)
+        assert api.legacy_saw_open_handle is False
+        assert api.closed.count(13) == 1
 
 
 def test_cancel_synchronous_io_preserves_pointer_width_and_closes_handle(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1264,6 +1270,74 @@ def test_posix_process_observes_before_cleanup_and_reaps_afterward(monkeypatch: 
     assert transport._cleanup_process_transport(process, [], [], time.monotonic() + 1)
 
     assert events == ["observe", "contain", "reap"]
+
+
+def test_posix_reap_is_deadline_bounded_when_child_is_not_waitable(monkeypatch: pytest.MonkeyPatch) -> None:
+    import graphite.probe_process as transport
+
+    leader = type("Leader", (), {"pid": 44, "stdin": None, "stdout": None, "stderr": None, "returncode": None})()
+    observed = type("WaitId", (), {"si_status": 0, "si_code": 1})()
+    ticks = iter((0.0, 0.0, 0.01, 0.02, 0.03))
+    monkeypatch.setattr(transport.os, "CLD_EXITED", 1, raising=False)
+    monkeypatch.setattr(transport.os, "P_PID", 1, raising=False)
+    monkeypatch.setattr(transport.os, "WEXITED", 1, raising=False)
+    monkeypatch.setattr(transport.os, "WNOHANG", 2, raising=False)
+    monkeypatch.setattr(transport.os, "WNOWAIT", 4, raising=False)
+    monkeypatch.setattr(transport.os, "waitid", lambda *args: observed, raising=False)
+    monkeypatch.setattr(transport.os, "waitpid", lambda *args: (0, 0), raising=False)
+    monkeypatch.setattr(transport.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(transport.time, "sleep", lambda duration: None)
+    process = transport._PosixProcess(leader)  # type: ignore[arg-type]
+    assert process.wait(0) == 0
+    monkeypatch.setattr(transport, "_terminate_process_tree", lambda *args: True)
+
+    assert not transport._cleanup_process_transport(process, [], [], 0.025)
+    assert not process._reaped
+
+
+def test_posix_observer_uses_macos_kqueue_when_waitid_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    import graphite.probe_process as transport
+
+    controls: list[tuple[int, int]] = []
+    event = type("Event", (), {"data": 7 << 8})()
+    class Kqueue:
+        def control(self, changes: object, max_events: int, timeout: int) -> list[object]:
+            controls.append((max_events, timeout))
+            return [] if changes is not None else [event]
+        def close(self) -> None: controls.append((-1, -1))
+    fake_select = type("Select", (), {
+        "KQ_FILTER_PROC": -5, "KQ_EV_ADD": 1, "KQ_EV_ENABLE": 2,
+        "KQ_EV_ONESHOT": 4, "KQ_NOTE_EXIT": 8,
+        "kqueue": lambda self: Kqueue(),
+        "kevent": lambda self, *args, **kwargs: object(),
+    })()
+    monkeypatch.delattr(transport.os, "waitid", raising=False)
+    monkeypatch.setattr(transport.sys, "platform", "darwin")
+    monkeypatch.setattr(transport, "select", fake_select)
+    leader = type("Leader", (), {"pid": 44, "stdin": None, "stdout": None, "stderr": None, "returncode": None})()
+
+    process = transport._PosixProcess(leader)  # type: ignore[arg-type]
+
+    assert process.poll() == 7
+    assert controls[:2] == [(0, 0), (1, 0)]
+
+
+def test_posix_launch_fails_closed_before_spawn_without_safe_observer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import graphite.probe_process as transport
+
+    monkeypatch.delattr(transport.os, "waitid", raising=False)
+    monkeypatch.setattr(transport.os, "name", "posix")
+    monkeypatch.setattr(transport.sys, "platform", "freebsd")
+    monkeypatch.setattr(
+        transport.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not spawn")),
+    )
+
+    with pytest.raises(transport.ProbeProcessError) as exc_info:
+        transport.run_bounded_process(["python"], cwd=tmp_path, timeout_seconds=1)
+
+    assert exc_info.value.code == "launch_failed"
 
 
 def test_core_deep_probe_runs_real_pipeline_without_touching_selected_root(tmp_path: Path) -> None:

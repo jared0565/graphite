@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import math
 import os
+import select
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Mapping
@@ -92,14 +94,32 @@ class _PosixProcess:
         self.stderr = process.stderr
         self.returncode: int | None = None
         self._reaped = False
+        self._kqueue: Any | None = None
+        if not callable(getattr(os, "waitid", None)):
+            if sys.platform != "darwin" or not hasattr(select, "kqueue"):
+                raise RuntimeError("non-reaping process observation unavailable")
+            self._kqueue = select.kqueue()
+            event = select.kevent(
+                self.pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            self._kqueue.control([event], 0, 0)
 
     def _observe(self) -> int | None:
         if self.returncode is not None:
             return self.returncode
-        result = os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-        if result is None:
-            return None
-        self.returncode = result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
+        if self._kqueue is not None:
+            events = self._kqueue.control(None, 1, 0)
+            if not events:
+                return None
+            self.returncode = os.waitstatus_to_exitcode(events[0].data)
+        else:
+            result = os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            if result is None:
+                return None
+            self.returncode = result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
         return self.returncode
 
     def poll(self) -> int | None:
@@ -125,17 +145,26 @@ class _PosixProcess:
         except OSError:
             return False
 
-    def reap(self) -> bool:
+    def reap(self, deadline: float) -> bool:
         if self._reaped:
             return True
-        try:
-            _, status = os.waitpid(self.pid, 0)
-        except ChildProcessError:
-            return False
-        self._reaped = True
-        self._process.returncode = os.waitstatus_to_exitcode(status)
-        self.returncode = self._process.returncode
-        return True
+        while True:
+            try:
+                waited_pid, status = os.waitpid(self.pid, os.WNOHANG)
+            except ChildProcessError:
+                return False
+            if waited_pid == self.pid:
+                self._reaped = True
+                self._process.returncode = os.waitstatus_to_exitcode(status)
+                self.returncode = self._process.returncode
+                if self._kqueue is not None:
+                    self._kqueue.close()
+                    self._kqueue = None
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.01, remaining))
 
 
 def _launch_process(argv: list[str], *, cwd: Path, input_data: bytes | None) -> _Process:
@@ -143,6 +172,8 @@ def _launch_process(argv: list[str], *, cwd: Path, input_data: bytes | None) -> 
         from .windows_job import launch
 
         return launch(argv, cwd=cwd, environment=sanitized_probe_environment(), with_stdin=input_data is not None)
+    if not callable(getattr(os, "waitid", None)) and (sys.platform != "darwin" or not hasattr(select, "kqueue")):
+        raise RuntimeError("non-reaping process observation unavailable")
     process = subprocess.Popen(
         argv,
         cwd=cwd,
@@ -153,7 +184,18 @@ def _launch_process(argv: list[str], *, cwd: Path, input_data: bytes | None) -> 
         stderr=subprocess.PIPE,
         start_new_session=True,
     )
-    return _PosixProcess(process)
+    try:
+        return _PosixProcess(process)
+    except Exception:
+        process.kill()
+        try:
+            process.wait(timeout=0.5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        raise
 
 
 def run_bounded_process(
@@ -329,7 +371,7 @@ def _cleanup_process_transport(
     reap = getattr(process, "reap", None)
     if reap is not None:
         try:
-            if reap() is False:
+            if reap(deadline) is False:
                 cleanup_ok = False
         except (OSError, ValueError):
             cleanup_ok = False

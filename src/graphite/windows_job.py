@@ -243,7 +243,9 @@ def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_s
             flags = CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT
             child_handles = (stdin_read, stdout_write, stderr_write)
             enabled_handles: list[int] = []
+            failed_restores: list[int] = []
             created = False
+            assigned = False
             try:
                 for child_handle in child_handles:
                     if not api.SetHandleInformation(child_handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT):
@@ -256,13 +258,25 @@ def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_s
             finally:
                 restored = True
                 for child_handle in enabled_handles:
-                    restored = bool(api.SetHandleInformation(child_handle, HANDLE_FLAG_INHERIT, 0)) and restored
+                    handle_restored = bool(api.SetHandleInformation(child_handle, HANDLE_FLAG_INHERIT, 0))
+                    restored = handle_restored and restored
+                    if not handle_restored:
+                        failed_restores.append(child_handle)
             if not created:
                 raise OSError("process create failed")
             process_handle, thread_handle = process_info.hProcess, process_info.hThread
             if not restored:
+                assigned = bool(api.AssignProcessToJobObject(job, process_handle))
+                for failed_handle in failed_restores:
+                    api.CloseHandle(failed_handle)
+                    if failed_handle == stdin_read:
+                        stdin_read = 0
+                    elif failed_handle == stdout_write:
+                        stdout_write = 0
+                    elif failed_handle == stderr_write:
+                        stderr_write = 0
                 raise OSError("child handle restore failed")
-            if not api.AssignProcessToJobObject(job, process_handle):
+            if not assigned and not api.AssignProcessToJobObject(job, process_handle):
                 raise OSError("job assignment failed")
             if api.ResumeThread(thread_handle) == 0xFFFFFFFF:
                 raise OSError("thread resume failed")
