@@ -28,6 +28,7 @@ _SAFE_ERROR_CODES = frozenset(
         "input_failed",
         "cleanup_failed",
         "invalid_timeout",
+        "invalid_environment",
         "input_limit",
     }
 )
@@ -71,6 +72,21 @@ def sanitized_probe_environment(source: Mapping[str, str] | None = None) -> dict
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
     return env
+
+
+def _validated_environment(environment: Mapping[str, str] | None) -> dict[str, str]:
+    validated = sanitized_probe_environment() if environment is None else dict(environment)
+    if any(
+        not isinstance(key, str)
+        or not isinstance(value, str)
+        or not key
+        or "=" in key
+        or "\0" in key
+        or "\0" in value
+        for key, value in validated.items()
+    ):
+        raise ProbeProcessError("invalid_environment")
+    return validated
 
 
 class _Process(Protocol):
@@ -174,17 +190,23 @@ class _PosixProcess:
             time.sleep(min(0.01, remaining))
 
 
-def _launch_process(argv: list[str], *, cwd: Path, input_data: bytes | None) -> _Process:
+def _launch_process(
+    argv: list[str],
+    *,
+    cwd: Path,
+    input_data: bytes | None,
+    environment: Mapping[str, str],
+) -> _Process:
     if os.name == "nt":
         from .windows_job import launch
 
-        return launch(argv, cwd=cwd, environment=sanitized_probe_environment(), with_stdin=input_data is not None)
+        return launch(argv, cwd=cwd, environment=environment, with_stdin=input_data is not None)
     if not callable(getattr(os, "waitid", None)) and (sys.platform != "darwin" or not hasattr(select, "kqueue")):
         raise RuntimeError("non-reaping process observation unavailable")
     process = subprocess.Popen(
         argv,
         cwd=cwd,
-        env=sanitized_probe_environment(),
+        env=environment,
         shell=False,
         stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -213,6 +235,7 @@ def run_bounded_process(
     timeout_seconds: float,
     max_output_bytes: int = OUTPUT_LIMIT_BYTES,
     check: bool = True,
+    environment: Mapping[str, str] | None = None,
 ) -> ProbeProcessResult:
     """Run one isolated process tree under a single hard transport deadline."""
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0 or max_output_bytes <= 0:
@@ -230,7 +253,13 @@ def run_bounded_process(
     started = time.monotonic()
     deadline = started + timeout_seconds
     try:
-        process = _launch_process(argv, cwd=cwd, input_data=input_data)
+        validated_environment = _validated_environment(environment)
+    except ProbeProcessError:
+        raise
+    except Exception:
+        raise ProbeProcessError("launch_failed") from None
+    try:
+        process = _launch_process(argv, cwd=cwd, input_data=input_data, environment=validated_environment)
     except Exception:
         raise ProbeProcessError("launch_failed") from None
 

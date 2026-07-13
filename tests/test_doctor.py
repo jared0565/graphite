@@ -712,6 +712,87 @@ def test_deep_bounded_runner_sanitizes_environment_and_bounds_output(monkeypatch
         assert exc_info.value.code == "output_limit"
 
 
+def test_bounded_process_accepts_an_exact_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from graphite.probe_process import run_bounded_process
+
+    monkeypatch.setenv("SECRET_TOKEN", "must-not-inherit")
+    script = "import os;print(os.environ.get('GRAPHITE_SENTINEL'));print(os.environ.get('SECRET_TOKEN'))"
+
+    result = run_bounded_process(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        environment={"GRAPHITE_SENTINEL": "safe"},
+        timeout_seconds=5,
+    )
+
+    assert result.stdout.decode().splitlines() == ["safe", "None"]
+
+
+def test_bounded_process_copies_an_exact_environment_before_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import graphite.probe_process as transport
+
+    source = {"GRAPHITE_SENTINEL": "safe"}
+    observed: list[object] = []
+
+    def fail_launch(*args: object, **kwargs: object) -> None:
+        observed.append(kwargs["environment"])
+        raise OSError("injected launch failure")
+
+    monkeypatch.setattr(transport, "_launch_process", fail_launch)
+
+    with pytest.raises(transport.ProbeProcessError, match="launch_failed"):
+        transport.run_bounded_process(
+            [sys.executable, "-c", "pass"],
+            cwd=tmp_path,
+            environment=source,
+            timeout_seconds=5,
+        )
+
+    assert observed == [source]
+    assert observed[0] is not source
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"": "value"},
+        {"BAD=KEY": "value"},
+        {"BAD\0KEY": "value"},
+        {"GOOD": "bad\0value"},
+        {1: "value"},
+        {"GOOD": 1},
+    ],
+)
+def test_bounded_process_rejects_invalid_exact_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    environment: dict[object, object],
+) -> None:
+    import graphite.probe_process as transport
+
+    launched = False
+
+    def fail_if_launched(*args: object, **kwargs: object) -> None:
+        nonlocal launched
+        launched = True
+        raise AssertionError("must not launch")
+
+    monkeypatch.setattr(transport, "_launch_process", fail_if_launched)
+
+    with pytest.raises(transport.ProbeProcessError, match="invalid_environment"):
+        transport.run_bounded_process(
+            [sys.executable, "-c", "raise AssertionError('must not launch')"],
+            cwd=tmp_path,
+            environment=environment,  # type: ignore[arg-type]
+            timeout_seconds=5,
+        )
+
+    assert launched is False
+
+
 def test_deep_bounded_runner_times_out_without_leaking_process_output(tmp_path: Path) -> None:
     from graphite.probe_process import ProbeProcessError, run_bounded_process
 
