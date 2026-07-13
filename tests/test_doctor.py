@@ -14,6 +14,7 @@ import threading
 import time
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import graphite.doctor as doctor_module
@@ -1471,12 +1472,17 @@ def test_core_deep_probe_rejects_temp_path_outside_os_temp(monkeypatch: pytest.M
     selected.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
-    def unsafe_factory(**kwargs: object) -> str:
-        return str(outside)
+    claimed_temp = tmp_path / "claimed-temp"
+    claimed_temp.mkdir()
+    lease = SimpleNamespace(
+        path=outside,
+        temp_root=claimed_temp,
+        validate=lambda: None,
+        cleanup=lambda: None,
+    )
     check = probes.probe_core_pipeline(
         selected,
-        _temp_factory=unsafe_factory,
-        _temp_root_resolver=lambda: tmp_path / "claimed-temp",
+        _workspace_factory=lambda: lease,
     )
     assert check.status == "blocked"
     assert check.details == {"error_type": "isolation", "code": "unsafe_temp_path"}
@@ -1490,12 +1496,10 @@ def test_core_deep_probe_rejects_work_overlapping_selected_before_writes(tmp_pat
     selected.mkdir()
     work = selected / "work"
     work.mkdir()
-    def overlapping_factory(**kwargs: object) -> str:
-        return str(work)
+    lease = SimpleNamespace(path=work, temp_root=tmp_path, validate=lambda: None, cleanup=lambda: None)
     check = probes.probe_core_pipeline(
         selected,
-        _temp_factory=overlapping_factory,
-        _temp_root_resolver=lambda: tmp_path,
+        _workspace_factory=lambda: lease,
     )
     assert check.status == "blocked"
     assert check.details == {"error_type": "isolation", "code": "overlapping_temp_path"}
@@ -1506,15 +1510,14 @@ def test_core_deep_probe_rejects_work_overlapping_selected_before_writes(tmp_pat
 def test_core_deep_probe_rejects_selected_root_containing_temp_before_creation(tmp_path: Path, relationship: str) -> None:
     import graphite.doctor_probes as probes
 
-    selected = tmp_path
-    temp_root = tmp_path if relationship == "equal" else tmp_path / "os-temp"
-    temp_root.mkdir(exist_ok=True)
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    selected = temp_root if relationship == "equal" else temp_root.parent
     created = False
-    def factory(**kwargs: object) -> object:
+    def factory() -> object:
         nonlocal created
         created = True
         raise AssertionError("temporary directory must not be created")
-    check = probes.probe_core_pipeline(selected, _temp_factory=factory, _temp_root_resolver=lambda: temp_root)
+    check = probes.probe_core_pipeline(selected, _workspace_factory=factory)
     assert check.status == "blocked"
     assert check.details == {"error_type": "isolation", "code": "selected_contains_temp"}
     assert created is False
@@ -1526,11 +1529,12 @@ def test_core_deep_probe_allows_selected_sibling_under_temp(tmp_path: Path) -> N
     selected = tmp_path / "selected"
     selected.mkdir()
     outputs = iter([b"", b'{"ok":true,"error_count":0,"errors":[],"node_count":2,"edge_count":1}', b'{"node_count":2,"edge_count":1}'])
-    def factory(**kwargs: object) -> object:
-        return tempfile.mkdtemp(dir=tmp_path, **kwargs)
+    from graphite.probe_workspace import ProbeWorkspaceLease
+    def factory() -> object:
+        return ProbeWorkspaceLease.acquire(temp_root=tmp_path)
     def run(*args: object, **kwargs: object) -> object:
         return probes.ProbeProcessResult(0, next(outputs), b"", 0.01)
-    check = probes.probe_core_pipeline(selected, _runner=run, _temp_factory=factory, _temp_root_resolver=lambda: tmp_path)
+    check = probes.probe_core_pipeline(selected, _runner=run, _workspace_factory=factory)
     assert check.status == "ready"
     assert list(selected.iterdir()) == []
 
@@ -1558,18 +1562,19 @@ def test_core_deep_probe_rejects_invalid_validation_contract(tmp_path: Path, val
 def test_core_deep_probe_cleans_temp_after_success_and_failure(tmp_path: Path) -> None:
     import graphite.doctor_probes as probes
     from graphite.probe_process import ProbeProcessError
+    from graphite.probe_workspace import ProbeWorkspaceLease
 
     created: list[Path] = []
-    def tracking_factory(**kwargs: object) -> str:
-        value = tempfile.mkdtemp(**kwargs)
-        created.append(Path(value))
-        return value
+    def tracking_factory() -> object:
+        lease = ProbeWorkspaceLease.acquire()
+        created.append(lease.parent_path)
+        return lease
 
-    assert probes.probe_core_pipeline(tmp_path, _temp_factory=tracking_factory).status == "ready"
+    assert probes.probe_core_pipeline(tmp_path, _workspace_factory=tracking_factory).status == "ready"
     assert created and not created[-1].exists()
     def fail(*args: object, **kwargs: object) -> object:
         raise ProbeProcessError("nonzero")
-    assert probes.probe_core_pipeline(tmp_path, _runner=fail, _temp_factory=tracking_factory).status == "blocked"
+    assert probes.probe_core_pipeline(tmp_path, _runner=fail, _workspace_factory=tracking_factory).status == "blocked"
     assert not created[-1].exists()
 
 
@@ -1589,11 +1594,19 @@ def test_core_deep_probe_uses_one_total_budget_and_maps_cleanup_error(tmp_path: 
     assert probes.probe_core_pipeline(tmp_path, timeout_seconds=1, _runner=run).status == "ready"
     assert timeouts[0] > timeouts[1] > timeouts[2] > 0
 
-    def cleanup_failure(path: Path) -> None:
-        shutil.rmtree(path)
-        raise RuntimeError("RAW cleanup path")
     outputs = iter([b"", b'{"ok":true,"error_count":0,"errors":[],"node_count":2,"edge_count":1}', b'{"node_count":2,"edge_count":1}'])
-    check = probes.probe_core_pipeline(tmp_path, _runner=run, _temp_cleanup=cleanup_failure)
+    from graphite.probe_workspace import ProbeWorkspaceLease
+    lease = ProbeWorkspaceLease.acquire()
+    def fail_cleanup() -> None:
+        lease.cleanup()
+        raise RuntimeError("RAW cleanup path")
+    wrapped = SimpleNamespace(
+        path=lease.path,
+        temp_root=lease.temp_root,
+        validate=lease.validate,
+        cleanup=fail_cleanup,
+    )
+    check = probes.probe_core_pipeline(tmp_path, _runner=run, _workspace_factory=lambda: wrapped)
     assert check.status == "blocked"
     assert check.details == {"error_type": "cleanup", "code": "cleanup_failed"}
     assert "RAW" not in json.dumps(check.to_dict())
@@ -1601,6 +1614,7 @@ def test_core_deep_probe_uses_one_total_budget_and_maps_cleanup_error(tmp_path: 
 
 def test_core_probe_deadline_includes_temp_creation_and_verified_cleanup(tmp_path: Path) -> None:
     import graphite.doctor_probes as probes
+    from graphite.probe_workspace import ProbeWorkspaceLease
 
     selected = tmp_path / "selected"
     selected.mkdir()
@@ -1608,17 +1622,16 @@ def test_core_probe_deadline_includes_temp_creation_and_verified_cleanup(tmp_pat
     temp_root.mkdir()
     created: list[Path] = []
     now = [0.0]
-    def factory(**kwargs: object) -> str:
-        path = Path(tempfile.mkdtemp(dir=temp_root, prefix="graphite-doctor-"))
-        created.append(path)
+    def factory() -> object:
+        lease = ProbeWorkspaceLease.acquire(temp_root=temp_root)
+        created.append(lease.parent_path)
         now[0] = 0.95
-        return str(path)
+        return lease
     check = probes.probe_core_pipeline(
         selected,
         timeout_seconds=1,
         _clock=lambda: now[0],
-        _temp_factory=factory,
-        _temp_root_resolver=lambda: temp_root,
+        _workspace_factory=factory,
     )
     assert check.status == "blocked"
     assert check.details == {"error_type": "timeout", "code": "timeout"}
@@ -1627,6 +1640,7 @@ def test_core_probe_deadline_includes_temp_creation_and_verified_cleanup(tmp_pat
 
 def test_core_probe_blocking_cleanup_is_bounded_and_never_ready(tmp_path: Path) -> None:
     import graphite.doctor_probes as probes
+    from graphite.probe_workspace import ProbeWorkspaceLease
 
     release = threading.Event()
     created: list[Path] = []
@@ -1635,17 +1649,26 @@ def test_core_probe_blocking_cleanup_is_bounded_and_never_ready(tmp_path: Path) 
         b'{"ok":true,"error_count":0,"errors":[],"node_count":2,"edge_count":1}',
         b'{"node_count":2,"edge_count":1}',
     ])
-    def factory(**kwargs: object) -> str:
-        path = Path(tempfile.mkdtemp(prefix="graphite-doctor-"))
-        created.append(path)
-        return str(path)
-    def cleanup(path: Path) -> None:
+    lease = ProbeWorkspaceLease.acquire()
+    created.append(lease.parent_path)
+    def cleanup() -> None:
         release.wait(2)
-        shutil.rmtree(path)
+        lease.cleanup()
     def run(*args: object, **kwargs: object) -> object:
         return probes.ProbeProcessResult(0, next(outputs), b"", 0.01)
     started = time.monotonic()
-    check = probes.probe_core_pipeline(tmp_path, timeout_seconds=0.3, _runner=run, _temp_factory=factory, _temp_cleanup=cleanup)
+    wrapped = SimpleNamespace(
+        path=lease.path,
+        temp_root=lease.temp_root,
+        validate=lease.validate,
+        cleanup=cleanup,
+    )
+    check = probes.probe_core_pipeline(
+        tmp_path,
+        timeout_seconds=0.3,
+        _runner=run,
+        _workspace_factory=lambda: wrapped,
+    )
     elapsed = time.monotonic() - started
     release.set()
     assert check.status == "blocked"

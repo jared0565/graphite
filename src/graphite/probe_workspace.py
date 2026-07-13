@@ -1,0 +1,480 @@
+"""Private, identity-bound workspace leases for destructive readiness probes.
+
+The local OS user and same-user process namespace remain a trust boundary.  The
+lease provides best-effort identity checks and Windows rename pinning; it does
+not claim complete protection from a malicious process running as that user.
+"""
+from __future__ import annotations
+
+import ctypes
+import os
+import shutil
+import stat
+import tempfile
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+
+class WorkspaceLeaseError(RuntimeError):
+    """A workspace could not be acquired, revalidated, or safely cleaned."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class _PathSnapshot:
+    lexical: Path
+    canonical: Path
+    identity: tuple[int, int]
+    size: int
+    mtime_ns: int
+    mode: int
+    uid: int | None
+    gid: int | None
+
+
+ParentFactory = Callable[..., str]
+
+
+class ProbeWorkspaceLease:
+    """Own a private parent and fixed child workspace until bounded cleanup."""
+
+    def __init__(
+        self,
+        *,
+        temp_root: Path,
+        parent: _PathSnapshot,
+        workspace: _PathSnapshot,
+        parent_handle: int,
+        workspace_handle: int,
+        windows_handle_identities: tuple[tuple[int, int, int], tuple[int, int, int]] | None,
+    ) -> None:
+        self.temp_root = temp_root
+        self._parent = parent
+        self._workspace = workspace
+        self._parent_handle: int | None = parent_handle
+        self._workspace_handle: int | None = workspace_handle
+        self._windows_handle_identities = windows_handle_identities
+        self._closed = False
+        self._cleaned = False
+
+    @property
+    def parent_path(self) -> Path:
+        return self._parent.lexical
+
+    @property
+    def path(self) -> Path:
+        return self._workspace.lexical
+
+    @classmethod
+    def acquire(
+        cls,
+        *,
+        temp_root: Path | None = None,
+        _parent_factory: ParentFactory | None = None,
+    ) -> ProbeWorkspaceLease:
+        """Create and pin a private randomized parent with a fixed workspace child."""
+        try:
+            root = (temp_root or Path(tempfile.gettempdir())).resolve(strict=True)
+            if not root.is_dir():
+                raise WorkspaceLeaseError("workspace_isolation_failed")
+        except (OSError, RuntimeError) as exc:
+            raise WorkspaceLeaseError("workspace_isolation_failed") from exc
+
+        factory = _parent_factory or tempfile.mkdtemp
+        parent_path: Path | None = None
+        workspace_path: Path | None = None
+        parent_handle: int | None = None
+        workspace_handle: int | None = None
+        workspace_created = False
+        try:
+            parent_path = Path(factory(prefix="graphite-doctor-", dir=str(root)))
+            parent_path = Path(os.path.abspath(parent_path))
+            os.chmod(parent_path, 0o700)
+            parent_before = _snapshot(parent_path, root)
+            if os.name == "nt":
+                _set_private_windows_dacl(parent_path)
+            parent_handle, parent_handle_identity = _open_directory_handle(parent_path)
+
+            workspace_path = parent_path / "workspace"
+            os.mkdir(workspace_path, 0o700)
+            workspace_created = True
+            os.chmod(workspace_path, 0o700)
+            if os.name == "nt":
+                _set_private_windows_dacl(workspace_path)
+            workspace_snapshot = _snapshot(workspace_path, root)
+            workspace_handle, workspace_handle_identity = _open_directory_handle(workspace_path)
+            parent_snapshot = _snapshot(parent_path, root)
+            if parent_snapshot.identity != parent_before.identity:
+                raise WorkspaceLeaseError("workspace_isolation_failed")
+            return cls(
+                temp_root=root,
+                parent=parent_snapshot,
+                workspace=workspace_snapshot,
+                parent_handle=parent_handle,
+                workspace_handle=workspace_handle,
+                windows_handle_identities=(parent_handle_identity, workspace_handle_identity)
+                if os.name == "nt"
+                else None,
+            )
+        except WorkspaceLeaseError:
+            _close_raw_handle(workspace_handle)
+            _close_raw_handle(parent_handle)
+            _initial_cleanup(parent_path, workspace_path, workspace_created)
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            _close_raw_handle(workspace_handle)
+            _close_raw_handle(parent_handle)
+            _initial_cleanup(parent_path, workspace_path, workspace_created)
+            raise WorkspaceLeaseError("workspace_isolation_failed") from exc
+
+    def validate(self) -> None:
+        """Revalidate containment, type, identity, ownership, and pinned handles."""
+        if self._closed or self._cleaned:
+            raise WorkspaceLeaseError("workspace_isolation_changed")
+        try:
+            parent = _snapshot(self.parent_path, self.temp_root)
+            workspace = _snapshot(self.path, self.temp_root)
+            if not _same_binding(parent, self._parent) or not _same_binding(workspace, self._workspace):
+                raise WorkspaceLeaseError("workspace_isolation_changed")
+            if os.name == "nt":
+                assert self._windows_handle_identities is not None
+                current_parent = _windows_handle_identity(self._required_handle(self._parent_handle))
+                current_workspace = _windows_handle_identity(self._required_handle(self._workspace_handle))
+                if (current_parent, current_workspace) != self._windows_handle_identities:
+                    raise WorkspaceLeaseError("workspace_isolation_changed")
+            else:
+                parent_stat = os.fstat(self._required_handle(self._parent_handle))
+                workspace_stat = os.fstat(self._required_handle(self._workspace_handle))
+                if (parent_stat.st_dev, parent_stat.st_ino) != self._parent.identity:
+                    raise WorkspaceLeaseError("workspace_isolation_changed")
+                if (workspace_stat.st_dev, workspace_stat.st_ino) != self._workspace.identity:
+                    raise WorkspaceLeaseError("workspace_isolation_changed")
+        except WorkspaceLeaseError:
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise WorkspaceLeaseError("workspace_isolation_changed") from exc
+
+    def cleanup(self) -> None:
+        """Delete only the still-bound lease target, otherwise deliberately leak it."""
+        if self._cleaned:
+            self.close()
+            return
+        try:
+            self.validate()
+        except WorkspaceLeaseError as exc:
+            self.close()
+            raise WorkspaceLeaseError("workspace_cleanup_blocked") from exc
+
+        try:
+            if os.name == "nt":
+                self._cleanup_windows()
+            else:
+                if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
+                    raise WorkspaceLeaseError("workspace_cleanup_blocked")
+                shutil.rmtree(self.parent_path)
+                if self.parent_path.exists():
+                    raise OSError("workspace parent still exists")
+                self._cleaned = True
+                self.close()
+        except WorkspaceLeaseError:
+            self.close()
+            raise
+        except OSError as exc:
+            self.close()
+            raise WorkspaceLeaseError("workspace_cleanup_failed") from exc
+
+    def _cleanup_windows(self) -> None:
+        for entry in os.scandir(self.path):
+            entry_path = Path(entry.path)
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry_path)
+            else:
+                entry_path.unlink()
+        self.validate()
+        _close_raw_handle(self._workspace_handle)
+        self._workspace_handle = None
+        os.rmdir(self.path)
+        parent = _snapshot(self.parent_path, self.temp_root)
+        if not _same_binding(parent, self._parent):
+            raise WorkspaceLeaseError("workspace_cleanup_blocked")
+        if any(os.scandir(self.parent_path)):
+            raise WorkspaceLeaseError("workspace_cleanup_failed")
+        _close_raw_handle(self._parent_handle)
+        self._parent_handle = None
+        os.rmdir(self.parent_path)
+        self._cleaned = True
+        self.close()
+
+    def close(self) -> None:
+        """Release lease handles; safe to call repeatedly."""
+        if self._closed:
+            return
+        _close_raw_handle(self._workspace_handle)
+        _close_raw_handle(self._parent_handle)
+        self._workspace_handle = None
+        self._parent_handle = None
+        self._closed = True
+
+    @staticmethod
+    def _required_handle(handle: int | None) -> int:
+        if handle is None:
+            raise WorkspaceLeaseError("workspace_isolation_changed")
+        return handle
+
+
+def _snapshot(path: Path, root: Path) -> _PathSnapshot:
+    lexical = Path(os.path.abspath(path))
+    info = lexical.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or _path_is_reparse(info):
+        raise WorkspaceLeaseError("workspace_isolation_failed")
+    canonical = lexical.resolve(strict=True)
+    try:
+        canonical.relative_to(root)
+    except ValueError as exc:
+        raise WorkspaceLeaseError("workspace_isolation_failed") from exc
+    if os.name == "nt" and _windows_path_is_reparse(lexical):
+        raise WorkspaceLeaseError("workspace_isolation_failed")
+    return _PathSnapshot(
+        lexical=lexical,
+        canonical=canonical,
+        identity=(info.st_dev, info.st_ino),
+        size=info.st_size,
+        mtime_ns=info.st_mtime_ns,
+        mode=stat.S_IMODE(info.st_mode),
+        uid=getattr(info, "st_uid", None),
+        gid=getattr(info, "st_gid", None),
+    )
+
+
+def _same_binding(current: _PathSnapshot, expected: _PathSnapshot) -> bool:
+    return (
+        current.lexical == expected.lexical
+        and current.canonical == expected.canonical
+        and current.identity == expected.identity
+        and current.mode == expected.mode
+        and current.uid == expected.uid
+        and current.gid == expected.gid
+    )
+
+
+def _path_is_reparse(info: os.stat_result) -> bool:
+    return bool(getattr(info, "st_file_attributes", 0) & 0x400)
+
+
+def _initial_cleanup(parent: Path | None, workspace: Path | None, workspace_created: bool) -> None:
+    if workspace_created and workspace is not None:
+        try:
+            os.rmdir(workspace)
+        except OSError:
+            pass
+    if parent is not None:
+        try:
+            os.rmdir(parent)
+        except OSError:
+            pass
+
+
+def _open_directory_handle(path: Path) -> tuple[int, tuple[int, int, int]]:
+    if os.name != "nt":
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        handle = os.open(path, flags)
+        os.set_inheritable(handle, False)
+        info = os.fstat(handle)
+        return handle, (info.st_dev, 0, info.st_ino)
+
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(path),
+        0x80000000 | 0x80,
+        0x1 | 0x2,
+        None,
+        3,
+        0x02000000 | 0x00200000,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    raw_handle = int(handle)
+    set_handle_information = kernel32.SetHandleInformation
+    set_handle_information.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD]
+    set_handle_information.restype = wintypes.BOOL
+    if not set_handle_information(raw_handle, 0x1, 0):
+        error = ctypes.get_last_error()
+        _close_raw_handle(raw_handle)
+        raise ctypes.WinError(error)
+    try:
+        identity = _windows_handle_identity(raw_handle)
+        _reject_windows_handle_reparse(raw_handle)
+        return raw_handle, identity
+    except Exception:
+        _close_raw_handle(raw_handle)
+        raise
+
+
+def _close_raw_handle(handle: int | None) -> None:
+    if handle is None:
+        return
+    if os.name != "nt":
+        try:
+            os.close(handle)
+        except OSError:
+            pass
+        return
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    close_handle(handle)
+
+
+def _windows_handle_identity(handle: int) -> tuple[int, int, int]:
+    from ctypes import wintypes
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    function = kernel32.GetFileInformationByHandle
+    function.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
+    function.restype = wintypes.BOOL
+    information = ByHandleFileInformation()
+    if not function(handle, ctypes.byref(information)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return (
+        information.volume_serial_number,
+        information.file_index_high,
+        information.file_index_low,
+    )
+
+
+def _reject_windows_handle_reparse(handle: int) -> None:
+    from ctypes import wintypes
+
+    class FileAttributeTagInformation(ctypes.Structure):
+        _fields_ = [("file_attributes", wintypes.DWORD), ("reparse_tag", wintypes.DWORD)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    function = kernel32.GetFileInformationByHandleEx
+    function.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    function.restype = wintypes.BOOL
+    information = FileAttributeTagInformation()
+    if not function(handle, 9, ctypes.byref(information), ctypes.sizeof(information)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if information.file_attributes & 0x400 or information.reparse_tag:
+        raise WorkspaceLeaseError("workspace_isolation_failed")
+
+
+def _windows_path_is_reparse(path: Path) -> bool:
+    if os.name != "nt":
+        return False
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    function = kernel32.GetFileAttributesW
+    function.argtypes = [wintypes.LPCWSTR]
+    function.restype = wintypes.DWORD
+    attributes = function(str(path))
+    if attributes == 0xFFFFFFFF:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return bool(attributes & 0x400)
+
+
+def _set_private_windows_dacl(path: Path) -> None:
+    """Apply a protected DACL granting full control only to the current user."""
+    if os.name != "nt":
+        return
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process_token = advapi32.OpenProcessToken
+    open_process_token.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    open_process_token.restype = wintypes.BOOL
+    get_token_information = advapi32.GetTokenInformation
+    get_token_information.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    get_token_information.restype = wintypes.BOOL
+    convert_sid = advapi32.ConvertSidToStringSidW
+    convert_sid.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR)]
+    convert_sid.restype = wintypes.BOOL
+    convert_descriptor = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert_descriptor.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    convert_descriptor.restype = wintypes.BOOL
+    set_file_security = advapi32.SetFileSecurityW
+    set_file_security.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID]
+    set_file_security.restype = wintypes.BOOL
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [wintypes.HLOCAL]
+    local_free.restype = wintypes.HLOCAL
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.argtypes = []
+    get_current_process.restype = wintypes.HANDLE
+
+    token = wintypes.HANDLE()
+    if not open_process_token(get_current_process(), 0x0008, ctypes.byref(token)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    sid_text = wintypes.LPWSTR()
+    descriptor = wintypes.LPVOID()
+    try:
+        needed = wintypes.DWORD()
+        get_token_information(token, 1, None, 0, ctypes.byref(needed))
+        if not needed.value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not get_token_information(token, 1, buffer, needed, ctypes.byref(needed)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        sid = ctypes.cast(buffer, ctypes.POINTER(wintypes.LPVOID))[0]
+        if not convert_sid(sid, ctypes.byref(sid_text)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        sddl = f"D:P(A;;FA;;;{sid_text.value})"
+        if not convert_descriptor(sddl, 1, ctypes.byref(descriptor), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not set_file_security(str(path), 0x80000004, descriptor):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        if descriptor:
+            local_free(descriptor)
+        if sid_text:
+            local_free(sid_text)
+        _close_raw_handle(int(token.value) if token.value else None)

@@ -6,7 +6,6 @@ import math
 import os
 import platform
 import re
-import shutil
 import sys
 import tempfile
 import threading
@@ -21,6 +20,7 @@ from typing import Any
 from .config import Config
 from .doctor import DoctorCheck
 from .probe_process import ProbeProcessError, ProbeProcessResult, run_bounded_process
+from .probe_workspace import ProbeWorkspaceLease, WorkspaceLeaseError
 
 _CLEANUP_RESERVE_SECONDS = 1.0
 _MCP_OUTPUT_LIMIT_BYTES = 1024 * 1024
@@ -428,34 +428,34 @@ def _check_deadline(limit: float, clock: Callable[[], float]) -> None:
         raise ProbeProcessError("timeout")
 
 
-def _cleanup_verified_temp(
-    path: Path,
-    cleanup: Callable[[Path], None],
+def _cleanup_workspace_lease(
+    lease: Any,
     deadline: float,
     clock: Callable[[], float],
 ) -> str | None:
-    """Clean only a previously verified target, waiting no longer than the total deadline."""
-    failed = threading.Event()
+    """Let a bounded cleanup thread retain sole ownership of the live lease."""
+    failure: list[str] = []
 
     def perform() -> None:
         try:
-            cleanup(path)
+            lease.cleanup()
+        except WorkspaceLeaseError as exc:
+            failure.append("cleanup_blocked" if exc.code == "workspace_cleanup_blocked" else "cleanup_failed")
         except Exception:
-            failed.set()
+            failure.append("cleanup_failed")
 
     thread = threading.Thread(target=perform, daemon=True)
     thread.start()
     thread.join(max(0.0, deadline - clock()))
     if thread.is_alive():
         return "cleanup_timeout"
-    if failed.is_set():
-        return "cleanup_failed"
-    try:
-        if path.exists():
-            return "cleanup_failed"
-    except OSError:
-        return "cleanup_failed"
-    return None
+    return failure[0] if failure else None
+
+
+def _check_workspace(lease: Any, limit: float, clock: Callable[[], float]) -> None:
+    _check_deadline(limit, clock)
+    lease.validate()
+    _check_deadline(limit, clock)
 
 
 def probe_core_pipeline(
@@ -464,9 +464,7 @@ def probe_core_pipeline(
     timeout_seconds: float = 30,
     *,
     _runner: Callable[..., ProbeProcessResult] = run_bounded_process,
-    _temp_factory: Callable[..., str] | None = None,
-    _temp_cleanup: Callable[[Path], None] | None = None,
-    _temp_root_resolver: Callable[[], Path] | None = None,
+    _workspace_factory: Callable[[], Any] = ProbeWorkspaceLease.acquire,
     _clock: Callable[[], float] = time.monotonic,
 ) -> DoctorCheck:
     """Exercise build/validate/query under one checked end-to-end deadline.
@@ -481,8 +479,7 @@ def probe_core_pipeline(
     deadline = started + timeout_seconds
     cleanup_reserve = min(_CLEANUP_RESERVE_SECONDS, max(0.05, timeout_seconds * 0.2))
     phase_deadline = deadline - cleanup_reserve
-    work: Path | None = None
-    verified_work: Path | None = None
+    lease: Any | None = None
     candidate: DoctorCheck | None = None
 
     try:
@@ -492,7 +489,7 @@ def probe_core_pipeline(
             return _blocked("invariant", "invalid_selected_root")
         _check_deadline(phase_deadline, _clock)
 
-        temp_root = (_temp_root_resolver() if _temp_root_resolver else Path(tempfile.gettempdir())).resolve()
+        temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
         _check_deadline(phase_deadline, _clock)
         try:
             temp_root.relative_to(selected)
@@ -501,14 +498,21 @@ def probe_core_pipeline(
         else:
             return _blocked("isolation", "selected_contains_temp")
 
-        factory = _temp_factory or tempfile.mkdtemp
         _check_deadline(phase_deadline, _clock)
-        work = Path(factory(prefix="graphite-doctor-")).resolve(strict=True)
+        lease = _workspace_factory()
         creation_exceeded_deadline = _clock() >= phase_deadline
+        _check_workspace(lease, phase_deadline, _clock)
+        work = Path(lease.path).resolve(strict=True)
         try:
             work.relative_to(temp_root)
         except ValueError:
-            return _blocked("isolation", "unsafe_temp_path")
+            # Injected leases may use another explicitly verified canonical temp
+            # root; the lease remains the authority for its containment.
+            lease_root = Path(getattr(lease, "temp_root", temp_root)).resolve(strict=True)
+            try:
+                work.relative_to(lease_root)
+            except ValueError:
+                return _blocked("isolation", "unsafe_temp_path")
         try:
             work.relative_to(selected)
         except ValueError:
@@ -521,17 +525,19 @@ def probe_core_pipeline(
             pass
         else:
             return _blocked("isolation", "overlapping_temp_path")
-        verified_work = work
         if creation_exceeded_deadline:
             raise ProbeProcessError("timeout")
-        _check_deadline(phase_deadline, _clock)
+        _check_workspace(lease, phase_deadline, _clock)
 
         repo = work / "repo"
         source = repo / "src"
+        _check_workspace(lease, phase_deadline, _clock)
         source.mkdir(parents=True)
+        _check_workspace(lease, phase_deadline, _clock)
         (source / "lib.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+        _check_workspace(lease, phase_deadline, _clock)
         (repo / "app.py").write_text("from src.lib import answer\nVALUE = answer()\n", encoding="utf-8")
-        _check_deadline(phase_deadline, _clock)
+        _check_workspace(lease, phase_deadline, _clock)
 
         out = work / "out"
         cache = work / "cache"
@@ -545,10 +551,11 @@ def probe_core_pipeline(
         validation_nodes: int | None = None
         validation_edges: int | None = None
         for index, command in enumerate(commands):
-            _check_deadline(phase_deadline, _clock)
+            _check_workspace(lease, phase_deadline, _clock)
             outputs.append(_runner(command, cwd=work, timeout_seconds=phase_deadline - _clock()))
-            _check_deadline(phase_deadline, _clock)
+            _check_workspace(lease, phase_deadline, _clock)
             if index == 1:
+                _check_workspace(lease, phase_deadline, _clock)
                 validation = _json_object(outputs[1].stdout)
                 _check_deadline(phase_deadline, _clock)
                 validation_nodes = _count(validation.get("node_count"), positive=True)
@@ -565,6 +572,7 @@ def probe_core_pipeline(
                     break
 
         if candidate is None:
+            _check_workspace(lease, phase_deadline, _clock)
             stats = _json_object(outputs[2].stdout)
             _check_deadline(phase_deadline, _clock)
             stats_nodes = _count(stats.get("node_count"), positive=True)
@@ -592,18 +600,15 @@ def probe_core_pipeline(
             candidate = _blocked("response", "malformed_output")
         else:
             candidate = _blocked(_process_error_type(exc.code), exc.code)
+    except WorkspaceLeaseError:
+        candidate = _blocked("isolation", "workspace_isolation_changed")
     except (OSError, RuntimeError):
         candidate = _blocked("isolation", "temporary_directory_failed")
     except Exception:
         candidate = _blocked("unexpected", "probe_failed")
     finally:
-        if verified_work is not None:
-            cleanup_error = _cleanup_verified_temp(
-                verified_work,
-                _temp_cleanup or shutil.rmtree,
-                deadline,
-                _clock,
-            )
+        if lease is not None:
+            cleanup_error = _cleanup_workspace_lease(lease, deadline, _clock)
             if cleanup_error is not None:
                 candidate = _blocked("cleanup", cleanup_error)
 
