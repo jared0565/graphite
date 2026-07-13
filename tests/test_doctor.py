@@ -1767,10 +1767,167 @@ def test_run_deep_probes_reports_core_mcp_and_typescript(monkeypatch: pytest.Mon
     core = DoctorCheck("deep_core", "Deterministic pipeline", "ready", "ok")
     mcp = DoctorCheck("deep_mcp", "MCP", "ready", "ok")
     typescript = DoctorCheck("deep_typescript", "TypeScript", "ready", "ok")
+    llm = DoctorCheck("deep_llm", "LLM", "ready", "ok")
     monkeypatch.setattr(probes, "probe_core_pipeline", lambda root: core)
     monkeypatch.setattr(probes, "probe_mcp", lambda root: mcp)
     monkeypatch.setattr(probes, "probe_typescript", lambda root: typescript)
-    assert probes.run_deep_probes(tmp_path, cfg=Config(), include_llm=True) == [core, mcp, typescript]
+    monkeypatch.setattr(probes, "probe_llm", lambda cfg, *, provider_factory: llm)
+    assert probes.run_deep_probes(
+        tmp_path,
+        cfg=Config(llm_mode="cloud"),
+        include_llm=True,
+        provider_factory=lambda cfg: object(),
+    ) == [core, mcp, typescript, llm]
+
+
+def test_llm_deep_probe_uses_only_constant_synthetic_content_and_redacts_failure() -> None:
+    import graphite.doctor_probes as probes
+
+    sentinel = "SENTINEL-doctor-secret"
+    calls: list[tuple[str, str]] = []
+
+    class RecordingProvider:
+        def complete(self, system: str, user: str) -> object:
+            calls.append((system, user))
+            raise RuntimeError(
+                f"{sentinel} https://provider.invalid?api_key={sentinel} Authorization: Bearer {sentinel}"
+            )
+
+    check = probes.probe_llm(
+        Config(llm_mode="cloud", llm_provider="FAKE_PROVIDER", llm_api_key=sentinel),
+        provider_factory=lambda cfg: RecordingProvider(),
+    )
+
+    assert calls == [
+        (
+            "You are a connectivity probe. Reply with READY only.",
+            "Synthetic Graphite connectivity test. No repository data is included.",
+        )
+    ]
+    assert check.status == "degraded"
+    assert check.summary == "synthetic connectivity probe failed"
+    assert check.details == {"error_type": "RuntimeError"}
+    assert check.remediation == (
+        "Verify the provider endpoint.",
+        "Use a rotated session credential.",
+        "Verify the configured model.",
+        "Verify the provider timeout.",
+    )
+    assert sentinel not in json.dumps(check.to_dict())
+
+
+def test_llm_deep_probe_success_reports_only_provider_and_response_presence(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+    from graphite.llm import CompletionResult
+
+    response = f"probabilistic non-READY response with private path {tmp_path.resolve()}"
+
+    class RecordingProvider:
+        def complete(self, system: str, user: str) -> CompletionResult:
+            del system, user
+            return CompletionResult(text=response, input_tokens=20, output_tokens=5, total_tokens=25)
+
+    check = probes.probe_llm(
+        Config(llm_mode="cloud", llm_provider="OpenAI_Compatible"),
+        provider_factory=lambda cfg: RecordingProvider(),
+    )
+
+    assert check.status == "ready"
+    assert check.details == {"provider": "openai-compatible", "response_present": True}
+    encoded_check = json.dumps(check.to_dict())
+    report = build_report(tmp_path, [check], deep=True, llm_included=True)
+    rendered = encoded_check + json.dumps(report) + format_doctor_text(report)
+    assert response not in rendered
+    assert str(tmp_path.resolve()) not in rendered
+    assert "You are a connectivity probe" not in rendered
+    assert "Synthetic Graphite connectivity test" not in rendered
+
+
+def test_llm_deep_probe_disabled_never_constructs_provider() -> None:
+    import graphite.doctor_probes as probes
+
+    def unexpected_factory(cfg: Config) -> object:
+        raise AssertionError("disabled probe constructed a provider")
+
+    check = probes.probe_llm(Config(llm_mode="none"), provider_factory=unexpected_factory)
+
+    assert check.code == "deep_llm"
+    assert check.status == "optional"
+    assert check.summary == "disabled by configuration"
+
+
+@pytest.mark.parametrize(
+    ("factory", "expected_details"),
+    [
+        (lambda cfg: (_ for _ in ()).throw(RuntimeError("secret https://host.invalid?q=credential")), {"error_type": "RuntimeError"}),
+        (lambda cfg: SimpleNamespace(complete=lambda system, user: (_ for _ in ()).throw(ConnectionError("secret Authorization header"))), {"error_type": "ConnectionError"}),
+        (lambda cfg: SimpleNamespace(complete=lambda system, user: None), {}),
+        (lambda cfg: SimpleNamespace(complete=lambda system, user: SimpleNamespace()), {}),
+        (lambda cfg: SimpleNamespace(complete=lambda system, user: SimpleNamespace(text="")), {}),
+        (lambda cfg: SimpleNamespace(complete=lambda system, user: SimpleNamespace(text=123)), {}),
+    ],
+)
+def test_llm_deep_probe_failures_are_stable_and_redacted(
+    factory: object,
+    expected_details: dict[str, object],
+) -> None:
+    import graphite.doctor_probes as probes
+
+    check = probes.probe_llm(
+        Config(llm_mode="cloud", llm_provider="fake"),
+        provider_factory=factory,  # type: ignore[arg-type]
+    )
+
+    assert check.status == "degraded"
+    assert check.summary == "synthetic connectivity probe failed"
+    assert check.details == expected_details
+    encoded = json.dumps(check.to_dict())
+    for forbidden in ("secret", "https://", "?q=", "Authorization"):
+        assert forbidden not in encoded
+
+
+def test_llm_deep_probe_omits_unsafe_exception_type() -> None:
+    import graphite.doctor_probes as probes
+
+    unsafe_error = type("Unsafe/credential", (Exception,), {})
+    check = probes.probe_llm(
+        Config(llm_mode="cloud", llm_provider="fake"),
+        provider_factory=lambda cfg: (_ for _ in ()).throw(unsafe_error("secret")),
+    )
+
+    assert check.details == {}
+
+
+def test_run_deep_probes_not_requested_makes_zero_provider_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import graphite.doctor_probes as probes
+
+    monkeypatch.setattr(probes, "probe_core_pipeline", lambda root: DoctorCheck("deep_core", "core", "ready", "ok"))
+    monkeypatch.setattr(probes, "probe_mcp", lambda root: DoctorCheck("deep_mcp", "mcp", "ready", "ok"))
+    monkeypatch.setattr(probes, "probe_typescript", lambda root: DoctorCheck("deep_typescript", "ts", "optional", "ok"))
+    provider_calls = 0
+
+    def unexpected_factory(cfg: Config) -> object:
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("provider must not be constructed")
+
+    checks = probes.run_deep_probes(
+        tmp_path,
+        cfg=Config(llm_mode="cloud", llm_provider="fake"),
+        include_llm=False,
+        provider_factory=unexpected_factory,
+    )
+
+    assert provider_calls == 0
+    assert checks[-1] == DoctorCheck(
+        "deep_llm",
+        "LLM",
+        "optional",
+        "not requested; use --deep --include-llm",
+    )
 
 
 def _mcp_probe_output(*messages: dict[str, object]) -> bytes:
@@ -2835,14 +2992,25 @@ def test_run_deep_probes_contains_each_probe_failure_and_continues(
         observed.append("typescript")
         return DoctorCheck("deep_typescript", "TypeScript", "optional", "ok")
 
+    def fail_llm(cfg: Config, *, provider_factory: object) -> DoctorCheck:
+        del cfg, provider_factory
+        observed.append("llm")
+        raise OSError("sensitive provider path")
+
     monkeypatch.setattr(probes, "probe_core_pipeline", fail_core)
     monkeypatch.setattr(probes, "probe_mcp", fail_mcp)
     monkeypatch.setattr(probes, "probe_typescript", typescript)
+    monkeypatch.setattr(probes, "probe_llm", fail_llm)
 
-    checks = probes.run_deep_probes(tmp_path, cfg=Config(), include_llm=False)
+    checks = probes.run_deep_probes(
+        tmp_path,
+        cfg=Config(llm_mode="cloud"),
+        include_llm=True,
+        provider_factory=lambda cfg: object(),
+    )
 
-    assert observed == ["core", "mcp", "typescript"]
-    assert [check.status for check in checks] == ["blocked", "degraded", "optional"]
+    assert observed == ["core", "mcp", "typescript", "llm"]
+    assert [check.status for check in checks] == ["blocked", "degraded", "optional", "degraded"]
     assert all("sensitive" not in check.summary for check in checks)
 
 

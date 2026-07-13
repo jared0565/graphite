@@ -19,6 +19,7 @@ from typing import Any
 
 from .config import Config
 from .doctor import DoctorCheck
+from .llm import make_provider
 from .probe_process import ProbeProcessError, ProbeProcessResult, run_bounded_process
 from .probe_workspace import ProbeWorkspaceLease, WorkspaceLeaseError
 
@@ -32,6 +33,15 @@ _MCP_NESTING_LIMIT = 32
 _MCP_METADATA_ROOT_LIMIT = 64
 _MCP_BUILDER_ARGUMENT_LIMIT_BYTES = 16 * 1024
 _MCP_PROTOCOL_VERSION = "2024-11-05"
+_LLM_SYSTEM_PROMPT = "You are a connectivity probe. Reply with READY only."
+_LLM_USER_PROMPT = "Synthetic Graphite connectivity test. No repository data is included."
+_LLM_FAILURE_REMEDIATION = (
+    "Verify the provider endpoint.",
+    "Use a rotated session credential.",
+    "Verify the configured model.",
+    "Verify the provider timeout.",
+)
+_SAFE_ERROR_TYPE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
 _REQUIRED_MCP_TOOLS = frozenset(
     {"graphite_query", "graphite_summary", "graphite_community", "graphite_refresh"}
 )
@@ -1535,9 +1545,63 @@ def probe_typescript(
     )
 
 
-def run_deep_probes(root: Path, *, cfg: Config, include_llm: bool) -> list[DoctorCheck]:
+def _llm_failure(exc: Exception | None = None) -> DoctorCheck:
+    details: dict[str, str] = {}
+    if exc is not None:
+        error_type = type(exc).__name__
+        if _SAFE_ERROR_TYPE.fullmatch(error_type):
+            details["error_type"] = error_type
+    return DoctorCheck(
+        "deep_llm",
+        "LLM",
+        "degraded",
+        "synthetic connectivity probe failed",
+        details,
+        _LLM_FAILURE_REMEDIATION,
+    )
+
+
+def probe_llm(
+    cfg: Config,
+    *,
+    provider_factory: Callable[[Config], Any] = make_provider,
+) -> DoctorCheck:
+    """Run one explicit synthetic connectivity request without repository data."""
+    if cfg.llm_mode.strip().lower() == "none":
+        return DoctorCheck(
+            "deep_llm",
+            "LLM",
+            "optional",
+            "disabled by configuration",
+        )
+
+    try:
+        provider = provider_factory(cfg)
+        completion = provider.complete(_LLM_SYSTEM_PROMPT, _LLM_USER_PROMPT)
+        text = getattr(completion, "text", None)
+    except Exception as exc:
+        return _llm_failure(exc)
+
+    if not isinstance(text, str) or not text.strip():
+        return _llm_failure()
+    provider_name = cfg.llm_provider.strip().lower().replace("_", "-")
+    return DoctorCheck(
+        "deep_llm",
+        "LLM",
+        "ready",
+        "synthetic connectivity probe succeeded",
+        {"provider": provider_name, "response_present": True},
+    )
+
+
+def run_deep_probes(
+    root: Path,
+    *,
+    cfg: Config,
+    include_llm: bool,
+    provider_factory: Callable[[Config], Any] = make_provider,
+) -> list[DoctorCheck]:
     """Return the deep capabilities implemented in this release."""
-    del cfg, include_llm
     probes: tuple[tuple[Callable[[Path], DoctorCheck], Callable[[], DoctorCheck]], ...] = (
         (probe_core_pipeline, lambda: _blocked("unexpected", "probe_failed")),
         (probe_mcp, lambda: _degraded_probe("deep_mcp", "MCP", "probe_failed")),
@@ -1552,4 +1616,18 @@ def run_deep_probes(root: Path, *, cfg: Config, include_llm: bool) -> list[Docto
             checks.append(probe(root))
         except Exception:
             checks.append(fallback())
+    if not include_llm:
+        checks.append(
+            DoctorCheck(
+                "deep_llm",
+                "LLM",
+                "optional",
+                "not requested; use --deep --include-llm",
+            )
+        )
+        return checks
+    try:
+        checks.append(probe_llm(cfg, provider_factory=provider_factory))
+    except Exception:
+        checks.append(_llm_failure())
     return checks
