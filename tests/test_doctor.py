@@ -1233,26 +1233,76 @@ def test_windows_native_launcher_child_observes_only_sanitized_environment(
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle-list inheritance contract")
 def test_windows_native_launcher_does_not_inherit_unrelated_inheritable_handle(tmp_path: Path) -> None:
+    import ctypes
     import msvcrt
+    from ctypes import wintypes
     from graphite.probe_process import run_bounded_process
 
-    read_fd, write_fd = os.pipe()
-    handle = msvcrt.get_osfhandle(read_fd)
-    os.set_handle_inheritable(handle, True)
-    script = (
-        "import ctypes,sys;from ctypes import wintypes;"
-        "api=ctypes.WinDLL('kernel32',use_last_error=True);"
-        "api.GetHandleInformation.argtypes=(wintypes.HANDLE,ctypes.POINTER(wintypes.DWORD));"
-        "api.GetHandleInformation.restype=wintypes.BOOL;flags=wintypes.DWORD();"
-        "print(int(bool(api.GetHandleInformation(int(sys.argv[1]),ctypes.byref(flags)))))"
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.GetFinalPathNameByHandleW.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
     )
-    try:
-        result = run_bounded_process([sys.executable, "-c", script, str(handle)], cwd=tmp_path, timeout_seconds=5)
-    finally:
-        os.close(read_fd)
-        os.close(write_fd)
+    api.GetFinalPathNameByHandleW.restype = wintypes.DWORD
 
-    assert result.stdout.strip() == b"0"
+    def canonical_path_for_handle(handle: int) -> str:
+        size = 512
+        while True:
+            buffer = ctypes.create_unicode_buffer(size)
+            length = api.GetFinalPathNameByHandleW(handle, buffer, size, 0)
+            if length == 0:
+                raise ctypes.WinError(ctypes.get_last_error())
+            if length < size:
+                return buffer.value
+            size = length + 1
+
+    sentinel_path = tmp_path / "unrelated-handle-sentinel"
+    sentinel_path.touch()
+    script = """
+import ctypes
+import json
+import sys
+from ctypes import wintypes
+
+api = ctypes.WinDLL("kernel32", use_last_error=True)
+api.GetFinalPathNameByHandleW.argtypes = (
+    wintypes.HANDLE,
+    wintypes.LPWSTR,
+    wintypes.DWORD,
+    wintypes.DWORD,
+)
+api.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+
+size = 512
+path = None
+while True:
+    buffer = ctypes.create_unicode_buffer(size)
+    length = api.GetFinalPathNameByHandleW(int(sys.argv[1]), buffer, size, 0)
+    if length == 0:
+        break
+    if length < size:
+        path = buffer.value
+        break
+    size = length + 1
+print(json.dumps(path))
+"""
+    with sentinel_path.open("rb") as sentinel_file:
+        handle = msvcrt.get_osfhandle(sentinel_file.fileno())
+        sentinel_identity = canonical_path_for_handle(handle)
+        os.set_handle_inheritable(handle, True)
+        try:
+            result = run_bounded_process(
+                [sys.executable, "-c", script, str(handle)],
+                cwd=tmp_path,
+                timeout_seconds=5,
+            )
+        finally:
+            os.set_handle_inheritable(handle, False)
+
+    child_identity = json.loads(result.stdout)
+    assert child_identity != sentinel_identity
 
 
 def test_windows_job_process_is_idempotent_and_preserves_unsigned_exit_status() -> None:
