@@ -10,6 +10,7 @@ import graphite.dependency_install as dependency_install
 
 from graphite.dependency_install import (
     INSTALL_OUTPUT_LIMIT,
+    MAX_TRUSTED_FILE_BYTES,
     TRUSTED_REGISTRY,
     Manager,
     ManagerAdapter,
@@ -395,6 +396,32 @@ def test_source_policy_rejects_malformed_lockfile_encoding():
 
 
 @pytest.mark.parametrize(
+    "lockfile",
+    [
+        b"lockfileVersion: '9.0'\npackages:\n  x:\n    \"tarball\": payload.tgz\n",
+        b"lockfileVersion: '9.0'\npackages:\n  x:\n    resolution:\n      'tarball': payload.tgz\n",
+        b"lockfileVersion: '9.0'\npackages:\n  x:\n    \"tar\\u0062all\": payload.tgz\n",
+        b"__metadata:\n  version: 8\n\n\"x@npm:1\":\n  version: 1\n  \"resolved\": payload.tgz\n",
+        b"__metadata:\n  version: 8\n\n\"x@npm:1\":\n  version: 1\n  resolution:\n    'path': payload.tgz\n",
+        b"__metadata:\n  version: 8\n\n\"x@npm:1\":\n  version: 1\n  \"u\\u0072l\": payload.tgz\n",
+    ],
+)
+def test_source_policy_rejects_quoted_or_escaped_source_keys(lockfile):
+    assert not control_files_use_trusted_sources(b'{"dependencies":{"x":"1.0.0"}}', lockfile)
+
+
+@pytest.mark.parametrize(
+    "lockfile",
+    [
+        b"lockfileVersion: '9.0'\npackages:\n  x:\n    \"tarball\": https://registry.npmjs.org/x.tgz\n",
+        b"__metadata:\n  version: 8\n\n\"x@npm:1\":\n  version: 1\n  'url': https://registry.npmjs.org/x.tgz\n",
+    ],
+)
+def test_source_policy_allows_quoted_source_keys_with_canonical_registry(lockfile):
+    assert control_files_use_trusted_sources(b'{"dependencies":{"x":"1.0.0"}}', lockfile)
+
+
+@pytest.mark.parametrize(
     ("manifest", "lockfile"),
     [
         (b'{"dependencies":{},"score":NaN}', b'{"lockfileVersion":3}'),
@@ -623,6 +650,26 @@ def test_install_rejects_noncanonical_adapter_before_launch(tmp_path):
         root, command, adversarial, TRUSTED_REGISTRY, tmp_path / "isolated", 1, runner
     ).ok
     assert not called
+
+
+def test_install_never_launches_canonical_guidance_only_yarn(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    command = _command(tmp_path / "bin" / ("yarn.exe" if os.name == "nt" else "yarn"))
+    isolated = tmp_path / "isolated"
+    called = False
+
+    def runner(*args, **kwargs):
+        nonlocal called
+        called = True
+        return ProbeProcessResult(0, b"", b"", 0)
+
+    result = run_install(
+        root, command, adapter_for(Manager.YARN), TRUSTED_REGISTRY, isolated, 1, runner
+    )
+    assert result.reason == "install_failed"
+    assert not called
+    assert not isolated.exists()
 
 
 def test_install_rejects_linked_config_without_mutating_target(tmp_path):
@@ -865,6 +912,29 @@ def test_hard_link_mutation_setup_fails_closed(tmp_path):
 
     assert run_validator(root, node, validator, 1, runner).reason == "executable_changed"
     assert resolve_trusted_file(node.path, root, executable=True) is None
+    assert not called
+
+
+def test_oversized_trusted_file_rejects_before_open(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    oversized = tmp_path / ("node.exe" if os.name == "nt" else "node")
+    with oversized.open("wb") as stream:
+        stream.seek(MAX_TRUSTED_FILE_BYTES)
+        stream.write(b"x")
+    oversized.chmod(0o755)
+    called = False
+    original_open = dependency_install.os.open
+
+    def guarded_open(path, *args, **kwargs):
+        nonlocal called
+        if Path(path) == oversized.resolve():
+            called = True
+            raise AssertionError("oversized file must not be opened")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(dependency_install.os, "open", guarded_open)
+    assert resolve_trusted_file(oversized, root, executable=True) is None
     assert not called
 
 

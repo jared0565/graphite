@@ -24,6 +24,7 @@ from .probe_process import ProbeProcessError, ProbeProcessResult, run_bounded_pr
 TRUSTED_REGISTRY = "https://registry.npmjs.org/"
 INSTALL_OUTPUT_LIMIT = 64 * 1024
 MAX_CONTROL_FILE_BYTES = 8 * 1024 * 1024
+MAX_TRUSTED_FILE_BYTES = 256 * 1024 * 1024
 ACTIVATION_MAX_FILES = 100_000
 
 _VERSION_RE = re.compile(
@@ -39,8 +40,9 @@ _FORBIDDEN_MANIFEST_FIELDS = frozenset(
 _URI_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*)://[^\s\"'<>}\]]+")
 _LOCKFILE_LINE_LIMIT = 64 * 1024
 _MAPPING_LINE_RE = re.compile(
-    r"^(?:\"[^\"]+\"|'[^']+'|[A-Za-z0-9_./@+*^~<>=,!|()-]+):(?:\s+(.+)|\s*)$"
+    r"^(?:\"[^\"]+\"|'(?:[^']|'')+'|[A-Za-z0-9_./@+*^~<>=,!|()-]+):(?:\s+(.+)|\s*)$"
 )
+_SOURCE_FIELD_KEYS = frozenset({"resolved", "tarball", "fetch", "source", "path", "url"})
 _LOCAL_TYPESCRIPT_SCRIPT = (
     "const p=require.resolve('typescript/package.json',{paths:[process.cwd()]});"
     "process.stdout.write(JSON.stringify({resolved:p}));"
@@ -241,7 +243,12 @@ def _trusted_file(path: Path, root: Path, *, executable: bool) -> TrustedFile | 
         initial = canonical.lstat()
     except (OSError, RuntimeError):
         return None
-    if _is_under(canonical, root_path) or not stat.S_ISREG(initial.st_mode) or _is_reparse(initial):
+    if (
+        _is_under(canonical, root_path)
+        or not stat.S_ISREG(initial.st_mode)
+        or _is_reparse(initial)
+        or initial.st_size > MAX_TRUSTED_FILE_BYTES
+    ):
         return None
     if executable:
         if os.name == "nt" and canonical.suffix.lower() not in {".exe", ".com"}:
@@ -253,10 +260,18 @@ def _trusted_file(path: Path, root: Path, *, executable: bool) -> TrustedFile | 
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(canonical, flags)
         before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or getattr(before, "st_nlink", 1) != 1:
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or getattr(before, "st_nlink", 1) != 1
+            or before.st_size > MAX_TRUSTED_FILE_BYTES
+        ):
             return None
         digest = hashlib.sha256()
+        total_read = 0
         while chunk := os.read(descriptor, 64 * 1024):
+            total_read += len(chunk)
+            if total_read > MAX_TRUSTED_FILE_BYTES:
+                return None
             digest.update(chunk)
         after = os.fstat(descriptor)
     except OSError:
@@ -265,7 +280,9 @@ def _trusted_file(path: Path, root: Path, *, executable: bool) -> TrustedFile | 
         if descriptor >= 0:
             os.close(descriptor)
     stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_nlink")
-    if any(getattr(initial, field, 1) != getattr(before, field, 1) for field in stable_fields) or any(
+    if total_read != before.st_size or any(
+        getattr(initial, field, 1) != getattr(before, field, 1) for field in stable_fields
+    ) or any(
         getattr(before, field, 1) != getattr(after, field, 1) for field in stable_fields
     ):
         return None
@@ -611,7 +628,7 @@ def _json_source_fields_are_trusted(value: Any) -> bool:
         return True
     for key, item in value.items():
         lowered = key.lower()
-        if lowered in {"resolved", "tarball", "fetch", "source", "url"}:
+        if lowered in _SOURCE_FIELD_KEYS:
             if not isinstance(item, str) or not _is_canonical_registry_url(item):
                 return False
         elif lowered == "resolution" and isinstance(item, dict):
@@ -625,17 +642,51 @@ def _json_source_fields_are_trusted(value: Any) -> bool:
 def _text_source_fields_are_trusted(text: str) -> bool:
     for line in text.splitlines():
         content = line.strip()
-        match = re.match(
-            r"(?i)^(?:resolved|tarball|fetch|source|url)(?::\s+|\s+)(.+)$", content
+        mapping = re.fullmatch(
+            r"(?P<key>\"[^\"]*\"|'(?:[^']|'')*'|[A-Za-z][A-Za-z0-9_-]*):\s+(?P<value>.+)",
+            content,
         )
-        if match is None:
-            continue
-        source = match.group(1).strip()
+        if mapping is not None:
+            key = _normalize_yaml_mapping_key(mapping.group("key"))
+            if key is None:
+                return False
+            if key.lower() not in _SOURCE_FIELD_KEYS:
+                continue
+            source = mapping.group("value").strip()
+        else:
+            classic = re.fullmatch(r"(?i)(resolved|tarball|fetch|source|path|url)\s+(.+)", content)
+            if classic is None:
+                continue
+            source = classic.group(2).strip()
         if source.startswith(("'", '"')) and source.endswith(source[0]) and len(source) >= 2:
             source = source[1:-1]
         if not _is_canonical_registry_url(source):
             return False
     return True
+
+
+def _normalize_yaml_mapping_key(value: str) -> str | None:
+    if value.startswith('"'):
+        if len(value) < 2 or not value.endswith('"') or '"' in value[1:-1]:
+            return None
+        return value[1:-1]
+    if value.startswith("'"):
+        if len(value) < 2 or not value.endswith("'"):
+            return None
+        inner = value[1:-1]
+        result: list[str] = []
+        index = 0
+        while index < len(inner):
+            if inner[index] == "'":
+                if index + 1 >= len(inner) or inner[index + 1] != "'":
+                    return None
+                result.append("'")
+                index += 2
+            else:
+                result.append(inner[index])
+                index += 1
+        return "".join(result)
+    return value if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", value) else None
 
 
 def _normalize_text_lockfile_escapes(text: str) -> str | None:
@@ -1073,7 +1124,8 @@ def run_install(
     if registry != TRUSTED_REGISTRY:
         return StepResult(False, "install_failed")
     try:
-        if adapter is not adapter_for(adapter.manager):
+        canonical_adapter = adapter_for(adapter.manager)
+        if adapter is not canonical_adapter or not canonical_adapter.automatic:
             return StepResult(False, "install_failed")
     except (KeyError, ValueError):
         return StepResult(False, "install_failed")
