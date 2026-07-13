@@ -360,6 +360,34 @@ def test_source_policy_rejects_structurally_malformed_recognized_text_lockfiles(
     assert not control_files_use_trusted_sources(b'{"dependencies":{"x":"1.0.0"}}', lockfile)
 
 
+@pytest.mark.parametrize("manager", ["pnpm", "berry"])
+@pytest.mark.parametrize(
+    ("scalar", "expected"),
+    [
+        ("(x: y)", False),
+        ('"x: y" trailing', False),
+        ("{x: y} trailing", False),
+        ("[x, y] trailing", False),
+        ('"x: y"', True),
+        ('"x: y" # comment', True),
+        ("{x: y}", True),
+        ("{x: y} # comment", True),
+        ("[x, y]", True),
+    ],
+)
+def test_source_policy_requires_yaml_scalar_to_consume_entire_value(manager, scalar, expected):
+    if manager == "pnpm":
+        lockfile = f"lockfileVersion: '9.0'\npackages:\n  x:\n    resolution: {scalar}\n"
+    else:
+        lockfile = (
+            '__metadata:\n  version: 8\n\n"x@npm:1":\n'
+            f"  version: 1\n  resolution: {scalar}\n"
+        )
+    assert control_files_use_trusted_sources(
+        b'{"dependencies":{"x":"1.0.0"}}', lockfile.encode()
+    ) is expected
+
+
 def test_validator_exact_argv_and_fixed_results(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()

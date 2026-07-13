@@ -492,33 +492,51 @@ def _mapping_line(content: str) -> tuple[bool, bool]:
     if match is None:
         return False, False
     value = match.group(1)
-    if value is not None and _plain_scalar_has_nested_delimiter(value):
+    if value is not None and not _yaml_scalar_is_valid(value):
         return False, False
     return True, value is None
 
 
-def _plain_scalar_has_nested_delimiter(value: str) -> bool:
-    quote: str | None = None
-    bracket_depth = 0
+def _yaml_scalar_remainder_is_valid(remainder: str) -> bool:
+    return not remainder or (remainder[0].isspace() and remainder.lstrip().startswith("#"))
+
+
+def _yaml_scalar_is_valid(value: str) -> bool:
+    if not value:
+        return False
+    if value[0] in {"'", '"'}:
+        closing = value.find(value[0], 1)
+        return closing >= 1 and _yaml_scalar_remainder_is_valid(value[closing + 1 :])
+    if value[0] in "[{":
+        pairs = {"]": "[", "}": "{"}
+        stack = [value[0]]
+        quote: str | None = None
+        for index, character in enumerate(value[1:], start=1):
+            if quote is not None:
+                if character == quote:
+                    quote = None
+                continue
+            if character in {"'", '"'}:
+                quote = character
+            elif character in "[{":
+                stack.append(character)
+            elif character in "]}":
+                if not stack or stack.pop() != pairs[character]:
+                    return False
+                if not stack:
+                    return _yaml_scalar_remainder_is_valid(value[index + 1 :])
+        return False
+    plain_value = value
     for index, character in enumerate(value):
-        if quote is not None:
-            if character == quote:
-                quote = None
-            continue
-        if character in {"'", '"'}:
-            quote = character
-        elif character in "[{(":
-            bracket_depth += 1
-        elif character in "]})":
-            bracket_depth -= 1
-        elif (
-            character == ":"
-            and bracket_depth == 0
-            and index + 1 < len(value)
-            and value[index + 1].isspace()
-        ):
-            return True
-    return False
+        if character == "#" and (index == 0 or value[index - 1].isspace()):
+            plain_value = value[:index].rstrip()
+            break
+    if not plain_value or any(character in plain_value for character in "[]{}"):
+        return False
+    return not any(
+        character == ":" and index + 1 < len(plain_value) and plain_value[index + 1].isspace()
+        for index, character in enumerate(plain_value)
+    )
 
 
 def _validate_mapping_lockfile(lines: list[str], *, berry: bool) -> bool:
