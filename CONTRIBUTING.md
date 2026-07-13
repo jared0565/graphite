@@ -29,7 +29,7 @@ PowerShell:
 ```powershell
 if (
   [string]::IsNullOrWhiteSpace($env:GRAPHITE_PACKAGE_VALIDATOR) -or
-  -not ([System.IO.Path]::IsPathRooted($env:GRAPHITE_PACKAGE_VALIDATOR)) -or
+  -not ([System.IO.Path]::IsPathFullyQualified($env:GRAPHITE_PACKAGE_VALIDATOR)) -or
   -not (Test-Path -LiteralPath $env:GRAPHITE_PACKAGE_VALIDATOR -PathType Leaf)
 ) { throw "GRAPHITE_PACKAGE_VALIDATOR is unset, relative, or missing; stop." }
 node $env:GRAPHITE_PACKAGE_VALIDATOR mcp

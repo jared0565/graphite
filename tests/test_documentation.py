@@ -53,8 +53,8 @@ def credential_example_linter_has_violation(text: str) -> bool:
     return False
 
 
-def validator_path_is_absolute(value: str, shell: str) -> bool:
-    """Model the documented shell-specific absolute validator-path contract."""
+def validator_path_is_fully_qualified(value: str, shell: str) -> bool:
+    """Model the documented shell-specific fully qualified validator-path contract."""
     if not value:
         return False
     path_type = PureWindowsPath if shell == "powershell" else PurePosixPath
@@ -542,9 +542,10 @@ def test_every_mcp_install_is_gated_by_local_validation() -> None:
                 f"{document_name}:{index + 1} does not fail closed"
             )
             assert (
-                "[System.IO.Path]::IsPathRooted($env:GRAPHITE_PACKAGE_VALIDATOR)"
+                "[System.IO.Path]::IsPathFullyQualified("
+                "$env:GRAPHITE_PACKAGE_VALIDATOR)"
                 in preceding_window
-            ), f"{document_name}:{index + 1} lacks the PowerShell rooted-path guard"
+            ), f"{document_name}:{index + 1} lacks the PowerShell qualified-path guard"
             assert 'case "$GRAPHITE_PACKAGE_VALIDATOR" in' in preceding_window, (
                 f"{document_name}:{index + 1} lacks the POSIX absolute-path guard"
             )
@@ -577,16 +578,21 @@ def test_validator_workflow_is_portable_fail_closed_and_scoped() -> None:
 def test_validator_path_contract_rejects_relative_and_empty_values() -> None:
     for shell in ("powershell", "posix"):
         for value in ("", "validate-packages.cjs", "./validate-packages.cjs"):
-            assert not validator_path_is_absolute(value, shell)
+            assert not validator_path_is_fully_qualified(value, shell)
 
-    assert validator_path_is_absolute(
+    for value in (r"C:validate-packages.cjs", r"\validate-packages.cjs"):
+        assert not validator_path_is_fully_qualified(value, "powershell")
+
+    assert validator_path_is_fully_qualified(
         r"C:\<trusted-tools>\validate-packages.cjs", "powershell"
     )
-    assert validator_path_is_absolute(
+    assert validator_path_is_fully_qualified(
         r"\\trusted-server\tools\validate-packages.cjs", "powershell"
     )
-    assert validator_path_is_absolute("/<trusted-tools>/validate-packages.cjs", "posix")
-    assert not validator_path_is_absolute(
+    assert validator_path_is_fully_qualified(
+        "/<trusted-tools>/validate-packages.cjs", "posix"
+    )
+    assert not validator_path_is_fully_qualified(
         r"C:\trusted-tools\validate-packages.cjs", "posix"
     )
 
@@ -594,7 +600,12 @@ def test_validator_path_contract_rejects_relative_and_empty_values() -> None:
 def test_validator_snippets_require_shell_specific_absolute_paths() -> None:
     for document_name in ("README.md", "CONTRIBUTING.md"):
         document = read_document(document_name)
-        assert "[System.IO.Path]::IsPathRooted($env:GRAPHITE_PACKAGE_VALIDATOR)" in document
+        assert (
+            "[System.IO.Path]::IsPathFullyQualified("
+            "$env:GRAPHITE_PACKAGE_VALIDATOR)"
+            in document
+        )
+        assert "[System.IO.Path]::IsPathRooted(" not in document
         assert 'case "$GRAPHITE_PACKAGE_VALIDATOR" in' in document
         assert "/*) ;;" in document
         assert "never execute a relative repository-local validator" in document.casefold()

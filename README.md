@@ -50,7 +50,7 @@ Run the applicable fail-closed check and validation command. PowerShell:
 ```powershell
 if (
   [string]::IsNullOrWhiteSpace($env:GRAPHITE_PACKAGE_VALIDATOR) -or
-  -not ([System.IO.Path]::IsPathRooted($env:GRAPHITE_PACKAGE_VALIDATOR)) -or
+  -not ([System.IO.Path]::IsPathFullyQualified($env:GRAPHITE_PACKAGE_VALIDATOR)) -or
   -not (Test-Path -LiteralPath $env:GRAPHITE_PACKAGE_VALIDATOR -PathType Leaf)
 ) { throw "GRAPHITE_PACKAGE_VALIDATOR is unset, relative, or missing; stop." }
 node $env:GRAPHITE_PACKAGE_VALIDATOR mcp
@@ -83,7 +83,7 @@ python -m pip install -e ".[mcp]"
 
 The deep MCP probe launches an isolated interpreter from a guarded distribution-record import manifest. It rejects current working directory and user-site shadows and does not import Graphite or MCP from the selected repository.
 
-TypeScript compiler resolution is also optional. Use the same configured validator and fail-closed rooted-path and existence checks, changing only the validated package argument to `typescript`:
+TypeScript compiler resolution is also optional. Use the same configured validator and fail-closed fully-qualified-path and existence checks, changing only the validated package argument to `typescript`:
 
 ```powershell
 node $env:GRAPHITE_PACKAGE_VALIDATOR typescript
@@ -488,4 +488,3 @@ Once configured, Claude can call these tools automatically:
 - `graphite_community` — list the community around a node
 - `graphite_summary` — stats, god nodes, entry points, surprising connections
 - `graphite_refresh` — rebuild and reload the graph
-
