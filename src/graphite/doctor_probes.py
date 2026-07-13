@@ -23,6 +23,8 @@ from .probe_process import ProbeProcessError, ProbeProcessResult, run_bounded_pr
 from .probe_workspace import ProbeWorkspaceLease, WorkspaceLeaseError
 
 _CLEANUP_RESERVE_SECONDS = 1.0
+_CORE_PROBE_SLOT_LOCK = threading.Lock()
+_CORE_PROBE_SLOT_ACTIVE = False
 _MCP_OUTPUT_LIMIT_BYTES = 1024 * 1024
 _MCP_LINE_LIMIT = 64
 _MCP_RESPONSE_LIMIT = 8
@@ -443,13 +445,34 @@ def _cleanup_workspace_lease(
             failure.append("cleanup_blocked" if exc.code == "workspace_cleanup_blocked" else "cleanup_failed")
         except Exception:
             failure.append("cleanup_failed")
+        finally:
+            _release_core_probe_slot()
 
     thread = threading.Thread(target=perform, daemon=True)
-    thread.start()
+    try:
+        thread.start()
+    except RuntimeError:
+        _release_core_probe_slot()
+        return "cleanup_failed"
     thread.join(max(0.0, deadline - clock()))
     if thread.is_alive():
         return "cleanup_timeout"
     return failure[0] if failure else None
+
+
+def _claim_core_probe_slot() -> bool:
+    global _CORE_PROBE_SLOT_ACTIVE
+    with _CORE_PROBE_SLOT_LOCK:
+        if _CORE_PROBE_SLOT_ACTIVE:
+            return False
+        _CORE_PROBE_SLOT_ACTIVE = True
+        return True
+
+
+def _release_core_probe_slot() -> None:
+    global _CORE_PROBE_SLOT_ACTIVE
+    with _CORE_PROBE_SLOT_LOCK:
+        _CORE_PROBE_SLOT_ACTIVE = False
 
 
 def _check_workspace(lease: Any, limit: float, clock: Callable[[], float]) -> None:
@@ -476,6 +499,8 @@ def probe_core_pipeline(
     started = _clock()
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         return _blocked("timeout", "invalid_timeout")
+    if not _claim_core_probe_slot():
+        return _blocked("cleanup", "cleanup_busy")
     deadline = started + timeout_seconds
     cleanup_reserve = min(_CLEANUP_RESERVE_SECONDS, max(0.05, timeout_seconds * 0.2))
     phase_deadline = deadline - cleanup_reserve
@@ -611,6 +636,8 @@ def probe_core_pipeline(
             cleanup_error = _cleanup_workspace_lease(lease, deadline, _clock)
             if cleanup_error is not None:
                 candidate = _blocked("cleanup", cleanup_error)
+        else:
+            _release_core_probe_slot()
 
     if candidate is None:
         return _blocked("unexpected", "probe_failed")

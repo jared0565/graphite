@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
+import ctypes
 from pathlib import Path
 
 import pytest
@@ -36,17 +38,20 @@ def test_workspace_lease_rejects_initial_symlink_or_windows_reparse_without_writ
     marker = sentinel / "keep.txt"
     marker.write_text("keep", encoding="utf-8")
 
-    def malicious_parent_factory(**kwargs: object) -> str:
-        parent = Path(os.path.join(str(kwargs["dir"]), "attacker-parent"))
-        parent.mkdir(mode=0o700)
+    def malicious_workspace_factory(parent: Path) -> tuple[Path, tuple[int, int]]:
+        workspace = parent / "workspace"
         try:
-            (parent / "workspace").symlink_to(sentinel, target_is_directory=True)
+            workspace.symlink_to(sentinel, target_is_directory=True)
         except OSError as exc:
             pytest.skip(f"directory symlinks unavailable: {exc}")
-        return str(parent)
+        info = workspace.lstat()
+        return workspace, (info.st_dev, info.st_ino)
 
     with pytest.raises(WorkspaceLeaseError):
-        ProbeWorkspaceLease.acquire(temp_root=temp_root, _parent_factory=malicious_parent_factory)
+        ProbeWorkspaceLease.acquire(
+            temp_root=temp_root,
+            _workspace_factory=malicious_workspace_factory,
+        )
 
     assert marker.read_text(encoding="utf-8") == "keep"
     assert list(sentinel.iterdir()) == [marker]
@@ -235,6 +240,128 @@ def test_windows_owned_creators_use_private_directory_creation(monkeypatch: pyte
 
     assert calls == [None, "workspace"]
     assert child == parent / "workspace"
+
+
+def _windows_sddl(path: Path) -> str:
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_security = advapi32.GetNamedSecurityInfoW
+    get_security.argtypes = [
+        wintypes.LPWSTR,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+    ]
+    get_security.restype = wintypes.DWORD
+    convert = advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW
+    convert.argtypes = [
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    convert.restype = wintypes.BOOL
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [wintypes.HLOCAL]
+    local_free.restype = wintypes.HLOCAL
+    descriptor = wintypes.LPVOID()
+    dacl = wintypes.LPVOID()
+    result = get_security(str(path), 1, 0x4, None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor))
+    if result:
+        raise OSError(result, "GetNamedSecurityInfoW failed")
+    text = wintypes.LPWSTR()
+    try:
+        if not convert(descriptor, 1, 0x4, ctypes.byref(text), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return text.value
+    finally:
+        if text:
+            local_free(text)
+        if descriptor:
+            local_free(descriptor)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native ACL inheritance invariant")
+def test_windows_workspace_acl_is_private_and_inherited_by_real_children(tmp_path: Path) -> None:
+    from graphite.probe_workspace import ProbeWorkspaceLease
+
+    lease = ProbeWorkspaceLease.acquire(temp_root=tmp_path)
+    child_dir = lease.path / "child"
+    child_file = lease.path / "child.txt"
+    child_dir.mkdir()
+    child_file.write_text("private", encoding="utf-8")
+    try:
+        parent_sddl = _windows_sddl(lease.parent_path)
+        workspace_sddl = _windows_sddl(lease.path)
+        child_dir_sddl = _windows_sddl(child_dir)
+        child_file_sddl = _windows_sddl(child_file)
+        owner_trustees = set(re.findall(r";;;([^;)]+)\)", parent_sddl))
+
+        assert len(owner_trustees) == 1
+        assert "D:P" in parent_sddl and "OICI" in parent_sddl
+        assert "D:P" in workspace_sddl and "OICI" in workspace_sddl
+        for child_sddl in (child_dir_sddl, child_file_sddl):
+            assert "ID" in child_sddl
+            assert set(re.findall(r";;;([^;)]+)\)", child_sddl)) == owner_trustees
+    finally:
+        lease.cleanup()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle/path correlation invariant")
+def test_windows_acquire_rejects_handle_bound_to_different_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import graphite.probe_workspace as workspace
+
+    other = tmp_path / "other"
+    other.mkdir()
+    marker = other / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    real_open = workspace._open_directory_handle
+    calls = 0
+
+    def mismatched_open(path: Path) -> tuple[int, tuple[int, int, int]]:
+        nonlocal calls
+        calls += 1
+        return real_open(other if calls == 1 else path)
+
+    monkeypatch.setattr(workspace, "_open_directory_handle", mismatched_open)
+
+    with pytest.raises(workspace.WorkspaceLeaseError):
+        workspace.ProbeWorkspaceLease.acquire(temp_root=tmp_path)
+
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX dir-fd cleanup invariant")
+def test_posix_cleanup_revalidates_after_substitution_hook(tmp_path: Path) -> None:
+    from graphite.probe_workspace import ProbeWorkspaceLease, WorkspaceLeaseError
+
+    lease = ProbeWorkspaceLease.acquire(temp_root=tmp_path)
+    replacement = lease.path
+    original = lease.parent_path / "original-workspace"
+    sentinel: Path | None = None
+
+    def substitute() -> None:
+        nonlocal sentinel
+        replacement.rename(original)
+        replacement.mkdir(mode=0o700)
+        sentinel = replacement / "keep.txt"
+        sentinel.write_text("keep", encoding="utf-8")
+
+    lease._before_cleanup_delete = substitute
+    with pytest.raises(WorkspaceLeaseError, match="workspace_cleanup_blocked"):
+        lease.cleanup()
+
+    assert sentinel is not None and sentinel.read_text(encoding="utf-8") == "keep"
 
 
 def test_core_probe_blocks_identity_change_before_next_phase_and_preserves_replacement(tmp_path: Path) -> None:

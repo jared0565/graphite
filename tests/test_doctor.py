@@ -1666,7 +1666,7 @@ def test_core_probe_blocking_cleanup_is_bounded_and_never_ready(tmp_path: Path) 
     )
     check = probes.probe_core_pipeline(
         tmp_path,
-        timeout_seconds=0.3,
+        timeout_seconds=1.0,
         _runner=run,
         _workspace_factory=lambda: wrapped,
     )
@@ -1674,11 +1674,73 @@ def test_core_probe_blocking_cleanup_is_bounded_and_never_ready(tmp_path: Path) 
     release.set()
     assert check.status == "blocked"
     assert check.details == {"error_type": "cleanup", "code": "cleanup_timeout"}
-    assert elapsed < 1
+    assert elapsed < 2
     deadline = time.monotonic() + 1
     while created[0].exists() and time.monotonic() < deadline:
         time.sleep(0.01)
     assert not created[0].exists()
+
+
+def test_core_probe_cleanup_timeout_uses_single_global_slot_and_recovers(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+    from graphite.probe_workspace import ProbeWorkspaceLease
+
+    release = threading.Event()
+    lease = ProbeWorkspaceLease.acquire()
+    acquisitions = 0
+    response_index = 0
+    responses = [
+        b"",
+        b'{"ok":true,"error_count":0,"errors":[],"node_count":2,"edge_count":1}',
+        b'{"node_count":2,"edge_count":1}',
+    ]
+
+    def cleanup() -> None:
+        release.wait(5)
+        lease.cleanup()
+
+    wrapped = SimpleNamespace(
+        path=lease.path,
+        temp_root=lease.temp_root,
+        validate=lease.validate,
+        cleanup=cleanup,
+    )
+
+    def factory() -> object:
+        nonlocal acquisitions
+        acquisitions += 1
+        return wrapped if acquisitions == 1 else ProbeWorkspaceLease.acquire()
+
+    def run(*args: object, **kwargs: object) -> object:
+        nonlocal response_index
+        result = probes.ProbeProcessResult(0, responses[response_index % 3], b"", 0.01)
+        response_index += 1
+        return result
+
+    first = probes.probe_core_pipeline(
+        tmp_path,
+        timeout_seconds=0.5,
+        _runner=run,
+        _workspace_factory=factory,
+    )
+    try:
+        second = probes.probe_core_pipeline(
+            tmp_path,
+            timeout_seconds=0.5,
+            _runner=run,
+            _workspace_factory=factory,
+        )
+        assert first.details == {"error_type": "cleanup", "code": "cleanup_timeout"}
+        assert second.details == {"error_type": "cleanup", "code": "cleanup_busy"}
+        assert acquisitions == 1
+    finally:
+        release.set()
+
+    deadline = time.monotonic() + 2
+    while lease.parent_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not lease.parent_path.exists()
+    assert probes.probe_core_pipeline(tmp_path, _runner=run).status == "ready"
 
 
 @pytest.mark.parametrize(

@@ -50,6 +50,7 @@ class ProbeWorkspaceLease:
         temp_root: Path,
         parent: _PathSnapshot,
         workspace: _PathSnapshot,
+        temp_root_handle: int | None,
         parent_handle: int,
         workspace_handle: int,
         windows_handle_identities: tuple[tuple[int, int, int], tuple[int, int, int]] | None,
@@ -57,6 +58,7 @@ class ProbeWorkspaceLease:
         self.temp_root = temp_root
         self._parent = parent
         self._workspace = workspace
+        self._temp_root_handle: int | None = temp_root_handle
         self._parent_handle: int | None = parent_handle
         self._workspace_handle: int | None = workspace_handle
         self._windows_handle_identities = windows_handle_identities
@@ -92,9 +94,18 @@ class ProbeWorkspaceLease:
         workspace_path: Path | None = None
         parent_handle: int | None = None
         workspace_handle: int | None = None
+        temp_root_handle: int | None = None
         parent_owned: _PathSnapshot | None = None
         workspace_owned: _PathSnapshot | None = None
         try:
+            if os.name != "nt":
+                root_snapshot = _snapshot(root, root)
+                temp_root_handle, root_handle_identity = _open_directory_handle(root)
+                _assert_handle_matches_snapshot(
+                    temp_root_handle,
+                    root_handle_identity,
+                    root_snapshot,
+                )
             if _parent_factory is not None:
                 if _owned_parent_factory is not None:
                     raise WorkspaceLeaseError("workspace_isolation_failed")
@@ -118,10 +129,21 @@ class ProbeWorkspaceLease:
             if os.name == "nt" and _owned_parent_factory is not None:
                 _set_private_windows_dacl(parent_path)
             parent_handle, parent_handle_identity = _open_directory_handle(parent_path)
+            _assert_handle_matches_snapshot(
+                parent_handle,
+                parent_handle_identity,
+                parent_before,
+            )
 
             workspace_path = parent_path / "workspace"
             workspace_creator = _workspace_factory or _create_owned_workspace
-            created_workspace_path, workspace_identity = workspace_creator(parent_path)
+            if _workspace_factory is None and os.name != "nt":
+                created_workspace_path, workspace_identity = _create_owned_workspace(
+                    parent_path,
+                    parent_handle,
+                )
+            else:
+                created_workspace_path, workspace_identity = workspace_creator(parent_path)
             created_workspace_path = Path(os.path.abspath(created_workspace_path))
             if created_workspace_path != workspace_path:
                 raise WorkspaceLeaseError("workspace_isolation_failed")
@@ -135,13 +157,29 @@ class ProbeWorkspaceLease:
                 _set_private_windows_dacl(workspace_path)
             workspace_snapshot = _snapshot(workspace_path, root)
             workspace_handle, workspace_handle_identity = _open_directory_handle(workspace_path)
+            _assert_handle_matches_snapshot(
+                workspace_handle,
+                workspace_handle_identity,
+                workspace_snapshot,
+            )
             parent_snapshot = _snapshot(parent_path, root)
             if parent_snapshot.identity != parent_before.identity:
                 raise WorkspaceLeaseError("workspace_isolation_failed")
+            _assert_handle_matches_snapshot(
+                parent_handle,
+                parent_handle_identity,
+                parent_snapshot,
+            )
+            _assert_handle_matches_snapshot(
+                workspace_handle,
+                workspace_handle_identity,
+                workspace_snapshot,
+            )
             return cls(
                 temp_root=root,
                 parent=parent_snapshot,
                 workspace=workspace_snapshot,
+                temp_root_handle=temp_root_handle,
                 parent_handle=parent_handle,
                 workspace_handle=workspace_handle,
                 windows_handle_identities=(parent_handle_identity, workspace_handle_identity)
@@ -151,11 +189,13 @@ class ProbeWorkspaceLease:
         except WorkspaceLeaseError:
             _close_raw_handle(workspace_handle)
             _close_raw_handle(parent_handle)
+            _close_raw_handle(temp_root_handle)
             _initial_cleanup(root, parent_owned, workspace_owned)
             raise
         except (OSError, RuntimeError, ValueError) as exc:
             _close_raw_handle(workspace_handle)
             _close_raw_handle(parent_handle)
+            _close_raw_handle(temp_root_handle)
             _initial_cleanup(root, parent_owned, workspace_owned)
             raise WorkspaceLeaseError("workspace_isolation_failed") from exc
 
@@ -174,9 +214,26 @@ class ProbeWorkspaceLease:
                 current_workspace = _windows_handle_identity(self._required_handle(self._workspace_handle))
                 if (current_parent, current_workspace) != self._windows_handle_identities:
                     raise WorkspaceLeaseError("workspace_isolation_changed")
+                _assert_handle_matches_snapshot(
+                    self._required_handle(self._parent_handle),
+                    current_parent,
+                    self._parent,
+                )
+                _assert_handle_matches_snapshot(
+                    self._required_handle(self._workspace_handle),
+                    current_workspace,
+                    self._workspace,
+                )
             else:
+                root_stat = os.fstat(self._required_handle(self._temp_root_handle))
                 parent_stat = os.fstat(self._required_handle(self._parent_handle))
                 workspace_stat = os.fstat(self._required_handle(self._workspace_handle))
+                root_path_stat = self.temp_root.lstat()
+                if (root_stat.st_dev, root_stat.st_ino) != (
+                    root_path_stat.st_dev,
+                    root_path_stat.st_ino,
+                ):
+                    raise WorkspaceLeaseError("workspace_isolation_changed")
                 if (parent_stat.st_dev, parent_stat.st_ino) != self._parent.identity:
                     raise WorkspaceLeaseError("workspace_isolation_changed")
                 if (workspace_stat.st_dev, workspace_stat.st_ino) != self._workspace.identity:
@@ -203,9 +260,26 @@ class ProbeWorkspaceLease:
             else:
                 if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
                     raise WorkspaceLeaseError("workspace_cleanup_blocked")
-                shutil.rmtree(self.parent_path)
-                if self.parent_path.exists():
-                    raise OSError("workspace parent still exists")
+                if os.rmdir not in os.supports_dir_fd:
+                    raise WorkspaceLeaseError("workspace_cleanup_blocked")
+                hook = getattr(self, "_before_cleanup_delete", None)
+                if hook is not None:
+                    hook()
+                try:
+                    self.validate()
+                except WorkspaceLeaseError as exc:
+                    raise WorkspaceLeaseError("workspace_cleanup_blocked") from exc
+                if self.parent_path.parent != self.temp_root or self.path.name != "workspace":
+                    raise WorkspaceLeaseError("workspace_cleanup_blocked")
+                shutil.rmtree(
+                    self.path.name,
+                    dir_fd=self._required_handle(self._parent_handle),
+                )
+                self._validate_posix_parent_binding()
+                os.rmdir(
+                    self.parent_path.name,
+                    dir_fd=self._required_handle(self._temp_root_handle),
+                )
                 self._cleaned = True
                 self.close()
         except WorkspaceLeaseError:
@@ -243,9 +317,26 @@ class ProbeWorkspaceLease:
             return
         _close_raw_handle(self._workspace_handle)
         _close_raw_handle(self._parent_handle)
+        _close_raw_handle(self._temp_root_handle)
         self._workspace_handle = None
         self._parent_handle = None
+        self._temp_root_handle = None
         self._closed = True
+
+    def _validate_posix_parent_binding(self) -> None:
+        parent = _snapshot(self.parent_path, self.temp_root)
+        if not _same_binding(parent, self._parent):
+            raise WorkspaceLeaseError("workspace_cleanup_blocked")
+        root_stat = os.fstat(self._required_handle(self._temp_root_handle))
+        path_root_stat = self.temp_root.lstat()
+        if (root_stat.st_dev, root_stat.st_ino) != (
+            path_root_stat.st_dev,
+            path_root_stat.st_ino,
+        ):
+            raise WorkspaceLeaseError("workspace_cleanup_blocked")
+        parent_stat = os.fstat(self._required_handle(self._parent_handle))
+        if (parent_stat.st_dev, parent_stat.st_ino) != self._parent.identity:
+            raise WorkspaceLeaseError("workspace_cleanup_blocked")
 
     @staticmethod
     def _required_handle(handle: int | None) -> int:
@@ -302,12 +393,21 @@ def _create_owned_parent(root: Path) -> tuple[Path, tuple[int, int]]:
     return path, (info.st_dev, info.st_ino)
 
 
-def _create_owned_workspace(parent: Path) -> tuple[Path, tuple[int, int]]:
+def _create_owned_workspace(
+    parent: Path,
+    parent_handle: int | None = None,
+) -> tuple[Path, tuple[int, int]]:
     if os.name == "nt":
         path = _create_private_windows_directory(parent, "workspace")
     else:
         path = parent / "workspace"
-        os.mkdir(path, 0o700)
+        if parent_handle is None:
+            os.mkdir(path, 0o700)
+            info = path.lstat()
+            return path, (info.st_dev, info.st_ino)
+        os.mkdir(path.name, 0o700, dir_fd=parent_handle)
+        info = os.stat(path.name, dir_fd=parent_handle, follow_symlinks=False)
+        return path, (info.st_dev, info.st_ino)
     info = path.lstat()
     return path, (info.st_dev, info.st_ino)
 
@@ -430,6 +530,43 @@ def _windows_handle_identity(handle: int) -> tuple[int, int, int]:
     )
 
 
+def _windows_handle_final_path(handle: int) -> Path:
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    function = kernel32.GetFinalPathNameByHandleW
+    function.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    function.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = function(handle, buffer, len(buffer), 0)
+    if not length or length >= len(buffer):
+        raise ctypes.WinError(ctypes.get_last_error())
+    value = buffer.value
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return Path(value).resolve(strict=True)
+
+
+def _assert_handle_matches_snapshot(
+    handle: int,
+    handle_identity: tuple[int, int, int],
+    snapshot: _PathSnapshot,
+) -> None:
+    if os.name == "nt":
+        file_index = (handle_identity[1] << 32) | handle_identity[2]
+        if file_index != snapshot.identity[1]:
+            raise WorkspaceLeaseError("workspace_isolation_failed")
+        final_path = _windows_handle_final_path(handle)
+        if os.path.normcase(str(final_path)) != os.path.normcase(str(snapshot.canonical)):
+            raise WorkspaceLeaseError("workspace_isolation_failed")
+        return
+    info = os.fstat(handle)
+    if (info.st_dev, info.st_ino) != snapshot.identity:
+        raise WorkspaceLeaseError("workspace_isolation_failed")
+
+
 def _reject_windows_handle_reparse(handle: int) -> None:
     from ctypes import wintypes
 
@@ -514,7 +651,7 @@ def _windows_private_security_descriptor() -> int:
         sid = ctypes.cast(buffer, ctypes.POINTER(wintypes.LPVOID))[0]
         if not convert_sid(sid, ctypes.byref(sid_text)):
             raise ctypes.WinError(ctypes.get_last_error())
-        sddl = f"D:P(A;;FA;;;{sid_text.value})"
+        sddl = f"D:P(A;OICI;FA;;;{sid_text.value})"
         if not convert_descriptor(sddl, 1, ctypes.byref(descriptor), None):
             raise ctypes.WinError(ctypes.get_last_error())
         result = int(descriptor.value)
