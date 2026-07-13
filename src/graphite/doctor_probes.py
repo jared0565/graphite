@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import sys
 import tempfile
@@ -17,6 +18,21 @@ from .doctor import DoctorCheck
 from .probe_process import ProbeProcessError, ProbeProcessResult, run_bounded_process
 
 _CLEANUP_RESERVE_SECONDS = 1.0
+_MCP_OUTPUT_LIMIT_BYTES = 1024 * 1024
+_MCP_PROTOCOL_VERSION = "2024-11-05"
+_REQUIRED_MCP_TOOLS = frozenset(
+    {"graphite_query", "graphite_summary", "graphite_community", "graphite_refresh"}
+)
+_TYPESCRIPT_SCRIPT = (
+    "const ts=require('typescript'); const source='const value: number = 1'; "
+    "const result=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022}}); "
+    "if(!result.outputText.includes('const value = 1')) process.exit(3); "
+    "process.stdout.write(JSON.stringify({version:ts.version}));"
+)
+_TYPESCRIPT_REMEDIATION = (
+    "Validate package: node C:/Users/fbmac/atlas/Codex/.codex_state/user_home/scripts/validate-packages.cjs typescript",
+    "Then add typescript with the target project's existing package manager.",
+)
 
 
 def _blocked(error_type: str, code: str) -> DoctorCheck:
@@ -245,7 +261,170 @@ def probe_core_pipeline(
     return candidate
 
 
+def _degraded_probe(code: str, label: str, failure: str) -> DoctorCheck:
+    return DoctorCheck(
+        code,
+        label,
+        "degraded",
+        f"The {label} deep probe {failure}.",
+        {"code": failure},
+    )
+
+
+def probe_mcp(
+    root: Path,
+    *,
+    python_executable: str = sys.executable,
+    timeout_seconds: float = 10.0,
+    _runner: Callable[..., ProbeProcessResult] = run_bounded_process,
+) -> DoctorCheck:
+    """Initialize the MCP server and inspect its read-only tool inventory."""
+    requests = (
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": _MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "graphite-doctor", "version": "1.0"},
+            },
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    )
+    stdin = b"".join(
+        json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+        for request in requests
+    )
+    try:
+        result = _runner(
+            [python_executable, "-B", "-m", "graphite.mcp"],
+            cwd=root,
+            stdin=stdin,
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=_MCP_OUTPUT_LIMIT_BYTES,
+        )
+    except ProbeProcessError as exc:
+        return _degraded_probe("deep_mcp", "MCP", exc.code)
+    except Exception:
+        return _degraded_probe("deep_mcp", "MCP", "probe_failed")
+
+    try:
+        responses: dict[int, dict[str, Any]] = {}
+        for raw_line in result.stdout.splitlines():
+            response = json.loads(raw_line.decode("utf-8"))
+            if not isinstance(response, dict):
+                raise ValueError
+            response_id = response.get("id")
+            if isinstance(response_id, int) and not isinstance(response_id, bool):
+                responses[response_id] = response
+        initialize = responses[1]["result"]
+        tools_result = responses[2]["result"]
+        if not isinstance(initialize, dict) or not isinstance(tools_result, dict):
+            raise ValueError
+        server_info = initialize.get("serverInfo")
+        tools = tools_result.get("tools")
+        if not isinstance(server_info, dict) or server_info.get("name") != "graphite":
+            raise ValueError
+        if not isinstance(tools, list):
+            raise ValueError
+        tool_names = {
+            tool.get("name")
+            for tool in tools
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+        }
+        if not _REQUIRED_MCP_TOOLS.issubset(tool_names):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return _degraded_probe("deep_mcp", "MCP", "invalid_response")
+    return DoctorCheck(
+        "deep_mcp",
+        "MCP",
+        "ready",
+        "The MCP server initializes and exposes the required tools.",
+        {"server_name": "graphite", "tool_count": len(tool_names)},
+    )
+
+
+def _resolve_external_node(root: Path) -> Path | None:
+    """Resolve executable Node from absolute PATH entries outside the selected project."""
+    name = "node.exe" if os.name == "nt" else "node"
+    try:
+        selected = root.resolve()
+    except OSError:
+        return None
+    for raw_directory in os.environ.get("PATH", "").split(os.pathsep):
+        directory = Path(raw_directory)
+        if not raw_directory or not directory.is_absolute():
+            continue
+        try:
+            candidate = (directory / name).resolve(strict=True)
+            if not candidate.is_file() or (os.name != "nt" and not os.access(candidate, os.X_OK)):
+                continue
+            try:
+                candidate.relative_to(selected)
+            except ValueError:
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def probe_typescript(
+    root: Path,
+    *,
+    timeout_seconds: float = 10.0,
+    _node_resolver: Callable[[Path], Path | None] = _resolve_external_node,
+    _runner: Callable[..., ProbeProcessResult] = run_bounded_process,
+) -> DoctorCheck:
+    """Load TypeScript and transpile one in-memory constant without repository writes."""
+    node = _node_resolver(root)
+    if node is None:
+        return DoctorCheck(
+            "deep_typescript",
+            "TypeScript",
+            "optional",
+            "Node.js is unavailable; the TypeScript deep probe is optional.",
+        )
+    try:
+        result = _runner(
+            [str(node), "-e", _TYPESCRIPT_SCRIPT],
+            cwd=root,
+            timeout_seconds=timeout_seconds,
+            check=False,
+        )
+    except ProbeProcessError as exc:
+        return _degraded_probe("deep_typescript", "TypeScript", exc.code)
+    except Exception:
+        return _degraded_probe("deep_typescript", "TypeScript", "probe_failed")
+    if result.returncode == 1:
+        return DoctorCheck(
+            "deep_typescript",
+            "TypeScript",
+            "optional",
+            "The TypeScript compiler module is unavailable.",
+            remediation=_TYPESCRIPT_REMEDIATION,
+        )
+    if result.returncode != 0:
+        return _degraded_probe("deep_typescript", "TypeScript", "invalid_result")
+    try:
+        payload = _json_object(result.stdout)
+        version = payload.get("version")
+        if not isinstance(version, str) or not version or len(version) > 64:
+            raise ValueError
+    except (ProbeProcessError, ValueError):
+        return _degraded_probe("deep_typescript", "TypeScript", "invalid_result")
+    return DoctorCheck(
+        "deep_typescript",
+        "TypeScript",
+        "ready",
+        "The TypeScript compiler transpiles the synthetic source.",
+        {"version": version},
+    )
+
+
 def run_deep_probes(root: Path, *, cfg: Config, include_llm: bool) -> list[DoctorCheck]:
     """Return the deep capabilities implemented in this release."""
     del cfg, include_llm
-    return [probe_core_pipeline(root)]
+    return [probe_core_pipeline(root), probe_mcp(root), probe_typescript(root)]

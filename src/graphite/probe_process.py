@@ -76,6 +76,7 @@ def run_bounded_process(
     stdin: bytes | str | None = None,
     timeout_seconds: float,
     max_output_bytes: int = OUTPUT_LIMIT_BYTES,
+    check: bool = True,
 ) -> ProbeProcessResult:
     """Run one isolated process tree under a single hard transport deadline."""
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0 or max_output_bytes <= 0:
@@ -223,7 +224,7 @@ def run_bounded_process(
         failure_code = "timeout"
     if failure_code is not None:
         raise ProbeProcessError(failure_code)
-    if process.returncode is None or process.returncode != 0:
+    if process.returncode is None or (check and process.returncode != 0):
         raise ProbeProcessError("nonzero")
     return ProbeProcessResult(
         process.returncode,
