@@ -81,7 +81,7 @@ Only after the applicable validator command succeeds, enable the declared extra:
 python -m pip install -e ".[mcp]"
 ```
 
-The deep MCP probe launches an isolated interpreter from a guarded distribution-record import manifest. It rejects current working directory and user-site shadows and does not import Graphite or MCP from the selected repository.
+The deep MCP probe launches an isolated interpreter from a guarded distribution-record import manifest. It rejects current working directory, user-site, and attacker-controlled selected-root shadows. The exact origin-verified trusted Graphite source may be inside the selected repository, but it is accepted only when its expected lexical, canonical, filesystem-identity, and module-origin checks all match; overlapping MCP dependency or distribution-metadata roots and alternate Graphite origins remain rejected.
 
 TypeScript compiler resolution is also optional. Use the same configured validator and fail-closed fully-qualified-path and existence checks, changing only the validated package argument to `typescript`:
 

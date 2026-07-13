@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.11+, argparse, dataclasses, pathlib, subprocess, tempfile, urllib, pytest, Ruff, optional MCP package, project-local Node.js/TypeScript
 
+> **Final implementation deviation (2026-07-13):** The TypeScript execution steps in Task 6 below are a historical planning record and were superseded. The final doctor uses static `require.resolve('typescript')` detection through a trusted external Node executable. It does not load, execute, or transpile project-controlled JavaScript, and both absence and detection remain optional and unverified. The planned compiler `require`, transpilation, and version reporting were removed because bounded processes and temporary storage provide no OS network sandbox for untrusted dependency initialization. The retained task text below is not the current security contract.
+
 ---
 
 ## File Structure

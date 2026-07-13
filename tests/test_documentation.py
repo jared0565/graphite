@@ -434,7 +434,7 @@ def test_readme_documents_system_readiness_and_optional_activation() -> None:
         "best-effort trust boundary",
         'python -m pip install -e ".[mcp]"',
         "guarded distribution-record import manifest",
-        "current working directory and user-site shadows",
+        "current working directory, user-site, and attacker-controlled selected-root shadows",
         "validate-packages.cjs typescript",
         "project-local TypeScript",
         "never executes or transpiles untrusted project JavaScript",
@@ -451,6 +451,69 @@ def test_readme_documents_system_readiness_and_optional_activation() -> None:
     readme_folded = readme.casefold()
     for phrase in required_phrases:
         assert phrase.casefold() in readme_folded
+
+
+def test_architecture_documents_current_llm_transport_and_token_bounds() -> None:
+    architecture = read_document("ARCHITECTURE.md")
+    architecture_folded = architecture.casefold()
+
+    for phrase in (
+        "hard 64 KiB HTTP response cap",
+        "redirects disabled",
+        "no retries",
+        "configured output-token bounds are normalized to 1–4096 with a default of 512",
+        "probe forces 16",
+    ):
+        assert phrase.casefold() in architecture_folded
+
+    for stale_claim in (
+        "not currently capped explicitly",
+        "do not currently impose an explicit byte or character cap on a successful provider response",
+    ):
+        assert stale_claim not in architecture_folded
+
+
+def test_mcp_docs_distinguish_trusted_source_overlap_from_project_shadows() -> None:
+    readme = read_document("README.md")
+    architecture = read_document("ARCHITECTURE.md")
+
+    for document in (readme, architecture):
+        assert "exact origin-verified trusted Graphite source" in document
+        assert "may be inside the selected repository" in document
+        assert "attacker-controlled selected-root shadows" in document
+
+    assert "does not import Graphite or MCP from the selected repository" not in readme
+
+
+def test_authoritative_doctor_design_documents_static_typescript_detection() -> None:
+    design = read_document(
+        "docs/superpowers/specs/2026-07-12-system-readiness-doctor-design.md"
+    )
+    historical_plan = read_document(
+        "docs/superpowers/plans/2026-07-12-system-readiness-doctor.md"
+    )
+
+    for phrase in (
+        "static `require.resolve('typescript')` detection",
+        "trusted external Node executable",
+        "does not load, execute, or transpile project-controlled JavaScript",
+        "optional and unverified",
+        "no OS network sandbox",
+        "compiler-execution design was therefore superseded",
+    ):
+        assert phrase in design
+
+    for stale_claim in (
+        "A TypeScript compiler-backed synthetic resolution probe",
+        "Doctor then reports the resolved compiler path/version and deep-probe result",
+        "TypeScript compiler probe succeeds",
+    ):
+        assert stale_claim not in design
+
+    assert "Final implementation deviation" in historical_plan
+    assert "static `require.resolve('typescript')` detection" in historical_plan
+    assert "superseded" in historical_plan
+    assert "no OS network sandbox" in historical_plan
 
 
 def test_optional_activation_docs_reject_unsafe_examples() -> None:

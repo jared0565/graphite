@@ -86,7 +86,7 @@ Deep mode adds functional probes:
 
 - A temporary deterministic scan, build, validate, and query pipeline using synthetic files.
 - An MCP stdio initialize/list-tools exchange.
-- A TypeScript compiler-backed synthetic resolution probe only when project-local TypeScript is available.
+- Static `require.resolve('typescript')` detection through a trusted external Node executable. Detection does not load, execute, or transpile project-controlled JavaScript and remains optional and unverified even when the package is found.
 - An LLM connectivity probe only when both `--deep` and `--include-llm` are present.
 
 The LLM probe sends synthetic content only. It must not send repository source, graph data, filenames, Git metadata, or secrets.
@@ -150,6 +150,7 @@ Every subprocess uses:
 - Typed, sanitized failure evidence.
 
 No deep probe writes to the selected repository, its graph output, its cache, or its Git metadata.
+These process controls provide no OS network sandbox. The original compiler-execution design was therefore superseded by static package-path detection through trusted external Node. The TypeScript doctor probe never loads the compiler or another project-controlled JavaScript module, whose initialization could execute code or access the network.
 
 ## Optional Activation
 
@@ -157,7 +158,7 @@ No deep probe writes to the selected repository, its graph output, its cache, or
 
 Graphite continues to use project-local TypeScript when available and heuristic resolution otherwise. Activation is performed in the target TypeScript project, not globally and not as a Graphite Python runtime dependency.
 
-Before any installation, the required package validator must be run against the exact package name `typescript`. If validation succeeds, the user may add TypeScript as a development dependency using the target project's existing package manager. Doctor then reports the resolved compiler path/version and deep-probe result.
+Before any installation, the required package validator must be run against the exact package name `typescript`. If validation succeeds, the user may add TypeScript as a development dependency using the target project's existing package manager. Doctor then reports the static detection result; it does not load the compiler or report a compiler version, and a detected package remains optional and unverified.
 
 No package-manager command is executed automatically by Graphite.
 
@@ -191,7 +192,7 @@ The exposed credential must be revoked in its provider dashboard. The replacemen
 - Errors are sanitized and bounded.
 - The LLM probe sends a constant synthetic prompt and accepts no repository-derived input.
 - MCP messages are framed and size-bounded; malformed, oversized, or unexpected responses fail only the MCP check.
-- TypeScript discovery is limited to the selected project and trusted external executable boundaries already used by Graphite.
+- TypeScript discovery uses static `require.resolve('typescript')` detection through a trusted external Node executable. It does not load, execute, or transpile project-controlled JavaScript, and its result remains optional and unverified.
 - Doctor never installs packages, modifies startup configuration, restarts the daemon, changes provider credentials, or writes into the selected repository.
 
 ## Error Handling
@@ -225,7 +226,7 @@ The exposed credential must be revoked in its provider dashboard. The replacemen
 
 - Synthetic scan/build/validate/query succeeds in an external temporary directory.
 - MCP initialize/list-tools succeeds and malformed, oversized, closed, and timed-out sessions fail safely.
-- TypeScript compiler probe succeeds when a fake/project-local compiler is available and reports optional fallback otherwise.
+- TypeScript static detection reports an absent package as optional and a detected package as optional and unverified without loading or executing it.
 - LLM tests use a local fake HTTP server; no live provider is required in the automated suite.
 
 ### System acceptance
@@ -236,7 +237,7 @@ The exposed credential must be revoked in its provider dashboard. The replacemen
 - Fresh core build, validation, and query pass.
 - `doctor` text and JSON modes report core ready.
 - `doctor --deep` passes deterministic and MCP probes.
-- Missing TypeScript and disabled LLM are `optional`, not blockers.
+- Missing or statically detected TypeScript and disabled LLM are `optional`, not blockers; detection never claims the compiler was executed or verified.
 - Daemon health no longer classifies recovered projects as actively failing.
 - Git worktree is clean.
 
