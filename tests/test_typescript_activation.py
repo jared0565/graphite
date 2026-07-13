@@ -7,9 +7,13 @@ from pathlib import Path
 
 import pytest
 import graphite.dependency_install as dependency_install
+import graphite.typescript_activation as typescript_activation
 
+from graphite.config import Config
 from graphite.dependency_install import (
+    ACTIVATION_MAX_FILES,
     INSTALL_OUTPUT_LIMIT,
+    MAX_CONTROL_FILE_BYTES,
     MAX_TRUSTED_FILE_BYTES,
     TRUSTED_REGISTRY,
     Manager,
@@ -31,7 +35,51 @@ from graphite.dependency_install import (
     run_validator,
     snapshot_control_file,
 )
+from graphite.ingest import IngestError
 from graphite.probe_process import ProbeProcessResult
+from graphite.typescript_activation import (
+    FATAL_OUTCOMES,
+    ActivationDetection,
+    ActivationOutcome,
+    ActivationResult,
+    detect_activation,
+)
+
+
+_SAFE_LOCKS = {
+    "package-lock.json": b'{"lockfileVersion":3}',
+    "pnpm-lock.yaml": b"lockfileVersion: '9.0'\npackages: {}\n",
+    "yarn.lock": (
+        b"# yarn lockfile v1\n\n"
+        b"typescript@5.0.0:\n"
+        b'  version "5.0.0"\n'
+        b'  resolved "https://registry.npmjs.org/typescript/-/typescript-5.0.0.tgz"\n'
+    ),
+    "bun.lock": b'{"lockfileVersion":1}',
+    "bun.lockb": b'{"lockfileVersion":1}',
+}
+
+
+def _activation_root(
+    tmp_path: Path,
+    lockfile: str = "package-lock.json",
+    *,
+    manifest: bytes = b"{}",
+) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "source.ts").write_text("export {};", encoding="utf-8")
+    (root / "package.json").write_bytes(manifest)
+    (root / lockfile).write_bytes(_SAFE_LOCKS[lockfile])
+    return root
+
+
+def _detect(root: Path, *, available: bool = False, cfg: Config | None = None) -> ActivationDetection:
+    return detect_activation(
+        root,
+        cfg or Config(),
+        local_typescript_available=available,
+    )
 
 
 def _file(path: Path, content: bytes = b"tool") -> TrustedFile:
@@ -956,3 +1004,438 @@ def test_probe_local_typescript_requires_resolved_regular_file_under_package(tmp
     assert calls[0][1]["max_output_bytes"] <= 4096
     assert calls[0][1]["check"] is False
     assert not probe_local_typescript(root, node, 1, lambda *a, **k: ProbeProcessResult(0, b"not-json secret", b"", 0))
+
+
+@pytest.mark.parametrize("outcome", list(ActivationOutcome))
+def test_activation_result_serialization_and_fatal_mapping_are_exact(outcome):
+    result = ActivationResult(
+        outcome=outcome,
+        manager=Manager.NPM,
+        reason="fixed_reason",
+        manifest="package.json",
+        lockfile="package-lock.json",
+        changed_files=("package-lock.json", "package.json"),
+        attempted=True,
+    )
+
+    assert result.fatal is (outcome in FATAL_OUTCOMES)
+    assert result.to_dict() == {
+        "outcome": outcome.value,
+        "manager": "npm",
+        "reason": "fixed_reason",
+        "manifest": "package.json",
+        "lockfile": "package-lock.json",
+        "changed_files": ["package-lock.json", "package.json"],
+        "attempted": True,
+    }
+    assert list(result.to_dict()) == [
+        "outcome",
+        "manager",
+        "reason",
+        "manifest",
+        "lockfile",
+        "changed_files",
+        "attempted",
+    ]
+
+
+def test_detect_without_typescript_evidence_is_not_applicable(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    detection = _detect(root)
+
+    assert detection.result == ActivationResult(
+        ActivationOutcome.NOT_APPLICABLE,
+        None,
+        "no_typescript_evidence",
+    )
+    assert detection.manager is None
+    assert detection.manifest_snapshot is None
+    assert detection.lockfile_snapshot is None
+
+
+@pytest.mark.parametrize("evidence", ["main.ts", "component.tsx", "tsconfig.json"])
+def test_detect_accepts_typescript_and_safe_root_config_evidence(tmp_path, evidence):
+    root = _activation_root(tmp_path)
+    (root / "source.ts").unlink()
+    (root / evidence).write_text("{}" if evidence == "tsconfig.json" else "export {};", encoding="utf-8")
+
+    detection = _detect(root)
+
+    assert detection.result is None
+    assert detection.manager is Manager.NPM
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (None, ACTIVATION_MAX_FILES),
+        (ACTIVATION_MAX_FILES + 1, ACTIVATION_MAX_FILES),
+        (17, 17),
+    ],
+)
+def test_detect_always_bounds_evidence_collection(tmp_path, monkeypatch, configured, expected):
+    root = tmp_path / "repo"
+    root.mkdir()
+    observed = []
+
+    def bounded_collect(selected_root, cfg):
+        observed.append((selected_root, cfg.max_files))
+        return []
+
+    monkeypatch.setattr(typescript_activation, "collect_files", bounded_collect)
+
+    assert _detect(root, cfg=Config(max_files=configured)).result.reason == "no_typescript_evidence"
+    assert observed == [(root.resolve(), expected)]
+
+
+def test_already_available_precedes_package_manager_inspection(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "source.ts").write_text("export {};", encoding="utf-8")
+    (root / "package.json").write_bytes(b"not json")
+    (root / "package-lock.json").write_bytes(b"not json")
+    (root / "pnpm-lock.yaml").write_bytes(b"not yaml")
+
+    detection = _detect(root, available=True)
+
+    assert detection.result == ActivationResult(
+        ActivationOutcome.ALREADY_AVAILABLE,
+        None,
+        "local_typescript_available",
+    )
+    assert detection.manager is None
+    assert detection.manifest is None
+    assert detection.lockfile is None
+
+
+@pytest.mark.parametrize(
+    ("lockfile", "manager", "outcome", "reason"),
+    [
+        ("package-lock.json", Manager.NPM, None, None),
+        ("pnpm-lock.yaml", Manager.PNPM, None, None),
+        ("yarn.lock", Manager.YARN, ActivationOutcome.GUIDANCE_ONLY, "manager_guidance_only"),
+        ("bun.lock", Manager.BUN, None, None),
+        ("bun.lockb", Manager.BUN, None, None),
+    ],
+)
+def test_detect_identifies_one_root_lockfile_family(tmp_path, lockfile, manager, outcome, reason):
+    detection = _detect(_activation_root(tmp_path, lockfile))
+
+    if outcome is None:
+        assert detection.result is None
+    else:
+        assert detection.result == ActivationResult(
+            outcome,
+            manager,
+            reason,
+            "package.json",
+            lockfile,
+        )
+    assert detection.manager is manager
+    assert detection.manifest == "package.json"
+    assert detection.lockfile == lockfile
+
+
+@pytest.mark.parametrize(
+    ("extra_lockfile", "reason"),
+    [
+        ("bun.lockb", "lockfile_ambiguous"),
+        ("pnpm-lock.yaml", "lockfile_ambiguous"),
+    ],
+)
+def test_detect_rejects_multiple_supported_root_lockfiles(tmp_path, extra_lockfile, reason):
+    first = "bun.lock" if extra_lockfile == "bun.lockb" else "package-lock.json"
+    root = _activation_root(tmp_path, first)
+    (root / extra_lockfile).write_bytes(_SAFE_LOCKS[extra_lockfile])
+
+    detection = _detect(root)
+
+    assert detection.result.outcome is ActivationOutcome.GUIDANCE_ONLY
+    assert detection.result.reason == reason
+    assert detection.result.manager is None
+    assert detection.result.lockfile is None
+
+
+def test_detect_rejects_missing_root_lockfile(tmp_path):
+    root = _activation_root(tmp_path)
+    (root / "package-lock.json").unlink()
+
+    detection = _detect(root)
+
+    assert detection.result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        None,
+        "lockfile_missing",
+        "package.json",
+    )
+
+
+@pytest.mark.parametrize("nested_control", ["package.json", "package-lock.json"])
+def test_detect_ignores_nested_control_files(tmp_path, nested_control):
+    root = _activation_root(tmp_path)
+    (root / nested_control).unlink()
+    nested = root / "nested"
+    nested.mkdir()
+    content = b"{}" if nested_control == "package.json" else _SAFE_LOCKS[nested_control]
+    (nested / nested_control).write_bytes(content)
+
+    detection = _detect(root)
+
+    expected_reason = "manifest_missing" if nested_control == "package.json" else "lockfile_missing"
+    assert detection.result.outcome is ActivationOutcome.GUIDANCE_ONLY
+    assert detection.result.reason == expected_reason
+
+
+@pytest.mark.parametrize("manifest", [b"not json", b"[]", b"null", b'{"x":1,"x":2}'])
+def test_detect_rejects_invalid_manifest_json(tmp_path, manifest):
+    detection = _detect(_activation_root(tmp_path, manifest=manifest))
+
+    assert detection.result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        None,
+        "manifest_invalid",
+        "package.json",
+    )
+
+
+def test_detect_rejects_oversized_manifest(tmp_path):
+    manifest = b" " * (MAX_CONTROL_FILE_BYTES + 1)
+
+    detection = _detect(_activation_root(tmp_path, manifest=manifest))
+
+    assert detection.result.reason == "manifest_invalid"
+    assert detection.manifest_snapshot is None
+
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error.__class__.__name__}")
+
+
+@pytest.mark.parametrize(
+    ("control", "expected_reason"),
+    [
+        ("package.json", "manifest_unsafe"),
+        ("package-lock.json", "lockfile_unsafe"),
+    ],
+)
+def test_detect_rejects_symlinked_or_escaping_control_file(tmp_path, control, expected_reason):
+    root = _activation_root(tmp_path)
+    outside = tmp_path / f"outside-{control}"
+    outside.write_bytes(b"{}" if control == "package.json" else _SAFE_LOCKS[control])
+    (root / control).unlink()
+    _symlink_or_skip(root / control, outside)
+
+    detection = _detect(root)
+
+    assert detection.result.outcome is ActivationOutcome.GUIDANCE_ONLY
+    assert detection.result.reason == expected_reason
+    assert str(outside) not in str(detection.result.to_dict())
+
+
+def test_unsafe_root_tsconfig_is_guidance_not_evidence(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "outside-tsconfig.json"
+    outside.write_text("{}", encoding="utf-8")
+    _symlink_or_skip(root / "tsconfig.json", outside)
+
+    detection = _detect(root)
+
+    assert detection.result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        None,
+        "typescript_configuration_unsafe",
+    )
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected_reason"),
+    [
+        (None, None),
+        ("npm@10.9.0", None),
+        ("npm", "package_manager_invalid"),
+        ("npm@", "package_manager_invalid"),
+        ("npm@10 9", "package_manager_invalid"),
+        (10, "package_manager_invalid"),
+        ("pnpm@10.0.0", "package_manager_conflict"),
+    ],
+)
+def test_detect_validates_package_manager_without_overriding_lockfile(
+    tmp_path,
+    metadata,
+    expected_reason,
+):
+    manifest = {} if metadata is None else {"packageManager": metadata}
+    root = _activation_root(tmp_path, manifest=json.dumps(manifest).encode())
+
+    detection = _detect(root)
+
+    if expected_reason is None:
+        assert detection.result is None
+        assert detection.manager is Manager.NPM
+    else:
+        assert detection.result == ActivationResult(
+            ActivationOutcome.GUIDANCE_ONLY,
+            Manager.NPM,
+            expected_reason,
+            "package.json",
+            "package-lock.json",
+        )
+
+
+def test_detect_rejects_present_null_package_manager(tmp_path):
+    root = _activation_root(
+        tmp_path,
+        manifest=json.dumps({"packageManager": None}).encode(),
+    )
+
+    detection = _detect(root)
+
+    assert detection.result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        Manager.NPM,
+        "package_manager_invalid",
+        "package.json",
+        "package-lock.json",
+    )
+
+
+@pytest.mark.parametrize(
+    ("lockfile", "unsafe_path", "directory"),
+    [
+        ("package-lock.json", ".npmrc", False),
+        ("pnpm-lock.yaml", ".pnpmfile.cjs", False),
+        ("yarn.lock", ".yarn/plugins", True),
+        ("bun.lock", "bunfig.toml", False),
+    ],
+)
+def test_detect_rejects_manager_root_configuration(tmp_path, lockfile, unsafe_path, directory):
+    root = _activation_root(tmp_path, lockfile)
+    path = root / unsafe_path
+    if directory:
+        path.mkdir(parents=True)
+    else:
+        path.write_text("unsafe", encoding="utf-8")
+
+    detection = _detect(root)
+
+    assert detection.result.outcome is ActivationOutcome.GUIDANCE_ONLY
+    assert detection.result.reason == "manager_configuration_unsafe"
+    assert detection.result.lockfile == lockfile
+
+
+@pytest.mark.parametrize(
+    ("manifest", "lockfile_bytes"),
+    [
+        (b'{"dependencies":{"x":"file:../x"}}', _SAFE_LOCKS["package-lock.json"]),
+        (
+            b'{"dependencies":{"x":"1.0.0"}}',
+            b'{"lockfileVersion":3,"resolved":"https://evil.example/x.tgz"}',
+        ),
+        (b'{"workspaces":["packages/*"]}', _SAFE_LOCKS["package-lock.json"]),
+    ],
+)
+def test_detect_rejects_hostile_dependency_sources(tmp_path, manifest, lockfile_bytes):
+    root = _activation_root(tmp_path, manifest=manifest)
+    (root / "package-lock.json").write_bytes(lockfile_bytes)
+
+    detection = _detect(root)
+
+    assert detection.result.outcome is ActivationOutcome.GUIDANCE_ONLY
+    assert detection.result.reason == "dependency_source_unsafe"
+
+
+def test_yarn_is_guidance_only_after_safe_policy_checks(tmp_path):
+    detection = _detect(_activation_root(tmp_path, "yarn.lock"))
+
+    assert detection.result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        Manager.YARN,
+        "manager_guidance_only",
+        "package.json",
+        "yarn.lock",
+    )
+    assert detection.manifest_snapshot is None
+    assert detection.lockfile_snapshot is None
+
+
+def test_eligible_detection_retains_only_bounded_snapshots(tmp_path):
+    detection = _detect(_activation_root(tmp_path))
+
+    assert detection.result is None
+    assert detection.manifest_snapshot.relative_path == "package.json"
+    assert detection.lockfile_snapshot.relative_path == "package-lock.json"
+    assert set(vars(detection.manifest_snapshot)) == {"relative_path", "identity", "sha256"}
+    assert set(vars(detection.lockfile_snapshot)) == {"relative_path", "identity", "sha256"}
+    serialized = repr(detection)
+    assert str(tmp_path) not in serialized
+    assert "lockfileVersion" not in serialized
+
+
+def test_terminal_detection_never_retains_snapshots(tmp_path):
+    root = _activation_root(tmp_path, manifest=b"not-json")
+
+    detection = _detect(root)
+
+    assert detection.result.reason == "manifest_invalid"
+    assert detection.manifest_snapshot is None
+    assert detection.lockfile_snapshot is None
+
+
+def test_ingestion_failure_maps_to_fixed_guidance_without_error_text(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    def fail_collection(*_args, **_kwargs):
+        raise IngestError(f"secret path: {tmp_path}")
+
+    monkeypatch.setattr(typescript_activation, "collect_files", fail_collection)
+
+    detection = _detect(root)
+
+    assert detection.result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        None,
+        "evidence_collection_failed",
+    )
+    assert str(tmp_path) not in str(detection.result.to_dict())
+
+
+def test_invalid_repository_root_maps_to_fixed_guidance(tmp_path):
+    detection = _detect(tmp_path / "missing")
+
+    assert detection.result == ActivationResult(
+        ActivationOutcome.GUIDANCE_ONLY,
+        None,
+        "repository_unsafe",
+    )
+
+
+def test_control_file_change_during_read_fails_closed(tmp_path, monkeypatch):
+    root = _activation_root(tmp_path)
+    original_snapshot = typescript_activation.snapshot_control_file
+    calls = 0
+
+    def changed_snapshot(selected_root, relative_path):
+        nonlocal calls
+        snapshot = original_snapshot(selected_root, relative_path)
+        calls += 1
+        if relative_path == "package.json" and calls == 2:
+            return dependency_install.FileSnapshot(
+                snapshot.relative_path,
+                snapshot.identity,
+                "0" * 64,
+            )
+        return snapshot
+
+    monkeypatch.setattr(typescript_activation, "snapshot_control_file", changed_snapshot)
+
+    detection = _detect(root)
+
+    assert detection.result.reason == "manifest_unsafe"
+    assert detection.manifest_snapshot is None
