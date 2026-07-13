@@ -24,6 +24,10 @@ _REQUIRED_MCP_TOOLS = frozenset(
     {"graphite_query", "graphite_summary", "graphite_community", "graphite_refresh"}
 )
 _TYPESCRIPT_SCRIPT = (
+    "try{require.resolve('typescript')}catch(error){"
+    "if(error&&error.code==='MODULE_NOT_FOUND'){"
+    "process.stdout.write(JSON.stringify({missing_module:'typescript'}));process.exit(0)}"
+    "process.exit(4)} "
     "const ts=require('typescript'); const source='const value: number = 1'; "
     "const result=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022}}); "
     "if(!result.outputText.includes('const value = 1')) process.exit(3); "
@@ -398,7 +402,13 @@ def probe_typescript(
         return _degraded_probe("deep_typescript", "TypeScript", exc.code)
     except Exception:
         return _degraded_probe("deep_typescript", "TypeScript", "probe_failed")
-    if result.returncode == 1:
+    if result.returncode != 0:
+        return _degraded_probe("deep_typescript", "TypeScript", "invalid_result")
+    try:
+        payload = _json_object(result.stdout)
+    except ProbeProcessError:
+        return _degraded_probe("deep_typescript", "TypeScript", "invalid_result")
+    if payload == {"missing_module": "typescript"}:
         return DoctorCheck(
             "deep_typescript",
             "TypeScript",
@@ -406,10 +416,7 @@ def probe_typescript(
             "The TypeScript compiler module is unavailable.",
             remediation=_TYPESCRIPT_REMEDIATION,
         )
-    if result.returncode != 0:
-        return _degraded_probe("deep_typescript", "TypeScript", "invalid_result")
     try:
-        payload = _json_object(result.stdout)
         version = payload.get("version")
         if not isinstance(version, str) or not version or len(version) > 64:
             raise ValueError

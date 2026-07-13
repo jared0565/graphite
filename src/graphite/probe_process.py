@@ -15,6 +15,7 @@ from typing import Any
 OUTPUT_LIMIT_BYTES = 32 * 1024
 INPUT_LIMIT_BYTES = 1024 * 1024
 _CLEANUP_SECONDS = 1.0
+_GRACEFUL_CLEANUP_SECONDS = 0.1
 _SAFE_ERROR_CODES = frozenset(
     {
         "timeout",
@@ -272,7 +273,18 @@ def _trusted_taskkill() -> Path | None:
     return resolved
 
 
-def _terminate_process_tree(process: subprocess.Popen[bytes], deadline: float) -> None:
+def _gracefully_signal_process_tree(process: subprocess.Popen[bytes]) -> bool:
+    try:
+        if os.name == "nt":
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+        return True
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _force_kill_process_tree(process: subprocess.Popen[bytes], deadline: float) -> None:
     if os.name != "nt":
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -308,3 +320,16 @@ def _terminate_process_tree(process: subprocess.Popen[bytes], deadline: float) -
         process.kill()
     except (OSError, ValueError):
         pass
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes], deadline: float) -> None:
+    """Gracefully signal the process group, then force-kill the tree within the deadline."""
+    signaled = _gracefully_signal_process_tree(process)
+    if signaled:
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining > 0:
+            try:
+                process.wait(timeout=min(_GRACEFUL_CLEANUP_SECONDS, remaining))
+            except (subprocess.TimeoutExpired, OSError, ValueError):
+                pass
+    _force_kill_process_tree(process, deadline)

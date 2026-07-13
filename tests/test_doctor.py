@@ -1113,6 +1113,152 @@ def test_mcp_deep_probe_rejects_closed_or_malformed_responses(tmp_path: Path, ou
     assert check.details == {"code": "invalid_response"}
 
 
+class _QueuedProbePipe:
+    def __init__(self) -> None:
+        self.items: queue.Queue[bytes | None] = queue.Queue()
+
+    def read(self, size: int) -> bytes:
+        del size
+        item = self.items.get(timeout=2)
+        return b"" if item is None else item
+
+    def send(self, value: bytes) -> None:
+        self.items.put(value)
+
+    def close(self) -> None:
+        self.items.put(None)
+
+
+class _QueuedProbeInput:
+    def __init__(self, process: "_QueuedProbeProcess", behavior: str) -> None:
+        self.process = process
+        self.behavior = behavior
+        self.data = bytearray()
+        self.flushed = False
+
+    def write(self, data: bytes) -> int:
+        self.data.extend(data)
+        return len(data)
+
+    def flush(self) -> None:
+        if self.flushed:
+            return
+        self.flushed = True
+        if self.behavior == "overflow":
+            self.process.stdout.send(b"x" * (1024 * 1024 + 1))
+        elif self.behavior == "closed":
+            self.process.stdout.close()
+            self.process.finish(0)
+        elif self.behavior == "nonzero":
+            self.process.stdout.close()
+            self.process.finish(9)
+
+    def close(self) -> None:
+        pass
+
+
+class _QueuedProbeProcess:
+    def __init__(self, behavior: str, events: list[str]) -> None:
+        self.pid = 12345
+        self.returncode: int | None = None
+        self.stdout = _QueuedProbePipe()
+        self.stderr = _QueuedProbePipe()
+        self.stdin = _QueuedProbeInput(self, behavior)
+        self._done = threading.Event()
+        self.events = events
+
+    def finish(self, returncode: int) -> None:
+        self.returncode = returncode
+        self._done.set()
+        self.stderr.close()
+
+    def wait(self, timeout: float) -> int:
+        if not self._done.wait(timeout):
+            raise subprocess.TimeoutExpired("fake-probe", timeout)
+        assert self.returncode is not None
+        return self.returncode
+
+    def send_signal(self, signal_number: int) -> None:
+        del signal_number
+        self.events.append("terminate")
+
+    def terminate(self) -> None:
+        self.events.append("terminate")
+
+    def kill(self) -> None:
+        self.events.append("kill")
+        self.finish(-9)
+        self.stdout.close()
+
+
+@pytest.mark.parametrize(
+    ("behavior", "expected_code"),
+    [("overflow", "output_limit"), ("timeout", "timeout")],
+)
+def test_mcp_deep_probe_real_transport_bounds_failures_and_escalates_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    behavior: str,
+    expected_code: str,
+) -> None:
+    import graphite.doctor_probes as probes
+    import graphite.probe_process as transport
+
+    events: list[str] = []
+    process = _QueuedProbeProcess(behavior, events)
+    monkeypatch.setattr(transport.subprocess, "Popen", lambda *a, **k: process)
+    monkeypatch.setattr(
+        transport,
+        "_gracefully_signal_process_tree",
+        lambda target: target.terminate() is None,
+    )
+    monkeypatch.setattr(
+        transport,
+        "_force_kill_process_tree",
+        lambda target, deadline: target.kill(),
+    )
+
+    started = time.monotonic()
+    check = probes.probe_mcp(tmp_path, timeout_seconds=0.35, _runner=transport.run_bounded_process)
+
+    assert time.monotonic() - started < 1
+    assert check.status == "degraded"
+    assert check.details == {"code": expected_code}
+    assert events.index("terminate") < events.index("kill")
+
+
+def test_mcp_deep_probe_real_transport_handles_nonzero_without_hanging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import graphite.doctor_probes as probes
+    import graphite.probe_process as transport
+
+    process = _QueuedProbeProcess("nonzero", [])
+    monkeypatch.setattr(transport.subprocess, "Popen", lambda *a, **k: process)
+    started = time.monotonic()
+    check = probes.probe_mcp(tmp_path, timeout_seconds=0.35, _runner=transport.run_bounded_process)
+    assert time.monotonic() - started < 1
+    assert check.status == "degraded"
+    assert check.details == {"code": "nonzero"}
+
+
+def test_mcp_deep_probe_real_transport_handles_closed_stdout_without_hanging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import graphite.doctor_probes as probes
+    import graphite.probe_process as transport
+
+    process = _QueuedProbeProcess("closed", [])
+    monkeypatch.setattr(transport.subprocess, "Popen", lambda *a, **k: process)
+    started = time.monotonic()
+    check = probes.probe_mcp(tmp_path, timeout_seconds=0.35, _runner=transport.run_bounded_process)
+    assert time.monotonic() - started < 1
+    assert check.status == "degraded"
+    assert check.details == {"code": "invalid_response"}
+
+
 def test_typescript_deep_probe_is_optional_when_node_is_missing(tmp_path: Path) -> None:
     import graphite.doctor_probes as probes
 
@@ -1127,13 +1273,25 @@ def test_typescript_deep_probe_gives_exact_activation_guidance_when_module_is_mi
     check = probes.probe_typescript(
         tmp_path,
         _node_resolver=lambda root: Path("NODE"),
-        _runner=lambda *a, **k: probes.ProbeProcessResult(1, b"", b"", 0.01),
+        _runner=lambda *a, **k: probes.ProbeProcessResult(0, b'{"missing_module":"typescript"}', b"", 0.01),
     )
     assert check.status == "optional"
     assert check.remediation == (
         "Validate package: node C:/Users/fbmac/atlas/Codex/.codex_state/user_home/scripts/validate-packages.cjs typescript",
         "Then add typescript with the target project's existing package manager.",
     )
+
+
+def test_typescript_deep_probe_runtime_exit_one_is_degraded(tmp_path: Path) -> None:
+    import graphite.doctor_probes as probes
+
+    check = probes.probe_typescript(
+        tmp_path,
+        _node_resolver=lambda root: Path("NODE"),
+        _runner=lambda *a, **k: probes.ProbeProcessResult(1, b"", b"", 0.01),
+    )
+    assert check.status == "degraded"
+    assert check.details == {"code": "invalid_result"}
 
 
 def test_typescript_deep_probe_transpiles_synthetic_constant_and_reports_version_only(tmp_path: Path) -> None:
@@ -1154,6 +1312,10 @@ def test_typescript_deep_probe_transpiles_synthetic_constant_and_reports_version
     assert check.details == {"version": "5.8.2"}
     assert captured["argv"][0:2] == ["NODE", "-e"]
     assert captured["argv"][2] == (
+        "try{require.resolve('typescript')}catch(error){"
+        "if(error&&error.code==='MODULE_NOT_FOUND'){"
+        "process.stdout.write(JSON.stringify({missing_module:'typescript'}));process.exit(0)}"
+        "process.exit(4)} "
         "const ts=require('typescript'); const source='const value: number = 1'; "
         "const result=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022}}); "
         "if(!result.outputText.includes('const value = 1')) process.exit(3); "
