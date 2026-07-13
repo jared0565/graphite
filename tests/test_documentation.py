@@ -1,6 +1,6 @@
 import re
 from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from string import punctuation
 from urllib.parse import unquote
 
@@ -51,6 +51,14 @@ def credential_example_linter_has_violation(text: str) -> bool:
             if len(value) >= 12:
                 return True
     return False
+
+
+def validator_path_is_absolute(value: str, shell: str) -> bool:
+    """Model the documented shell-specific absolute validator-path contract."""
+    if not value:
+        return False
+    path_type = PureWindowsPath if shell == "powershell" else PurePosixPath
+    return path_type(value).is_absolute()
 
 
 def _is_escaped(text: str, index: int) -> bool:
@@ -518,7 +526,7 @@ def test_every_mcp_install_is_gated_by_local_validation() -> None:
                 (offset for offset in range(index) if lines[offset].startswith("#")),
                 default=-1,
             )
-            preceding_window = "\n".join(lines[max(section_start + 1, index - 24) : index])
+            preceding_window = "\n".join(lines[max(section_start + 1, index - 36) : index])
             assert "package-validation policy" in preceding_window.casefold(), (
                 f"{document_name}:{index + 1} installs MCP without preceding policy"
             )
@@ -533,6 +541,13 @@ def test_every_mcp_install_is_gated_by_local_validation() -> None:
             assert "stop" in preceding_window.casefold(), (
                 f"{document_name}:{index + 1} does not fail closed"
             )
+            assert (
+                "[System.IO.Path]::IsPathRooted($env:GRAPHITE_PACKAGE_VALIDATOR)"
+                in preceding_window
+            ), f"{document_name}:{index + 1} lacks the PowerShell rooted-path guard"
+            assert 'case "$GRAPHITE_PACKAGE_VALIDATOR" in' in preceding_window, (
+                f"{document_name}:{index + 1} lacks the POSIX absolute-path guard"
+            )
     assert found, "No MCP activation install instructions were found"
 
 
@@ -543,10 +558,13 @@ def test_validator_workflow_is_portable_fail_closed_and_scoped() -> None:
 
     for document in (readme, contributing):
         assert "GRAPHITE_PACKAGE_VALIDATOR" in document
-        assert "unset or missing" in document.casefold()
-        assert "stop" in document.casefold()
-        assert "environment-specific" in document.casefold()
-        assert "do not download" in document.casefold()
+        document_folded = document.casefold()
+        assert "unset" in document_folded
+        assert "relative" in document_folded
+        assert "missing" in document_folded
+        assert "stop" in document_folded
+        assert "environment-specific" in document_folded
+        assert "do not download" in document_folded
 
     contributing_folded = contributing.casefold()
     assert "repository-reviewed declared `.[dev]` extra" in contributing_folded
@@ -554,6 +572,32 @@ def test_validator_workflow_is_portable_fail_closed_and_scoped() -> None:
     assert "optional activation installs" in contributing_folded
     assert "adding or changing external dependencies or package names" in contributing_folded
     assert "validate-packages.cjs typescript" in combined
+
+
+def test_validator_path_contract_rejects_relative_and_empty_values() -> None:
+    for shell in ("powershell", "posix"):
+        for value in ("", "validate-packages.cjs", "./validate-packages.cjs"):
+            assert not validator_path_is_absolute(value, shell)
+
+    assert validator_path_is_absolute(
+        r"C:\<trusted-tools>\validate-packages.cjs", "powershell"
+    )
+    assert validator_path_is_absolute(
+        r"\\trusted-server\tools\validate-packages.cjs", "powershell"
+    )
+    assert validator_path_is_absolute("/<trusted-tools>/validate-packages.cjs", "posix")
+    assert not validator_path_is_absolute(
+        r"C:\trusted-tools\validate-packages.cjs", "posix"
+    )
+
+
+def test_validator_snippets_require_shell_specific_absolute_paths() -> None:
+    for document_name in ("README.md", "CONTRIBUTING.md"):
+        document = read_document(document_name)
+        assert "[System.IO.Path]::IsPathRooted($env:GRAPHITE_PACKAGE_VALIDATOR)" in document
+        assert 'case "$GRAPHITE_PACKAGE_VALIDATOR" in' in document
+        assert "/*) ;;" in document
+        assert "never execute a relative repository-local validator" in document.casefold()
 
 
 def test_workspace_security_docs_match_source_semantics() -> None:

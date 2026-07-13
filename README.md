@@ -43,12 +43,16 @@ Fast checks do not write to the selected repository. Deep pipeline work writes o
 
 Separately, the no-follow lease validates canonical containment, pinned directory handles, reparse state, and directory identity/bindings before and after each phase. Child processes receive native Job Object containment on Windows or POSIX process group containment, bounded I/O, and one end-to-end deadline. Cleanup is reserved within that deadline. A cleanup timeout is reported as a blocked result, and the cleanup worker retains sole ownership of the live lease while overlapping core probes in the same interpreter/process remain blocked. The local OS user and same-user process namespace remain a best-effort trust boundary: these controls reduce pathname races and contain descendants but cannot fully isolate a malicious process running as the same user.
 
-MCP is optional. Before optional activation installs, the mandatory repository package-validation policy requires a trusted local validator. Set `GRAPHITE_PACKAGE_VALIDATOR` to the absolute path of the trusted `validate-packages.cjs` maintained by your environment. If the variable is unset or missing, or does not name an existing file, stop. Do not download a validator, search for an unknown replacement, or fall back to an unverified script.
+MCP is optional. Before optional activation installs, the mandatory repository package-validation policy requires a trusted local validator. Set `GRAPHITE_PACKAGE_VALIDATOR` to the absolute path of the trusted `validate-packages.cjs` maintained by your environment. If the variable is unset, relative, missing, or does not name an existing file, stop. Never execute a relative repository-local validator. Do not download a validator, search for an unknown replacement, or fall back to an unverified script.
 
 Run the applicable fail-closed check and validation command. PowerShell:
 
 ```powershell
-if ([string]::IsNullOrWhiteSpace($env:GRAPHITE_PACKAGE_VALIDATOR) -or -not (Test-Path -LiteralPath $env:GRAPHITE_PACKAGE_VALIDATOR -PathType Leaf)) { throw "GRAPHITE_PACKAGE_VALIDATOR is unset or missing; stop." }
+if (
+  [string]::IsNullOrWhiteSpace($env:GRAPHITE_PACKAGE_VALIDATOR) -or
+  -not ([System.IO.Path]::IsPathRooted($env:GRAPHITE_PACKAGE_VALIDATOR)) -or
+  -not (Test-Path -LiteralPath $env:GRAPHITE_PACKAGE_VALIDATOR -PathType Leaf)
+) { throw "GRAPHITE_PACKAGE_VALIDATOR is unset, relative, or missing; stop." }
 node $env:GRAPHITE_PACKAGE_VALIDATOR mcp
 if ($LASTEXITCODE -ne 0) { throw "Package validation failed; stop." }
 ```
@@ -56,8 +60,16 @@ if ($LASTEXITCODE -ne 0) { throw "Package validation failed; stop." }
 POSIX shell:
 
 ```sh
-if [ -z "${GRAPHITE_PACKAGE_VALIDATOR:-}" ] || [ ! -f "$GRAPHITE_PACKAGE_VALIDATOR" ]; then
-  printf '%s\n' 'GRAPHITE_PACKAGE_VALIDATOR is unset or missing; stop.' >&2
+if [ -z "${GRAPHITE_PACKAGE_VALIDATOR:-}" ]; then
+  printf '%s\n' 'GRAPHITE_PACKAGE_VALIDATOR is unset; stop.' >&2
+  exit 1
+fi
+case "$GRAPHITE_PACKAGE_VALIDATOR" in
+  /*) ;;
+  *) printf '%s\n' 'GRAPHITE_PACKAGE_VALIDATOR must be an absolute POSIX path; stop.' >&2; exit 1 ;;
+esac
+if [ ! -f "$GRAPHITE_PACKAGE_VALIDATOR" ]; then
+  printf '%s\n' 'GRAPHITE_PACKAGE_VALIDATOR is missing; stop.' >&2
   exit 1
 fi
 node "$GRAPHITE_PACKAGE_VALIDATOR" mcp || exit 1
@@ -71,7 +83,7 @@ python -m pip install -e ".[mcp]"
 
 The deep MCP probe launches an isolated interpreter from a guarded distribution-record import manifest. It rejects current working directory and user-site shadows and does not import Graphite or MCP from the selected repository.
 
-TypeScript compiler resolution is also optional. Use the same configured validator and fail-closed existence check, changing only the validated package argument to `typescript`:
+TypeScript compiler resolution is also optional. Use the same configured validator and fail-closed rooted-path and existence checks, changing only the validated package argument to `typescript`:
 
 ```powershell
 node $env:GRAPHITE_PACKAGE_VALIDATOR typescript
@@ -476,5 +488,4 @@ Once configured, Claude can call these tools automatically:
 - `graphite_community` — list the community around a node
 - `graphite_summary` — stats, god nodes, entry points, surprising connections
 - `graphite_refresh` — rebuild and reload the graph
-
 

@@ -22,12 +22,16 @@ python -m pip install -e ".[dev]"
 
 This bootstrap uses the repository-reviewed declared `.[dev]` extra and does not require per-package validation. The validator rule applies before optional activation installs and before adding or changing external dependencies or package names.
 
-For MCP development, the mandatory repository package-validation policy requires a trusted local validator before activation. Set `GRAPHITE_PACKAGE_VALIDATOR` to the absolute path of the trusted `validate-packages.cjs` maintained by your environment. If the variable is unset or missing, or does not name an existing file, stop. Do not download a validator, discover an unknown replacement, or use an unverified fallback.
+For MCP development, the mandatory repository package-validation policy requires a trusted local validator before activation. Set `GRAPHITE_PACKAGE_VALIDATOR` to the absolute path of the trusted `validate-packages.cjs` maintained by your environment. If the variable is unset, relative, missing, or does not name an existing file, stop. Never execute a relative repository-local validator. Do not download a validator, discover an unknown replacement, or use an unverified fallback.
 
 PowerShell:
 
 ```powershell
-if ([string]::IsNullOrWhiteSpace($env:GRAPHITE_PACKAGE_VALIDATOR) -or -not (Test-Path -LiteralPath $env:GRAPHITE_PACKAGE_VALIDATOR -PathType Leaf)) { throw "GRAPHITE_PACKAGE_VALIDATOR is unset or missing; stop." }
+if (
+  [string]::IsNullOrWhiteSpace($env:GRAPHITE_PACKAGE_VALIDATOR) -or
+  -not ([System.IO.Path]::IsPathRooted($env:GRAPHITE_PACKAGE_VALIDATOR)) -or
+  -not (Test-Path -LiteralPath $env:GRAPHITE_PACKAGE_VALIDATOR -PathType Leaf)
+) { throw "GRAPHITE_PACKAGE_VALIDATOR is unset, relative, or missing; stop." }
 node $env:GRAPHITE_PACKAGE_VALIDATOR mcp
 if ($LASTEXITCODE -ne 0) { throw "Package validation failed; stop." }
 ```
@@ -35,8 +39,16 @@ if ($LASTEXITCODE -ne 0) { throw "Package validation failed; stop." }
 POSIX shell:
 
 ```sh
-if [ -z "${GRAPHITE_PACKAGE_VALIDATOR:-}" ] || [ ! -f "$GRAPHITE_PACKAGE_VALIDATOR" ]; then
-  printf '%s\n' 'GRAPHITE_PACKAGE_VALIDATOR is unset or missing; stop.' >&2
+if [ -z "${GRAPHITE_PACKAGE_VALIDATOR:-}" ]; then
+  printf '%s\n' 'GRAPHITE_PACKAGE_VALIDATOR is unset; stop.' >&2
+  exit 1
+fi
+case "$GRAPHITE_PACKAGE_VALIDATOR" in
+  /*) ;;
+  *) printf '%s\n' 'GRAPHITE_PACKAGE_VALIDATOR must be an absolute POSIX path; stop.' >&2; exit 1 ;;
+esac
+if [ ! -f "$GRAPHITE_PACKAGE_VALIDATOR" ]; then
+  printf '%s\n' 'GRAPHITE_PACKAGE_VALIDATOR is missing; stop.' >&2
   exit 1
 fi
 node "$GRAPHITE_PACKAGE_VALIDATOR" mcp || exit 1
