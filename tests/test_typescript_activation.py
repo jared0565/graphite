@@ -274,11 +274,12 @@ def test_activate_accepts_consent_and_installs_in_exact_order(tmp_path, monkeypa
         "prompt",
         "validator",
         "preinstall_revalidate",
+        "preinstall_revalidate",
         "install",
         "postinstall_snapshot/safety",
         "verify",
     ]
-    assert revalidation_calls == 1
+    assert revalidation_calls == 2
 
 
 def test_activate_returns_already_available_before_manager_inspection(tmp_path):
@@ -701,7 +702,7 @@ def test_activate_deadline_expiry_during_post_state_is_operation_timeout(tmp_pat
     assert result.changed_files == ("package-lock.json", "package.json")
 
 
-@pytest.mark.parametrize("expiry_call", [4, 6])
+@pytest.mark.parametrize("expiry_call", [4, 5])
 def test_activate_deadline_expiry_before_or_during_install_is_operation_timeout(
     tmp_path, expiry_call
 ):
@@ -741,7 +742,7 @@ def test_activate_deadline_expiry_during_verification_is_operation_timeout(tmp_p
         ActivationRequest(root, Config(), True, True, False, False, 30), deps
     )
 
-    assert result.outcome is ActivationOutcome.VERIFICATION_FAILED
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
     assert result.reason == "operation_timeout"
     assert result.changed_files == ("package-lock.json", "package.json")
 
@@ -789,14 +790,31 @@ def test_activate_same_root_lock_is_nonblocking_and_released(tmp_path):
     assert third.reason == "non_interactive"
 
 
-def test_activate_lock_releases_when_prompt_raises(tmp_path):
+def test_activate_contains_prompt_failure_and_releases_lock(tmp_path):
     root = _activation_root(tmp_path)
     events = []
-    deps = _activation_dependencies(tmp_path, root, events, prompt_answer=RuntimeError("secret"))
-    with pytest.raises(RuntimeError, match="secret"):
-        activate_typescript(
-            ActivationRequest(root, Config(), True, True, False, False), deps
-        )
+    secret = f"secret prompt path {tmp_path}"
+    deps = _activation_dependencies(
+        tmp_path, root, events, prompt_answer=RuntimeError(secret)
+    )
+
+    failed = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert failed == ActivationResult(
+        ActivationOutcome.DECLINED,
+        Manager.NPM,
+        "prompt_failed",
+        "package.json",
+        "package-lock.json",
+    )
+    assert secret not in repr(failed)
+    assert [event[0] for event in events] == [
+        "local_probe",
+        "manager_version",
+        "prompt",
+    ]
 
     second_events = []
     deps = _activation_dependencies(
@@ -806,6 +824,257 @@ def test_activate_lock_releases_when_prompt_raises(tmp_path):
         ActivationRequest(root, Config(), True, True, False, False), deps
     )
     assert result.outcome is ActivationOutcome.DECLINED
+
+
+def test_activate_contains_prompt_response_parsing_failure(tmp_path):
+    root = _activation_root(tmp_path)
+    events = []
+
+    class ExplodingAnswer(str):
+        def strip(self, *args, **kwargs):
+            raise RuntimeError(f"secret response path {tmp_path}")
+
+    deps = _activation_dependencies(
+        tmp_path,
+        root,
+        events,
+        prompt_answer=ExplodingAnswer("yes"),
+    )
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.DECLINED
+    assert result.reason == "prompt_failed"
+    assert str(tmp_path) not in repr(result)
+    assert all(event[0] not in {"validator", "install"} for event in events)
+
+
+@pytest.mark.parametrize("mutation", ["config", "new_lock", "shrinkwrap", "manifest"])
+def test_activate_revalidates_after_temporary_factory_before_install(
+    tmp_path, mutation
+):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    temporary = tempfile.TemporaryDirectory(dir=tmp_path)
+
+    def temporary_factory():
+        if mutation == "config":
+            (root / ".npmrc").write_text("unsafe", encoding="utf-8")
+        elif mutation == "new_lock":
+            (root / "pnpm-lock.yaml").write_bytes(_SAFE_LOCKS["pnpm-lock.yaml"])
+        elif mutation == "shrinkwrap":
+            (root / "npm-shrinkwrap.json").write_text("{}", encoding="utf-8")
+        else:
+            (root / "package.json").write_bytes(b'{"dependencies":{"x":"1.0.0"}}')
+        return temporary
+
+    deps.temporary_directory = temporary_factory
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "project_state_changed"
+    assert result.attempted
+    assert all(event[0] != "install" for event in events)
+    assert not Path(temporary.name).exists()
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        (ProbeProcessResult(1, b"secret", b"secret", 0), "install_failed"),
+        (ProbeProcessError("timeout"), "install_timeout"),
+    ],
+)
+def test_activate_inspects_changed_controls_after_failed_install(
+    tmp_path, failure, reason
+):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    base_runner = deps.runner
+
+    def runner(argv, **kwargs):
+        values = [str(value) for value in argv]
+        if "install" in values or "add" in values:
+            events.append(("install", kwargs["timeout_seconds"]))
+            (root / "package.json").write_bytes(
+                b'{"devDependencies":{"typescript":"^5.1.0"}}'
+            )
+            (root / "package-lock.json").write_bytes(
+                b'{"lockfileVersion":3,"packages":{}}'
+            )
+            if isinstance(failure, BaseException):
+                raise failure
+            return failure
+        return base_runner(argv, **kwargs)
+
+    deps.runner = runner
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == reason
+    assert result.changed_files == ("package-lock.json", "package.json")
+    assert "secret" not in repr(result)
+    assert [event[0] for event in events].count("install") == 1
+    assert all(event[0] != "verify" for event in events)
+
+
+@pytest.mark.parametrize("control", ["package.json", "package-lock.json"])
+def test_activate_reports_unsafe_control_after_failed_install(tmp_path, control):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    base_runner = deps.runner
+
+    def runner(argv, **kwargs):
+        values = [str(value) for value in argv]
+        if "install" in values or "add" in values:
+            events.append(("install", kwargs["timeout_seconds"]))
+            path = root / control
+            path.unlink()
+            path.mkdir()
+            return ProbeProcessResult(1, b"secret", b"secret", 0)
+        return base_runner(argv, **kwargs)
+
+    deps.runner = runner
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "control_file_unsafe"
+    assert result.changed_files == (control,)
+    assert all(event[0] != "verify" for event in events)
+
+
+@pytest.mark.parametrize("unsafe", ["config", "new_lock", "shrinkwrap"])
+def test_activate_reports_new_negative_state_after_failed_install(tmp_path, unsafe):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    base_runner = deps.runner
+
+    def runner(argv, **kwargs):
+        values = [str(value) for value in argv]
+        if "install" in values or "add" in values:
+            events.append(("install", kwargs["timeout_seconds"]))
+            if unsafe == "config":
+                (root / ".npmrc").write_text("unsafe", encoding="utf-8")
+            elif unsafe == "new_lock":
+                (root / "pnpm-lock.yaml").write_bytes(_SAFE_LOCKS["pnpm-lock.yaml"])
+            else:
+                (root / "npm-shrinkwrap.json").write_text("{}", encoding="utf-8")
+            return ProbeProcessResult(1, b"secret", b"secret", 0)
+        return base_runner(argv, **kwargs)
+
+    deps.runner = runner
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "project_state_changed"
+    assert all(event[0] != "verify" for event in events)
+
+
+@pytest.mark.parametrize("phase", ["failed_install", "prelaunch_revalidation"])
+def test_activate_cleanup_error_overrides_every_provisional_result(tmp_path, phase):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events, install_ok=False)
+    base_runner = deps.runner
+
+    def runner(argv, **kwargs):
+        process_result = base_runner(argv, **kwargs)
+        values = [str(value) for value in argv]
+        if "install" in values or "add" in values:
+            (root / "package.json").write_bytes(
+                b'{"devDependencies":{"typescript":"^5.1.0"}}'
+            )
+            (root / "package-lock.json").write_bytes(
+                b'{"lockfileVersion":3,"packages":{}}'
+            )
+        return process_result
+
+    deps.runner = runner
+    real_temporary = tempfile.TemporaryDirectory(dir=tmp_path)
+    cleanup_calls = 0
+
+    class FailingCleanup:
+        name = real_temporary.name
+
+        def cleanup(self):
+            nonlocal cleanup_calls
+            cleanup_calls += 1
+            real_temporary.cleanup()
+            raise OSError(f"secret cleanup path {tmp_path}")
+
+    def factory():
+        if phase == "prelaunch_revalidation":
+            (root / ".npmrc").write_text("unsafe", encoding="utf-8")
+        return FailingCleanup()
+
+    deps.temporary_directory = factory
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "isolation_cleanup_failed"
+    assert result.attempted
+    assert cleanup_calls == 1
+    assert str(tmp_path) not in repr(result)
+    expected_installs = 0 if phase == "prelaunch_revalidation" else 1
+    assert [event[0] for event in events].count("install") == expected_installs
+    expected_changed = (
+        ()
+        if phase == "prelaunch_revalidation"
+        else ("package-lock.json", "package.json")
+    )
+    assert result.changed_files == expected_changed
+
+
+@pytest.mark.parametrize("phase", ["failed_install", "prelaunch_revalidation"])
+def test_activate_cleanup_deadline_overrides_every_provisional_result(tmp_path, phase):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events, install_ok=False)
+    real_temporary = tempfile.TemporaryDirectory(dir=tmp_path)
+    now = 0.0
+    cleanup_calls = 0
+
+    class SlowCleanup:
+        name = real_temporary.name
+
+        def cleanup(self):
+            nonlocal cleanup_calls, now
+            cleanup_calls += 1
+            real_temporary.cleanup()
+            now = 31.0
+
+    def factory():
+        if phase == "prelaunch_revalidation":
+            (root / ".npmrc").write_text("unsafe", encoding="utf-8")
+        return SlowCleanup()
+
+    deps.monotonic = lambda: now
+    deps.temporary_directory = factory
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False, 30), deps
+    )
+
+    assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
+    assert result.reason == "operation_timeout"
+    assert result.attempted
+    assert cleanup_calls == 1
+    expected_installs = 0 if phase == "prelaunch_revalidation" else 1
+    assert [event[0] for event in events].count("install") == expected_installs
 
 
 def test_activate_separate_roots_do_not_share_lock(tmp_path):

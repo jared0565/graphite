@@ -801,68 +801,98 @@ def _isolated_home_path(temporary: Any, root: Path) -> Path | None:
         return None
 
 
-def _postinstall_result(
+def _inspect_post_attempt(
     root: Path,
     cfg: Config,
     detection: ActivationDetection,
-    node: Any,
     deadline: _Deadline,
-    runner: Runner,
-) -> ActivationResult:
-    try:
-        manifest_snapshot = snapshot_control_file(root, detection.manifest or "")
-        lockfile_snapshot = snapshot_control_file(root, detection.lockfile or "")
-    except ValueError:
-        return _result_for_detection(
-            detection,
-            ActivationOutcome.INSTALLATION_FAILED,
-            "control_file_unsafe",
-            attempted=True,
-        )
-    changed = tuple(
-        sorted(
-            snapshot.relative_path
-            for before, snapshot in (
-                (detection.manifest_snapshot, manifest_snapshot),
-                (detection.lockfile_snapshot, lockfile_snapshot),
-            )
-            if before != snapshot
-        )
-    )
+) -> tuple[ActivationResult | None, tuple[str, ...]]:
+    changed_names: set[str] = set()
+    control_unsafe = False
+    for before, relative_path in (
+        (detection.manifest_snapshot, detection.manifest),
+        (detection.lockfile_snapshot, detection.lockfile),
+    ):
+        if relative_path is None:
+            continue
+        try:
+            after = snapshot_control_file(root, relative_path)
+        except ValueError:
+            control_unsafe = True
+            changed_names.add(relative_path)
+        else:
+            if before != after:
+                changed_names.add(relative_path)
+    changed = tuple(sorted(changed_names))
     try:
         deadline.remaining()
     except _DeadlineExpired:
-        return _result_for_detection(
-            detection,
-            ActivationOutcome.INSTALLATION_FAILED,
-            "operation_timeout",
-            attempted=True,
-            changed_files=changed,
+        return (
+            _result_for_detection(
+                detection,
+                ActivationOutcome.INSTALLATION_FAILED,
+                "operation_timeout",
+                attempted=True,
+                changed_files=changed,
+            ),
+            changed,
         )
-    current = detect_activation(root, cfg, local_typescript_available=False)
+    try:
+        current = detect_activation(root, cfg, local_typescript_available=False)
+    except Exception:
+        current = None
     try:
         deadline.remaining()
     except _DeadlineExpired:
-        return _result_for_detection(
-            detection,
-            ActivationOutcome.INSTALLATION_FAILED,
-            "operation_timeout",
-            attempted=True,
-            changed_files=changed,
+        return (
+            _result_for_detection(
+                detection,
+                ActivationOutcome.INSTALLATION_FAILED,
+                "operation_timeout",
+                attempted=True,
+                changed_files=changed,
+            ),
+            changed,
+        )
+    if control_unsafe:
+        return (
+            _result_for_detection(
+                detection,
+                ActivationOutcome.INSTALLATION_FAILED,
+                "control_file_unsafe",
+                attempted=True,
+                changed_files=changed,
+            ),
+            changed,
         )
     if (
-        current.result is not None
+        current is None
+        or current.result is not None
         or current.manager is not detection.manager
         or current.manifest != detection.manifest
         or current.lockfile != detection.lockfile
     ):
-        return _result_for_detection(
-            detection,
-            ActivationOutcome.INSTALLATION_FAILED,
-            "project_state_changed",
-            attempted=True,
-            changed_files=changed,
+        return (
+            _result_for_detection(
+                detection,
+                ActivationOutcome.INSTALLATION_FAILED,
+                "project_state_changed",
+                attempted=True,
+                changed_files=changed,
+            ),
+            changed,
         )
+    return None, changed
+
+
+def _verification_result(
+    root: Path,
+    detection: ActivationDetection,
+    node: Any,
+    deadline: _Deadline,
+    runner: Runner,
+    changed: tuple[str, ...],
+) -> ActivationResult:
     verification_timed_out = False
     try:
         verified = probe_local_typescript(root, node, deadline.remaining(), runner)
@@ -897,55 +927,69 @@ def _install_with_isolation(
     dependencies: ActivationDependencies,
 ) -> ActivationResult:
     temporary = None
-    result: ActivationResult | None = None
+    result = _result_for_detection(
+        detection,
+        ActivationOutcome.INSTALLATION_FAILED,
+        "isolation_unavailable",
+        attempted=True,
+    )
     try:
         temporary = dependencies.temporary_directory()
         isolated_home = _isolated_home_path(temporary, root)
         if isolated_home is None:
-            return _result_for_detection(
+            result = _result_for_detection(
                 detection,
                 ActivationOutcome.INSTALLATION_FAILED,
                 "isolation_unavailable",
                 attempted=True,
             )
-        install = run_install(
-            root,
-            command,
-            adapter_for(detection.manager),
-            TRUSTED_REGISTRY,
-            isolated_home,
-            deadline.remaining(),
-            dependencies.runner,
-        )
-        try:
-            deadline.remaining()
-        except _DeadlineExpired:
-            return _result_for_detection(
+        elif not revalidate_activation_detection(root, cfg, detection):
+            result = _result_for_detection(
                 detection,
                 ActivationOutcome.INSTALLATION_FAILED,
-                "operation_timeout",
+                "project_state_changed",
                 attempted=True,
             )
-        if not install.ok:
-            return _result_for_detection(
+        else:
+            install = run_install(
+                root,
+                command,
+                adapter_for(detection.manager),
+                TRUSTED_REGISTRY,
+                isolated_home,
+                deadline.remaining(),
+                dependencies.runner,
+            )
+            inspection, changed = _inspect_post_attempt(
+                root,
+                cfg,
                 detection,
-                ActivationOutcome.INSTALLATION_FAILED,
-                install.reason,
-                attempted=True,
+                deadline,
             )
-        result = _postinstall_result(
-            root,
-            cfg,
-            detection,
-            node,
-            deadline,
-            dependencies.runner,
-        )
+            if inspection is not None:
+                result = inspection
+            elif not install.ok:
+                result = _result_for_detection(
+                    detection,
+                    ActivationOutcome.INSTALLATION_FAILED,
+                    install.reason,
+                    attempted=True,
+                    changed_files=changed,
+                )
+            else:
+                result = _verification_result(
+                    root,
+                    detection,
+                    node,
+                    deadline,
+                    dependencies.runner,
+                    changed,
+                )
     except _DeadlineExpired:
         result = _result_for_detection(
             detection,
             ActivationOutcome.INSTALLATION_FAILED,
-            "install_timeout",
+            "operation_timeout",
             attempted=True,
         )
     except Exception:
@@ -963,11 +1007,11 @@ def _install_with_isolation(
                 result = _result_for_detection(
                     detection,
                     ActivationOutcome.INSTALLATION_FAILED,
-                    "isolation_unavailable",
+                    "isolation_cleanup_failed",
                     attempted=True,
-                    changed_files=result.changed_files if result else (),
+                    changed_files=result.changed_files,
                 )
-            if result is not None and result.outcome is ActivationOutcome.INSTALLED:
+            else:
                 try:
                     deadline.remaining()
                 except _DeadlineExpired:
@@ -978,12 +1022,7 @@ def _install_with_isolation(
                         attempted=True,
                         changed_files=result.changed_files,
                     )
-    return result or _result_for_detection(
-        detection,
-        ActivationOutcome.INSTALLATION_FAILED,
-        "isolation_unavailable",
-        attempted=True,
-    )
+    return result
 
 
 def activate_typescript(
@@ -1106,9 +1145,19 @@ def activate_typescript(
         )
         try:
             answer = deps.prompt(question)
+            accepted = (
+                isinstance(answer, str)
+                and answer.strip().lower() in {"y", "yes"}
+            )
         except EOFError:
-            answer = ""
-        if not isinstance(answer, str) or answer.strip().lower() not in {"y", "yes"}:
+            accepted = False
+        except Exception:
+            return _result_for_detection(
+                detection,
+                ActivationOutcome.DECLINED,
+                "prompt_failed",
+            )
+        if not accepted:
             return _result_for_detection(
                 detection,
                 ActivationOutcome.DECLINED,
