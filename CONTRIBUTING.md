@@ -20,24 +20,40 @@ Activate `.venv` using the command for your shell. Before installing already-dec
 python -m pip install -e ".[dev]"
 ```
 
-For MCP development, the mandatory repository package-validation policy requires this check before activation:
+This bootstrap uses the repository-reviewed declared `.[dev]` extra and does not require per-package validation. The validator rule applies before optional activation installs and before adding or changing external dependencies or package names.
 
-```text
-node "C:\Users\fbmac\atlas\Codex\.codex_state\user_home\scripts\validate-packages.cjs" mcp
+For MCP development, the mandatory repository package-validation policy requires a trusted local validator before activation. Set `GRAPHITE_PACKAGE_VALIDATOR` to the absolute path of the trusted `validate-packages.cjs` maintained by your environment. If the variable is unset or missing, or does not name an existing file, stop. Do not download a validator, discover an unknown replacement, or use an unverified fallback.
+
+PowerShell:
+
+```powershell
+if ([string]::IsNullOrWhiteSpace($env:GRAPHITE_PACKAGE_VALIDATOR) -or -not (Test-Path -LiteralPath $env:GRAPHITE_PACKAGE_VALIDATOR -PathType Leaf)) { throw "GRAPHITE_PACKAGE_VALIDATOR is unset or missing; stop." }
+node $env:GRAPHITE_PACKAGE_VALIDATOR mcp
+if ($LASTEXITCODE -ne 0) { throw "Package validation failed; stop." }
 ```
 
-If validation exits 1, stop. If registry lookup is unavailable, manually verify the exact package spelling and identity. Only after successful validation, install the optional MCP extra as well:
+POSIX shell:
+
+```sh
+if [ -z "${GRAPHITE_PACKAGE_VALIDATOR:-}" ] || [ ! -f "$GRAPHITE_PACKAGE_VALIDATOR" ]; then
+  printf '%s\n' 'GRAPHITE_PACKAGE_VALIDATOR is unset or missing; stop.' >&2
+  exit 1
+fi
+node "$GRAPHITE_PACKAGE_VALIDATOR" mcp || exit 1
+```
+
+Only after the applicable validator command succeeds, the package-validation policy permits installing the optional MCP extra:
 
 ```bash
 python -m pip install -e ".[dev,mcp]"
 ```
 
-Installing these declared extras is different from proposing a new dependency. Before adding or installing any new dependency:
+Installing a repository-reviewed declared bootstrap extra is different from adding or changing an external dependency or package name. For the latter:
 
 1. Verify its exact registry name and project identity to prevent typo-squatting or substitution.
 2. Review its maintenance activity and reputation, license compatibility, published security advisories, and transitive dependency risk.
 3. Obtain maintainer approval before changing dependency declarations or installing it for repository work.
-4. Run the repository package validator before installation; a failed validation blocks the install.
+4. Run the configured repository package validator before installation; an unset, missing, or failed validator blocks the install.
 
 Prefer existing declared dependencies and standard-library capabilities when they are sufficient. Never invent a package name or assume that a similarly named registry project is the intended dependency.
 
@@ -83,7 +99,9 @@ Security-sensitive changes should include tests for hostile input, boundary viol
 
 For doctor work, assume the selected root is hostile. Neither text nor JSON diagnostics may include raw outputs, raw errors, secrets, or absolute paths. Preserve private external workspaces, no-follow identity checks, native child-process containment, bounded parsing and output, redacted error categories, and deadline-coordinated cleanup.
 
-Before any optional-integration activation install, follow the repository package-validation policy. The exact user guardrail for TypeScript is:
+Before any optional activation install, follow the repository package-validation policy and fail-closed `GRAPHITE_PACKAGE_VALIDATOR` workflow above. For TypeScript, run `node $env:GRAPHITE_PACKAGE_VALIDATOR typescript` in PowerShell or `node "$GRAPHITE_PACKAGE_VALIDATOR" typescript` in a POSIX shell, then stop on any non-zero result.
+
+The exact command below is an environment-specific example for the maintained Codex environment where this trusted validator exists; it is not a universal path:
 
 ```text
 node "C:\Users\fbmac\atlas\Codex\.codex_state\user_home\scripts\validate-packages.cjs" typescript

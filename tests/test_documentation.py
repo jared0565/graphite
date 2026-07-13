@@ -18,10 +18,14 @@ SECRET_VALUE = re.compile(
     r"AIza[a-z0-9_-]{20,})\b"
 )
 API_KEY_ASSIGNMENT = re.compile(
-    r"(?i)\bGRAPHITE_LLM_API_KEY\s*=\s*(?P<value>[^\s`]+)"
+    r'''(?i)\bGRAPHITE_LLM_API_KEY\s*=\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s`]+)'''
 )
 AUTHORIZATION_BEARER = re.compile(
-    r"(?i)\bAuthorization\s*:\s*Bearer\s+(?P<value>[^\s`]+)"
+    r'''(?i)\bAuthorization\s*:\s*Bearer\s+(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^\s`]+)'''
+)
+PURE_ENV_REFERENCE = re.compile(
+    r"(?i)(?:\$\{[A-Z_][A-Z0-9_]*\}|\$[A-Z_][A-Z0-9_]*|"
+    r"\$env:[A-Z_][A-Z0-9_]*)"
 )
 
 
@@ -29,8 +33,8 @@ def read_document(name: str) -> str:
     return (ROOT / name).read_text(encoding="utf-8")
 
 
-def contains_secret_example(text: str) -> bool:
-    """Return whether text contains a credential-shaped value, not a placeholder."""
+def credential_example_linter_has_violation(text: str) -> bool:
+    """Lint documentation for credential examples that are not pure placeholders."""
     if SECRET_VALUE.search(text):
         return True
     placeholders = {"...", "redacted", "placeholder", "your-api-key"}
@@ -41,8 +45,7 @@ def contains_secret_example(text: str) -> bool:
             if (
                 value_folded in placeholders
                 or (value.startswith("<") and value.endswith(">"))
-                or value.startswith("${")
-                or value_folded.startswith("$env:")
+                or PURE_ENV_REFERENCE.fullmatch(value)
             ):
                 continue
             if len(value) >= 12:
@@ -416,7 +419,6 @@ def test_readme_documents_system_readiness_and_optional_activation() -> None:
         "exit code",
         "external private temporary workspace",
         "selected repository remains read-only",
-        "identity, reparse-point, and ACL checks",
         "no-follow lease",
         "native Job Object",
         "POSIX process group",
@@ -462,18 +464,20 @@ def test_optional_activation_docs_reject_unsafe_examples() -> None:
     )
     for command in forbidden_global_installs:
         assert command not in documents.casefold()
-    assert not contains_secret_example(documents)
+    assert not credential_example_linter_has_violation(documents)
 
     assert "defaults to 512" in readme
     assert "1–4096" in readme
     assert "16-token cap" in readme
 
 
-def test_secret_example_detection_is_precise() -> None:
+def test_credential_example_linter_is_precise() -> None:
     prohibited = (
         "GRAPHITE_LLM_API_KEY=" + "live-secret-value-12345",
+        'GRAPHITE_LLM_API_KEY="literal secret value"',
         "GRAPHITE_LLM_API_KEY=" + "sk-" + "a" * 20,
         "Authorization: Bearer " + "sk-" + "b" * 20,
+        'Authorization: Bearer "literal session credential"',
         "provider credential " + "ghp_" + "c" * 24,
     )
     allowed = (
@@ -482,18 +486,26 @@ def test_secret_example_detection_is_precise() -> None:
         "GRAPHITE_LLM_API_KEY",
         "GRAPHITE_LLM_API_KEY=...",
         "GRAPHITE_LLM_API_KEY=<provider-secret>",
+        "GRAPHITE_LLM_API_KEY=${SESSION_SECRET}",
+        "GRAPHITE_LLM_API_KEY=$env:SESSION_SECRET",
         "Authorization: Bearer <session-token>",
+    )
+    disguised_literals = (
+        "GRAPHITE_LLM_API_KEY=${SESSION_SECRET:-literal-secret-value}",
+        "GRAPHITE_LLM_API_KEY=$env:SESSION_SECRET:literal-secret-value",
+        "Authorization: Bearer ${TOKEN:-literal-secret-value}",
     )
 
     for example in prohibited:
-        assert contains_secret_example(example)
+        assert credential_example_linter_has_violation(example)
+    for example in disguised_literals:
+        assert credential_example_linter_has_violation(example)
     for example in allowed:
-        assert not contains_secret_example(example)
+        assert not credential_example_linter_has_violation(example)
 
 
 def test_every_mcp_install_is_gated_by_local_validation() -> None:
     install_pattern = re.compile(r"(?i)\bpip install\b.*\[[^\]]*mcp[^\]]*\]")
-    validator_pattern = re.compile(r"validate-packages\.cjs[\"']?\s+mcp\b")
     found: list[str] = []
 
     for document_name in ("README.md", "CONTRIBUTING.md"):
@@ -506,17 +518,74 @@ def test_every_mcp_install_is_gated_by_local_validation() -> None:
                 (offset for offset in range(index) if lines[offset].startswith("#")),
                 default=-1,
             )
-            preceding_window = "\n".join(
-                lines[max(section_start + 1, index - 12) : index]
-            )
+            preceding_window = "\n".join(lines[max(section_start + 1, index - 24) : index])
             assert "package-validation policy" in preceding_window.casefold(), (
                 f"{document_name}:{index + 1} installs MCP without preceding policy"
             )
-            assert validator_pattern.search(preceding_window), (
-                f"{document_name}:{index + 1} installs MCP without preceding validator"
+            assert "GRAPHITE_PACKAGE_VALIDATOR" in preceding_window, (
+                f"{document_name}:{index + 1} lacks a configurable validator"
             )
-
+            assert re.search(
+                r"node\s+(?:\"\$GRAPHITE_PACKAGE_VALIDATOR\"|"
+                r"\$env:GRAPHITE_PACKAGE_VALIDATOR)\s+mcp\b",
+                preceding_window,
+            ), f"{document_name}:{index + 1} does not run the configured validator"
+            assert "stop" in preceding_window.casefold(), (
+                f"{document_name}:{index + 1} does not fail closed"
+            )
     assert found, "No MCP activation install instructions were found"
+
+
+def test_validator_workflow_is_portable_fail_closed_and_scoped() -> None:
+    readme = read_document("README.md")
+    contributing = read_document("CONTRIBUTING.md")
+    combined = "\n".join((readme, contributing))
+
+    for document in (readme, contributing):
+        assert "GRAPHITE_PACKAGE_VALIDATOR" in document
+        assert "unset or missing" in document.casefold()
+        assert "stop" in document.casefold()
+        assert "environment-specific" in document.casefold()
+        assert "do not download" in document.casefold()
+
+    contributing_folded = contributing.casefold()
+    assert "repository-reviewed declared `.[dev]` extra" in contributing_folded
+    assert "does not require per-package validation" in contributing_folded
+    assert "optional activation installs" in contributing_folded
+    assert "adding or changing external dependencies or package names" in contributing_folded
+    assert "validate-packages.cjs typescript" in combined
+
+
+def test_workspace_security_docs_match_source_semantics() -> None:
+    readme = read_document("README.md")
+    architecture = read_document("ARCHITECTURE.md")
+    workspace_source = (ROOT / "src/graphite/probe_workspace.py").read_text(
+        encoding="utf-8"
+    )
+    probes_source = (ROOT / "src/graphite/doctor_probes.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'sddl = f"D:P(A;OICI;FA;;;' in workspace_source
+    assert "_CORE_PROBE_SLOT_ACTIVE" in probes_source
+    assert "_CORE_PROBE_SLOT_LOCK" in probes_source
+    for document in (readme, architecture):
+        document_folded = document.casefold()
+        assert "created with a protected, inheritable current-user dacl" in document_folded
+        assert "pinned" in document_folded
+        assert "reparse" in document_folded
+        assert "identity" in document_folded
+        assert "same interpreter/process" in document_folded
+        assert not re.search(
+            r"(?:checks?|validates?|revalidates?).{0,100}d?acl.{0,100}"
+            r"before and after (?:each|every) phase",
+            document_folded,
+        )
+        assert not re.search(
+            r"d?acl (?:is|are) (?:checked|validated|revalidated)"
+            r".{0,60}(?:each|every) phase",
+            document_folded,
+        )
 
 
 def test_contributing_documents_doctor_test_and_security_contracts() -> None:

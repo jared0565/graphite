@@ -39,15 +39,31 @@ python -m graphite doctor . --deep --include-llm
 
 Each check is `ready` when usable, `optional` when an absent integration does not affect core operation, `degraded` when a non-core capability needs attention, or `blocked` when a core safety or execution requirement failed. The overall result is the most severe check. The exit code boundary is deliberately narrow: `blocked` exits 1, while `ready`, `optional`, and `degraded` exit 0. Use `--json` for the stable machine-readable report.
 
-Fast checks do not write to the selected repository. Deep pipeline work writes only to an external private temporary workspace; the selected repository remains read-only. The lease uses containment, identity, reparse-point, and ACL checks, a no-follow lease, and pinned directory handles. Child processes receive native Job Object containment on Windows or POSIX process group containment, bounded I/O, and one end-to-end deadline. Cleanup is reserved within that deadline. A cleanup timeout is reported as a blocked result, and the cleanup worker retains sole ownership of the live lease while overlapping core probes remain blocked. The local OS user and same-user process namespace remain a best-effort trust boundary: these controls reduce pathname races and contain descendants but cannot fully isolate a malicious process running as the same user.
+Fast checks do not write to the selected repository. Deep pipeline work writes only to an external private temporary workspace; the selected repository remains read-only. On Windows, the private parent and workspace directories are created with a protected, inheritable current-user DACL. That is a creation-time guarantee, not a claim that the DACL is re-read during every probe phase.
 
-MCP is optional. Before activation, the mandatory repository package-validation policy requires validating the declared `mcp` distribution:
+Separately, the no-follow lease validates canonical containment, pinned directory handles, reparse state, and directory identity/bindings before and after each phase. Child processes receive native Job Object containment on Windows or POSIX process group containment, bounded I/O, and one end-to-end deadline. Cleanup is reserved within that deadline. A cleanup timeout is reported as a blocked result, and the cleanup worker retains sole ownership of the live lease while overlapping core probes in the same interpreter/process remain blocked. The local OS user and same-user process namespace remain a best-effort trust boundary: these controls reduce pathname races and contain descendants but cannot fully isolate a malicious process running as the same user.
 
-```text
-node "C:\Users\fbmac\atlas\Codex\.codex_state\user_home\scripts\validate-packages.cjs" mcp
+MCP is optional. Before optional activation installs, the mandatory repository package-validation policy requires a trusted local validator. Set `GRAPHITE_PACKAGE_VALIDATOR` to the absolute path of the trusted `validate-packages.cjs` maintained by your environment. If the variable is unset or missing, or does not name an existing file, stop. Do not download a validator, search for an unknown replacement, or fall back to an unverified script.
+
+Run the applicable fail-closed check and validation command. PowerShell:
+
+```powershell
+if ([string]::IsNullOrWhiteSpace($env:GRAPHITE_PACKAGE_VALIDATOR) -or -not (Test-Path -LiteralPath $env:GRAPHITE_PACKAGE_VALIDATOR -PathType Leaf)) { throw "GRAPHITE_PACKAGE_VALIDATOR is unset or missing; stop." }
+node $env:GRAPHITE_PACKAGE_VALIDATOR mcp
+if ($LASTEXITCODE -ne 0) { throw "Package validation failed; stop." }
 ```
 
-If validation exits 1, stop. If registry lookup is unavailable, manually verify the exact package spelling and identity. Only after that validation succeeds, enable the declared extra:
+POSIX shell:
+
+```sh
+if [ -z "${GRAPHITE_PACKAGE_VALIDATOR:-}" ] || [ ! -f "$GRAPHITE_PACKAGE_VALIDATOR" ]; then
+  printf '%s\n' 'GRAPHITE_PACKAGE_VALIDATOR is unset or missing; stop.' >&2
+  exit 1
+fi
+node "$GRAPHITE_PACKAGE_VALIDATOR" mcp || exit 1
+```
+
+Only after the applicable validator command succeeds, enable the declared extra:
 
 ```bash
 python -m pip install -e ".[mcp]"
@@ -55,7 +71,18 @@ python -m pip install -e ".[mcp]"
 
 The deep MCP probe launches an isolated interpreter from a guarded distribution-record import manifest. It rejects current working directory and user-site shadows and does not import Graphite or MCP from the selected repository.
 
-TypeScript compiler resolution is also optional. Before adding TypeScript, run the mandated package guardrail:
+TypeScript compiler resolution is also optional. Use the same configured validator and fail-closed existence check, changing only the validated package argument to `typescript`:
+
+```powershell
+node $env:GRAPHITE_PACKAGE_VALIDATOR typescript
+if ($LASTEXITCODE -ne 0) { throw "Package validation failed; stop." }
+```
+
+```sh
+node "$GRAPHITE_PACKAGE_VALIDATOR" typescript || exit 1
+```
+
+The following exact command is an environment-specific example for the maintained Codex environment where this trusted path exists; it is not a universal validator location:
 
 ```text
 node "C:\Users\fbmac\atlas\Codex\.codex_state\user_home\scripts\validate-packages.cjs" typescript
@@ -449,7 +476,5 @@ Once configured, Claude can call these tools automatically:
 - `graphite_community` — list the community around a node
 - `graphite_summary` — stats, god nodes, entry points, surprising connections
 - `graphite_refresh` — rebuild and reload the graph
-
-
 
 
