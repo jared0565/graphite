@@ -1,3 +1,5 @@
+import hashlib
+import json
 import re
 import shlex
 from collections.abc import Iterator
@@ -6,6 +8,7 @@ from string import punctuation
 from urllib.parse import unquote
 
 import pytest
+from graphite.routing.registry import BUNDLED_PROFILES
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,12 +86,7 @@ def test_hardened_routing_model_pool_and_evidence_are_documented() -> None:
     )
     combined = "\n".join((readme, architecture, evidence)).casefold()
 
-    for model_id in (
-        "kimi-k2.7-code:cloud",
-        "minimax-m2.7:cloud",
-        "nemotron-3-super:cloud",
-        "minimax-m3:cloud",
-    ):
+    for model_id in BUNDLED_PROFILES:
         assert model_id in combined
     for required in (
         "30-day minimum retirement runway",
@@ -151,13 +149,8 @@ def test_active_routing_evidence_table_matches_the_approved_snapshot() -> None:
         "Status",
         "Effort",
     )
-    assert len(rows) == 4
-    assert {row[0] for row in rows} == {
-        "`kimi-k2.7-code:cloud`",
-        "`minimax-m2.7:cloud`",
-        "`nemotron-3-super:cloud`",
-        "`minimax-m3:cloud`",
-    }
+    assert len(rows) == len(BUNDLED_PROFILES)
+    assert {row[0].strip("`") for row in rows} == set(BUNDLED_PROFILES)
     expected = {
         "`kimi-k2.7-code:cloud`": (
             "`eda07a6592375dcbde7cf167b6d6b368cdd28e244f9d71559fb59919aca882fa`",
@@ -195,6 +188,32 @@ def test_active_routing_evidence_table_matches_the_approved_snapshot() -> None:
     for row in rows:
         assert row[1:7] == expected[row[0]]
         assert row[7:] == ("2026-07-14", "provisional", "`default` only")
+        entry = BUNDLED_PROFILES[row[0].strip("`")]
+        assert int(row[2]) == entry.profile.context_window_tokens
+        role_labels = {"coding_primary": "primary coding", "long_context": "long-context"}
+        assert row[3] == ", ".join(
+            role_labels.get(role.value, role.value.replace("_", " "))
+            for role in entry.roles
+        )
+        assert row[4] == entry.usage_class.value
+        assert row[6] == f"<{entry.evidence_url}>"
+        assert row[7] == entry.evidence_accessed
+        assert entry.profile.provisional is True
+        assert entry.retirement_date is None
+        assert tuple(e.value for e in entry.profile.supported_efforts) == ("default",)
+        assert {effort.value: dict(payload) for effort, payload in entry.effort_payloads.items()} == {"default": {}}
+
+    canonical = [
+        {
+            "model_id": row[0].strip("`"),
+            "digest": row[1].strip("`"),
+            "context": int(row[2]),
+            "provider_capabilities": row[5].split(", "),
+        }
+        for row in sorted(rows, key=lambda item: item[0].strip("`"))
+    ]
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    assert hashlib.sha256(encoded).hexdigest() in evidence
 
 
 def test_routing_docs_state_each_authority_and_recovery_gate() -> None:
@@ -239,22 +258,16 @@ def test_routing_docs_state_each_authority_and_recovery_gate() -> None:
 
 
 def test_glm5_references_are_confined_to_labelled_history_sections() -> None:
-    assert set(ROUTING_OPERATOR_DOCUMENTS) == {
-        "README.md",
-        "ARCHITECTURE.md",
-        "docs/superpowers/implementation-notes/2026-07-14-router-model-pool-evidence.md",
-        "docs/superpowers/implementation-notes/2026-07-14-ollama-routing-contracts.md",
-    }
     notes_root = ROOT / "docs/superpowers/implementation-notes"
     discovered_notes = {
         path.relative_to(ROOT).as_posix()
         for path in notes_root.glob("*.md")
         if "routing" in path.name or "model-pool" in path.name
     }
-    assert discovered_notes == set(ROUTING_EVIDENCE_DOCUMENTS)
+    documents = (*ROUTING_OPERATOR_DOCUMENTS[:2], *sorted(discovered_notes))
     found = 0
     labels = ("removed", "historical", "migration", "superseded")
-    for name in ROUTING_OPERATOR_DOCUMENTS:
+    for name in documents:
         current_heading = ""
         for line in read_document(name).splitlines():
             if line.startswith("#"):

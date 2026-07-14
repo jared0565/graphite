@@ -22,6 +22,14 @@ observation, read `GET http://127.0.0.1:11434/api/tags`, retain only the four ap
 IDs, and emit only `name`, `digest`, `details.context_length`, and `capabilities`.
 Do not retain unrelated inventory entries or local aliases.
 
+Canonical snapshot representation: sort rows by `model_id`; encode a JSON array
+whose objects contain only `model_id`, `digest`, integer `context`, and ordered
+`provider_capabilities`; use UTF-8, lexicographically sorted object keys, and JSON
+separators `,` and `:` with no extra whitespace. Python standard-library equivalent:
+`json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")`.
+The SHA-256 of the four rows below is
+`4bb9957626958885b90d9d6cf22b92e77a7cf09eac7c7bec830a70123684890c`.
+
 ## Approved profile evidence
 
 | Model ID | Digest | Context | Roles | Usage class | Provider capabilities | Official Ollama URL | Accessed | Status | Effort |
