@@ -1,6 +1,7 @@
 # Graphite artifacts (this tool graphs itself via the F:\Projects daemon)
 graph-out/
 **/.cache/graphite/
+**/.graphite/
 .graphite-daemon/
 
 # Python

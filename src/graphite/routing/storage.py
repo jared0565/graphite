@@ -1,0 +1,614 @@
+"""SQLite evidence storage with repository and aggregate trust boundaries."""
+from __future__ import annotations
+
+import os
+import re
+import sqlite3
+import stat
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Final
+
+from .contracts import Effort, ExecutionOutcome, RiskTier, TaskCategory
+
+SCHEMA_VERSION: Final = "1"
+BUSY_TIMEOUT_MS: Final = 2_000
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+_MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}(?::cloud)?$")
+_VERSION = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+_HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+_TABLES = frozenset(
+    {
+        "tasks",
+        "decisions",
+        "approvals",
+        "executions",
+        "outcomes",
+        "shadow_comparisons",
+        "policy_versions",
+        "budget_ledger",
+        "confidence_stats",
+    }
+)
+
+
+class StorageError(RuntimeError):
+    """A stable, path-free persistence failure."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+def _is_reparse_point(metadata: os.stat_result) -> bool:
+    return bool(getattr(metadata, "st_file_attributes", 0) & _REPARSE_POINT)
+
+
+def _selected_root(root: Path) -> Path:
+    try:
+        metadata = root.lstat()
+    except OSError as exc:
+        raise StorageError("repository_root_invalid") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or _is_reparse_point(metadata)
+    ):
+        raise StorageError("repository_root_invalid")
+    try:
+        return root.resolve(strict=True)
+    except OSError as exc:
+        raise StorageError("repository_root_invalid") from exc
+
+
+def _identifier(value: object, code: str) -> str:
+    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
+        raise ValueError(code)
+    return value
+
+
+def _nonnegative_integer(value: object, code: str, maximum: int = 10**12) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > maximum:
+        raise ValueError(code)
+    return value
+
+
+def _translate_database_error(exc: sqlite3.Error) -> StorageError:
+    message = str(exc).casefold()
+    if "locked" in message or "busy" in message:
+        return StorageError("storage_locked")
+    if "database disk image is malformed" in message or "not a database" in message:
+        return StorageError("storage_corrupt")
+    return StorageError("storage_unavailable")
+
+
+def _secure_directory(path: Path) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        metadata = path.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or _is_reparse_point(metadata)
+        ):
+            raise StorageError("storage_path_invalid")
+        if os.name != "nt":
+            path.chmod(0o700)
+    except StorageError:
+        raise
+    except OSError as exc:
+        raise StorageError("storage_unavailable") from exc
+
+
+def _secure_repository_directory(root: Path, path: Path) -> None:
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise StorageError("storage_path_invalid") from exc
+    current = root
+    for part in relative.parts:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            metadata = None
+        except OSError as exc:
+            raise StorageError("storage_unavailable") from exc
+        if metadata is not None:
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or _is_reparse_point(metadata)
+            ):
+                raise StorageError("storage_path_invalid")
+        else:
+            try:
+                current.mkdir(mode=0o700)
+            except OSError as exc:
+                raise StorageError("storage_unavailable") from exc
+        if os.name != "nt":
+            try:
+                current.chmod(0o700)
+            except OSError as exc:
+                raise StorageError("storage_unavailable") from exc
+
+
+def _validate_database_file(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise StorageError("storage_unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or _is_reparse_point(metadata)
+    ):
+        raise StorageError("storage_path_invalid")
+
+
+def _secure_file(path: Path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        path.chmod(0o600)
+    except OSError as exc:
+        raise StorageError("storage_unavailable") from exc
+
+
+_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    """CREATE TABLE IF NOT EXISTS tasks (
+        task_id TEXT PRIMARY KEY,
+        category TEXT NOT NULL,
+        risk TEXT NOT NULL,
+        objective_hash TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS decisions (
+        decision_id TEXT PRIMARY KEY,
+        task_id TEXT REFERENCES tasks(task_id) ON DELETE CASCADE,
+        model_id TEXT,
+        effort TEXT,
+        policy_version TEXT NOT NULL,
+        evidence_version TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS approvals (
+        approval_id TEXT PRIMARY KEY,
+        task_id TEXT REFERENCES tasks(task_id) ON DELETE CASCADE,
+        decision_id TEXT REFERENCES decisions(decision_id) ON DELETE CASCADE,
+        nonce_hash TEXT NOT NULL UNIQUE,
+        manifest_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        reserved_tokens INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS executions (
+        execution_id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        task_id TEXT REFERENCES tasks(task_id) ON DELETE SET NULL,
+        decision_id TEXT REFERENCES decisions(decision_id) ON DELETE SET NULL,
+        approval_id TEXT REFERENCES approvals(approval_id) ON DELETE SET NULL,
+        model_id TEXT NOT NULL,
+        effort TEXT NOT NULL,
+        status TEXT NOT NULL,
+        reserved_tokens INTEGER NOT NULL,
+        actual_input_tokens INTEGER,
+        actual_output_tokens INTEGER,
+        created_at INTEGER NOT NULL,
+        completed_at INTEGER
+    )""",
+    """CREATE TABLE IF NOT EXISTS outcomes (
+        outcome_id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL REFERENCES executions(execution_id) ON DELETE CASCADE,
+        provenance TEXT NOT NULL,
+        success INTEGER NOT NULL CHECK (success IN (0, 1)),
+        severe_failure INTEGER NOT NULL CHECK (severe_failure IN (0, 1)),
+        recorded_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS shadow_comparisons (
+        comparison_id TEXT PRIMARY KEY,
+        primary_execution_id TEXT NOT NULL REFERENCES executions(execution_id) ON DELETE CASCADE,
+        shadow_execution_id TEXT NOT NULL REFERENCES executions(execution_id) ON DELETE CASCADE,
+        verdict TEXT,
+        created_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS policy_versions (
+        policy_version TEXT PRIMARY KEY,
+        policy_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS budget_ledger (
+        entry_id TEXT PRIMARY KEY,
+        approval_id TEXT REFERENCES approvals(approval_id) ON DELETE SET NULL,
+        execution_id TEXT REFERENCES executions(execution_id) ON DELETE SET NULL,
+        entry_type TEXT NOT NULL,
+        token_amount INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS confidence_stats (
+        model_id TEXT NOT NULL,
+        effort TEXT NOT NULL,
+        category TEXT NOT NULL,
+        risk TEXT NOT NULL,
+        sample_count INTEGER NOT NULL,
+        success_count INTEGER NOT NULL,
+        severe_failure_count INTEGER NOT NULL,
+        PRIMARY KEY (model_id, effort, category, risk)
+    )""",
+    "CREATE INDEX IF NOT EXISTS outcomes_recorded_at_idx ON outcomes(recorded_at)",
+    "CREATE INDEX IF NOT EXISTS executions_task_idx ON executions(task_id)",
+)
+
+
+class RepositoryStore:
+    """Detailed evidence that never leaves the selected repository by default."""
+
+    def __init__(self, repository_root: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> None:
+        self.root = _selected_root(repository_root)
+        if isinstance(busy_timeout_ms, bool) or not 100 <= busy_timeout_ms <= 30_000:
+            raise ValueError("busy_timeout_invalid")
+        self.busy_timeout_ms = busy_timeout_ms
+        self.path = self.root / ".graphite" / "routing" / "events.sqlite3"
+
+    def _connect(self) -> sqlite3.Connection:
+        try:
+            connection = sqlite3.connect(
+                self.path,
+                timeout=self.busy_timeout_ms / 1_000,
+                isolation_level=None,
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA journal_mode = WAL")
+            return connection
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def initialize(self) -> None:
+        _secure_repository_directory(self.root, self.path.parent)
+        _validate_database_file(self.path)
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(_SCHEMA[0])
+            existing_version = connection.execute(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()
+            if existing_version is not None and existing_version[0] != SCHEMA_VERSION:
+                raise StorageError("storage_schema_unsupported")
+            for statement in _SCHEMA[1:]:
+                connection.execute(statement)
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_meta(key, value) VALUES('schema_version', ?)",
+                (SCHEMA_VERSION,),
+            )
+            connection.commit()
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+            if result is None or result[0] != "ok":
+                raise StorageError("storage_corrupt")
+        except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+        _validate_database_file(self.path)
+        _secure_file(self.path)
+
+    def integrity_check(self) -> str:
+        try:
+            with self._connect() as connection:
+                row = connection.execute("PRAGMA integrity_check").fetchone()
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+        if row is None or row[0] != "ok":
+            raise StorageError("storage_corrupt")
+        return "ok"
+
+    def pragma_state(self) -> dict[str, int | str]:
+        with self._connect() as connection:
+            foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+            journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).casefold()
+            busy_timeout = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
+        return {
+            "foreign_keys": foreign_keys,
+            "journal_mode": journal_mode,
+            "busy_timeout": busy_timeout,
+        }
+
+    def record_task(
+        self,
+        task_id: str,
+        category: str,
+        risk: str,
+        objective_hash: str,
+        created_at: int,
+    ) -> bool:
+        task_id = _identifier(task_id, "task_id_invalid")
+        category = TaskCategory(category).value
+        risk = RiskTier(risk).value
+        if not _HEX_64.fullmatch(objective_hash):
+            raise ValueError("objective_hash_invalid")
+        created_at = _nonnegative_integer(created_at, "created_at_invalid")
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO tasks(task_id, category, risk, objective_hash, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (task_id, category, risk, objective_hash, created_at),
+                )
+                return cursor.rowcount == 1
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def insert_execution(
+        self,
+        *,
+        execution_id: str,
+        idempotency_key: str,
+        task_id: str | None,
+        decision_id: str | None,
+        approval_id: str | None,
+        model_id: str,
+        effort: str,
+        status: str,
+        reserved_tokens: int,
+        created_at: int,
+    ) -> bool:
+        values = {
+            "execution_id": _identifier(execution_id, "execution_id_invalid"),
+            "idempotency_key": _identifier(idempotency_key, "idempotency_key_invalid"),
+            "task_id": None if task_id is None else _identifier(task_id, "task_id_invalid"),
+            "decision_id": None if decision_id is None else _identifier(decision_id, "decision_id_invalid"),
+            "approval_id": None if approval_id is None else _identifier(approval_id, "approval_id_invalid"),
+            "model_id": _identifier(model_id, "model_id_invalid"),
+            "effort": Effort(effort).value,
+            "status": _identifier(status, "status_invalid"),
+            "reserved_tokens": _nonnegative_integer(reserved_tokens, "reserved_tokens_invalid"),
+            "created_at": _nonnegative_integer(created_at, "created_at_invalid"),
+        }
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT execution_id FROM executions WHERE idempotency_key = ?",
+                (values["idempotency_key"],),
+            ).fetchone()
+            if existing is not None:
+                connection.rollback()
+                return False
+            connection.execute(
+                """INSERT INTO executions(
+                    execution_id, idempotency_key, task_id, decision_id, approval_id,
+                    model_id, effort, status, reserved_tokens, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                tuple(values.values()),
+            )
+            connection.commit()
+            return True
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def record_outcome(
+        self,
+        outcome_id: str,
+        execution_id: str,
+        provenance: str,
+        success: bool,
+        severe_failure: bool,
+        recorded_at: int,
+    ) -> bool:
+        outcome_id = _identifier(outcome_id, "outcome_id_invalid")
+        execution_id = _identifier(execution_id, "execution_id_invalid")
+        if provenance not in {"machine_verified", "ci_imported", "human", "pairwise", "reversion", "ambiguous"}:
+            raise ValueError("provenance_invalid")
+        if not isinstance(success, bool) or not isinstance(severe_failure, bool):
+            raise ValueError("outcome_invalid")
+        recorded_at = _nonnegative_integer(recorded_at, "recorded_at_invalid")
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO outcomes(outcome_id, execution_id, provenance, success, severe_failure, recorded_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (outcome_id, execution_id, provenance, int(success), int(severe_failure), recorded_at),
+                )
+                return cursor.rowcount == 1
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def purge_outcomes_before(self, cutoff: int) -> int:
+        cutoff = _nonnegative_integer(cutoff, "cutoff_invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            deleted = connection.execute(
+                "DELETE FROM outcomes WHERE recorded_at < ?",
+                (cutoff,),
+            ).rowcount
+            connection.execute("DELETE FROM confidence_stats")
+            connection.execute(
+                """INSERT INTO confidence_stats(
+                    model_id, effort, category, risk, sample_count,
+                    success_count, severe_failure_count
+                )
+                SELECT e.model_id, e.effort, t.category, t.risk,
+                    COUNT(*), SUM(o.success), SUM(o.severe_failure)
+                FROM outcomes o
+                JOIN executions e ON e.execution_id = o.execution_id
+                JOIN tasks t ON t.task_id = e.task_id
+                WHERE o.provenance IN ('machine_verified', 'ci_imported')
+                GROUP BY e.model_id, e.effort, t.category, t.risk"""
+            )
+            connection.commit()
+            return int(deleted)
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def confidence_rows(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT model_id, effort, category, risk, sample_count,
+                    success_count, severe_failure_count
+                FROM confidence_stats
+                ORDER BY model_id, effort, category, risk"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def row_count(self, table: str) -> int:
+        if table not in _TABLES:
+            raise ValueError("table_invalid")
+        with self._connect() as connection:
+            return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+@dataclass(frozen=True)
+class AggregateRecord:
+    model_id: str
+    effort: str
+    category: str
+    risk: str
+    outcome: str
+    input_bucket: int
+    output_bucket: int
+    latency_bucket: int
+    policy_version: str
+    recorded_day: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.model_id, str) or not _MODEL_ID.fullmatch(self.model_id):
+            raise ValueError("model_id_invalid")
+        object.__setattr__(self, "effort", Effort(self.effort).value)
+        object.__setattr__(self, "category", TaskCategory(self.category).value)
+        object.__setattr__(self, "risk", RiskTier(self.risk).value)
+        object.__setattr__(self, "outcome", ExecutionOutcome(self.outcome).value)
+        for name in ("input_bucket", "output_bucket", "latency_bucket"):
+            object.__setattr__(self, name, _nonnegative_integer(getattr(self, name), f"{name}_invalid", 20))
+        if not isinstance(self.policy_version, str) or not _VERSION.fullmatch(self.policy_version):
+            raise ValueError("policy_version_invalid")
+        object.__setattr__(self, "recorded_day", _nonnegative_integer(self.recorded_day, "recorded_day_invalid", 1_000_000))
+
+    def to_dict(self) -> dict[str, str | int]:
+        return {
+            "model_id": self.model_id,
+            "effort": self.effort,
+            "category": self.category,
+            "risk": self.risk,
+            "outcome": self.outcome,
+            "input_bucket": self.input_bucket,
+            "output_bucket": self.output_bucket,
+            "latency_bucket": self.latency_bucket,
+            "policy_version": self.policy_version,
+            "recorded_day": self.recorded_day,
+        }
+
+
+def _default_machine_state_dir() -> Path:
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        return (Path(base) if base else Path.home() / "AppData" / "Local") / "Graphite" / "routing"
+    xdg = os.environ.get("XDG_STATE_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".local" / "state") / "graphite" / "routing"
+
+
+class AggregateStore:
+    """Opt-in machine-wide store containing sanitized typed aggregates only."""
+
+    def __init__(
+        self,
+        repository_root: Path,
+        *,
+        opt_in: bool,
+        state_dir: Path | None = None,
+    ) -> None:
+        if not isinstance(opt_in, bool):
+            raise ValueError("aggregate_opt_in_invalid")
+        self.root = _selected_root(repository_root)
+        self.opt_in = opt_in
+        selected_state = (state_dir or _default_machine_state_dir()).resolve(strict=False)
+        try:
+            selected_state.relative_to(self.root)
+        except ValueError:
+            pass
+        else:
+            raise StorageError("aggregate_path_invalid")
+        self.path = selected_state / "aggregate.sqlite3"
+
+    def _initialize(self) -> None:
+        _secure_directory(self.path.parent)
+        try:
+            with sqlite3.connect(self.path, timeout=2.0) as connection:
+                connection.execute("PRAGMA journal_mode = WAL")
+                connection.execute("PRAGMA busy_timeout = 2000")
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS aggregate_events (
+                        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        model_id TEXT NOT NULL,
+                        effort TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        risk TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        input_bucket INTEGER NOT NULL,
+                        output_bucket INTEGER NOT NULL,
+                        latency_bucket INTEGER NOT NULL,
+                        policy_version TEXT NOT NULL,
+                        recorded_day INTEGER NOT NULL
+                    )"""
+                )
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+        _secure_file(self.path)
+
+    def write(self, record: AggregateRecord) -> bool:
+        if not isinstance(record, AggregateRecord):
+            raise ValueError("aggregate_record_invalid")
+        if not self.opt_in:
+            return False
+        self._initialize()
+        values = record.to_dict()
+        try:
+            with sqlite3.connect(self.path, timeout=2.0) as connection:
+                connection.execute("PRAGMA busy_timeout = 2000")
+                connection.execute(
+                    """INSERT INTO aggregate_events(
+                        model_id, effort, category, risk, outcome,
+                        input_bucket, output_bucket, latency_bucket,
+                        policy_version, recorded_day
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    tuple(values.values()),
+                )
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+        return True
+
+    def row_count(self) -> int:
+        if not self.opt_in or not self.path.exists():
+            return 0
+        try:
+            with sqlite3.connect(self.path, timeout=2.0) as connection:
+                return int(connection.execute("SELECT COUNT(*) FROM aggregate_events").fetchone()[0])
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
