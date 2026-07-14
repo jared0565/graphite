@@ -141,7 +141,7 @@ def _activation_dependencies(
         npm_cli.write_bytes(b"trusted npm cli")
     else:
         npm = tools / "npm"
-        npm.write_bytes(b"trusted npm")
+        npm.write_bytes(b"#!/usr/bin/env node\n")
         node.chmod(0o700)
         npm.chmod(0o700)
     probes = 0
@@ -373,6 +373,34 @@ def test_activate_guides_when_node_or_manager_is_unavailable(tmp_path):
         ActivationRequest(root, Config(), True, True, False, False), deps
     )
     assert no_manager.reason == "manager_unavailable"
+    assert [event[0] for event in events] == ["local_probe"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX interpreter binding")
+@pytest.mark.parametrize(
+    "content",
+    (
+        b"#!/bin/sh\nexit 0\n",
+        b"#!/usr/bin/env -S node --no-warnings\n",
+        b"console.log('ambiguous script without a shebang')\n",
+    ),
+)
+def test_activate_guides_when_posix_manager_interpreter_is_unsupported(
+    tmp_path, content
+):
+    root = _activation_root(tmp_path)
+    events = []
+    deps = _activation_dependencies(tmp_path, root, events)
+    manager = Path(deps.environ["PATH"]) / "npm"
+    manager.write_bytes(content)
+    manager.chmod(0o700)
+
+    result = activate_typescript(
+        ActivationRequest(root, Config(), True, True, False, False), deps
+    )
+
+    assert result.outcome is ActivationOutcome.GUIDANCE_ONLY
+    assert result.reason == "manager_unavailable"
     assert [event[0] for event in events] == ["local_probe"]
 
 
@@ -2263,7 +2291,7 @@ def test_activate_revalidates_manager_command_before_install(tmp_path):
     )
 
     assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
-    assert result.reason == ("command_changed" if os.name == "nt" else "executable_changed")
+    assert result.reason == "command_changed"
     assert result.attempted
     assert all(event[0] != "install" for event in events)
 
@@ -2300,12 +2328,35 @@ def _file(path: Path, content: bytes = b"tool") -> TrustedFile:
     path.chmod(0o755)
     stat = path.stat()
     return TrustedFile(
-        path.resolve(),
-        (stat.st_dev, stat.st_ino),
-        stat.st_size,
-        stat.st_mtime_ns,
-        hashlib.sha256(content).hexdigest(),
+        path=path.resolve(),
+        identity=(stat.st_dev, stat.st_ino),
+        size=stat.st_size,
+        mtime_ns=stat.st_mtime_ns,
+        ctime_ns=None if os.name == "nt" else stat.st_ctime_ns,
+        sha256=hashlib.sha256(content).hexdigest(),
+        prefix=content[: dependency_install.MAX_TRUSTED_EXECUTABLE_PREFIX_BYTES],
     )
+
+
+def _copied_python_node(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(Path(sys.executable).resolve(), path)
+    path.chmod(0o755)
+    return path
+
+
+def _recording_node_manager(path: Path, log_path: Path) -> TrustedFile:
+    source = (
+        "#!/usr/bin/env node\n"
+        "import json, os, pathlib, sys\n"
+        f"log = pathlib.Path({str(log_path)!r})\n"
+        "record = {'executable': sys.executable, 'argv': sys.argv, "
+        "'path': os.environ.get('PATH')}\n"
+        "with log.open('a', encoding='utf-8') as stream:\n"
+        "    stream.write(json.dumps(record) + '\\n')\n"
+        "print('11.2.0')\n"
+    )
+    return _file(path, source.encode())
 
 
 def _command(path: Path) -> TrustedCommand:
@@ -2566,8 +2617,10 @@ def test_posix_npm_symlink_launcher_preserves_argv_for_version_and_install(tmp_p
     reference = resolve_trusted_executable("npm", root, str(bin_dir), windows=False)
     assert reference is not None
     assert reference.path == target.path
-    command = command_for(reference)
-    assert command.argv == (str(launcher.absolute()),)
+    node = _file(tmp_path / "node-runtime" / "node", b"trusted node")
+    command = command_for(reference, node)
+    assert command is not None
+    assert command.argv == (str(node.path), str(launcher.absolute()))
 
     calls = []
 
@@ -2585,10 +2638,17 @@ def test_posix_npm_symlink_launcher_preserves_argv_for_version_and_install(tmp_p
         1,
         runner,
     ).ok
-    assert calls[0][0] == [str(launcher.absolute()), "--version"]
-    assert calls[1][0][0] == str(launcher.absolute())
-    assert Path(calls[1][0][0]).name == "npm"
-    assert calls[1][1]["environment"]["PATH"].split(os.pathsep)[0] == str(bin_dir)
+    assert calls[0][0] == [str(node.path), str(launcher.absolute()), "--version"]
+    assert calls[0][1]["environment"] == dependency_install._minimal_node_environment()
+    assert calls[1][0][0:2] == [str(node.path), str(launcher.absolute())]
+    assert Path(calls[1][0][1]).name == "npm"
+    assert calls[1][1]["environment"] == build_install_environment(
+        Manager.NPM,
+        tmp_path / "isolated",
+        (bin_dir,),
+        TRUSTED_REGISTRY,
+        os.environ,
+    )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX launcher symlink policy")
@@ -2611,11 +2671,13 @@ def test_posix_corepack_style_launcher_chain_preserves_pnpm_name(tmp_path):
 
     reference = resolve_trusted_executable("pnpm", root, str(bin_dir), windows=False)
     assert reference is not None and reference.path == target.path
-    command = command_for(reference)
+    node = _file(tmp_path / "node-runtime" / "node", b"trusted node")
+    command = command_for(reference, node)
+    assert command is not None
     calls = []
 
     def runner(argv, **kwargs):
-        calls.append(argv)
+        calls.append((argv, kwargs))
         return ProbeProcessResult(0, b"11.1.0\n", b"", 0)
 
     assert run_manager_version(command, root, 1, runner).ok
@@ -2628,9 +2690,141 @@ def test_posix_corepack_style_launcher_chain_preserves_pnpm_name(tmp_path):
         1,
         runner,
     ).ok
-    assert calls[0] == [str(pnpm.absolute()), "--version"]
-    assert calls[1][0] == str(pnpm.absolute())
-    assert Path(calls[0][0]).name == "pnpm"
+    assert calls[0][0] == [str(node.path), str(pnpm.absolute()), "--version"]
+    assert calls[0][1]["environment"] == dependency_install._minimal_node_environment()
+    assert calls[1][0][0:2] == [str(node.path), str(pnpm.absolute())]
+    assert calls[1][1]["environment"] == build_install_environment(
+        Manager.PNPM,
+        tmp_path / "isolated",
+        (bin_dir,),
+        TRUSTED_REGISTRY,
+        os.environ,
+    )
+    assert Path(calls[0][0][1]).name == "pnpm"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX interpreter binding")
+@pytest.mark.parametrize("manager", (Manager.NPM, Manager.PNPM))
+def test_posix_node_script_manager_uses_exact_trusted_node_without_node_on_child_path(
+    tmp_path, manager
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    node_path = _copied_python_node(tmp_path / "runtime" / "node")
+    node = resolve_trusted_executable(
+        "node", root, str(node_path.parent), windows=False
+    )
+    assert node is not None and node.path == node_path.resolve()
+    bin_dir = tmp_path / "toolchain" / "bin"
+    target = _recording_node_manager(
+        tmp_path / "toolchain" / "lib" / "corepack.js", tmp_path / "calls.jsonl"
+    )
+    bin_dir.mkdir(parents=True)
+    launcher = bin_dir / manager.value
+    try:
+        if manager is Manager.PNPM:
+            corepack = bin_dir / "corepack"
+            corepack.symlink_to(Path("../lib/corepack.js"))
+            launcher.symlink_to("corepack")
+        else:
+            launcher.symlink_to(Path("../lib/corepack.js"))
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+    reference = resolve_trusted_executable(
+        manager.value, root, str(bin_dir), windows=False
+    )
+    assert reference is not None and reference.path == target.path
+    command = command_for(reference, node)
+    assert command is not None
+    assert command.argv == (str(node.path), str(launcher.absolute()))
+
+    assert run_manager_version(command, root, 5).ok
+    assert run_install(
+        root,
+        command,
+        adapter_for(manager),
+        TRUSTED_REGISTRY,
+        tmp_path / "isolated",
+        5,
+    ).ok
+
+    records = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert len(records) == 2
+    assert all(record["executable"] == str(node.path) for record in records)
+    assert records[0]["argv"] == [str(launcher.absolute()), "--version"]
+    assert records[1]["argv"] == [
+        str(launcher.absolute()),
+        *adapter_for(manager).argument_tail(TRUSTED_REGISTRY),
+    ]
+    assert Path(records[0]["argv"][0]).name == manager.value
+    assert all(str(node.path.parent) not in record["path"].split(os.pathsep) for record in records)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX interpreter binding")
+@pytest.mark.parametrize("phase", ("version", "install"))
+@pytest.mark.parametrize("mutation", ("replace", "repoint"))
+def test_posix_node_script_manager_rejects_node_provenance_change_before_phase(
+    tmp_path, phase, mutation
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    node_path = _copied_python_node(tmp_path / "runtime" / "node")
+    node = resolve_trusted_executable("node", root, str(node_path.parent), windows=False)
+    bin_dir = tmp_path / "toolchain" / "bin"
+    target = _recording_node_manager(
+        tmp_path / "toolchain" / "lib" / "npm-cli.js", tmp_path / "unexpected.jsonl"
+    )
+    bin_dir.mkdir(parents=True)
+    launcher = bin_dir / "npm"
+    try:
+        launcher.symlink_to(Path("../lib/npm-cli.js"))
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+    reference = resolve_trusted_executable("npm", root, str(bin_dir), windows=False)
+    assert node is not None and reference is not None and reference.path == target.path
+    command = command_for(reference, node)
+    assert command is not None
+
+    if mutation == "replace":
+        node_path.unlink()
+        _copied_python_node(node_path)
+    else:
+        original = tmp_path / "runtime-original"
+        node_path.parent.rename(original)
+        try:
+            node_path.parent.symlink_to(original, target_is_directory=True)
+        except OSError as error:
+            pytest.skip(f"directory symlink unavailable: {error.__class__.__name__}")
+
+    result = (
+        run_manager_version(command, root, 5)
+        if phase == "version"
+        else run_install(
+            root,
+            command,
+            adapter_for(Manager.NPM),
+            TRUSTED_REGISTRY,
+            tmp_path / "isolated",
+            5,
+        )
+    )
+    assert not result.ok
+    assert not (tmp_path / "unexpected.jsonl").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX interpreter binding")
+def test_posix_native_manager_binary_remains_direct(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    bin_dir = tmp_path / "bin"
+    manager = _file(bin_dir / "bun", b"\x7fELF" + b"\0" * 64)
+    node = _file(tmp_path / "runtime" / "node")
+    reference = resolve_trusted_executable("bun", root, str(bin_dir), windows=False)
+    assert reference is not None and reference.path == manager.path
+
+    command = command_for(reference, node)
+
+    assert command == TrustedCommand((str(manager.path),), (reference,))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX launcher symlink policy")
@@ -2741,7 +2935,7 @@ def test_posix_launcher_rejects_ancestor_binding_replacement_before_launch(
     root.mkdir()
     tree = tmp_path / "toolchain"
     bin_dir = tree / "bin"
-    target = _file(tree / "lib" / "npm-cli.js")
+    target = _file(tree / "lib" / "npm-cli.js", b"\x7fELF" + b"\0" * 64)
     launcher = bin_dir / "npm"
     bin_dir.mkdir(parents=True)
     try:
@@ -2792,7 +2986,10 @@ def test_posix_launcher_directory_component_symlink_policy(tmp_path, mutation):
     visible = tmp_path / "visible"
     primary = tmp_path / "private-primary"
     alternate = tmp_path / "private-alternate"
-    for tree, content in ((primary, b"primary"), (alternate, b"alternate")):
+    for tree, content in (
+        (primary, b"\x7fELF" + b"primary"),
+        (alternate, b"\x7fELF" + b"alternate"),
+    ):
         target = _file(tree / "usr" / "local" / "lib" / "npm-cli.js", content)
         launcher = tree / "usr" / "local" / "bin" / "npm"
         launcher.parent.mkdir(parents=True)
@@ -2814,7 +3011,9 @@ def test_posix_launcher_directory_component_symlink_policy(tmp_path, mutation):
         return
 
     assert reference is not None
-    command = command_for(reference)
+    node = _file(tmp_path / "runtime" / "node")
+    command = command_for(reference, node)
+    assert command is not None
     if mutation == "none":
         calls = []
 
@@ -2893,7 +3092,9 @@ def test_posix_launcher_chain_mutation_fails_before_launch(tmp_path, mutation):
 
     reference = resolve_trusted_executable("npm", root, str(bin_dir), windows=False)
     assert reference is not None
-    command = command_for(reference)
+    node = _file(tmp_path / "runtime" / "node")
+    command = command_for(reference, node)
+    assert command is not None
     if mutation == "launcher":
         launcher.unlink()
         launcher.symlink_to(replacement.path)
@@ -2924,7 +3125,7 @@ def test_posix_launcher_chain_mutation_fails_before_launch(tmp_path, mutation):
         tmp_path / "isolated",
         1,
         runner,
-    ).reason == "executable_changed"
+    ).reason == "command_changed"
     assert not called
 
 

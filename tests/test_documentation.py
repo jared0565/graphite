@@ -778,6 +778,9 @@ def test_architecture_pins_typescript_activation_security_boundary() -> None:
         "validator and control-file symlink rules remain strict",
         "every root-to-leaf directory/component binding",
         "group/world-writable non-sticky ancestors fail closed",
+        "canonical trusted-node plus lexical-launcher argv",
+        "child `path` is never used to select node",
+        "ambiguous or unsupported interpreters fail closed",
         "same-uid process may still race",
     ):
         assert phrase in folded

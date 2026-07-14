@@ -29,6 +29,7 @@ MAX_TRUSTED_FILE_BYTES = 256 * 1024 * 1024
 MAX_TRUSTED_LAUNCHER_LINKS = 8
 MAX_TRUSTED_LINK_TARGET_BYTES = 4096
 MAX_TRUSTED_ROUTE_COMPONENTS = 256
+MAX_TRUSTED_EXECUTABLE_PREFIX_BYTES = 256
 ACTIVATION_MAX_FILES = 100_000
 
 _VERSION_RE = re.compile(
@@ -99,12 +100,18 @@ class TrustedFile:
     identity: tuple[int, int]
     size: int
     mtime_ns: int
+    ctime_ns: int | None
     sha256: str
     launcher_path: Path | None = None
     launcher_route: tuple[TrustedPathComponent, ...] = ()
+    prefix: bytes = b""
 
     def __post_init__(self) -> None:
-        if (self.launcher_path is None) != (not self.launcher_route):
+        if (
+            (self.launcher_path is None) != (not self.launcher_route)
+            or not isinstance(self.prefix, bytes)
+            or len(self.prefix) > MAX_TRUSTED_EXECUTABLE_PREFIX_BYTES
+        ):
             raise ValueError("trusted_file_launcher_invalid")
 
     @property
@@ -136,8 +143,9 @@ class VersionResult:
 class TrustedCommand:
     """An argv prefix and every external file on which that prefix depends.
 
-    The first reference is always executable.  Remaining references are data
-    files consumed by that executable (for example npm-cli.js).
+    The first reference is always the OS executable. Remaining references are
+    pinned files consumed by it, including a POSIX manager's lexical script
+    route or the Windows npm CLI.
     """
 
     argv: tuple[str, ...]
@@ -415,13 +423,15 @@ def _trusted_posix_launcher(path: Path, root: Path) -> TrustedFile | None:
     ):
         return None
     return TrustedFile(
-        target_reference.path,
-        target_reference.identity,
-        target_reference.size,
-        target_reference.mtime_ns,
-        target_reference.sha256,
-        lexical,
-        route,
+        path=target_reference.path,
+        identity=target_reference.identity,
+        size=target_reference.size,
+        mtime_ns=target_reference.mtime_ns,
+        ctime_ns=target_reference.ctime_ns,
+        sha256=target_reference.sha256,
+        launcher_path=lexical,
+        launcher_route=route,
+        prefix=target_reference.prefix,
     )
 
 
@@ -461,11 +471,15 @@ def _trusted_file(path: Path, root: Path, *, executable: bool) -> TrustedFile | 
         ):
             return None
         digest = hashlib.sha256()
+        prefix = bytearray()
         total_read = 0
         while chunk := os.read(descriptor, 64 * 1024):
             total_read += len(chunk)
             if total_read > MAX_TRUSTED_FILE_BYTES:
                 return None
+            if len(prefix) < MAX_TRUSTED_EXECUTABLE_PREFIX_BYTES:
+                remaining = MAX_TRUSTED_EXECUTABLE_PREFIX_BYTES - len(prefix)
+                prefix.extend(chunk[:remaining])
             digest.update(chunk)
         after = os.fstat(descriptor)
     except OSError:
@@ -473,7 +487,15 @@ def _trusted_file(path: Path, root: Path, *, executable: bool) -> TrustedFile | 
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_nlink")
+    stable_fields = (
+        "st_dev",
+        "st_ino",
+        "st_size",
+        "st_mtime_ns",
+        "st_nlink",
+    )
+    if os.name != "nt":
+        stable_fields += ("st_ctime_ns",)
     if total_read != before.st_size or any(
         getattr(initial, field, 1) != getattr(before, field, 1) for field in stable_fields
     ) or any(
@@ -481,11 +503,13 @@ def _trusted_file(path: Path, root: Path, *, executable: bool) -> TrustedFile | 
     ):
         return None
     return TrustedFile(
-        canonical,
-        (before.st_dev, before.st_ino),
-        before.st_size,
-        before.st_mtime_ns,
-        digest.hexdigest(),
+        path=canonical,
+        identity=(before.st_dev, before.st_ino),
+        size=before.st_size,
+        mtime_ns=before.st_mtime_ns,
+        ctime_ns=None if os.name == "nt" else before.st_ctime_ns,
+        sha256=digest.hexdigest(),
+        prefix=bytes(prefix),
     )
 
 
@@ -583,7 +607,52 @@ def resolve_windows_npm_prefix(
     return None
 
 
-def command_for(reference: TrustedFile) -> TrustedCommand:
+_NODE_SHEBANGS = frozenset(
+    {
+        b"#!/usr/bin/env node",
+        b"#!/usr/bin/node",
+        b"#!/bin/node",
+    }
+)
+_POSIX_NATIVE_MAGICS = (
+    b"\x7fELF",
+    b"\xfe\xed\xfa\xce",
+    b"\xce\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xcf",
+    b"\xcf\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+    b"\xca\xfe\xba\xbf",
+    b"\xbf\xba\xfe\xca",
+)
+
+
+def _posix_manager_execution_kind(reference: TrustedFile) -> str | None:
+    prefix = reference.prefix
+    if prefix.startswith(b"#!"):
+        newline = prefix.find(b"\n")
+        if newline < 0:
+            return None
+        shebang = prefix[:newline]
+        if shebang.endswith(b"\r"):
+            shebang = shebang[:-1]
+        return "node" if shebang in _NODE_SHEBANGS else None
+    return "native" if prefix.startswith(_POSIX_NATIVE_MAGICS) else None
+
+
+def command_for(
+    reference: TrustedFile, node: TrustedFile | None = None
+) -> TrustedCommand | None:
+    if os.name != "nt" and reference.launcher_path is not None:
+        execution_kind = _posix_manager_execution_kind(reference)
+        if execution_kind == "node":
+            if node is None or node.launcher_path is not None:
+                return None
+            return TrustedCommand(
+                (str(node.path), str(reference.command_path)), (node, reference)
+            )
+        if execution_kind != "native":
+            return None
     return TrustedCommand((str(reference.command_path),), (reference,))
 
 
@@ -1266,7 +1335,8 @@ def _minimal_node_environment(source: Mapping[str, str] | None = None) -> dict[s
 
 def _command_revalidation_reason(command: TrustedCommand, root: Path) -> str | None:
     for index, reference in enumerate(command.references):
-        if not revalidate_trusted_file(reference, root, executable=index == 0):
+        executable = index == 0 or reference.launcher_path is not None
+        if not revalidate_trusted_file(reference, root, executable=executable):
             return "executable_changed" if index == 0 else "command_changed"
     return None
 
@@ -1355,7 +1425,12 @@ def run_install(
         return StepResult(False, "install_failed")
     if not _prepare_isolated_install_home(root, isolated_home, adapter.manager):
         return StepResult(False, "install_failed")
-    directories = (command.references[0].command_path.parent,)
+    path_reference = (
+        command.references[-1]
+        if os.name != "nt" and command.references[-1].launcher_path is not None
+        else command.references[0]
+    )
+    directories = (path_reference.command_path.parent,)
     try:
         environment = build_install_environment(
             adapter.manager, isolated_home, directories, TRUSTED_REGISTRY, os.environ

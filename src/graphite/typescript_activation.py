@@ -1006,11 +1006,12 @@ def _resolve_manager_command(
     root: Path,
     manager: Manager,
     path_source: str,
+    node: Any,
 ):
     if os.name == "nt" and manager is Manager.NPM:
         return resolve_windows_npm_prefix(root, path_source)
     executable = resolve_trusted_executable(manager.value, root, path_source)
-    return command_for(executable) if executable is not None else None
+    return command_for(executable, node) if executable is not None else None
 
 
 def _validated_isolated_lease(
@@ -1413,6 +1414,7 @@ def activate_typescript(
             canonical_root,
             detection.manager,
             path_source,
+            node,
         )
         if command is None:
             return _result_for_detection(
