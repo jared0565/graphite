@@ -33,6 +33,8 @@ from .ingest import collect_files
 from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
 from .llm import enrich_report
+from .routing.approval import approval_prompt
+from .routing.service import RoutingService
 from .query import _find_node, annotate_communities, query
 from .replacement_audit import audit_replacement, format_replacement_audit
 from .review import (
@@ -960,6 +962,91 @@ def cmd_daemon_uninstall_startup_windows(args: argparse.Namespace) -> int:
     return 0
 
 
+def _route_print(payload: dict[str, Any], *, json_mode: bool) -> None:
+    if json_mode:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def cmd_route_recommend(args: argparse.Namespace) -> int:
+    service = RoutingService(args.path)
+    recommendation = service.recommend(
+        objective=args.objective,
+        targets=tuple(args.target or ()),
+    )
+    _route_print(recommendation.to_dict(), json_mode=args.json)
+    return 3 if recommendation.manual_handoff else 0
+
+
+def cmd_route_run(args: argparse.Namespace) -> int:
+    service = RoutingService(args.path)
+    recommendation = service.recommend(
+        objective=args.objective,
+        targets=tuple(args.target or ()),
+    )
+    public = recommendation.to_dict()
+    _route_print(public, json_mode=args.json)
+    if recommendation.manual_handoff:
+        return 3
+    approved = approval_prompt(
+        stdin=sys.stdin,
+        stdout=sys.stdout,
+        stdin_is_tty=sys.stdin.isatty(),
+        stdout_is_tty=sys.stdout.isatty(),
+        json_mode=args.json,
+        assume_yes=args.yes,
+        ci=bool(os.environ.get("CI")),
+    )
+    if not approved:
+        return 2
+    if args.shadow:
+        print(json.dumps({"shadow": "separate_approval_required", "budget": "bounded"}))
+        shadow_approved = approval_prompt(
+            stdin=sys.stdin,
+            stdout=sys.stdout,
+            stdin_is_tty=sys.stdin.isatty(),
+            stdout_is_tty=sys.stdout.isatty(),
+            json_mode=args.json,
+            assume_yes=args.yes,
+            ci=bool(os.environ.get("CI")),
+        )
+        if not shadow_approved:
+            print(json.dumps({"shadow": "declined", "primary": "continuing"}))
+    receipt = service.execute_approved(recommendation)
+    _route_print(receipt, json_mode=args.json)
+    return 0
+
+
+def cmd_route_status(args: argparse.Namespace) -> int:
+    _route_print(RoutingService(args.path).status(), json_mode=args.json)
+    return 0
+
+
+def cmd_route_policy(args: argparse.Namespace) -> int:
+    payload = RoutingService(args.path).policy(
+        refresh_models=args.refresh_models,
+        promote=args.promote,
+        rollback=args.rollback,
+    )
+    _route_print(payload, json_mode=args.json)
+    return 0
+
+
+def cmd_route_record_outcome(args: argparse.Namespace) -> int:
+    if args.provenance in {"machine_verified", "ci_imported"} and not args.evidence_file:
+        print("[graphite] supported evidence import required", file=sys.stderr)
+        return 6
+    payload = RoutingService(args.path).record_outcome(
+        execution_id=args.execution_id,
+        provenance=args.provenance,
+        accepted=args.accepted,
+        evidence_file=args.evidence_file,
+    )
+    _route_print(payload, json_mode=args.json)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="graphite", description="Local-first code knowledge graph.")
     parser.add_argument("--output-dir", default=None, help="Output directory (default: graph-out)")
@@ -978,6 +1065,50 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--llm-max-input-chars", type=int, default=None, help="Maximum graph-summary prompt characters")
 
     sub = parser.add_subparsers(dest="command")
+
+    p_route = sub.add_parser("route", help="Recommend or run approval-gated model routing")
+    route_sub = p_route.add_subparsers(dest="route_command", required=True)
+
+    p_route_recommend = route_sub.add_parser("recommend", help="Compute an offline recommendation")
+    p_route_recommend.add_argument("path", help="Repository path")
+    p_route_recommend.add_argument("--objective", required=True, help="Bounded task objective")
+    p_route_recommend.add_argument("--target", action="append", default=[], help="Repository-relative target")
+    p_route_recommend.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_route_recommend.set_defaults(func=cmd_route_recommend)
+
+    p_route_run = route_sub.add_parser("run", help="Run one separately approved Ollama call")
+    p_route_run.add_argument("path", help="Repository path")
+    p_route_run.add_argument("--objective", required=True, help="Bounded task objective")
+    p_route_run.add_argument("--target", action="append", default=[], help="Repository-relative target")
+    p_route_run.add_argument("--shadow", action="store_true", help="Offer a separate bounded shadow evaluation")
+    p_route_run.add_argument("--yes", action="store_true", help="Never grants routing consent; interactive approval is still required")
+    p_route_run.add_argument("--json", action="store_true", help="Non-interactive output; execution is disabled")
+    p_route_run.set_defaults(func=cmd_route_run)
+
+    p_route_outcome = route_sub.add_parser("record-outcome", help="Append supported outcome evidence")
+    p_route_outcome.add_argument("path", help="Repository path")
+    p_route_outcome.add_argument("--execution-id", required=True)
+    p_route_outcome.add_argument(
+        "--provenance", required=True,
+        choices=["machine_verified", "ci_imported", "human", "pairwise", "reversion", "ambiguous"],
+    )
+    p_route_outcome.add_argument("--accepted", action="store_true")
+    p_route_outcome.add_argument("--evidence-file", default=None)
+    p_route_outcome.add_argument("--json", action="store_true")
+    p_route_outcome.set_defaults(func=cmd_route_record_outcome)
+
+    p_route_status = route_sub.add_parser("status", help="Read local routing readiness")
+    p_route_status.add_argument("path", help="Repository path")
+    p_route_status.add_argument("--json", action="store_true")
+    p_route_status.set_defaults(func=cmd_route_status)
+
+    p_route_policy = route_sub.add_parser("policy", help="Inspect or explicitly manage recommendation policy")
+    p_route_policy.add_argument("path", help="Repository path")
+    p_route_policy.add_argument("--refresh-models", action="store_true")
+    p_route_policy.add_argument("--promote", default=None)
+    p_route_policy.add_argument("--rollback", default=None)
+    p_route_policy.add_argument("--json", action="store_true")
+    p_route_policy.set_defaults(func=cmd_route_policy)
 
     p_scan = sub.add_parser("scan", help="Scan files and write manifest")
     p_scan.add_argument("path", help="Repository path")
@@ -1224,4 +1355,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
