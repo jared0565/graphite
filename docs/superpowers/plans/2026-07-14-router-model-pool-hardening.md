@@ -462,7 +462,7 @@ git commit -m "docs: document hardened router model pool"
 - Modify: `docs/superpowers/plans/2026-07-14-router-model-pool-hardening.md`
 - Modify only after successful/attempted approved smoke: `docs/superpowers/plans/2026-07-14-adaptive-development-router.md`
 
-- [ ] **Step 1: Run focused model-pool suites**
+- [x] **Step 1: Run focused model-pool suites**
 
 ```powershell
 $env:PYTHONPATH=(Resolve-Path 'src').Path
@@ -471,7 +471,7 @@ python -B -m pytest -q -p no:cacheprovider --basetemp F:\tmp\graphite-model-pool
 
 Expected: all pass; only documented platform permission skips are acceptable.
 
-- [ ] **Step 2: Run full static and automated acceptance**
+- [x] **Step 2: Run full static and automated acceptance**
 
 ```powershell
 $env:PYTHONPATH=(Resolve-Path 'src').Path
@@ -482,7 +482,7 @@ git diff --check
 
 Expected: all pass; no routing security or authority test is skipped.
 
-- [ ] **Step 3: Rebuild and validate Graphite's graph**
+- [x] **Step 3: Rebuild and validate Graphite's graph**
 
 ```powershell
 $env:PYTHONPATH=(Resolve-Path 'src').Path
@@ -493,7 +493,7 @@ python -B -m graphite validate --graph-json graph-out/graph.json --json
 
 Expected: fresh graph; zero validation errors and warnings.
 
-- [ ] **Step 4: Rebuild the synthetic smoke fixture and refresh inventory**
+- [x] **Step 4: Rebuild the synthetic smoke fixture and refresh inventory**
 
 Use only `F:\tmp\graphite-router-smoke`. Verify its three source/test/documentation
 files contain no secret pattern, rebuild from that directory, run its unit test, and
@@ -511,7 +511,7 @@ Expected recommendation: `kimi-k2.7-code:cloud`, `default`, low risk, source man
 containing only the fixture source and test. Record estimated tokens and the maximum
 reservation (`max_input_tokens + max_output_tokens`) before proceeding.
 
-- [ ] **Step 5: Stop and request explicit live-call approval**
+- [x] **Step 5: Stop and request explicit live-call approval**
 
 Present the exact model ID and current digest, effort, manifest paths/hashes/bytes,
 estimated tokens, maximum reserved tokens, timeout, and the fact that Ollama labels
@@ -529,23 +529,23 @@ record receipt ID, exact model, effort, input/output usage, latency, hashes, and
 human accepted/rejected verdict. If provider execution fails, record the stable
 failure reason without response body or credentials; do not retry or switch models.
 
-- [ ] **Step 7: Mark acceptance status accurately**
+- [x] **Step 7: Mark acceptance status accurately**
 
 Set the hardening design status to `Implemented` only after offline acceptance.
 Record live smoke separately as `passed`, `declined`, or `external provider failure`.
 Check the original adaptive-router smoke item only when an approved call was actually
 attempted and its state was recorded. Never mark it complete based on unit tests.
 
-- [ ] **Step 8: Commit acceptance evidence**
+- [x] **Step 8: Commit acceptance evidence**
 
 ```powershell
-git add docs/superpowers/specs/2026-07-14-router-model-pool-hardening-design.md docs/superpowers/plans/2026-07-14-router-model-pool-hardening.md docs/superpowers/plans/2026-07-14-adaptive-development-router.md
-git commit -m "docs: record hardened model pool acceptance"
+git add docs/superpowers/specs/2026-07-14-router-model-pool-hardening-design.md docs/superpowers/plans/2026-07-14-router-model-pool-hardening.md
+git commit -m "docs: record hardened model pool offline acceptance"
 ```
 
 Stage the original adaptive-router plan only if its live-smoke state changed.
 
-- [ ] **Step 9: Review branch without pushing**
+- [x] **Step 9: Review branch without pushing**
 
 ```powershell
 git status --short --branch
@@ -557,6 +557,57 @@ git diff main...HEAD --check
 Expected: clean feature branch with reviewable commits. Use the
 `finishing-a-development-branch` skill for integration; push only after explicit
 user direction.
+
+#### Offline acceptance record — 2026-07-14
+
+- Focused routing/documentation suites, with cache disabled and a controlled
+  `F:\tmp` basetemp: 279 passed, 1 skipped in 71.36 seconds. The sole skip was
+  `tests/test_routing_storage.py:981`, because POSIX permission bits are not
+  authoritative on Windows.
+- Full suite, with cache disabled and a controlled `F:\tmp` basetemp: 1,369 passed,
+  44 skipped in 272.55 seconds. Skips were Windows/POSIX contract cases and the
+  unavailable optional TypeScript compiler bridge. No routing security or
+  approval-authority test was skipped.
+- `python -B -m ruff check .` and `git diff --check`: passed.
+- Rebuilt repository graph: fresh, 133 source/manifest files, 5,506 nodes, 11,918
+  edges, zero validation errors, and zero warnings.
+- Synthetic fixture inventory: authored `README.md`, `src/listing_summary.py`, and
+  `tests/test_listing_summary.py`; other files are generated Graphite cache, graph,
+  and routing-state artifacts. The credential scan found no secret material. The
+  fixture unit test passed (1 test), and the bounded loopback `/api/tags` refresh
+  completed without a provider chat call.
+
+#### Current live-approval preflight (not issued)
+
+- Task: `task-444452e9f8f89d3fbd0d37ee`; policy version `2`; low risk; data policy
+  `source_allowed`.
+- Model: `kimi-k2.7-code:cloud`; digest
+  `eda07a6592375dcbde7cf167b6d6b368cdd28e244f9d71559fb59919aca882fa`;
+  effort `default`; provider usage class `high`.
+- Graph fingerprint:
+  `b405a65af40d3c1d43959bc114f2c9578934022bb66800f5fe14f0327ea5c001`.
+- Context manifest hash:
+  `6dff489286124e90c54fd5d4f27a5f68256656adfd93bd234de681ec72e48024`;
+  753 total bytes; zero exclusions and zero redactions.
+- `src/listing_summary.py`: 560 bytes, SHA-256
+  `49601f28e6addf0602801a9664fa9221504b87b87107ac833bada201d08922b8`.
+- `tests/test_listing_summary.py`: 193 bytes, SHA-256
+  `a4c17d1890223e12964073b4d12e84afcb0583e56f0d4a87b495d6618efcfcb0`.
+- Estimated context input: 189 tokens; canonical request estimate: 507 tokens
+  (2,025 bytes); estimated output ceiling: 4,096 tokens; recommendation estimate:
+  4,285 tokens.
+- Maximum input/output: 32,768/4,096 tokens; total reservation: 36,864 tokens;
+  timeout: 180 seconds; approval TTL if later issued: 300 seconds.
+- Canonical prompt binding hash:
+  `6f048355d18dd5691cfd36de805cd10bec46f1f656e990ab000b4827f8eda360`.
+- A future signed approval must additionally bind a newly allocated approval ID,
+  decision ID, issue/expiry timestamps, and nonce. None was allocated for this
+  preflight. Execution is single-shot with no retry, redirect, model fallback, or
+  model pull.
+
+Live smoke state: **pending explicit approval**. No model inference/provider chat
+call occurred, and no approval was issued or consumed. The original adaptive-router
+live-smoke item remains unchecked.
 
 ---
 

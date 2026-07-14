@@ -1,7 +1,7 @@
 # Router Model Pool Hardening Design
 
 **Date:** 2026-07-14
-**Status:** Approved design; implementation pending
+**Status:** Implemented (offline acceptance passed; live smoke pending explicit approval)
 **Scope:** Ollama Cloud development-routing profiles and deterministic selection
 
 ## 1. Problem
@@ -146,3 +146,19 @@ Registry and policy changes are isolated and versioned. Rollback restores the pr
 profile/policy commit but must not re-enable a profile whose retirement date has
 passed. Repository evidence remains append-only; no migration may rewrite historical
 executions or outcomes.
+
+## 10. Acceptance Status
+
+Offline acceptance passed on 2026-07-14 with the feature worktree source explicitly
+pinned. The focused routing/documentation suites passed with 279 tests and one
+expected Windows-only POSIX permission skip. The full suite passed with 1,369 tests
+and 44 platform/optional-tooling skips; no routing security or approval-authority
+test was skipped. Ruff and `git diff --check` passed. The rebuilt repository graph
+is fresh (133 source files) and validates with 5,506 nodes, 11,918 edges, zero errors,
+and zero warnings.
+
+The isolated fixture passed its unit test and recommends
+`kimi-k2.7-code:cloud` at `default` effort and low risk. Its current approval
+preflight is recorded in the implementation plan. No provider chat/inference call
+was made, and no approval was issued or consumed. The original adaptive-router live
+smoke remains pending explicit approval.
