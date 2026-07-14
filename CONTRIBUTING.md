@@ -174,3 +174,18 @@ Treat model output as untrusted enrichment, never as authoritative control data.
 - [ ] Compatibility impact and any required migration are documented.
 - [ ] Deterministic, local-first, model-agnostic behavior is preserved.
 - [ ] No secrets appear in code, history, fixtures, logs, examples, artifacts, or prompts.
+# Adaptive router development rules
+
+Keep `graphite route recommend` offline, read-only, deterministic, and free of
+approval writes. Keep `graphite route run` default-No and interactive: non-TTY,
+JSON, CI, redirected, and `--yes` modes must not execute. Every source-bearing call
+must display an outbound manifest first. Ollama Cloud is the only development
+execution provider; OpenRouter is reserved for production in-application inference,
+and Claude/Codex are manual handoff only.
+
+Tests must prove containment, response/request limits, exact model identity, quota
+accounting, single-use consent, sanitized errors, and absence of shell/filesystem
+authority. Treat model output as untrusted; it cannot mutate code. Add no high-risk
+autonomy path. Shadow changes require separate consent and budget tests. Document
+retention, reset/rollback, and incident response effects whenever evidence schemas
+or promotion rules change.

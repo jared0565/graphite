@@ -33,6 +33,7 @@ def test_bootstrap_creates_gitignore_and_agents_idempotently(tmp_path: Path) -> 
     assert "graph-out/" in gitignore
     # unanchored form so nested workspace caches are ignored too
     assert "**/.cache/graphite/" in gitignore
+    assert "**/.graphite/" in gitignore
     assert "## Automatic Graphite Consult" in agents
     # `python -m graphite` is the shell- and agent-agnostic invocation form.
     assert "python -m graphite context <likely-changed-file>" in agents

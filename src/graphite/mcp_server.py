@@ -21,7 +21,7 @@ except ImportError:
 import networkx as nx
 
 from .analyze import analyze
-from .graph import graph_from_json
+from .graph_io import GraphReadError, load_validated_graph_bundle
 from .query import query
 
 
@@ -34,24 +34,25 @@ class GraphiteMCPServer:
         self.report_md = self.project_root / "graph-out" / "GRAPH_REPORT.md"
         self._g: nx.DiGraph | None = None
         self._load_error: str | None = None
+        self._load_attempts = 0
 
     def _load(self) -> bool:
         if self._g is not None:
             return True
-        if not self.graph_json.exists():
-            self._load_error = (
-                f"No graph found at {self.graph_json}. "
-                "Run `python -m graphite build .` or call `graphite_refresh`."
-            )
+        if self._load_attempts >= 3:
+            self._load_error = "Graph unavailable: retry_limit"
             return False
+        self._load_attempts += 1
         try:
-            with open(self.graph_json, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self._g = graph_from_json(data)
+            _, self._g = load_validated_graph_bundle(
+                self.graph_json,
+                root=self.project_root,
+            )
             self._load_error = None
+            self._load_attempts = 0
             return True
-        except Exception as e:
-            self._load_error = f"Failed to load graph.json: {e}"
+        except GraphReadError as exc:
+            self._load_error = f"Graph unavailable: {exc.code}"
             return False
 
     def refresh(self) -> dict[str, Any]:
@@ -71,6 +72,7 @@ class GraphiteMCPServer:
         if result.returncode != 0:
             return {"success": False, "error": result.stderr or result.stdout}
         self._g = None
+        self._load_attempts = 0
         loaded = self._load()
         return {
             "success": loaded,
@@ -196,4 +198,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

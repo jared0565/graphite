@@ -94,3 +94,26 @@ def test_build_writes_validation_artifact(tmp_path: Path, monkeypatch, capsys) -
 
     assert result == 0
     assert validation["ok"] is True
+
+
+def test_build_manifest_records_engine_identity(tmp_path: Path, monkeypatch, capsys) -> None:
+    src = tmp_path / "src" / "app.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = main(["--output-dir", "graph-out", "build", "."])
+    capsys.readouterr()
+    manifest = json.loads(
+        (tmp_path / "graph-out" / ".graphite_manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert result == 0
+    assert set(manifest["engine"]) == {
+        "version",
+        "cache_version",
+        "schema_version",
+        "fingerprint",
+    }
+    assert len(manifest["engine"]["fingerprint"]) == 64
+    assert str(Path(__file__).parents[1]) not in json.dumps(manifest["engine"])

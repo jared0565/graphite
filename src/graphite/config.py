@@ -52,6 +52,12 @@ class Config:
         from dataclasses import asdict
         return asdict(self)
 
+    def routing_settings(self, overrides: dict[str, str] | None = None):
+        """Build isolated routing settings without exporting routing secrets."""
+        from .routing.settings import RoutingSettings
+
+        return RoutingSettings.from_env(overrides)
+
     @classmethod
     def from_env(cls, overrides: dict[str, str] | None = None) -> "Config":
         """Build config from environment variables and CLI overrides."""

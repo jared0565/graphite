@@ -17,6 +17,7 @@ GRAPHITE_GITIGNORE_LINES: tuple[str, ...] = (
     "# Graphite",
     "graph-out/",
     "**/.cache/graphite/",
+    "**/.graphite/",
     ".graphite-daemon/",
 )
 
@@ -175,5 +176,4 @@ def _default_daemon_base(project_root: Path) -> Path:
         if parent.as_posix().lower().rstrip("/") == "f:/projects":
             return parent
     return resolved
-
 
