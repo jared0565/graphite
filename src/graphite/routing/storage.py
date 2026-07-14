@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 import re
 import sqlite3
 import stat
@@ -16,6 +18,10 @@ BUSY_TIMEOUT_MS: Final = 2_000
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}(?::cloud)?$")
+_SNAPSHOT_MODEL_ID = re.compile(
+    r"^[a-z0-9][a-z0-9._-]{0,127}(?::[a-z0-9][a-z0-9._-]{0,63})?$"
+)
+_CAPABILITY = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _VERSION = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _TABLES = frozenset(
@@ -29,6 +35,7 @@ _TABLES = frozenset(
         "policy_versions",
         "budget_ledger",
         "confidence_stats",
+        "registry_snapshots",
     }
 )
 
@@ -242,6 +249,13 @@ _SCHEMA = (
     )""",
     "CREATE INDEX IF NOT EXISTS outcomes_recorded_at_idx ON outcomes(recorded_at)",
     "CREATE INDEX IF NOT EXISTS executions_task_idx ON executions(task_id)",
+    """CREATE TABLE IF NOT EXISTS registry_snapshots (
+        snapshot_id INTEGER PRIMARY KEY CHECK (snapshot_id = 1),
+        payload_json TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        refreshed_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+    )""",
 )
 
 
@@ -483,6 +497,88 @@ class RepositoryStore:
             raise ValueError("table_invalid")
         with self._connect() as connection:
             return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+    def save_registry_snapshot(self, payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict) or set(payload) != {
+            "schema_version",
+            "refreshed_at",
+            "expires_at",
+            "models",
+        }:
+            raise ValueError("registry_snapshot_invalid")
+        refreshed = _nonnegative_integer(payload["refreshed_at"], "refreshed_at_invalid")
+        expires = _nonnegative_integer(payload["expires_at"], "expires_at_invalid")
+        if expires <= refreshed:
+            raise ValueError("expires_at_invalid")
+        models = payload["models"]
+        if not isinstance(models, list) or len(models) > 128:
+            raise ValueError("registry_models_invalid")
+        for model in models:
+            if not isinstance(model, dict) or set(model) != {
+                "model_id",
+                "digest",
+                "context_window_tokens",
+                "capabilities",
+            }:
+                raise ValueError("registry_model_invalid")
+            model_id = model["model_id"]
+            digest = model["digest"]
+            context = model["context_window_tokens"]
+            capabilities = model["capabilities"]
+            if not isinstance(model_id, str) or not _SNAPSHOT_MODEL_ID.fullmatch(model_id):
+                raise ValueError("registry_model_invalid")
+            if not isinstance(digest, str) or not _HEX_64.fullmatch(digest):
+                raise ValueError("registry_model_invalid")
+            _nonnegative_integer(context, "registry_model_invalid", 4_194_304)
+            if (
+                not isinstance(capabilities, list)
+                or len(capabilities) > 16
+                or any(
+                    not isinstance(item, str) or not _CAPABILITY.fullmatch(item)
+                    for item in capabilities
+                )
+            ):
+                raise ValueError("registry_model_invalid")
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        if len(serialized.encode("utf-8")) > 2 * 1024 * 1024:
+            raise ValueError("registry_snapshot_too_large")
+        payload_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """INSERT INTO registry_snapshots(
+                        snapshot_id, payload_json, payload_hash, refreshed_at, expires_at
+                    ) VALUES (1, ?, ?, ?, ?)
+                    ON CONFLICT(snapshot_id) DO UPDATE SET
+                        payload_json = excluded.payload_json,
+                        payload_hash = excluded.payload_hash,
+                        refreshed_at = excluded.refreshed_at,
+                        expires_at = excluded.expires_at""",
+                    (serialized, payload_hash, refreshed, expires),
+                )
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def load_registry_snapshot(self) -> dict[str, Any] | None:
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT payload_json, payload_hash FROM registry_snapshots WHERE snapshot_id = 1"
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+        if row is None:
+            return None
+        payload_text = str(row["payload_json"])
+        if hashlib.sha256(payload_text.encode("utf-8")).hexdigest() != row["payload_hash"]:
+            raise StorageError("storage_corrupt")
+        try:
+            payload = json.loads(payload_text)
+        except (json.JSONDecodeError, RecursionError) as exc:
+            raise StorageError("storage_corrupt") from exc
+        if not isinstance(payload, dict):
+            raise StorageError("storage_corrupt")
+        return payload
 
 
 @dataclass(frozen=True)
