@@ -274,7 +274,9 @@ _SCHEMA = (
         max_input_tokens INTEGER NOT NULL,
         max_output_tokens INTEGER NOT NULL,
         expected_prompt_hash TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'failed', 'persistence_failed')),
+        status TEXT NOT NULL CHECK(status IN (
+            'pending', 'completed', 'failed', 'persistence_failed', 'legacy_unrecoverable'
+        )),
         failure_reason TEXT,
         execution_id TEXT UNIQUE REFERENCES executions(execution_id) ON DELETE RESTRICT,
         created_at INTEGER NOT NULL,
@@ -374,22 +376,10 @@ class RepositoryStore:
             ).fetchone()
             if existing_version is not None and existing_version[0] not in {"1", SCHEMA_VERSION}:
                 raise StorageError("storage_schema_unsupported")
+            if existing_version is not None and existing_version[0] == "1":
+                self._migrate_v1_attempts(connection)
             for statement in _SCHEMA[1:]:
                 connection.execute(statement)
-            if existing_version is not None and existing_version[0] == "1":
-                attempt_columns = {
-                    str(row[1])
-                    for row in connection.execute("PRAGMA table_info(execution_attempts)")
-                }
-                for name, declaration in (
-                    ("max_input_tokens", "INTEGER"),
-                    ("max_output_tokens", "INTEGER"),
-                    ("expected_prompt_hash", "TEXT"),
-                ):
-                    if name not in attempt_columns:
-                        connection.execute(
-                            f"ALTER TABLE execution_attempts ADD COLUMN {name} {declaration}"
-                        )
             connection.execute(
                 """INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
@@ -412,6 +402,69 @@ class RepositoryStore:
                 connection.close()
         _validate_database_file(self.path)
         _secure_file(self.path)
+
+    @staticmethod
+    def _migrate_v1_attempts(connection: sqlite3.Connection) -> None:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_attempts'"
+        ).fetchone()
+        if exists is None:
+            return
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(execution_attempts)")
+        }
+        if {"max_input_tokens", "max_output_tokens", "expected_prompt_hash"} <= columns:
+            return
+        connection.execute("ALTER TABLE execution_attempts RENAME TO execution_attempts_v1")
+        connection.execute(
+            """CREATE TABLE execution_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                approval_id TEXT NOT NULL UNIQUE REFERENCES approvals(approval_id) ON DELETE RESTRICT,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
+                decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE RESTRICT,
+                manifest_hash TEXT NOT NULL,
+                graph_fingerprint TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                effort TEXT NOT NULL,
+                reserved_tokens INTEGER NOT NULL,
+                max_input_tokens INTEGER,
+                max_output_tokens INTEGER,
+                expected_prompt_hash TEXT,
+                status TEXT NOT NULL CHECK(status IN (
+                    'pending', 'completed', 'failed', 'persistence_failed', 'legacy_unrecoverable'
+                )),
+                failure_reason TEXT,
+                execution_id TEXT UNIQUE REFERENCES executions(execution_id) ON DELETE RESTRICT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                CHECK(
+                    status IN ('completed', 'failed', 'legacy_unrecoverable')
+                    OR (
+                        max_input_tokens IS NOT NULL AND max_input_tokens > 0
+                        AND max_output_tokens IS NOT NULL AND max_output_tokens > 0
+                        AND expected_prompt_hash IS NOT NULL
+                    )
+                )
+            )"""
+        )
+        connection.execute(
+            """INSERT INTO execution_attempts(
+                attempt_id, approval_id, task_id, decision_id, manifest_hash,
+                graph_fingerprint, model_id, effort, reserved_tokens,
+                max_input_tokens, max_output_tokens, expected_prompt_hash,
+                status, failure_reason, execution_id, created_at, updated_at
+            )
+            SELECT attempt_id, approval_id, task_id, decision_id, manifest_hash,
+                graph_fingerprint, model_id, effort, reserved_tokens,
+                NULL, NULL, NULL,
+                CASE WHEN status IN ('pending', 'persistence_failed')
+                    THEN 'legacy_unrecoverable' ELSE status END,
+                CASE WHEN status IN ('pending', 'persistence_failed')
+                    THEN 'legacy_attempt_bindings_missing' ELSE failure_reason END,
+                execution_id, created_at, updated_at
+            FROM execution_attempts_v1"""
+        )
+        connection.execute("DROP TABLE execution_attempts_v1")
 
     def integrity_check(self) -> str:
         try:
@@ -897,6 +950,8 @@ class RepositoryStore:
             ).fetchone()
             if attempt is None:
                 raise StorageError("execution_attempt_missing")
+            if attempt["status"] == "legacy_unrecoverable":
+                raise StorageError("legacy_attempt_bindings_missing")
             self._assert_approval_consumed(connection, attempt)
             if attempt["status"] == "completed":
                 stored = connection.execute(
@@ -1021,6 +1076,8 @@ class RepositoryStore:
             ).fetchone()
             if attempt is None:
                 raise StorageError("execution_attempt_missing")
+            if attempt["status"] == "legacy_unrecoverable":
+                raise StorageError("legacy_attempt_bindings_missing")
             self._assert_approval_consumed(connection, attempt)
             if attempt["status"] == "completed":
                 row = connection.execute(
