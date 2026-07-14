@@ -76,9 +76,11 @@ def _inline_code_spans(line: str) -> Iterator[str]:
 
 
 def markdown_code_fragments(markdown: str) -> Iterator[tuple[int, str]]:
-    """Yield fenced blocks and inline code spans; prose is intentionally excluded."""
+    """Yield fenced, indented, and inline code; prose is intentionally excluded."""
     fence: tuple[str, int, int, int] | None = None
     fenced_lines: list[str] = []
+    indented_start: int | None = None
+    indented_lines: list[str] = []
     for line_number, line in enumerate(markdown.splitlines(), start=1):
         quote_depth, content = _blockquote_content(line)
         run = _fence_run(content)
@@ -97,18 +99,37 @@ def markdown_code_fragments(markdown: str) -> Iterator[tuple[int, str]]:
             else:
                 fenced_lines.append(content)
             continue
+        indented_content: str | None = None
+        if content.startswith("\t"):
+            indented_content = content[1:]
+        elif content.startswith("    "):
+            indented_content = content[4:]
+        if indented_content is not None:
+            if indented_start is None:
+                indented_start = line_number
+            indented_lines.append(indented_content)
+            continue
+        if indented_start is not None and not content.strip():
+            indented_lines.append("")
+            continue
+        if indented_start is not None:
+            yield indented_start, "\n".join(indented_lines)
+            indented_start = None
+            indented_lines = []
         if run:
             fence = (run[0], run[1], quote_depth, line_number)
             fenced_lines = []
             continue
-        if content.startswith(("\t", "    ")):
-            continue
         for span in _inline_code_spans(content):
             yield line_number, span
+    if fence:
+        yield fence[3], "\n".join(fenced_lines)
+    if indented_start is not None:
+        yield indented_start, "\n".join(indented_lines)
 
 
 def _shell_command_segments(code: str) -> Iterator[list[str]]:
-    logical_code = re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", code)
+    logical_code = re.sub(r"(?:\\|`|\^)[ \t]*\r?\n[ \t]*", " ", code)
     for command_line in logical_code.splitlines():
         lexer = shlex.shlex(
             command_line,
@@ -143,56 +164,93 @@ def _manager_name(token: str) -> str | None:
 
 def _is_global_typescript_install(tokens: list[str]) -> bool:
     folded = [token.strip("\"'").casefold().rstrip(".,;:") for token in tokens]
-    for manager_index, token in enumerate(folded):
-        manager = _manager_name(token)
-        if manager is None:
+    if not folded:
+        return False
+    manager = _manager_name(folded[0])
+    if manager is None:
+        return False
+    command = folded[1:]
+    actions = {
+        "npm": {"install", "i"},
+        "pnpm": {"add", "install", "i"},
+        "yarn": {"add"},
+        "bun": {"add", "install"},
+    }[manager]
+    options_with_values = {
+        "--cache",
+        "--config",
+        "--cwd",
+        "--dir",
+        "--filter",
+        "--location",
+        "--prefix",
+        "--registry",
+        "--userconfig",
+        "--workspace",
+    }
+    action_index: int | None = None
+    index = 0
+    while index < len(command):
+        item = command[index]
+        if item in actions:
+            action_index = index
+            break
+        if manager == "yarn" and index == 0 and item == "global":
+            index += 1
             continue
-        command = folded[manager_index + 1 :]
-        actions = {"install", "add"} | ({"i"} if manager == "npm" else set())
-        action_index = next(
-            (index for index, item in enumerate(command) if item in actions),
-            None,
+        if item == "--":
+            return False
+        if item.startswith("--"):
+            option_name, separator, _ = item.partition("=")
+            if not separator and option_name in options_with_values:
+                if index + 1 >= len(command):
+                    return False
+                index += 2
+            else:
+                index += 1
+            continue
+        if item.startswith("-") and item != "-":
+            index += 1
+            continue
+        return False
+    if action_index is None:
+        return False
+    has_typescript = any(
+        re.fullmatch(r"typescript(?:@[^\s]+)?", item)
+        or re.fullmatch(r"-g(?:=)?typescript(?:@[^\s]+)?", item)
+        for item in command[action_index + 1 :]
+    )
+    if not has_typescript:
+        return False
+    for index, item in enumerate(command):
+        short_options = (
+            item[1:] if item.startswith("-") and not item.startswith("--") else ""
         )
-        if action_index is None:
-            continue
-        has_typescript = any(
-            re.fullmatch(r"typescript(?:@[^\s]+)?", item)
-            or re.fullmatch(r"-g(?:=)?typescript(?:@[^\s]+)?", item)
-            for item in command
-        )
-        if not has_typescript:
-            continue
-        for index, item in enumerate(command):
-            short_options = (
-                item[1:]
-                if item.startswith("-") and not item.startswith("--")
-                else ""
+        if (
+            (manager == "yarn" and item == "global" and index < action_index)
+            or item == "--global"
+            or item.startswith("--global=")
+            or (
+                item.startswith("--location=")
+                and item.partition("=")[2].startswith("global")
             )
-            if (
-                (manager == "yarn" and item == "global" and index < action_index)
-                or item == "--global"
-                or item.startswith("--global=")
-                or (
-                    item.startswith("--location=")
-                    and item.partition("=")[2].startswith("global")
-                )
-                or (
-                    item == "--location"
-                    and index + 1 < len(command)
-                    and command[index + 1].startswith("global")
-                )
-                or (
-                    short_options
-                    and (
-                        short_options.startswith(("g=", "gtypescript"))
-                        or (
-                            re.fullmatch(r"[A-Za-z]+", short_options) is not None
-                            and "g" in short_options.casefold()
-                        )
+            or (
+                item == "--location"
+                and index + 1 < len(command)
+                and command[index + 1].startswith("global")
+            )
+            or (
+                short_options
+                and (
+                    short_options.startswith(("g=", "gtypescript"))
+                    or (
+                        re.fullmatch(r"[A-Za-z]+", short_options) is not None
+                        and "g" in short_options
                     )
                 )
-            ):
-                return True
+            )
+        ):
+            return True
     return False
 
 
@@ -813,6 +871,10 @@ def test_optional_activation_docs_reject_unsafe_examples() -> None:
         "```sh\nyarn global add typescript\n```",
         "```powershell\nC:\\tools\\npm.cmd -Dg install typescript\n```",
         "```sh\nnpm install --global \\\n  typescript\n```",
+        "```powershell\nnpm install --global `\n  typescript\n```",
+        "```batch\nnpm install --global ^\n  typescript\n```",
+        "    npm install --global typescript",
+        "Use `pnpm i -g typescript` only in this mutant.",
     ),
 )
 def test_global_typescript_install_diagnostics_rejects_code_mutants(
@@ -830,6 +892,12 @@ def test_global_typescript_install_diagnostics_rejects_code_mutants(
         "```sh\npnpm add -D typescript\nbun add --dev typescript@5.9.0\n```",
         "`npm config set location global typescript` is not an install command.",
         "`yarn add global typescript` installs two local packages.",
+        "`npm run install --global typescript` invokes a local script.",
+        "    npm run install --global typescript",
+        "```powershell\nnpm install --save-dev `\n  typescript\n```",
+        "```batch\npnpm i -D ^\n  typescript\n```",
+        "    pnpm i -D typescript",
+        "`npm --location global run install --global typescript` runs a script.",
     ),
 )
 def test_global_typescript_install_diagnostics_allows_local_code_or_prose(
