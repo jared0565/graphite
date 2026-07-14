@@ -995,8 +995,12 @@ def _route_recovery_error(
         candidate = "repository_root_invalid"
     elif isinstance(error, OSError):
         candidate = "storage_unavailable"
-    else:
+    elif isinstance(error, ValueError):
         candidate = str(error)
+        if candidate not in _ROUTE_RECOVERY_ERROR_CODES:
+            raise error
+    else:
+        raise error
     code = (
         candidate
         if candidate in _ROUTE_RECOVERY_ERROR_CODES

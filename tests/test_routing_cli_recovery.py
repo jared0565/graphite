@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from argparse import Namespace
 from pathlib import Path
 from typing import NoReturn
 
@@ -136,6 +137,42 @@ def test_recoverable_storage_failure_is_fixed_path_free_text(
     assert captured.out == ""
     assert captured.err == "[graphite] route recovery error: repository_root_invalid\n"
     assert str(missing) not in captured.err
+
+
+@pytest.mark.parametrize("error", [ValueError("programmer_bug"), RuntimeError("bug")])
+def test_recovery_error_boundary_does_not_convert_programmer_failures(
+    error: Exception,
+) -> None:
+    with pytest.raises(type(error), match="^" + str(error) + "$"):
+        cli._route_recovery_error(error, json_mode=True)  # type: ignore[arg-type]
+
+
+def test_recovery_error_boundary_sanitizes_known_value_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli._route_recovery_error(ValueError("attempt_id_invalid"), json_mode=True) == 1
+    assert json.loads(capsys.readouterr().err) == {
+        "error": {"code": "attempt_id_invalid"}
+    }
+
+
+@pytest.mark.parametrize("error", [ValueError("programmer_bug"), RuntimeError("bug")])
+def test_reconcile_handler_propagates_programmer_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    class BrokenService:
+        def __init__(self, _path: str) -> None:
+            pass
+
+        def reconcile_execution(self, _attempt_id: str) -> NoReturn:
+            raise error
+
+    monkeypatch.setattr(cli, "RoutingService", BrokenService)
+    args = Namespace(path=".", attempt_id="attempt-1", json=True)
+
+    with pytest.raises(type(error), match="^" + str(error) + "$"):
+        cli.cmd_route_reconcile(args)
 
 
 def test_real_recovery_success_is_idempotent_and_authority_free(

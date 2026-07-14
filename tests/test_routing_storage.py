@@ -432,67 +432,14 @@ def test_v2_digestless_recovery_is_quarantined_without_fabrication(tmp_path: Pat
     root = tmp_path / "project"
     path = root / ".graphite" / "routing" / "events.sqlite3"
     path.parent.mkdir(parents=True)
+    fixture = Path(__file__).parent / "fixtures" / "routing_schema_v2_ca77600.sql"
     with sqlite3.connect(path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.executescript(
-            """
-            CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT INTO schema_meta VALUES ('schema_version', '2');
-            CREATE TABLE tasks (task_id TEXT PRIMARY KEY, category TEXT NOT NULL,
-                risk TEXT NOT NULL, graph_fingerprint TEXT NOT NULL, created_at INTEGER NOT NULL);
-            CREATE TABLE decisions (decision_id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
-                model_id TEXT NOT NULL, effort TEXT NOT NULL, policy_version TEXT NOT NULL,
-                inventory_version TEXT NOT NULL, created_at INTEGER NOT NULL);
-            CREATE TABLE approvals (approval_id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
-                decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE CASCADE,
-                nonce_hash TEXT NOT NULL UNIQUE, manifest_hash TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('issued','consumed','expired','revoked')),
-                expires_at INTEGER NOT NULL, reserved_tokens INTEGER NOT NULL);
-            CREATE TABLE executions (execution_id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE,
-                task_id TEXT REFERENCES tasks(task_id) ON DELETE SET NULL,
-                decision_id TEXT REFERENCES decisions(decision_id) ON DELETE SET NULL,
-                approval_id TEXT REFERENCES approvals(approval_id) ON DELETE SET NULL,
-                model_id TEXT NOT NULL, effort TEXT NOT NULL, status TEXT NOT NULL,
-                reserved_tokens INTEGER NOT NULL, actual_input_tokens INTEGER,
-                actual_output_tokens INTEGER, created_at INTEGER NOT NULL, completed_at INTEGER);
-            CREATE INDEX executions_task_idx ON executions(task_id);
-            CREATE TABLE execution_evidence (execution_id TEXT PRIMARY KEY
-                REFERENCES executions(execution_id) ON DELETE CASCADE,
-                task_id TEXT NOT NULL, decision_id TEXT NOT NULL, graph_fingerprint TEXT NOT NULL);
-            CREATE TABLE execution_attempts (attempt_id TEXT PRIMARY KEY,
-                approval_id TEXT NOT NULL UNIQUE REFERENCES approvals(approval_id) ON DELETE RESTRICT,
-                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
-                decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE RESTRICT,
-                manifest_hash TEXT NOT NULL, graph_fingerprint TEXT NOT NULL, model_id TEXT NOT NULL,
-                effort TEXT NOT NULL, reserved_tokens INTEGER NOT NULL,
-                max_input_tokens INTEGER NOT NULL, max_output_tokens INTEGER NOT NULL,
-                expected_prompt_hash TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN
-                    ('pending','completed','failed','persistence_failed','legacy_unrecoverable')),
-                failure_reason TEXT,
-                execution_id TEXT UNIQUE REFERENCES executions(execution_id) ON DELETE RESTRICT,
-                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-            CREATE TABLE staged_execution_receipts (attempt_id TEXT PRIMARY KEY
-                REFERENCES execution_attempts(attempt_id) ON DELETE CASCADE,
-                execution_id TEXT NOT NULL UNIQUE, approval_id TEXT NOT NULL,
-                model_id TEXT NOT NULL, effort TEXT NOT NULL, outcome TEXT NOT NULL,
-                input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
-                latency_ms INTEGER NOT NULL, prompt_hash TEXT NOT NULL,
-                response_hash TEXT NOT NULL, failure_reason TEXT, staged_at INTEGER NOT NULL);
-            CREATE TABLE execution_receipts (execution_id TEXT PRIMARY KEY
-                REFERENCES executions(execution_id) ON DELETE CASCADE,
-                approval_id TEXT NOT NULL, model_id TEXT NOT NULL, effort TEXT NOT NULL,
-                outcome TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
-                latency_ms INTEGER NOT NULL, prompt_hash TEXT NOT NULL, response_hash TEXT NOT NULL,
-                failure_reason TEXT, completed_at INTEGER NOT NULL);
-            """
-        )
+        connection.executescript(fixture.read_text(encoding="utf-8"))
         for suffix in ("pending", "recover", "completed"):
             connection.execute(
                 "INSERT INTO tasks VALUES (?, 'isolated_code', 'low', ?, 1)",
-                (f"task-{suffix}", "a" * 64),
+                (f"task-{suffix}", suffix[0] * 64),
             )
             connection.execute(
                 "INSERT INTO decisions VALUES (?, ?, 'model:cloud', 'default', '1', '1', 1)",
@@ -507,6 +454,11 @@ def test_v2_digestless_recovery_is_quarantined_without_fabrication(tmp_path: Pat
             "INSERT INTO executions VALUES ('exec-completed','attempt-completed','task-completed',"
             "'decision-completed','approval-completed','model:cloud','default','succeeded',"
             "10,6,2,1,2)"
+        )
+        connection.execute(
+            "INSERT INTO executions VALUES ('exec-shadow','shadow-key','task-completed',"
+            "'decision-completed','approval-completed','model:cloud','default','succeeded',"
+            "10,5,2,1,2)"
         )
         attempts = [
             ("attempt-pending", "pending", None, None),
@@ -535,6 +487,60 @@ def test_v2_digestless_recovery_is_quarantined_without_fabrication(tmp_path: Pat
             "INSERT INTO execution_evidence VALUES "
             "('exec-completed','task-completed','decision-completed',?)", ("b" * 64,),
         )
+        connection.execute(
+            "INSERT INTO outcomes VALUES "
+            "('outcome-1','exec-completed','human',1,0,3)"
+        )
+        connection.execute(
+            "INSERT INTO shadow_comparisons VALUES "
+            "('shadow-1','exec-completed','exec-shadow','primary',3)"
+        )
+        connection.execute(
+            "INSERT INTO policy_versions VALUES ('1',?,'active',1)", ("e" * 64,)
+        )
+        connection.execute(
+            "INSERT INTO budget_ledger VALUES "
+            "('reserve-1','approval-completed','exec-completed','reservation',10,1)"
+        )
+        connection.execute(
+            "INSERT INTO confidence_stats VALUES "
+            "('model:cloud','default','isolated_code','low',4,3,1)"
+        )
+        connection.execute(
+            "INSERT INTO incident_reviews(execution_id,reviewed_at) "
+            "VALUES ('exec-completed',4)"
+        )
+        connection.execute(
+            "INSERT INTO blind_comparisons VALUES "
+            "('blind-1','exec-completed','exec-shadow',?,?,1,'a',4,3)",
+            ("f" * 64, "0" * 64),
+        )
+        connection.execute(
+            "INSERT INTO registry_snapshots VALUES (1,'{}',?,1,99)", ("9" * 64,)
+        )
+        preserved_tables = (
+            "tasks", "decisions", "approvals", "executions", "outcomes",
+            "shadow_comparisons", "policy_versions", "budget_ledger",
+            "confidence_stats", "execution_evidence", "execution_receipts",
+            "incident_reviews", "blind_comparisons", "registry_snapshots",
+        )
+        before = {
+            table: connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+            for table in preserved_tables
+        }
+        before_attempts = connection.execute(
+            "SELECT attempt_id,approval_id,task_id,decision_id,manifest_hash,"
+            "graph_fingerprint,model_id,effort,reserved_tokens,max_input_tokens,"
+            "max_output_tokens,expected_prompt_hash,status,failure_reason,execution_id,"
+            "created_at,updated_at FROM execution_attempts ORDER BY attempt_id"
+        ).fetchall()
+        before_staged = connection.execute(
+            "SELECT * FROM staged_execution_receipts ORDER BY attempt_id"
+        ).fetchall()
+        before_indexes = connection.execute(
+            "SELECT name,sql FROM sqlite_master "
+            "WHERE type='index' AND sql IS NOT NULL ORDER BY name"
+        ).fetchall()
 
     store = RepositoryStore(root)
     store.initialize()
@@ -548,6 +554,25 @@ def test_v2_digestless_recovery_is_quarantined_without_fabrication(tmp_path: Pat
             "SELECT attempt_id,status,failure_reason,inventory_digest "
             "FROM execution_attempts ORDER BY attempt_id"
         ).fetchall()
+        after = {
+            table: connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+            for table in preserved_tables
+        }
+        after_attempts = connection.execute(
+            "SELECT attempt_id,approval_id,task_id,decision_id,manifest_hash,"
+            "graph_fingerprint,model_id,effort,reserved_tokens,max_input_tokens,"
+            "max_output_tokens,expected_prompt_hash,status,failure_reason,execution_id,"
+            "created_at,updated_at FROM execution_attempts ORDER BY attempt_id"
+        ).fetchall()
+        after_staged = connection.execute(
+            "SELECT attempt_id,execution_id,approval_id,model_id,effort,outcome,"
+            "input_tokens,output_tokens,latency_ms,prompt_hash,response_hash,"
+            "failure_reason,staged_at FROM staged_execution_receipts ORDER BY attempt_id"
+        ).fetchall()
+        after_indexes = connection.execute(
+            "SELECT name,sql FROM sqlite_master "
+            "WHERE type='index' AND sql IS NOT NULL ORDER BY name"
+        ).fetchall()
         assert rows == [
             ("attempt-completed", "completed", None, None),
             ("attempt-pending", "legacy_unrecoverable", "legacy_attempt_digest_missing", None),
@@ -558,10 +583,30 @@ def test_v2_digestless_recovery_is_quarantined_without_fabrication(tmp_path: Pat
         ).fetchone() == ("exec-recover", None)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-        indexes = {row[0] for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
-        )}
-        assert "executions_task_idx" in indexes
+        canonical_columns = {
+            "tasks": [row[1] for row in connection.execute("PRAGMA table_info(tasks)")],
+            "decisions": [
+                row[1] for row in connection.execute("PRAGMA table_info(decisions)")
+            ],
+        }
+    assert canonical_columns["tasks"] == [
+        "task_id", "category", "risk", "objective_hash", "created_at"
+    ]
+    assert canonical_columns["decisions"] == [
+        "decision_id", "task_id", "model_id", "effort", "policy_version",
+        "evidence_version", "created_at",
+    ]
+    assert after == before
+    expected_attempts = []
+    for row in before_attempts:
+        expected = list(row)
+        if expected[12] in {"pending", "persistence_failed"}:
+            expected[12] = "legacy_unrecoverable"
+            expected[13] = "legacy_attempt_digest_missing"
+        expected_attempts.append(tuple(expected))
+    assert after_attempts == expected_attempts
+    assert after_staged == before_staged
+    assert after_indexes == before_indexes
     assert store.recoverable_attempt_ids() == ()
     assert store.execution_attempt("attempt-completed")["execution_id"] == "exec-completed"
     for attempt_id in ("attempt-pending", "attempt-recover"):
