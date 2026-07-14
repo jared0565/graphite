@@ -1013,8 +1013,9 @@ def cmd_route_run(args: argparse.Namespace) -> int:
         )
         if not shadow_approved:
             print(json.dumps({"shadow": "declined", "primary": "continuing"}))
-    receipt = service.execute_approved(recommendation)
-    _route_print(receipt, json_mode=args.json)
+    result = service.execute_approved(recommendation)
+    print(result.text)
+    _route_print(result.to_public_dict(), json_mode=False)
     return 0
 
 

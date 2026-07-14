@@ -29,7 +29,12 @@ class _Service:
 
     def execute_approved(self, recommendation):
         self.calls.append("execute")
-        return {"outcome": "succeeded", "execution_id": "exec-1"}
+        return type("ApprovedExecution", (), {
+            "text": "bounded suggestion",
+            "to_public_dict": lambda self: {
+                "outcome": "succeeded", "execution_id": "exec-1",
+            },
+        })()
 
     def status(self):
         self.calls.append("status")
@@ -84,6 +89,25 @@ def test_interactive_run_displays_budget_then_prompts_once(
     output = stdout.getvalue()
     assert output.count("Approve this Ollama model call?") == 1
     assert output.index("estimated_tokens") < output.index("Approve")
+    assert output.count("bounded suggestion") == 1
+    receipt = json.loads(output[output.rfind("{"):])
+    assert receipt == {"execution_id": "exec-1", "outcome": "succeeded"}
+
+
+@pytest.mark.parametrize(
+    ("extra", "ci"),
+    [(["--json"], False), (["--yes"], False), ([], True), ([], False)],
+)
+def test_noninteractive_modes_never_execute_or_print_provider_text(
+    extra: list[str], ci: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("yes\n"))
+    monkeypatch.setattr(cli.sys, "stdout", io.StringIO())
+    if ci:
+        monkeypatch.setenv("CI", "1")
+    assert cli.main(["route", "run", ".", "--objective", "review", *extra]) == 2
+    assert _Service.calls == ["recommend"]
+    assert "bounded suggestion" not in cli.sys.stdout.getvalue()
 
 
 def test_manual_handoff_never_prompts_or_executes(monkeypatch: pytest.MonkeyPatch) -> None:

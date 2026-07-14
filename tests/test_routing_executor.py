@@ -19,8 +19,14 @@ from graphite.routing.settings import RoutingSettings
 from graphite.routing.storage import RepositoryStore
 
 
+MODEL_DIGESTS = {
+    "kimi-k2.7-code:cloud": "a" * 64,
+    "minimax-m2.7:cloud": "b" * 64,
+    "nemotron-3-super:cloud": "c" * 64,
+    "minimax-m3:cloud": "d" * 64,
+}
 MODEL = "kimi-k2.7-code:cloud"
-DIGEST = "d" * 64
+DIGEST = MODEL_DIGESTS[MODEL]
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -48,20 +54,26 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def _server(*, chat_status: int = 200, chat: bytes | None = None):
+def _server(
+    *,
+    model: str = MODEL,
+    digest: str = DIGEST,
+    chat_status: int = 200,
+    chat: bytes | None = None,
+):
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     server.requests = []
     server.inventory_status = 200
     server.inventory = json.dumps({"models": [{
-        "name": MODEL,
-        "model": MODEL,
-        "digest": DIGEST,
+        "name": model,
+        "model": model,
+        "digest": digest,
         "details": {"context_length": 262144},
         "capabilities": ["code"],
     }]}).encode()
     server.chat_status = chat_status
     server.chat = chat or json.dumps({
-        "model": MODEL,
+        "model": model,
         "message": {"role": "assistant", "content": "suggested change"},
         "done": True,
         "prompt_eval_count": 123,
@@ -77,7 +89,9 @@ def _server(*, chat_status: int = 200, chat: bytes | None = None):
         thread.join()
 
 
-def _approved(tmp_path: Path) -> tuple[ApprovalAuthority, object, ApprovalManifest, ContextBundle]:
+def _approved(
+    tmp_path: Path, model: str = MODEL
+) -> tuple[ApprovalAuthority, object, ApprovalManifest, ContextBundle]:
     root = tmp_path / "repo"
     root.mkdir()
     store = RepositoryStore(root)
@@ -96,7 +110,7 @@ def _approved(tmp_path: Path) -> tuple[ApprovalAuthority, object, ApprovalManife
         decision_id="decision-1",
         graph_fingerprint="a" * 64,
         context_manifest_hash=manifest.manifest_hash,
-        model_id=MODEL,
+        model_id=model,
         effort=Effort.DEFAULT,
         max_input_tokens=8000,
         max_output_tokens=2000,
@@ -108,16 +122,20 @@ def _approved(tmp_path: Path) -> tuple[ApprovalAuthority, object, ApprovalManife
     return authority, authority.issue(approval), approval, context
 
 
-def test_executor_revalidates_then_posts_fixed_bounded_shape(tmp_path: Path) -> None:
-    authority, signed, approval, context = _approved(tmp_path)
-    with _server() as server:
+@pytest.mark.parametrize("model", tuple(MODEL_DIGESTS))
+def test_executor_revalidates_then_posts_fixed_bounded_shape(
+    tmp_path: Path, model: str
+) -> None:
+    digest = MODEL_DIGESTS[model]
+    authority, signed, approval, context = _approved(tmp_path, model)
+    with _server(model=model, digest=digest) as server:
         result = execute_ollama(
             authority=authority,
             signed_approval=signed,
             current_manifest=approval,
             context=context,
             objective="Review this implementation",
-            expected_digest=DIGEST,
+            expected_digest=digest,
             settings=RoutingSettings(),
             host="127.0.0.1",
             port=server.server_port,
@@ -135,13 +153,38 @@ def test_executor_revalidates_then_posts_fixed_bounded_shape(tmp_path: Path) -> 
     headers = server.requests[1][2]
     payload = json.loads(server.requests[1][3])
     assert "Authorization" not in headers
-    assert payload["model"] == MODEL
+    assert result.receipt.model_id == model
+    assert payload["model"] == model
     assert payload["stream"] is False
     assert payload["options"] == {"num_predict": 2000}
     assert set(payload) == {"model", "messages", "options", "stream"}
     assert "no execution authority" in payload["messages"][0]["content"]
     prompt = payload["messages"][1]["content"]
     assert "src/app.py" in prompt
+
+
+@pytest.mark.parametrize("model", ("glm-5:cloud", "kimi-k2.6:cloud"))
+def test_removed_profile_fails_before_chat_without_consuming_approval(
+    tmp_path: Path, model: str
+) -> None:
+    digest = "f" * 64
+    authority, signed, approval, context = _approved(tmp_path, model)
+    with _server(model=model, digest=digest) as server:
+        with pytest.raises(ExecutorError, match="model_profile_missing"):
+            execute_ollama(
+                authority=authority,
+                signed_approval=signed,
+                current_manifest=approval,
+                context=context,
+                objective="review",
+                expected_digest=digest,
+                settings=RoutingSettings(),
+                host="127.0.0.1",
+                port=server.server_port,
+                allowed_ports=frozenset({server.server_port}),
+            )
+    assert [(method, path) for method, path, _, _ in server.requests] == [("GET", "/api/tags")]
+    assert authority.store.approval_status("approval-1") == "issued"
 
 
 @pytest.mark.parametrize(

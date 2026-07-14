@@ -17,7 +17,7 @@ from graphite.graph_io import GraphReadError, load_validated_graph_bundle
 from .approval import ApprovalAuthority
 from .classifier import classify_task
 from .context_builder import ContextBundle, build_routing_context
-from .contracts import ApprovalManifest, Effort, TaskRequest
+from .contracts import ApprovalManifest, Effort, ExecutionReceipt, TaskRequest
 from .ollama_executor import execute_ollama
 from .policy import CandidateMetrics, PolicyGates, rank_candidates
 from .registry import (
@@ -58,6 +58,17 @@ class RoutingRecommendation:
             "policy_version": self.policy_version,
             "execution_authority": "single_use_approval_required",
         }
+
+
+@dataclass(frozen=True)
+class ApprovedExecution:
+    """Ephemeral provider text paired with its persistence-safe receipt."""
+
+    text: str
+    receipt: ExecutionReceipt
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return dict(self.receipt.to_dict())
 
 
 @dataclass(frozen=True)
@@ -175,7 +186,7 @@ class RoutingService:
             (reason,), ("claude_code", "codex"), True, "1",
         )
 
-    def execute_approved(self, recommendation: RoutingRecommendation) -> dict[str, Any]:
+    def execute_approved(self, recommendation: RoutingRecommendation) -> ApprovedExecution:
         if recommendation.manual_handoff or recommendation.model_id is None:
             raise ValueError("manual_handoff_required")
         prepared = self._prepared.pop(recommendation.task_id, None)
@@ -246,7 +257,7 @@ class RoutingService:
             receipt.execution_id, prepared.task.task_id, decision_id,
             prepared.graph_fingerprint,
         )
-        return receipt.to_dict()
+        return ApprovedExecution(text=result.text, receipt=receipt)
 
     def status(self) -> dict[str, Any]:
         try:
