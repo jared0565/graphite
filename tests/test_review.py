@@ -13,6 +13,8 @@ import graphite.review as review_module
 
 from graphite.cache import file_hash
 from graphite.cli import main
+from graphite.config import Config
+from graphite.engine_identity import engine_identity
 from graphite.review import (
     Change,
     ReviewError,
@@ -124,6 +126,7 @@ def _write_review_project(
     manifest = {
         "root": root.name,
         "file_count": 2,
+        "engine": engine_identity(Config().cache_version),
         "files": [
             {
                 "rel_path": relative,
@@ -141,6 +144,7 @@ def _write_review_manifest(root: Path, output_dir: str, relative_files: tuple[st
     manifest = {
         "root": root.name,
         "file_count": len(relative_files),
+        "engine": engine_identity(Config().cache_version),
         "files": [
             {
                 "rel_path": relative,

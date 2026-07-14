@@ -27,7 +27,8 @@ from .export.json import build_bundle, to_json as export_json
 from .export.md import to_markdown as export_md
 from .extract.ast import extract_all
 from .freshness import check_graph_freshness
-from .graph import build_graph, graph_from_json, graph_to_json
+from .graph import build_graph, graph_to_json
+from .graph_io import GraphReadError, load_validated_graph_bundle
 from .ingest import collect_files
 from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
@@ -218,14 +219,13 @@ def _build_project(path: Path, cfg: Config) -> None:
     _report(cfg, manifest, graph_data, clusters, analysis)
 
 
-def _load_graph(path: Path) -> Any:
-    if not path.exists():
-        print(f"[graphite] graph not found: {path}", file=sys.stderr)
-        print("Run `graphite build .` first.", file=sys.stderr)
-        raise SystemExit(1)
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return graph_from_json(data)
+def _load_graph(path: Path, *, root: Path | None = None) -> Any:
+    selected_root = (root or Path.cwd()).resolve()
+    try:
+        _, graph = load_validated_graph_bundle(path, root=selected_root)
+    except GraphReadError as exc:
+        raise ValueError(f"graph unavailable: {exc.code}") from None
+    return graph
 
 
 def _is_test_file(path: str) -> bool:
@@ -298,7 +298,7 @@ def _print_watch_impact(root: Path, cfg: Config, change: WatchChange, depth: int
         return
 
     try:
-        g = _load_graph(graph_path)
+        g = _load_graph(graph_path, root=root)
         result = _impact(g, impact_inputs, depth)
     except Exception as exc:
         print(f"[graphite] impact skipped: {exc}", file=sys.stderr)
@@ -589,14 +589,14 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 def cmd_query(args: argparse.Namespace) -> int:
-    g = _load_graph(Path(args.graph_json))
+    g = _load_graph(Path(args.graph_json), root=Path.cwd())
     result = query(g, args.query)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
 def cmd_impact(args: argparse.Namespace) -> int:
-    g = _load_graph(Path(args.graph_json))
+    g = _load_graph(Path(args.graph_json), root=Path.cwd())
     result = _impact(g, args.files, args.depth)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -648,20 +648,18 @@ def _resolve_review_graph_path(
     return resolved
 
 
-def _load_review_graph(path: Path) -> tuple[Any, str | None]:
+def _load_review_graph(path: Path, root: Path | None = None) -> tuple[Any, str | None]:
     try:
-        with path.open("rb") as graph_file:
-            raw_graph = graph_file.read(_MAX_REVIEW_GRAPH_BYTES + 1)
-        if len(raw_graph) > _MAX_REVIEW_GRAPH_BYTES:
-            raise ValueError("review graph exceeds size limit")
-        return json.loads(raw_graph.decode("utf-8")), None
-    except (
-        OSError,
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        RecursionError,
-        ValueError,
-    ):
+        selected_root = root or path.parent.parent
+        bundle, _ = load_validated_graph_bundle(
+            path,
+            root=selected_root,
+            max_bytes=_MAX_REVIEW_GRAPH_BYTES,
+        )
+        return bundle, None
+    except GraphReadError as exc:
+        if exc.code == "graph_invalid":
+            return {}, None
         return None, "dependency graph is unavailable"
 
 
@@ -694,7 +692,7 @@ def cmd_review_changes(args: argparse.Namespace) -> int:
     cfg = _project_scoped_config(args, root)
     custom_graph = args.graph_json is not None
     graph_path = _resolve_review_graph_path(root, cfg, args.graph_json)
-    graph_bundle, graph_error = _load_review_graph(graph_path)
+    graph_bundle, graph_error = _load_review_graph(graph_path, root)
 
     packet = build_review_packet(
         root_name=root.name,
@@ -715,7 +713,7 @@ def cmd_review_changes(args: argparse.Namespace) -> int:
 
 
 def cmd_context(args: argparse.Namespace) -> int:
-    g = _load_graph(Path(args.graph_json))
+    g = _load_graph(Path(args.graph_json), root=Path.cwd())
     result = build_context(g, args.files, depth=args.depth, neighbor_limit=args.neighbor_limit)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -1226,6 +1224,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
 
