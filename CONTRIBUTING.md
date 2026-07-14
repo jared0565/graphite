@@ -121,6 +121,35 @@ node "C:\Users\fbmac\atlas\Codex\.codex_state\user_home\scripts\validate-package
 
 In shorthand, the validated target is `validate-packages.cjs typescript`. If validation exits 1, stop; if registry lookup is unavailable, manually verify the spelling and identity before proceeding. After validation, use the target project's existing package manager and project-local dependency declaration. Do not use a global TypeScript install.
 
+## TypeScript activation maintenance contract
+
+`graphite init` and `graphite bootstrap` are the only callers allowed to request automatic TypeScript activation. Their normal onboarding writes complete first; activation is a consent-gated post-step before the normal build and validation stages. Build, report, check, doctor, daemon, watch, MCP, agents, JSON, CI, redirected streams, and `--yes` must never gain prompt or installation authority. Preserve tests for those boundaries whenever CLI dispatch or imports change.
+
+Eligibility is deliberately conservative. A selected root needs contained `.ts`/`.tsx` or `tsconfig.json` evidence, no resolvable project-local TypeScript, a regular contained `package.json`, exactly one supported root lockfile, and an external trusted manager executable. If `package.json#packageManager` exists, its manager family must match the lockfile. Multiple lockfiles, nested-only package roots, invalid metadata, unsafe manager configuration, non-canonical dependency sources, or unsupported/unknown versions are `guidance_only` without mutation.
+
+The implemented automatic matrix is:
+
+| Manager | Supported automatic major | Required root lockfile | Disallowed root configuration |
+| --- | --- | --- | --- |
+| npm | npm 8–11 | `package-lock.json` | `.npmrc`, `npm-shrinkwrap.json` |
+| pnpm | pnpm 11 | `pnpm-lock.yaml` | `.npmrc`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `.pnpmfile.mjs` |
+| Bun | Bun 1 | exactly one of `bun.lock` or `bun.lockb` | `.npmrc`, `bunfig.toml` |
+| Yarn | none | `yarn.lock` | `.yarnrc.yml`, `.yarnrc`, `.yarn/plugins` |
+
+Yarn is `guidance_only`: automatic execution remains disabled because its version/configuration families do not yet provide one verified unattended registry, credential-isolation, and no-build contract. Do not widen supported majors or flags without official-source verification plus adapter, argv, environment, and adversarial tests.
+
+Only explicit interactive `y` or `yes` consent may proceed. The trusted validator must be absolute, a regular file, outside the selected root, revalidated before launch, and invoked with exact argument `typescript` before any package-manager action. Automatic npm, pnpm, and Bun use `https://registry.npmjs.org/`, an isolated configuration/home, stripped ambient credentials and repository overrides, fixed argv, closed stdin, and lifecycle scripts disabled. Private registries and mirrors are manual-only. Activation installs only local development dependency `typescript` and does not infer `@types/*` or any adjacent tool.
+
+Manual TypeScript workflow, in fixed order:
+
+1. Set `GRAPHITE_PACKAGE_VALIDATOR` to the trusted environment-specific absolute validator path outside the project.
+2. Fail closed if it is unset, relative, missing, repository-contained, or not a regular file.
+3. Run the validator for the exact package name `typescript`; stop on any non-zero result.
+4. Only after successful validation, use the existing project manager to add local development dependency `typescript` with lifecycle scripts disabled under the operator's registry and credential policy.
+5. Rerun `graphite doctor` or onboarding to confirm detection.
+
+Never add a global TypeScript command. `validation_failed`, `installation_failed`, and `verification_failed` are fatal to the overall onboarding exit and return 1, but completed onboarding files and reviewable manager changes remain preserved. Do not add automatic rollback: concurrent editors or package managers may own those changes.
+
 ## Model-agnostic design
 
 Core scanning, graph construction, validation, review, and export must remain deterministic with LLM functionality disabled. Optional model integrations belong behind a `CompletionProvider`-style interface; no vendor SDK, model, host, or API key may become mandatory for core behavior.

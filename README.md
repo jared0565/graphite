@@ -221,6 +221,34 @@ graphite bootstrap . --json
 
 Bootstrap updates `.gitignore`, creates or extends `AGENTS.md` with the auto-consult workflow, checks daemon visibility, builds the initial graph by default, and validates `graph-out/graph.json`.
 
+## Consent-gated project-local TypeScript activation
+
+After `graphite init` or `graphite bootstrap` writes its normal onboarding files, Graphite checks whether the selected root has `.ts`/`.tsx` source or `tsconfig.json` evidence but insufficient project-local TypeScript support. Core graphing does not require the compiler: when activation is unavailable, declined, or ineligible, Tree-sitter extraction and heuristic resolution remain available. Graphite adds only the exact project-local `typescript` development dependency; it does not infer `@types/*` or install frameworks or adjacent tooling. Graphite does not install global TypeScript.
+
+Automatic activation requires a contained regular `package.json`, exactly one supported root lockfile, matching `package.json#packageManager` metadata when present, safe control-file dependency sources, no manager-specific configuration that could redirect the operation, a supported external manager executable/version, and project-local TypeScript not already being resolvable. The automatic matrix is npm 8–11 with `package-lock.json`, pnpm 11 with `pnpm-lock.yaml`, and Bun 1 with exactly one of `bun.lock` or `bun.lockb`. Yarn is `guidance_only` because Graphite cannot currently prove a version-independent unattended registry, credential, and lifecycle-script boundary. Missing, nested-only, malformed, conflicting, ambiguous, or unsafe evidence also returns `guidance_only`; Graphite never guesses npm or a workspace package.
+
+In an interactive terminal Graphite prompts exactly once, after those eligibility checks and before validator, network, manifest, lockfile, or dependency-store activity:
+
+```text
+Project-local TypeScript is missing. Install it with <manager> as a development dependency? [y/N]
+```
+
+The prompt defaults to No. Only an explicit `y` or `yes`, case-insensitively, grants consent. Empty input, EOF, malformed input, and every other response mean `declined`. There is no remembered consent between repositories or invocations. JSON, CI, redirected stdin, redirected stdout, and `--yes` are non-interactive activation modes: they never prompt, validate, or install and instead return a non-mutating result such as `guidance_only`, `already_available`, or `not_applicable`.
+
+Consent does not bypass validation. `GRAPHITE_PACKAGE_VALIDATOR` must identify an absolute, existing regular file outside the selected root. Graphite invokes that validator through a trusted external Node executable with the exact argument `typescript`; unset, relative, missing, repository-contained, changed, rejected, or non-file validators fail closed before installation. The automatic path permits only `https://registry.npmjs.org/`, removes ambient registry tokens and repository-controlled overrides, uses fixed argv with lifecycle scripts disabled, closes child stdin, and bounds output, descendants, and the shared deadline. Private registries and enterprise mirrors use the manual workflow under the operator's existing package-management policy.
+
+Onboarding files are written before activation and remain preserved. Activation then runs before the normal optional build and validation stages. `installed`, `already_available`, `not_applicable`, `declined`, and `guidance_only` do not make otherwise-successful onboarding fail. Explicitly approved `validation_failed`, `installation_failed`, and `verification_failed` outcomes preserve the completed onboarding files but make `init` or `bootstrap` return exit code 1. Package-manager changes remain visible for review; Graphite performs no automatic rollback that could overwrite concurrent edits.
+
+When automatic activation is unavailable, follow this fixed manual workflow in order:
+
+1. Set `GRAPHITE_PACKAGE_VALIDATOR` to your environment's trusted absolute validator path outside the project.
+2. Fail closed if it is unset, relative, missing, or not a regular file.
+3. Run the validator for the exact package name `typescript`, for example `node "$GRAPHITE_PACKAGE_VALIDATOR" typescript`, and stop on failure.
+4. Only after successful validation, use the project's existing package manager to add `typescript` as a local development dependency with lifecycle scripts disabled according to local registry and credential policy.
+5. Rerun `graphite doctor` or onboarding to confirm project-local detection.
+
+Normal `build`, `report`, `check`, `doctor`, `daemon`, `watch`, MCP, agent, and other non-onboarding paths have no TypeScript installation authority. These controls reduce and contain risk; they are not a claim that Graphite or the local host is unhackable.
+
 ## Agent auto-consult workflow
 
 For non-trivial code changes, agents should consult Graphite before broad file reads or edits:

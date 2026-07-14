@@ -33,6 +33,14 @@ def read_document(name: str) -> str:
     return (ROOT / name).read_text(encoding="utf-8")
 
 
+def document_section(document: str, heading: str) -> str:
+    """Return one Markdown section without coupling tests to the whole document."""
+    start = document.index(heading)
+    body_start = start + len(heading)
+    next_heading = document.find("\n## ", body_start)
+    return document[start : next_heading if next_heading != -1 else len(document)]
+
+
 def credential_example_linter_has_violation(text: str) -> bool:
     """Lint documentation for credential examples that are not pure placeholders."""
     if SECRET_VALUE.search(text):
@@ -451,6 +459,114 @@ def test_readme_documents_system_readiness_and_optional_activation() -> None:
     readme_folded = readme.casefold()
     for phrase in required_phrases:
         assert phrase.casefold() in readme_folded
+
+
+def test_docs_define_consent_gated_typescript_activation() -> None:
+    combined = "\n".join(
+        read_document(name) for name in ("README.md", "CONTRIBUTING.md", "ARCHITECTURE.md")
+    ).casefold()
+
+    for phrase in (
+        "project-local typescript",
+        "defaults to no",
+        "graphite_package_validator",
+        "non-interactive",
+        "lifecycle scripts",
+        "private registries",
+        "guidance_only",
+        "global typescript",
+    ):
+        assert phrase in combined
+    assert "yarn" in combined
+    assert "does not install global typescript" in combined
+
+
+def test_readme_pins_typescript_consent_and_onboarding_lifecycle() -> None:
+    section = document_section(
+        read_document("README.md"),
+        "## Consent-gated project-local TypeScript activation",
+    )
+    folded = section.casefold()
+
+    for phrase in (
+        "graphite init",
+        "graphite bootstrap",
+        "project-local typescript is missing. install it with <manager> as a development dependency? [y/n]",
+        "prompts exactly once",
+        "defaults to no",
+        "explicit `y` or `yes`",
+        "empty input, eof, malformed input",
+        "no remembered consent",
+        "json, ci, redirected stdin, redirected stdout, and `--yes`",
+        "never prompt, validate, or install",
+        "onboarding files are written before activation",
+        "validation_failed`, `installation_failed`, and `verification_failed",
+        "exit code 1",
+        "preserved",
+    ):
+        assert phrase in folded
+
+
+def test_contributing_pins_typescript_eligibility_and_manual_workflow() -> None:
+    section = document_section(
+        read_document("CONTRIBUTING.md"),
+        "## TypeScript activation maintenance contract",
+    )
+    folded = section.casefold()
+
+    for phrase in (
+        "npm 8–11",
+        "pnpm 11",
+        "bun 1",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "bun.lock",
+        "bun.lockb",
+        "package.json#packagemanager",
+        "unsafe manager configuration",
+        "https://registry.npmjs.org/",
+        "private registries",
+        "lifecycle scripts disabled",
+        "does not infer `@types/*`",
+    ):
+        assert phrase in folded
+    assert "yarn is" in folded
+    assert "guidance_only" in folded
+
+    workflow_steps = (
+        "1. set `graphite_package_validator`",
+        "2. fail closed",
+        "3. run the validator for the exact package name `typescript`",
+        "4. only after successful validation",
+        "5. rerun `graphite doctor` or onboarding",
+    )
+    positions = [folded.index(step) for step in workflow_steps]
+    assert positions == sorted(positions)
+
+
+def test_architecture_pins_typescript_activation_security_boundary() -> None:
+    section = document_section(
+        read_document("ARCHITECTURE.md"),
+        "## Consent-gated TypeScript activation boundary",
+    )
+    folded = section.casefold()
+
+    for phrase in (
+        "typescript_activation.py",
+        "dependency_install.py",
+        "build, report, check, doctor, daemon, watch, and mcp",
+        "no installation authority",
+        "shell=false",
+        "bounded output",
+        "shared deadline",
+        "ambient registry tokens",
+        "no automatic rollback",
+        "process-local",
+        "do not make graphite unhackable",
+        "empty temporary root",
+        "posix",
+    ):
+        assert phrase in folded
 
 
 def test_architecture_documents_current_llm_transport_and_token_bounds() -> None:
