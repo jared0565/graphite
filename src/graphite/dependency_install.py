@@ -25,6 +25,8 @@ TRUSTED_REGISTRY = "https://registry.npmjs.org/"
 INSTALL_OUTPUT_LIMIT = 64 * 1024
 MAX_CONTROL_FILE_BYTES = 8 * 1024 * 1024
 MAX_TRUSTED_FILE_BYTES = 256 * 1024 * 1024
+MAX_TRUSTED_LAUNCHER_LINKS = 8
+MAX_TRUSTED_LINK_TARGET_BYTES = 4096
 ACTIVATION_MAX_FILES = 100_000
 
 _VERSION_RE = re.compile(
@@ -80,12 +82,35 @@ class ManagerAdapter:
 
 
 @dataclass(frozen=True)
+class TrustedLink:
+    path: Path
+    identity: tuple[int, int]
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    owner: int
+    target: str
+
+
+@dataclass(frozen=True)
 class TrustedFile:
     path: Path
     identity: tuple[int, int]
     size: int
     mtime_ns: int
     sha256: str
+    launcher_path: Path | None = None
+    launcher_chain: tuple[TrustedLink, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (self.launcher_path is None) != (not self.launcher_chain):
+            raise ValueError("trusted_file_launcher_invalid")
+        if self.launcher_chain and self.launcher_chain[0].path != self.launcher_path:
+            raise ValueError("trusted_file_launcher_invalid")
+
+    @property
+    def command_path(self) -> Path:
+        return self.launcher_path if self.launcher_path is not None else self.path
 
 
 @dataclass(frozen=True)
@@ -120,7 +145,7 @@ class TrustedCommand:
     references: tuple[TrustedFile, ...]
 
     def __post_init__(self) -> None:
-        reference_arguments = tuple(str(reference.path) for reference in self.references)
+        reference_arguments = tuple(str(reference.command_path) for reference in self.references)
         if (
             not self.argv
             or not self.references
@@ -235,6 +260,150 @@ def _path_has_symlink(path: Path) -> bool:
     return False
 
 
+def _trusted_posix_owner(details: os.stat_result) -> bool:
+    try:
+        effective_uid = os.geteuid()
+    except AttributeError:
+        return False
+    return getattr(details, "st_uid", -1) in {0, effective_uid}
+
+
+def _trusted_posix_directory(path: Path, root: Path) -> bool:
+    try:
+        lexical = Path(os.path.abspath(path))
+        root_path = root.resolve(strict=True)
+        if _is_under(lexical, root_path) or _path_has_symlink(lexical):
+            return False
+        details = lexical.lstat()
+    except (OSError, RuntimeError):
+        return False
+    return (
+        stat.S_ISDIR(details.st_mode)
+        and not _is_reparse(details)
+        and _trusted_posix_owner(details)
+        and not details.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    )
+
+
+def _lexical_route_enters_root(base: Path, target: str, root: Path) -> bool:
+    target_path = Path(target)
+    current = Path(target_path.anchor) if target_path.is_absolute() else base
+    if _is_under(current, root):
+        return True
+    parts = target_path.parts[1:] if target_path.is_absolute() else target_path.parts
+    for part in parts:
+        if part in {"", "."}:
+            continue
+        current = current.parent if part == ".." else current / part
+        if _is_under(current, root):
+            return True
+    return False
+
+
+def _trusted_posix_link(path: Path, root: Path) -> TrustedLink | None:
+    try:
+        lexical = Path(os.path.abspath(path))
+        root_path = root.resolve(strict=True)
+        if _is_under(lexical, root_path) or not _trusted_posix_directory(lexical.parent, root_path):
+            return None
+        before = lexical.lstat()
+        if (
+            not stat.S_ISLNK(before.st_mode)
+            or _is_reparse(before)
+            or getattr(before, "st_nlink", 1) != 1
+            or not _trusted_posix_owner(before)
+            or before.st_size > MAX_TRUSTED_LINK_TARGET_BYTES
+        ):
+            return None
+        target = os.readlink(lexical)
+        if len(os.fsencode(target)) > MAX_TRUSTED_LINK_TARGET_BYTES:
+            return None
+        after = lexical.lstat()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    stable_fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+        "st_nlink",
+        "st_uid",
+    )
+    if any(getattr(before, field, None) != getattr(after, field, None) for field in stable_fields):
+        return None
+    return TrustedLink(
+        lexical,
+        (before.st_dev, before.st_ino),
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+        before.st_uid,
+        target,
+    )
+
+
+def _trusted_posix_launcher(path: Path, root: Path) -> TrustedFile | None:
+    try:
+        lexical = Path(os.path.abspath(path))
+        root_path = root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if _is_under(lexical, root_path):
+        return None
+    current = lexical
+    links: list[TrustedLink] = []
+    seen: set[tuple[int, int]] = set()
+    while True:
+        try:
+            details = current.lstat()
+        except OSError:
+            return None
+        if not stat.S_ISLNK(details.st_mode):
+            break
+        if len(links) >= MAX_TRUSTED_LAUNCHER_LINKS:
+            return None
+        link = _trusted_posix_link(current, root_path)
+        if link is None or link.identity in seen:
+            return None
+        seen.add(link.identity)
+        links.append(link)
+        if _lexical_route_enters_root(current.parent, link.target, root_path):
+            return None
+        target = Path(link.target)
+        current = Path(
+            os.path.abspath(target if target.is_absolute() else current.parent / target)
+        )
+        if _is_under(current, root_path):
+            return None
+    if not links:
+        return _trusted_file(lexical, root_path, executable=True)
+    if not _trusted_posix_directory(current.parent, root_path):
+        return None
+    try:
+        final_details = current.lstat()
+    except OSError:
+        return None
+    if (
+        not _trusted_posix_owner(final_details)
+        or final_details.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    ):
+        return None
+    target_reference = _trusted_file(current, root_path, executable=True)
+    if target_reference is None:
+        return None
+    return TrustedFile(
+        target_reference.path,
+        target_reference.identity,
+        target_reference.size,
+        target_reference.mtime_ns,
+        target_reference.sha256,
+        lexical,
+        tuple(links),
+    )
+
+
 def _trusted_file(path: Path, root: Path, *, executable: bool) -> TrustedFile | None:
     if not path.is_absolute():
         return None
@@ -300,7 +469,12 @@ def _trusted_file(path: Path, root: Path, *, executable: bool) -> TrustedFile | 
 
 
 def revalidate_trusted_file(reference: TrustedFile, root: Path, executable: bool) -> bool:
-    current = _trusted_file(reference.path, root, executable=executable)
+    if reference.launcher_path is not None:
+        if os.name == "nt" or not executable:
+            return False
+        current = _trusted_posix_launcher(reference.launcher_path, root)
+    else:
+        current = _trusted_file(reference.path, root, executable=executable)
     return current == reference
 
 
@@ -346,7 +520,14 @@ def resolve_trusted_executable(
     for directory in _path_entries(path_source):
         for candidate_name in names:
             candidate = directory / candidate_name
-            reference = _trusted_file(candidate, root, executable=not use_windows_rules)
+            if (
+                os.name != "nt"
+                and not use_windows_rules
+                and name in {manager.value for manager in Manager}
+            ):
+                reference = _trusted_posix_launcher(candidate, root)
+            else:
+                reference = _trusted_file(candidate, root, executable=not use_windows_rules)
             if reference is not None:
                 return reference
     return None
@@ -364,7 +545,7 @@ def resolve_windows_npm_prefix(
 
 
 def command_for(reference: TrustedFile) -> TrustedCommand:
-    return TrustedCommand((str(reference.path),), (reference,))
+    return TrustedCommand((str(reference.command_path),), (reference,))
 
 
 def _trusted_windows_system_environment() -> dict[str, str]:
@@ -1135,7 +1316,7 @@ def run_install(
         return StepResult(False, "install_failed")
     if not _prepare_isolated_install_home(root, isolated_home, adapter.manager):
         return StepResult(False, "install_failed")
-    directories = (command.references[0].path.parent,)
+    directories = (command.references[0].command_path.parent,)
     try:
         environment = build_install_environment(
             adapter.manager, isolated_home, directories, TRUSTED_REGISTRY, os.environ

@@ -110,7 +110,7 @@ If the manager cannot be safely constrained to the trusted registry without hono
 ## Process and filesystem security
 
 - Validator and package-manager commands use fixed argv with `shell=False`.
-- Executables must resolve outside the selected root and are revalidated immediately before launch.
+- Executables must resolve outside the selected root and are revalidated immediately before launch. POSIX package-manager launchers may use a bounded external symlink chain whose lexical launcher, every hop, and final target are identity-pinned and revalidated while argv preserves the manager basename needed by Corepack-style dispatch. Cycles, dangling or excessive chains, unsafe ownership or write permissions, selected-root crossings, and any chain or target replacement fail closed. Validators, control files, and Windows executables retain their strict non-symlink rules.
 - The selected root is the working directory but never an executable search location.
 - Stdin is closed after the one Graphite-owned prompt; child processes cannot prompt.
 - A single shared deadline bounds validation, installation, verification, and process-tree cleanup.

@@ -36,6 +36,7 @@ from graphite.dependency_install import (
     Version,
     adapter_for,
     build_install_environment,
+    command_for,
     control_files_use_trusted_sources,
     parse_version,
     probe_local_typescript,
@@ -2261,7 +2262,7 @@ def test_activate_revalidates_manager_command_before_install(tmp_path):
     )
 
     assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
-    assert result.reason == "command_changed"
+    assert result.reason == ("command_changed" if os.name == "nt" else "executable_changed")
     assert result.attempted
     assert all(event[0] != "install" for event in events)
 
@@ -2536,6 +2537,240 @@ def test_resolve_and_revalidate_external_executable(tmp_path):
     assert resolve_trusted_executable("tool", root, f"relative{os.pathsep}{root}", windows=False) is None
     inside = _file(root / ("tool.exe" if os.name == "nt" else "tool"))
     assert resolve_trusted_executable("tool", root, str(inside.path.parent), windows=os.name == "nt") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher symlink policy")
+def test_posix_npm_symlink_launcher_preserves_argv_for_version_and_install(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    bin_dir = tmp_path / "node" / "bin"
+    target = _file(
+        tmp_path / "node" / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js",
+        b"#!/usr/bin/env node\n",
+    )
+    launcher = bin_dir / "npm"
+    launcher.parent.mkdir(parents=True)
+    try:
+        launcher.symlink_to(Path("../lib/node_modules/npm/bin/npm-cli.js"))
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+
+    reference = resolve_trusted_executable("npm", root, str(bin_dir), windows=False)
+    assert reference is not None
+    assert reference.path == target.path
+    command = command_for(reference)
+    assert command.argv == (str(launcher.absolute()),)
+
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return ProbeProcessResult(0, b"11.2.0\n", b"", 0)
+
+    assert run_manager_version(command, root, 1, runner).ok
+    assert run_install(
+        root,
+        command,
+        adapter_for(Manager.NPM),
+        TRUSTED_REGISTRY,
+        tmp_path / "isolated",
+        1,
+        runner,
+    ).ok
+    assert calls[0][0] == [str(launcher.absolute()), "--version"]
+    assert calls[1][0][0] == str(launcher.absolute())
+    assert Path(calls[1][0][0]).name == "npm"
+    assert calls[1][1]["environment"]["PATH"].split(os.pathsep)[0] == str(bin_dir)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher symlink policy")
+def test_posix_corepack_style_launcher_chain_preserves_pnpm_name(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    bin_dir = tmp_path / "corepack" / "bin"
+    target = _file(
+        tmp_path / "corepack" / "lib" / "corepack.js",
+        b"#!/usr/bin/env node\n",
+    )
+    corepack = bin_dir / "corepack"
+    pnpm = bin_dir / "pnpm"
+    bin_dir.mkdir(parents=True)
+    try:
+        corepack.symlink_to(Path("../lib/corepack.js"))
+        pnpm.symlink_to("corepack")
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+
+    reference = resolve_trusted_executable("pnpm", root, str(bin_dir), windows=False)
+    assert reference is not None and reference.path == target.path
+    command = command_for(reference)
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        return ProbeProcessResult(0, b"11.1.0\n", b"", 0)
+
+    assert run_manager_version(command, root, 1, runner).ok
+    assert run_install(
+        root,
+        command,
+        adapter_for(Manager.PNPM),
+        TRUSTED_REGISTRY,
+        tmp_path / "isolated",
+        1,
+        runner,
+    ).ok
+    assert calls[0] == [str(pnpm.absolute()), "--version"]
+    assert calls[1][0] == str(pnpm.absolute())
+    assert Path(calls[0][0]).name == "pnpm"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher symlink policy")
+def test_posix_launcher_rejects_selected_root_on_either_side(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    external_bin = tmp_path / "external-bin"
+    external_target = _file(tmp_path / "external-lib" / "npm-cli.js")
+    external_bin.mkdir()
+    root_launcher = root / "npm"
+    external_launcher = external_bin / "npm"
+    root_target = _file(root / "pnpm-cli.js")
+    crossing_bin = tmp_path / "crossing-bin"
+    crossing_bin.mkdir()
+    crossing_launcher = crossing_bin / "npm"
+    try:
+        root_launcher.symlink_to(external_target.path)
+        external_launcher.symlink_to(root_target.path)
+        crossing_launcher.symlink_to(Path("../repo/../external-lib/npm-cli.js"))
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+
+    assert resolve_trusted_executable("npm", root, str(root), windows=False) is None
+    assert resolve_trusted_executable("npm", root, str(external_bin), windows=False) is None
+    assert resolve_trusted_executable("npm", root, str(crossing_bin), windows=False) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher symlink policy")
+def test_posix_manager_launcher_policy_does_not_widen_node_or_validator(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    bin_dir = tmp_path / "bin"
+    target = _file(tmp_path / "lib" / "node")
+    validator_target = _file(tmp_path / "lib" / "validate-packages.cjs")
+    node_launcher = bin_dir / "node"
+    validator_launcher = tmp_path / "validate-packages.cjs"
+    bin_dir.mkdir()
+    try:
+        node_launcher.symlink_to(target.path)
+        validator_launcher.symlink_to(validator_target.path)
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+
+    assert resolve_trusted_executable("node", root, str(bin_dir), windows=False) is None
+    assert resolve_trusted_file(validator_launcher, root, executable=False) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher symlink policy")
+@pytest.mark.parametrize("failure", ("cycle", "depth", "dangling"))
+def test_posix_launcher_rejects_invalid_symlink_chains(tmp_path, failure):
+    root = tmp_path / "repo"
+    root.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "npm"
+    try:
+        if failure == "cycle":
+            launcher.symlink_to("npm-next")
+            (bin_dir / "npm-next").symlink_to("npm")
+        elif failure == "dangling":
+            launcher.symlink_to("missing-cli.js")
+        else:
+            launcher.symlink_to("link-0")
+            for index in range(32):
+                (bin_dir / f"link-{index}").symlink_to(f"link-{index + 1}")
+            _file(bin_dir / "link-32")
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+
+    assert resolve_trusted_executable("npm", root, str(bin_dir), windows=False) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher symlink policy")
+@pytest.mark.parametrize("mutation", ("launcher", "intermediate", "target_replace", "target_content"))
+def test_posix_launcher_chain_mutation_fails_before_launch(tmp_path, mutation):
+    root = tmp_path / "repo"
+    root.mkdir()
+    bin_dir = tmp_path / "bin"
+    lib_dir = tmp_path / "lib"
+    target = _file(lib_dir / "npm-cli.js", b"#!/usr/bin/env node\n")
+    replacement = _file(lib_dir / "replacement.js", b"#!/usr/bin/env node\nreplacement")
+    launcher = bin_dir / "npm"
+    intermediate = bin_dir / "npm-link"
+    bin_dir.mkdir()
+    try:
+        launcher.symlink_to("npm-link")
+        intermediate.symlink_to(target.path)
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+
+    reference = resolve_trusted_executable("npm", root, str(bin_dir), windows=False)
+    assert reference is not None
+    command = command_for(reference)
+    if mutation == "launcher":
+        launcher.unlink()
+        launcher.symlink_to(replacement.path)
+    elif mutation == "intermediate":
+        intermediate.unlink()
+        intermediate.symlink_to(replacement.path)
+    elif mutation == "target_replace":
+        target.path.unlink()
+        target.path.write_bytes(b"#!/usr/bin/env node\nreplacement")
+        target.path.chmod(0o755)
+    else:
+        target.path.write_bytes(b"#!/usr/bin/env node\nmutated")
+        target.path.chmod(0o755)
+
+    called = False
+
+    def runner(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return ProbeProcessResult(0, b"11.0.0", b"", 0)
+
+    assert run_manager_version(command, root, 1, runner).reason == "manager_unavailable"
+    assert run_install(
+        root,
+        command,
+        adapter_for(Manager.NPM),
+        TRUSTED_REGISTRY,
+        tmp_path / "isolated",
+        1,
+        runner,
+    ).reason == "executable_changed"
+    assert not called
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher symlink policy")
+@pytest.mark.parametrize("unsafe", ("target", "launcher_directory", "target_directory"))
+def test_posix_launcher_rejects_unsafe_write_permissions(tmp_path, unsafe):
+    root = tmp_path / "repo"
+    root.mkdir()
+    bin_dir = tmp_path / "bin"
+    target = _file(tmp_path / "lib" / "npm-cli.js")
+    launcher = bin_dir / "npm"
+    bin_dir.mkdir()
+    try:
+        launcher.symlink_to(target.path)
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+    if unsafe == "target":
+        target.path.chmod(0o775)
+    elif unsafe == "launcher_directory":
+        bin_dir.chmod(0o775)
+    elif unsafe == "target_directory":
+        target.path.parent.chmod(0o775)
+
+    assert resolve_trusted_executable("npm", root, str(bin_dir), windows=False) is None
 
 
 def test_resolve_trusted_external_regular_file(tmp_path):

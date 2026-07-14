@@ -773,6 +773,9 @@ def test_architecture_pins_typescript_activation_security_boundary() -> None:
         "empty temporary root",
         "posix",
         "typescript activation results expose only",
+        "bounded external symlink-launcher chain",
+        "argv retains the lexical manager name",
+        "validator and control-file symlink rules remain strict",
     ):
         assert phrase in folded
 
