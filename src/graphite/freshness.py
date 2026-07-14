@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .engine_identity import EngineIdentityError, engine_identity
 from .ingest import collect_files
 
 _DOCTOR_FILE_LIMIT = 10_000
@@ -63,6 +64,24 @@ def check_graph_freshness(root: Path, cfg: Config, *, max_manifest_bytes: int | 
     entries = collect_files(root, cfg)
     if max_manifest_bytes is not None and len(entries) > _DOCTOR_FILE_LIMIT:
         raise FreshnessLimitError("freshness file limit exceeded")
+    try:
+        current_engine = engine_identity(cfg.cache_version)
+    except EngineIdentityError:
+        return {
+            "stale": True,
+            "reason": "engine_identity_unavailable",
+            "added": [],
+            "changed": [],
+            "removed": [],
+        }
+    if previous.get("engine") != current_engine:
+        return {
+            "stale": True,
+            "reason": "engine_changed",
+            "added": [],
+            "changed": [],
+            "removed": [],
+        }
     current = {e.rel_path: e.content_hash for e in entries}
     added = sorted(set(current) - set(old))
     removed = sorted(set(old) - set(current))

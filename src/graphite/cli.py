@@ -21,6 +21,7 @@ from .context import build_context, format_context_markdown
 from .daemon import DaemonOptions, read_daemon_status, run_daemon
 from .daemon_health import HealthOptions, evaluate_daemon_health, format_health_text
 from .doctor import format_doctor_text, run_doctor
+from .engine_identity import engine_identity
 from .export.html import to_html as export_html
 from .export.json import build_bundle, to_json as export_json
 from .export.md import to_markdown as export_md
@@ -118,6 +119,7 @@ def _scan(args: argparse.Namespace, cfg: Config) -> tuple[dict[str, Any], list[A
     manifest = {
         "root": root.name,
         "file_count": len(entries),
+        "engine": engine_identity(cfg.cache_version),
         "files": [
             {"rel_path": e.rel_path, "language": e.language, "size": e.size, "hash": e.content_hash}
             for e in entries
@@ -1224,7 +1226,6 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 
 
 
