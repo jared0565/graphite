@@ -42,52 +42,166 @@ def document_section(document: str, heading: str) -> str:
     return document[start : next_heading if next_heading != -1 else len(document)]
 
 
-def global_typescript_install_diagnostics(markdown: str) -> list[str]:
-    """Find package-manager command lines that request global TypeScript."""
-    diagnostics: list[str] = []
-    managers = {"npm", "pnpm", "yarn", "bun"}
-    for line_number, raw_line in enumerate(markdown.splitlines(), start=1):
-        normalized = raw_line.replace("`", " ").replace("\\", "/").strip()
-        normalized = re.sub(r"^(?:>\s*)?(?:[-*+]\s+|\d+\.\s+)?", "", normalized)
-        try:
-            tokens = shlex.split(normalized, posix=True)
-        except ValueError:
-            tokens = normalized.split()
-        folded = [token.casefold().rstrip(".,;:") for token in tokens]
-        manager_indexes = [
-            index
-            for index, token in enumerate(folded)
-            if token.replace("\\", "/").rsplit("/", 1)[-1].removesuffix(".cmd").removesuffix(".exe")
-            in managers
-        ]
-        for manager_index in manager_indexes:
-            command = folded[manager_index + 1 :]
-            has_typescript = any(
-                re.fullmatch(r"typescript(?:@[^\s]+)?", token)
-                or re.fullmatch(r"-g(?:=)?typescript(?:@[^\s]+)?", token)
-                for token in command
+def _inline_code_spans(line: str) -> Iterator[str]:
+    index = 0
+    while index < len(line):
+        if line[index] != "`" or _is_escaped(line, index):
+            index += 1
+            continue
+        run_length = len(line[index:]) - len(line[index:].lstrip("`"))
+        content_start = index + run_length
+        search_index = content_start
+        while search_index < len(line):
+            closing_start = line.find("`", search_index)
+            if closing_start == -1:
+                return
+            closing_length = len(line[closing_start:]) - len(
+                line[closing_start:].lstrip("`")
             )
-            if not has_typescript:
-                continue
-            has_global_option = any(
-                token == "global"
-                or re.fullmatch(r"-g(?:$|=.*|typescript(?:@[^\s]+)?)", token)
-                or token == "--global"
-                or token.startswith("--global=")
+            if closing_length == run_length:
+                content = line[content_start:closing_start]
+                if (
+                    len(content) >= 2
+                    and content.startswith(" ")
+                    and content.endswith(" ")
+                    and content.strip()
+                ):
+                    content = content[1:-1]
+                yield content
+                index = closing_start + closing_length
+                break
+            search_index = closing_start + closing_length
+        else:
+            return
+
+
+def markdown_code_fragments(markdown: str) -> Iterator[tuple[int, str]]:
+    """Yield fenced blocks and inline code spans; prose is intentionally excluded."""
+    fence: tuple[str, int, int, int] | None = None
+    fenced_lines: list[str] = []
+    for line_number, line in enumerate(markdown.splitlines(), start=1):
+        quote_depth, content = _blockquote_content(line)
+        run = _fence_run(content)
+        if fence:
+            marker, length, opening_depth, opening_line = fence
+            if (
+                run
+                and run[0] == marker
+                and run[1] >= length
+                and quote_depth == opening_depth
+                and not content[run[2] :].strip()
+            ):
+                yield opening_line, "\n".join(fenced_lines)
+                fence = None
+                fenced_lines = []
+            else:
+                fenced_lines.append(content)
+            continue
+        if run:
+            fence = (run[0], run[1], quote_depth, line_number)
+            fenced_lines = []
+            continue
+        if content.startswith(("\t", "    ")):
+            continue
+        for span in _inline_code_spans(content):
+            yield line_number, span
+
+
+def _shell_command_segments(code: str) -> Iterator[list[str]]:
+    logical_code = re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", code)
+    for command_line in logical_code.splitlines():
+        lexer = shlex.shlex(
+            command_line,
+            posix=False,
+            punctuation_chars=";&|",
+        )
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        try:
+            tokens = list(lexer)
+        except ValueError:
+            continue
+        segment: list[str] = []
+        for token in tokens:
+            if token and set(token) <= {";", "&", "|"}:
+                if segment:
+                    yield segment
+                    segment = []
+            else:
+                segment.append(token)
+        if segment:
+            yield segment
+
+
+def _manager_name(token: str) -> str | None:
+    executable = token.strip("\"'").replace("\\", "/").rsplit("/", 1)[-1]
+    executable = executable.casefold()
+    for suffix in (".cmd", ".exe", ".com"):
+        executable = executable.removesuffix(suffix)
+    return executable if executable in {"npm", "pnpm", "yarn", "bun"} else None
+
+
+def _is_global_typescript_install(tokens: list[str]) -> bool:
+    folded = [token.strip("\"'").casefold().rstrip(".,;:") for token in tokens]
+    for manager_index, token in enumerate(folded):
+        manager = _manager_name(token)
+        if manager is None:
+            continue
+        command = folded[manager_index + 1 :]
+        actions = {"install", "add"} | ({"i"} if manager == "npm" else set())
+        action_index = next(
+            (index for index, item in enumerate(command) if item in actions),
+            None,
+        )
+        if action_index is None:
+            continue
+        has_typescript = any(
+            re.fullmatch(r"typescript(?:@[^\s]+)?", item)
+            or re.fullmatch(r"-g(?:=)?typescript(?:@[^\s]+)?", item)
+            for item in command
+        )
+        if not has_typescript:
+            continue
+        for index, item in enumerate(command):
+            short_options = (
+                item[1:]
+                if item.startswith("-") and not item.startswith("--")
+                else ""
+            )
+            if (
+                (manager == "yarn" and item == "global" and index < action_index)
+                or item == "--global"
+                or item.startswith("--global=")
                 or (
-                    token.startswith("--location=")
-                    and token.partition("=")[2].startswith("global")
+                    item.startswith("--location=")
+                    and item.partition("=")[2].startswith("global")
                 )
                 or (
-                    token == "--location"
+                    item == "--location"
                     and index + 1 < len(command)
                     and command[index + 1].startswith("global")
                 )
-                for index, token in enumerate(command)
-            )
-            if has_global_option:
-                diagnostics.append(f"line {line_number}: {raw_line.strip()}")
-                break
+                or (
+                    short_options
+                    and (
+                        short_options.startswith(("g=", "gtypescript"))
+                        or (
+                            re.fullmatch(r"[A-Za-z]+", short_options) is not None
+                            and "g" in short_options.casefold()
+                        )
+                    )
+                )
+            ):
+                return True
+    return False
+
+
+def global_typescript_install_diagnostics(markdown: str) -> list[str]:
+    """Find global TypeScript installs shown as executable Markdown code."""
+    diagnostics: list[str] = []
+    for line_number, code in markdown_code_fragments(markdown):
+        if any(_is_global_typescript_install(tokens) for tokens in _shell_command_segments(code)):
+            diagnostics.append(f"line {line_number}: global TypeScript install command")
     return diagnostics
 
 
@@ -687,36 +801,41 @@ def test_optional_activation_docs_reject_unsafe_examples() -> None:
 
 
 @pytest.mark.parametrize(
-    "command",
+    "markdown",
     (
-        "npm install -g typescript",
         "`npm install -gtypescript`",
-        "- pnpm add --global typescript",
-        "bun add --global=true typescript",
-        "npm install --location global typescript",
-        "npm install --location=global typescript",
-        "npm install --location=global-prefix typescript@latest",
-        "yarn global add typescript",
-        r"C:\tools\npm.cmd install --global typescript",
+        "Use `npm --global install typescript` only in this mutant.",
+        "```sh\npnpm add --global typescript\n```",
+        "```sh\nbun add typescript --global=true\n```",
+        "```sh\nnpm install --location global typescript\n```",
+        "```sh\nnpm --location=global install typescript\n```",
+        "```sh\nnpm install typescript@latest --location=global-prefix\n```",
+        "```sh\nyarn global add typescript\n```",
+        "```powershell\nC:\\tools\\npm.cmd -Dg install typescript\n```",
+        "```sh\nnpm install --global \\\n  typescript\n```",
     ),
 )
-def test_global_typescript_install_diagnostics_rejects_mutants(command: str) -> None:
-    assert global_typescript_install_diagnostics(command)
+def test_global_typescript_install_diagnostics_rejects_code_mutants(
+    markdown: str,
+) -> None:
+    assert global_typescript_install_diagnostics(markdown)
 
 
 @pytest.mark.parametrize(
-    "command",
+    "markdown",
     (
-        "npm install --save-dev --ignore-scripts typescript",
-        "pnpm add -D typescript",
-        "bun add --dev typescript@5.9.0",
-        "Graphite does not install global TypeScript.",
+        "The prose words npm install, global, and TypeScript describe policy only.",
+        "Do not copy the prose command npm install --global typescript.",
+        "Use `npm install --save-dev --ignore-scripts typescript` locally.",
+        "```sh\npnpm add -D typescript\nbun add --dev typescript@5.9.0\n```",
+        "`npm config set location global typescript` is not an install command.",
+        "`yarn add global typescript` installs two local packages.",
     ),
 )
-def test_global_typescript_install_diagnostics_allows_local_or_prose(
-    command: str,
+def test_global_typescript_install_diagnostics_allows_local_code_or_prose(
+    markdown: str,
 ) -> None:
-    assert global_typescript_install_diagnostics(command) == []
+    assert global_typescript_install_diagnostics(markdown) == []
 
 
 def test_credential_example_linter_is_precise() -> None:
