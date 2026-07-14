@@ -59,6 +59,10 @@ def test_schema_migration_is_idempotent_and_enables_safety_pragmas(tmp_path: Pat
             row[1]: row[3]
             for row in connection.execute("PRAGMA table_info(execution_attempts)")
         }
+        staged_columns = {
+            row[1]: row[3]
+            for row in connection.execute("PRAGMA table_info(staged_execution_receipts)")
+        }
     assert {
         "tasks",
         "decisions",
@@ -72,10 +76,12 @@ def test_schema_migration_is_idempotent_and_enables_safety_pragmas(tmp_path: Pat
         "execution_attempts",
         "execution_receipts",
     } <= tables
-    assert version == "2"
+    assert version == "3"
     assert attempt_columns["max_input_tokens"] == 1
     assert attempt_columns["max_output_tokens"] == 1
     assert attempt_columns["expected_prompt_hash"] == 1
+    assert attempt_columns["inventory_digest"] == 1
+    assert staged_columns["inventory_digest"] == 1
     assert store.pragma_state() == {
         "foreign_keys": 1,
         "journal_mode": "wal",
@@ -102,7 +108,8 @@ def test_execution_finalization_is_atomic_and_idempotent(tmp_path: Path) -> None
         decision_id="decision-1", manifest_hash="c" * 64,
         graph_fingerprint="d" * 64, model_id="kimi-k2.7-code:cloud",
         effort="default", reserved_tokens=10, max_input_tokens=8,
-        max_output_tokens=2, expected_prompt_hash="e" * 64, created_at=11,
+        max_output_tokens=2, expected_prompt_hash="e" * 64,
+        inventory_digest="1" * 64, created_at=11,
     )
     receipt = ExecutionReceipt(
         "exec-1", "approval-1", "kimi-k2.7-code:cloud", Effort.DEFAULT,
@@ -110,7 +117,8 @@ def test_execution_finalization_is_atomic_and_idempotent(tmp_path: Path) -> None
     )
     with pytest.raises(StorageError, match="^approval_not_consumed$"):
         store.finalize_execution_attempt(
-            attempt_id="attempt-1", receipt=receipt, completed_at=12
+            attempt_id="attempt-1", receipt=receipt,
+            inventory_digest="1" * 64, completed_at=12
         )
     assert store.row_count("executions") == 0
     assert store.row_count("execution_receipts") == 0
@@ -120,6 +128,22 @@ def test_execution_finalization_is_atomic_and_idempotent(tmp_path: Path) -> None
         approval_id="approval-1", nonce_hash="b" * 64, manifest_hash="c" * 64,
         now=12, token_amount=10, repository_quota=100,
     )
+    with pytest.raises(StorageError, match="^execution_attempt_conflict$"):
+        store.finalize_execution_attempt(
+            attempt_id="attempt-1", receipt=receipt,
+            inventory_digest="2" * 64, completed_at=12,
+        )
+    with pytest.raises(StorageError, match="^execution_attempt_conflict$"):
+        store.stage_execution_receipt(
+            attempt_id="attempt-1", receipt=receipt,
+            inventory_digest="2" * 64, staged_at=12,
+        )
+    with sqlite3.connect(store.path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE execution_attempts SET inventory_digest = ? WHERE attempt_id = ?",
+                ("A" * 64, "attempt-1"),
+            )
     with sqlite3.connect(store.path) as connection:
         connection.execute(
             "CREATE TRIGGER fail_evidence BEFORE INSERT ON execution_evidence "
@@ -128,7 +152,8 @@ def test_execution_finalization_is_atomic_and_idempotent(tmp_path: Path) -> None
 
     with pytest.raises(StorageError, match="storage_unavailable"):
         store.finalize_execution_attempt(
-            attempt_id="attempt-1", receipt=receipt, completed_at=12
+            attempt_id="attempt-1", receipt=receipt,
+            inventory_digest="1" * 64, completed_at=12
         )
     assert store.row_count("executions") == 0
     assert store.row_count("execution_receipts") == 0
@@ -138,10 +163,12 @@ def test_execution_finalization_is_atomic_and_idempotent(tmp_path: Path) -> None
     with sqlite3.connect(store.path) as connection:
         connection.execute("DROP TRIGGER fail_evidence")
     assert store.finalize_execution_attempt(
-        attempt_id="attempt-1", receipt=receipt, completed_at=12
+        attempt_id="attempt-1", receipt=receipt,
+        inventory_digest="1" * 64, completed_at=12
     ) is True
     assert store.finalize_execution_attempt(
-        attempt_id="attempt-1", receipt=receipt, completed_at=12
+        attempt_id="attempt-1", receipt=receipt,
+        inventory_digest="1" * 64, completed_at=12
     ) is False
     assert store.row_count("executions") == 1
     assert store.row_count("execution_receipts") == 1
@@ -322,7 +349,8 @@ def test_v1_database_migrates_to_v2_without_losing_rows(tmp_path: Path) -> None:
         }
         attempts = connection.execute(
             "SELECT attempt_id,status,failure_reason,execution_id,max_input_tokens,"
-            "max_output_tokens,expected_prompt_hash FROM execution_attempts ORDER BY attempt_id"
+            "max_output_tokens,expected_prompt_hash,inventory_digest "
+            "FROM execution_attempts ORDER BY attempt_id"
         ).fetchall()
         preserved_attempt_fields = connection.execute(
             "SELECT attempt_id,approval_id,task_id,decision_id,manifest_hash,"
@@ -342,7 +370,7 @@ def test_v1_database_migrates_to_v2_without_losing_rows(tmp_path: Path) -> None:
         }
         foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
-    assert version == "2"
+    assert version == "3"
     assert after == before
     expected_attempt_fields = []
     for legacy in before_attempts:
@@ -353,11 +381,13 @@ def test_v1_database_migrates_to_v2_without_losing_rows(tmp_path: Path) -> None:
         expected_attempt_fields.append(tuple(expected))
     assert preserved_attempt_fields == expected_attempt_fields
     assert attempts == [
-        ("attempt-completed", "completed", None, "exec-completed", None, None, None),
-        ("attempt-pending", "legacy_unrecoverable", "legacy_attempt_bindings_missing", None, None, None, None),
-        ("attempt-recover", "legacy_unrecoverable", "legacy_attempt_bindings_missing", None, None, None, None),
+        ("attempt-completed", "completed", None, "exec-completed", None, None, None, None),
+        ("attempt-pending", "legacy_unrecoverable", "legacy_attempt_bindings_missing", None, None, None, None, None),
+        ("attempt-recover", "legacy_unrecoverable", "legacy_attempt_bindings_missing", None, None, None, None, None),
     ]
-    assert {"max_input_tokens", "max_output_tokens", "expected_prompt_hash"} <= columns
+    assert {
+        "max_input_tokens", "max_output_tokens", "expected_prompt_hash", "inventory_digest"
+    } <= columns
     assert staged_exists == (1,)
     assert {"outcomes_recorded_at_idx", "executions_task_idx"} <= indexes
     assert foreign_key_errors == []
@@ -389,12 +419,154 @@ def test_attempt_creation_is_transactionally_idempotent_under_concurrency(
         "decision_id": "decision-1", "manifest_hash": "c" * 64,
         "graph_fingerprint": "d" * 64, "model_id": "kimi-k2.7-code:cloud",
         "effort": "default", "reserved_tokens": 10, "max_input_tokens": 8,
-        "max_output_tokens": 2, "expected_prompt_hash": "e" * 64, "created_at": 11,
+        "max_output_tokens": 2, "expected_prompt_hash": "e" * 64,
+        "inventory_digest": "1" * 64, "created_at": 11,
     }
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _index: store.create_execution_attempt(**values), range(2)))
     assert sorted(results) == [False, True]
     assert store.row_count("execution_attempts") == 1
+
+
+def test_v2_digestless_recovery_is_quarantined_without_fabrication(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    path = root / ".graphite" / "routing" / "events.sqlite3"
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.executescript(
+            """
+            CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO schema_meta VALUES ('schema_version', '2');
+            CREATE TABLE tasks (task_id TEXT PRIMARY KEY, category TEXT NOT NULL,
+                risk TEXT NOT NULL, graph_fingerprint TEXT NOT NULL, created_at INTEGER NOT NULL);
+            CREATE TABLE decisions (decision_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                model_id TEXT NOT NULL, effort TEXT NOT NULL, policy_version TEXT NOT NULL,
+                inventory_version TEXT NOT NULL, created_at INTEGER NOT NULL);
+            CREATE TABLE approvals (approval_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE CASCADE,
+                nonce_hash TEXT NOT NULL UNIQUE, manifest_hash TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('issued','consumed','expired','revoked')),
+                expires_at INTEGER NOT NULL, reserved_tokens INTEGER NOT NULL);
+            CREATE TABLE executions (execution_id TEXT PRIMARY KEY, idempotency_key TEXT UNIQUE,
+                task_id TEXT REFERENCES tasks(task_id) ON DELETE SET NULL,
+                decision_id TEXT REFERENCES decisions(decision_id) ON DELETE SET NULL,
+                approval_id TEXT REFERENCES approvals(approval_id) ON DELETE SET NULL,
+                model_id TEXT NOT NULL, effort TEXT NOT NULL, status TEXT NOT NULL,
+                reserved_tokens INTEGER NOT NULL, actual_input_tokens INTEGER,
+                actual_output_tokens INTEGER, created_at INTEGER NOT NULL, completed_at INTEGER);
+            CREATE INDEX executions_task_idx ON executions(task_id);
+            CREATE TABLE execution_evidence (execution_id TEXT PRIMARY KEY
+                REFERENCES executions(execution_id) ON DELETE CASCADE,
+                task_id TEXT NOT NULL, decision_id TEXT NOT NULL, graph_fingerprint TEXT NOT NULL);
+            CREATE TABLE execution_attempts (attempt_id TEXT PRIMARY KEY,
+                approval_id TEXT NOT NULL UNIQUE REFERENCES approvals(approval_id) ON DELETE RESTRICT,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
+                decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE RESTRICT,
+                manifest_hash TEXT NOT NULL, graph_fingerprint TEXT NOT NULL, model_id TEXT NOT NULL,
+                effort TEXT NOT NULL, reserved_tokens INTEGER NOT NULL,
+                max_input_tokens INTEGER NOT NULL, max_output_tokens INTEGER NOT NULL,
+                expected_prompt_hash TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN
+                    ('pending','completed','failed','persistence_failed','legacy_unrecoverable')),
+                failure_reason TEXT,
+                execution_id TEXT UNIQUE REFERENCES executions(execution_id) ON DELETE RESTRICT,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+            CREATE TABLE staged_execution_receipts (attempt_id TEXT PRIMARY KEY
+                REFERENCES execution_attempts(attempt_id) ON DELETE CASCADE,
+                execution_id TEXT NOT NULL UNIQUE, approval_id TEXT NOT NULL,
+                model_id TEXT NOT NULL, effort TEXT NOT NULL, outcome TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+                latency_ms INTEGER NOT NULL, prompt_hash TEXT NOT NULL,
+                response_hash TEXT NOT NULL, failure_reason TEXT, staged_at INTEGER NOT NULL);
+            CREATE TABLE execution_receipts (execution_id TEXT PRIMARY KEY
+                REFERENCES executions(execution_id) ON DELETE CASCADE,
+                approval_id TEXT NOT NULL, model_id TEXT NOT NULL, effort TEXT NOT NULL,
+                outcome TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+                latency_ms INTEGER NOT NULL, prompt_hash TEXT NOT NULL, response_hash TEXT NOT NULL,
+                failure_reason TEXT, completed_at INTEGER NOT NULL);
+            """
+        )
+        for suffix in ("pending", "recover", "completed"):
+            connection.execute(
+                "INSERT INTO tasks VALUES (?, 'isolated_code', 'low', ?, 1)",
+                (f"task-{suffix}", "a" * 64),
+            )
+            connection.execute(
+                "INSERT INTO decisions VALUES (?, ?, 'model:cloud', 'default', '1', '1', 1)",
+                (f"decision-{suffix}", f"task-{suffix}"),
+            )
+            connection.execute(
+                "INSERT INTO approvals VALUES (?, ?, ?, ?, ?, 'consumed', 99, 10)",
+                (f"approval-{suffix}", f"task-{suffix}", f"decision-{suffix}",
+                 suffix[0] * 64, suffix[-1] * 64),
+            )
+        connection.execute(
+            "INSERT INTO executions VALUES ('exec-completed','attempt-completed','task-completed',"
+            "'decision-completed','approval-completed','model:cloud','default','succeeded',"
+            "10,6,2,1,2)"
+        )
+        attempts = [
+            ("attempt-pending", "pending", None, None),
+            ("attempt-recover", "persistence_failed", "execution_persistence_failed", None),
+            ("attempt-completed", "completed", None, "exec-completed"),
+        ]
+        for attempt_id, status, reason, execution_id in attempts:
+            suffix = attempt_id.removeprefix("attempt-")
+            connection.execute(
+                "INSERT INTO execution_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (attempt_id, f"approval-{suffix}", f"task-{suffix}", f"decision-{suffix}",
+                 suffix[-1] * 64, "b" * 64, "model:cloud", "default", 10, 8, 2,
+                 "c" * 64, status, reason, execution_id, 1, 2),
+            )
+        connection.execute(
+            "INSERT INTO staged_execution_receipts VALUES "
+            "('attempt-recover','exec-recover','approval-recover','model:cloud','default',"
+            "'succeeded',6,2,5,?,?,NULL,2)", ("c" * 64, "d" * 64),
+        )
+        connection.execute(
+            "INSERT INTO execution_receipts VALUES "
+            "('exec-completed','approval-completed','model:cloud','default','succeeded',"
+            "6,2,5,?,?,NULL,2)", ("c" * 64, "e" * 64),
+        )
+        connection.execute(
+            "INSERT INTO execution_evidence VALUES "
+            "('exec-completed','task-completed','decision-completed',?)", ("b" * 64,),
+        )
+
+    store = RepositoryStore(root)
+    store.initialize()
+    store.initialize()
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone() == ("3",)
+        rows = connection.execute(
+            "SELECT attempt_id,status,failure_reason,inventory_digest "
+            "FROM execution_attempts ORDER BY attempt_id"
+        ).fetchall()
+        assert rows == [
+            ("attempt-completed", "completed", None, None),
+            ("attempt-pending", "legacy_unrecoverable", "legacy_attempt_digest_missing", None),
+            ("attempt-recover", "legacy_unrecoverable", "legacy_attempt_digest_missing", None),
+        ]
+        assert connection.execute(
+            "SELECT execution_id, inventory_digest FROM staged_execution_receipts"
+        ).fetchone() == ("exec-recover", None)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        indexes = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )}
+        assert "executions_task_idx" in indexes
+    assert store.recoverable_attempt_ids() == ()
+    assert store.execution_attempt("attempt-completed")["execution_id"] == "exec-completed"
+    for attempt_id in ("attempt-pending", "attempt-recover"):
+        with pytest.raises(StorageError, match="^legacy_attempt_digest_missing$"):
+            store.reconcile_execution_attempt(attempt_id, completed_at=3)
 
 
 def test_duplicate_idempotency_key_cannot_create_duplicate_execution(tmp_path: Path) -> None:

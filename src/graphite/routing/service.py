@@ -263,6 +263,7 @@ class RoutingService:
             max_input_tokens=manifest.max_input_tokens,
             max_output_tokens=manifest.max_output_tokens,
             expected_prompt_hash=provider_request.prompt_hash,
+            inventory_digest=manifest.inventory_digest,
             created_at=now,
         )
         try:
@@ -289,6 +290,7 @@ class RoutingService:
             self.store.finalize_execution_attempt(
                 attempt_id=attempt_id,
                 receipt=receipt,
+                inventory_digest=manifest.inventory_digest,
                 completed_at=int(time.time()),
             )
         except StorageError as exc:
@@ -299,6 +301,7 @@ class RoutingService:
                 self.store.stage_execution_receipt(
                     attempt_id=attempt_id,
                     receipt=receipt,
+                    inventory_digest=manifest.inventory_digest,
                     staged_at=int(time.time()),
                 )
             except (StorageError, OSError, ValueError):

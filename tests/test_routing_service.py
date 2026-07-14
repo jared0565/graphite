@@ -376,6 +376,7 @@ def test_completion_failure_leaves_recoverable_trace_without_text(
         service.store.stage_execution_receipt(
             attempt_id=attempt[0],
             receipt=replace(captured["receipt"], response_hash="f" * 64),
+            inventory_digest=MODEL_DIGESTS["kimi-k2.7-code:cloud"],
             staged_at=100,
         )
     persisted = b"".join(path.read_bytes() for path in tmp_path.rglob("*") if path.is_file())

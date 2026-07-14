@@ -13,7 +13,7 @@ from typing import Any, Final
 
 from .contracts import Effort, ExecutionOutcome, ExecutionReceipt, RiskTier, TaskCategory
 
-SCHEMA_VERSION: Final = "2"
+SCHEMA_VERSION: Final = "3"
 BUSY_TIMEOUT_MS: Final = 2_000
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
@@ -274,6 +274,10 @@ _SCHEMA = (
         max_input_tokens INTEGER NOT NULL,
         max_output_tokens INTEGER NOT NULL,
         expected_prompt_hash TEXT NOT NULL,
+        inventory_digest TEXT NOT NULL CHECK(
+            length(inventory_digest) = 64
+            AND inventory_digest NOT GLOB '*[^0-9a-f]*'
+        ),
         status TEXT NOT NULL CHECK(status IN (
             'pending', 'completed', 'failed', 'persistence_failed', 'legacy_unrecoverable'
         )),
@@ -294,6 +298,10 @@ _SCHEMA = (
         latency_ms INTEGER NOT NULL,
         prompt_hash TEXT NOT NULL,
         response_hash TEXT NOT NULL,
+        inventory_digest TEXT NOT NULL CHECK(
+            length(inventory_digest) = 64
+            AND inventory_digest NOT GLOB '*[^0-9a-f]*'
+        ),
         failure_reason TEXT,
         staged_at INTEGER NOT NULL
     )""",
@@ -374,10 +382,14 @@ class RepositoryStore:
             existing_version = connection.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()
-            if existing_version is not None and existing_version[0] not in {"1", SCHEMA_VERSION}:
+            if existing_version is not None and existing_version[0] not in {
+                "1", "2", SCHEMA_VERSION
+            }:
                 raise StorageError("storage_schema_unsupported")
             if existing_version is not None and existing_version[0] == "1":
                 self._migrate_v1_attempts(connection)
+            if existing_version is not None and existing_version[0] in {"1", "2"}:
+                self._migrate_v2_digest(connection)
             for statement in _SCHEMA[1:]:
                 connection.execute(statement)
             connection.execute(
@@ -465,6 +477,39 @@ class RepositoryStore:
             FROM execution_attempts_v1"""
         )
         connection.execute("DROP TABLE execution_attempts_v1")
+
+    @staticmethod
+    def _migrate_v2_digest(connection: sqlite3.Connection) -> None:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_attempts'"
+        ).fetchone()
+        if exists is None:
+            return
+        attempt_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(execution_attempts)")
+        }
+        if "inventory_digest" not in attempt_columns:
+            connection.execute("ALTER TABLE execution_attempts ADD COLUMN inventory_digest TEXT")
+        connection.execute(
+            """UPDATE execution_attempts
+            SET status = 'legacy_unrecoverable',
+                failure_reason = 'legacy_attempt_digest_missing'
+            WHERE status IN ('pending', 'persistence_failed')
+              AND inventory_digest IS NULL"""
+        )
+        staged_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='staged_execution_receipts'"
+        ).fetchone()
+        if staged_exists is not None:
+            staged_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(staged_execution_receipts)")
+            }
+            if "inventory_digest" not in staged_columns:
+                connection.execute(
+                    "ALTER TABLE staged_execution_receipts ADD COLUMN inventory_digest TEXT"
+                )
 
     def integrity_check(self) -> str:
         try:
@@ -680,6 +725,7 @@ class RepositoryStore:
         max_input_tokens: int,
         max_output_tokens: int,
         expected_prompt_hash: str,
+        inventory_digest: str,
         created_at: int,
     ) -> bool:
         values = (
@@ -695,6 +741,7 @@ class RepositoryStore:
             _nonnegative_integer(max_input_tokens, "max_input_tokens_invalid"),
             _nonnegative_integer(max_output_tokens, "max_output_tokens_invalid"),
             expected_prompt_hash,
+            inventory_digest,
             _nonnegative_integer(created_at, "created_at_invalid"),
         )
         if not _HEX_64.fullmatch(manifest_hash):
@@ -703,6 +750,8 @@ class RepositoryStore:
             raise ValueError("graph_fingerprint_invalid")
         if not _HEX_64.fullmatch(expected_prompt_hash):
             raise ValueError("prompt_hash_invalid")
+        if not isinstance(inventory_digest, str) or not _HEX_64.fullmatch(inventory_digest):
+            raise ValueError("inventory_digest_invalid")
         if values[9] < 1 or values[10] < 1 or values[9] + values[10] != values[8]:
             raise ValueError("token_bounds_invalid")
         connection: sqlite3.Connection | None = None
@@ -712,12 +761,12 @@ class RepositoryStore:
             existing = connection.execute(
                 "SELECT attempt_id, task_id, decision_id, manifest_hash, "
                 "graph_fingerprint, model_id, effort, reserved_tokens, max_input_tokens, "
-                "max_output_tokens, expected_prompt_hash "
+                "max_output_tokens, expected_prompt_hash, inventory_digest "
                 "FROM execution_attempts WHERE approval_id = ?",
                 (values[1],),
             ).fetchone()
             if existing is not None:
-                expected = (values[0], *values[2:12])
+                expected = (values[0], *values[2:13])
                 if tuple(existing) != expected:
                     raise StorageError("execution_attempt_conflict")
                 connection.rollback()
@@ -742,10 +791,12 @@ class RepositoryStore:
                 """INSERT INTO execution_attempts(
                     attempt_id, approval_id, task_id, decision_id, manifest_hash,
                     graph_fingerprint, model_id, effort, reserved_tokens,
-                    max_input_tokens, max_output_tokens, expected_prompt_hash, status,
+                    max_input_tokens, max_output_tokens, expected_prompt_hash,
+                    inventory_digest, status,
                     failure_reason, execution_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)""",
-                (*values[:12], values[12], values[12]),
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    'pending', NULL, NULL, ?, ?)""",
+                (*values[:13], values[13], values[13]),
             )
             connection.commit()
             return True
@@ -935,10 +986,13 @@ class RepositoryStore:
         *,
         attempt_id: str,
         receipt: ExecutionReceipt,
+        inventory_digest: str,
         completed_at: int,
     ) -> bool:
         attempt_id = _identifier(attempt_id, "attempt_id_invalid")
         self._validate_receipt_shape(receipt)
+        if not isinstance(inventory_digest, str) or not _HEX_64.fullmatch(inventory_digest):
+            raise ValueError("inventory_digest_invalid")
         completed_at = _nonnegative_integer(completed_at, "completed_at_invalid")
         connection: sqlite3.Connection | None = None
         try:
@@ -951,7 +1005,9 @@ class RepositoryStore:
             if attempt is None:
                 raise StorageError("execution_attempt_missing")
             if attempt["status"] == "legacy_unrecoverable":
-                raise StorageError("legacy_attempt_bindings_missing")
+                raise StorageError(str(attempt["failure_reason"]))
+            if attempt["inventory_digest"] != inventory_digest:
+                raise StorageError("execution_attempt_conflict")
             self._assert_approval_consumed(connection, attempt)
             if attempt["status"] == "completed":
                 stored = connection.execute(
@@ -998,10 +1054,13 @@ class RepositoryStore:
         *,
         attempt_id: str,
         receipt: ExecutionReceipt,
+        inventory_digest: str,
         staged_at: int,
     ) -> bool:
         attempt_id = _identifier(attempt_id, "attempt_id_invalid")
         self._validate_receipt_shape(receipt)
+        if not isinstance(inventory_digest, str) or not _HEX_64.fullmatch(inventory_digest):
+            raise ValueError("inventory_digest_invalid")
         staged_at = _nonnegative_integer(staged_at, "staged_at_invalid")
         connection: sqlite3.Connection | None = None
         try:
@@ -1012,6 +1071,10 @@ class RepositoryStore:
             ).fetchone()
             if attempt is None:
                 raise StorageError("execution_attempt_missing")
+            if attempt["status"] == "legacy_unrecoverable":
+                raise StorageError(str(attempt["failure_reason"]))
+            if attempt["inventory_digest"] != inventory_digest:
+                raise StorageError("execution_attempt_conflict")
             self._assert_approval_consumed(connection, attempt)
             if attempt["status"] not in {"pending", "persistence_failed"}:
                 raise StorageError("execution_attempt_conflict")
@@ -1021,7 +1084,11 @@ class RepositoryStore:
                 (attempt_id,),
             ).fetchone()
             if existing is not None:
-                if self._receipt_tuple(self._receipt_from_row(existing)) != self._receipt_tuple(receipt):
+                if (
+                    existing["inventory_digest"] != inventory_digest
+                    or self._receipt_tuple(self._receipt_from_row(existing))
+                    != self._receipt_tuple(receipt)
+                ):
                     raise StorageError("execution_attempt_conflict")
                 connection.rollback()
                 return False
@@ -1029,9 +1096,12 @@ class RepositoryStore:
                 """INSERT INTO staged_execution_receipts(
                     attempt_id, execution_id, approval_id, model_id, effort, outcome,
                     input_tokens, output_tokens, latency_ms, prompt_hash, response_hash,
-                    failure_reason, staged_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
-                (attempt_id, receipt.execution_id, *self._receipt_tuple(receipt)[:-1], staged_at),
+                    inventory_digest, failure_reason, staged_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+                (
+                    attempt_id, receipt.execution_id,
+                    *self._receipt_tuple(receipt)[:-1], inventory_digest, staged_at,
+                ),
             )
             connection.execute(
                 """UPDATE execution_attempts SET status = 'persistence_failed',
@@ -1077,7 +1147,7 @@ class RepositoryStore:
             if attempt is None:
                 raise StorageError("execution_attempt_missing")
             if attempt["status"] == "legacy_unrecoverable":
-                raise StorageError("legacy_attempt_bindings_missing")
+                raise StorageError(str(attempt["failure_reason"]))
             self._assert_approval_consumed(connection, attempt)
             if attempt["status"] == "completed":
                 row = connection.execute(
@@ -1101,6 +1171,8 @@ class RepositoryStore:
                 (attempt_id,),
             ).fetchone()
             if staged is None:
+                raise StorageError("execution_attempt_conflict")
+            if staged["inventory_digest"] != attempt["inventory_digest"]:
                 raise StorageError("execution_attempt_conflict")
             receipt = self._receipt_from_row(staged)
             self._validate_attempt_binding(attempt, receipt)
