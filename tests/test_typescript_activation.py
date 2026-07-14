@@ -8,6 +8,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -2543,9 +2544,16 @@ def test_resolve_and_revalidate_external_executable(tmp_path):
 def test_posix_npm_symlink_launcher_preserves_argv_for_version_and_install(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
-    bin_dir = tmp_path / "node" / "bin"
+    bin_dir = tmp_path / "usr" / "local" / "bin"
     target = _file(
-        tmp_path / "node" / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js",
+        tmp_path
+        / "usr"
+        / "local"
+        / "lib"
+        / "node_modules"
+        / "npm"
+        / "bin"
+        / "npm-cli.js",
         b"#!/usr/bin/env node\n",
     )
     launcher = bin_dir / "npm"
@@ -2668,6 +2676,176 @@ def test_posix_manager_launcher_policy_does_not_widen_node_or_validator(tmp_path
 
     assert resolve_trusted_executable("node", root, str(bin_dir), windows=False) is None
     assert resolve_trusted_file(validator_launcher, root, executable=False) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher ancestor policy")
+def test_posix_launcher_rejects_nonsticky_writable_grandparent(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    writable = tmp_path / "shared"
+    bin_dir = writable / "toolchain" / "bin"
+    _file(writable / "toolchain" / "lib" / "npm-cli.js")
+    launcher = bin_dir / "npm"
+    bin_dir.mkdir(parents=True)
+    try:
+        launcher.symlink_to(Path("../lib/npm-cli.js"))
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+    writable.chmod(0o777)
+
+    assert resolve_trusted_executable("npm", root, str(bin_dir), windows=False) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher ancestor policy")
+def test_posix_launcher_allows_trusted_sticky_temporary_ancestor():
+    lexical_temp = Path("/tmp")
+    try:
+        canonical_temp = lexical_temp.resolve(strict=True)
+        details = canonical_temp.lstat()
+    except OSError as error:
+        pytest.skip(f"standard temporary root unavailable: {error.__class__.__name__}")
+    if details.st_uid != 0 or not details.st_mode & stat.S_ISVTX:
+        pytest.skip("standard root-owned sticky temporary directory unavailable")
+
+    with tempfile.TemporaryDirectory(dir=lexical_temp) as temporary:
+        base = Path(temporary)
+        root = base / "repo"
+        root.mkdir()
+        bin_dir = base / "usr" / "local" / "bin"
+        target = _file(base / "usr" / "local" / "lib" / "npm-cli.js")
+        launcher = bin_dir / "npm"
+        bin_dir.mkdir(parents=True)
+        try:
+            launcher.symlink_to(Path("../lib/npm-cli.js"))
+        except OSError as error:
+            pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+
+        reference = resolve_trusted_executable("npm", root, str(bin_dir), windows=False)
+        assert reference is not None and reference.path == target.path
+        sticky_component = next(
+            component
+            for component in reference.launcher_route
+            if component.path == canonical_temp
+        )
+        assert sticky_component.owner == 0
+        assert sticky_component.mode & stat.S_ISVTX
+        assert sticky_component.mode & (stat.S_IWGRP | stat.S_IWOTH)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher ancestor policy")
+@pytest.mark.parametrize("launch", ("version", "install"))
+def test_posix_launcher_rejects_ancestor_binding_replacement_before_launch(
+    tmp_path, launch
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    tree = tmp_path / "toolchain"
+    bin_dir = tree / "bin"
+    target = _file(tree / "lib" / "npm-cli.js")
+    launcher = bin_dir / "npm"
+    bin_dir.mkdir(parents=True)
+    try:
+        launcher.symlink_to(Path("../lib/npm-cli.js"))
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+    reference = resolve_trusted_executable("npm", root, str(bin_dir), windows=False)
+    assert reference is not None and reference.path == target.path
+    command = command_for(reference)
+
+    original = tmp_path / "toolchain-original"
+    tree.rename(original)
+    tree.mkdir()
+    try:
+        (tree / "bin").symlink_to(original / "bin", target_is_directory=True)
+        (tree / "lib").symlink_to(original / "lib", target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlink unavailable: {error.__class__.__name__}")
+    called = False
+
+    def runner(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return ProbeProcessResult(0, b"11.0.0", b"", 0)
+
+    result = (
+        run_manager_version(command, root, 1, runner)
+        if launch == "version"
+        else run_install(
+            root,
+            command,
+            adapter_for(Manager.NPM),
+            TRUSTED_REGISTRY,
+            tmp_path / "isolated",
+            1,
+            runner,
+        )
+    )
+    assert not result.ok
+    assert not called
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher ancestor policy")
+@pytest.mark.parametrize("mutation", ("none", "repoint", "cycle"))
+def test_posix_launcher_directory_component_symlink_policy(tmp_path, mutation):
+    root = tmp_path / "repo"
+    root.mkdir()
+    visible = tmp_path / "visible"
+    primary = tmp_path / "private-primary"
+    alternate = tmp_path / "private-alternate"
+    for tree, content in ((primary, b"primary"), (alternate, b"alternate")):
+        target = _file(tree / "usr" / "local" / "lib" / "npm-cli.js", content)
+        launcher = tree / "usr" / "local" / "bin" / "npm"
+        launcher.parent.mkdir(parents=True)
+        try:
+            launcher.symlink_to(Path("../lib/npm-cli.js"))
+        except OSError as error:
+            pytest.skip(f"symlink creation unavailable: {error.__class__.__name__}")
+        assert target.path.exists()
+    try:
+        visible.symlink_to(primary, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlink unavailable: {error.__class__.__name__}")
+    bin_dir = visible / "usr" / "local" / "bin"
+    reference = resolve_trusted_executable("npm", root, str(bin_dir), windows=False)
+    if mutation == "cycle":
+        visible.unlink()
+        visible.symlink_to(visible, target_is_directory=True)
+        assert resolve_trusted_executable("npm", root, str(bin_dir), windows=False) is None
+        return
+
+    assert reference is not None
+    command = command_for(reference)
+    if mutation == "none":
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            return ProbeProcessResult(0, b"11.0.0", b"", 0)
+
+        assert run_manager_version(command, root, 1, runner).ok
+        assert calls == [[str(bin_dir / "npm"), "--version"]]
+        return
+
+    visible.unlink()
+    visible.symlink_to(alternate, target_is_directory=True)
+    called = False
+
+    def forbidden(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return ProbeProcessResult(0, b"11.0.0", b"", 0)
+
+    assert not run_manager_version(command, root, 1, forbidden).ok
+    assert not run_install(
+        root,
+        command,
+        adapter_for(Manager.NPM),
+        TRUSTED_REGISTRY,
+        tmp_path / "isolated",
+        1,
+        forbidden,
+    ).ok
+    assert not called
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX launcher symlink policy")

@@ -12,6 +12,7 @@ import math
 import os
 import re
 import stat
+from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -27,6 +28,7 @@ MAX_CONTROL_FILE_BYTES = 8 * 1024 * 1024
 MAX_TRUSTED_FILE_BYTES = 256 * 1024 * 1024
 MAX_TRUSTED_LAUNCHER_LINKS = 8
 MAX_TRUSTED_LINK_TARGET_BYTES = 4096
+MAX_TRUSTED_ROUTE_COMPONENTS = 256
 ACTIVATION_MAX_FILES = 100_000
 
 _VERSION_RE = re.compile(
@@ -82,14 +84,13 @@ class ManagerAdapter:
 
 
 @dataclass(frozen=True)
-class TrustedLink:
+class TrustedPathComponent:
     path: Path
     identity: tuple[int, int]
-    size: int
-    mtime_ns: int
-    ctime_ns: int
+    mode: int
     owner: int
-    target: str
+    link_target: str | None
+    link_count: int | None
 
 
 @dataclass(frozen=True)
@@ -100,12 +101,10 @@ class TrustedFile:
     mtime_ns: int
     sha256: str
     launcher_path: Path | None = None
-    launcher_chain: tuple[TrustedLink, ...] = ()
+    launcher_route: tuple[TrustedPathComponent, ...] = ()
 
     def __post_init__(self) -> None:
-        if (self.launcher_path is None) != (not self.launcher_chain):
-            raise ValueError("trusted_file_launcher_invalid")
-        if self.launcher_chain and self.launcher_chain[0].path != self.launcher_path:
+        if (self.launcher_path is None) != (not self.launcher_route):
             raise ValueError("trusted_file_launcher_invalid")
 
     @property
@@ -260,64 +259,27 @@ def _path_has_symlink(path: Path) -> bool:
     return False
 
 
-def _trusted_posix_owner(details: os.stat_result) -> bool:
+def _trusted_posix_owner(owner: int) -> bool:
     try:
         effective_uid = os.geteuid()
     except AttributeError:
         return False
-    return getattr(details, "st_uid", -1) in {0, effective_uid}
+    return owner in {0, effective_uid}
 
 
-def _trusted_posix_directory(path: Path, root: Path) -> bool:
+def _capture_posix_component(path: Path) -> TrustedPathComponent | None:
     try:
         lexical = Path(os.path.abspath(path))
-        root_path = root.resolve(strict=True)
-        if _is_under(lexical, root_path) or _path_has_symlink(lexical):
-            return False
-        details = lexical.lstat()
-    except (OSError, RuntimeError):
-        return False
-    return (
-        stat.S_ISDIR(details.st_mode)
-        and not _is_reparse(details)
-        and _trusted_posix_owner(details)
-        and not details.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-    )
-
-
-def _lexical_route_enters_root(base: Path, target: str, root: Path) -> bool:
-    target_path = Path(target)
-    current = Path(target_path.anchor) if target_path.is_absolute() else base
-    if _is_under(current, root):
-        return True
-    parts = target_path.parts[1:] if target_path.is_absolute() else target_path.parts
-    for part in parts:
-        if part in {"", "."}:
-            continue
-        current = current.parent if part == ".." else current / part
-        if _is_under(current, root):
-            return True
-    return False
-
-
-def _trusted_posix_link(path: Path, root: Path) -> TrustedLink | None:
-    try:
-        lexical = Path(os.path.abspath(path))
-        root_path = root.resolve(strict=True)
-        if _is_under(lexical, root_path) or not _trusted_posix_directory(lexical.parent, root_path):
-            return None
         before = lexical.lstat()
-        if (
-            not stat.S_ISLNK(before.st_mode)
-            or _is_reparse(before)
-            or getattr(before, "st_nlink", 1) != 1
-            or not _trusted_posix_owner(before)
-            or before.st_size > MAX_TRUSTED_LINK_TARGET_BYTES
-        ):
+        if _is_reparse(before):
             return None
-        target = os.readlink(lexical)
-        if len(os.fsencode(target)) > MAX_TRUSTED_LINK_TARGET_BYTES:
-            return None
+        link_target = None
+        if stat.S_ISLNK(before.st_mode):
+            if before.st_size > MAX_TRUSTED_LINK_TARGET_BYTES:
+                return None
+            link_target = os.readlink(lexical)
+            if len(os.fsencode(link_target)) > MAX_TRUSTED_LINK_TARGET_BYTES:
+                return None
         after = lexical.lstat()
     except (OSError, RuntimeError, ValueError):
         return None
@@ -333,15 +295,104 @@ def _trusted_posix_link(path: Path, root: Path) -> TrustedLink | None:
     )
     if any(getattr(before, field, None) != getattr(after, field, None) for field in stable_fields):
         return None
-    return TrustedLink(
+    return TrustedPathComponent(
         lexical,
         (before.st_dev, before.st_ino),
-        before.st_size,
-        before.st_mtime_ns,
-        before.st_ctime_ns,
+        before.st_mode,
         before.st_uid,
-        target,
+        link_target,
+        None if stat.S_ISDIR(before.st_mode) else before.st_nlink,
     )
+
+
+def _trusted_posix_component(
+    component: TrustedPathComponent, *, directory: bool
+) -> bool:
+    if not _trusted_posix_owner(component.owner):
+        return False
+    if component.link_target is not None:
+        return component.link_count == 1
+    if directory:
+        if not stat.S_ISDIR(component.mode):
+            return False
+        writable = bool(component.mode & (stat.S_IWGRP | stat.S_IWOTH))
+        return not writable or bool(component.mode & stat.S_ISVTX)
+    return (
+        stat.S_ISREG(component.mode)
+        and component.link_count == 1
+        and not component.mode & (stat.S_IWGRP | stat.S_IWOTH)
+    )
+
+
+def _trusted_posix_route(
+    path: Path, root: Path
+) -> tuple[Path, tuple[TrustedPathComponent, ...]] | None:
+    try:
+        lexical = Path(os.path.abspath(path))
+        root_path = root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not lexical.is_absolute() or _is_under(lexical, root_path):
+        return None
+    anchor = Path(lexical.anchor)
+    anchor_component = _capture_posix_component(anchor)
+    if anchor_component is None or not _trusted_posix_component(
+        anchor_component, directory=True
+    ):
+        return None
+    route = [anchor_component]
+    pending = deque(lexical.parts[1:])
+    current = anchor
+    seen_links: set[tuple[int, int]] = set()
+    followed_links = 0
+    while pending:
+        part = pending.popleft()
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            current = current.parent
+            continue
+        candidate = current / part
+        if _is_under(candidate, root_path):
+            return None
+        component = _capture_posix_component(candidate)
+        if component is None or len(route) >= MAX_TRUSTED_ROUTE_COMPONENTS:
+            return None
+        route.append(component)
+        if component.link_target is None:
+            if not _trusted_posix_component(component, directory=bool(pending)):
+                return None
+            current = candidate
+            continue
+        followed_links += 1
+        if (
+            followed_links > MAX_TRUSTED_LAUNCHER_LINKS
+            or component.identity in seen_links
+            or not _trusted_posix_component(component, directory=False)
+        ):
+            return None
+        seen_links.add(component.identity)
+        target = Path(component.link_target)
+        remaining = tuple(pending)
+        if target.is_absolute():
+            target_anchor = Path(target.anchor)
+            target_anchor_component = _capture_posix_component(target_anchor)
+            if (
+                target_anchor_component is None
+                or len(route) >= MAX_TRUSTED_ROUTE_COMPONENTS
+                or not _trusted_posix_component(target_anchor_component, directory=True)
+            ):
+                return None
+            route.append(target_anchor_component)
+            current = target_anchor
+            target_parts = target.parts[1:]
+        else:
+            current = candidate.parent
+            target_parts = target.parts
+        pending = deque((*target_parts, *remaining))
+    if _is_under(current, root_path):
+        return None
+    return current, tuple(route)
 
 
 def _trusted_posix_launcher(path: Path, root: Path) -> TrustedFile | None:
@@ -350,48 +401,18 @@ def _trusted_posix_launcher(path: Path, root: Path) -> TrustedFile | None:
         root_path = root.resolve(strict=True)
     except (OSError, RuntimeError):
         return None
-    if _is_under(lexical, root_path):
+    resolved_route = _trusted_posix_route(lexical, root_path)
+    if resolved_route is None:
         return None
-    current = lexical
-    links: list[TrustedLink] = []
-    seen: set[tuple[int, int]] = set()
-    while True:
-        try:
-            details = current.lstat()
-        except OSError:
-            return None
-        if not stat.S_ISLNK(details.st_mode):
-            break
-        if len(links) >= MAX_TRUSTED_LAUNCHER_LINKS:
-            return None
-        link = _trusted_posix_link(current, root_path)
-        if link is None or link.identity in seen:
-            return None
-        seen.add(link.identity)
-        links.append(link)
-        if _lexical_route_enters_root(current.parent, link.target, root_path):
-            return None
-        target = Path(link.target)
-        current = Path(
-            os.path.abspath(target if target.is_absolute() else current.parent / target)
-        )
-        if _is_under(current, root_path):
-            return None
-    if not links:
-        return _trusted_file(lexical, root_path, executable=True)
-    if not _trusted_posix_directory(current.parent, root_path):
-        return None
-    try:
-        final_details = current.lstat()
-    except OSError:
-        return None
-    if (
-        not _trusted_posix_owner(final_details)
-        or final_details.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-    ):
-        return None
+    current, route = resolved_route
     target_reference = _trusted_file(current, root_path, executable=True)
     if target_reference is None:
+        return None
+    final_component = route[-1]
+    if (
+        target_reference.path != current
+        or target_reference.identity != final_component.identity
+    ):
         return None
     return TrustedFile(
         target_reference.path,
@@ -400,7 +421,7 @@ def _trusted_posix_launcher(path: Path, root: Path) -> TrustedFile | None:
         target_reference.mtime_ns,
         target_reference.sha256,
         lexical,
-        tuple(links),
+        route,
     )
 
 
@@ -501,6 +522,18 @@ def _path_entries(path_source: str | Iterable[str | Path]) -> tuple[Path, ...]:
     return tuple(entries)
 
 
+def _posix_manager_path_entries(
+    path_source: str | Iterable[str | Path],
+) -> tuple[Path, ...]:
+    raw_entries = path_source.split(os.pathsep) if isinstance(path_source, str) else path_source
+    entries: list[Path] = []
+    for raw in raw_entries:
+        entry = Path(raw)
+        if entry.is_absolute():
+            entries.append(Path(os.path.abspath(entry)))
+    return tuple(entries)
+
+
 def resolve_trusted_executable(
     name: str,
     root: Path,
@@ -517,14 +550,20 @@ def resolve_trusted_executable(
         names = (name,) if suffix in {".exe", ".com"} else (f"{name}.exe", f"{name}.com")
     else:
         names = (name,)
-    for directory in _path_entries(path_source):
+    posix_manager = (
+        os.name != "nt"
+        and not use_windows_rules
+        and name in {manager.value for manager in Manager}
+    )
+    directories = (
+        _posix_manager_path_entries(path_source)
+        if posix_manager
+        else _path_entries(path_source)
+    )
+    for directory in directories:
         for candidate_name in names:
             candidate = directory / candidate_name
-            if (
-                os.name != "nt"
-                and not use_windows_rules
-                and name in {manager.value for manager in Manager}
-            ):
+            if posix_manager:
                 reference = _trusted_posix_launcher(candidate, root)
             else:
                 reference = _trusted_file(candidate, root, executable=not use_windows_rules)
