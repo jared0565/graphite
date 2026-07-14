@@ -325,15 +325,18 @@ def test_unconsumed_success_receipt_is_rejected_as_authority_violation(
 def test_completion_failure_leaves_recoverable_trace_without_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    service, _root = _service(tmp_path, monkeypatch)
+    service, root = _service(tmp_path, monkeypatch)
     recommendation = service.recommend(
         objective="Review this isolated formatting helper",
         targets=("src/listing_summary.py",),
     )
     text = "UNPERSISTED PRIVATE BODY"
+    captured: dict[str, ExecutionReceipt] = {}
 
     def execute(**kwargs: object) -> ExecutionResult:
-        return _successful_result(kwargs, text, execution_id="exec-1")
+        result = _successful_result(kwargs, text, execution_id="exec-1")
+        captured["receipt"] = result.receipt
+        return result
 
     monkeypatch.setattr(service_module, "execute_ollama", execute)
     monkeypatch.setattr(
@@ -344,9 +347,75 @@ def test_completion_failure_leaves_recoverable_trace_without_text(
     with pytest.raises(StorageError, match="^execution_persistence_failed$"):
         service.execute_approved(recommendation)
     with sqlite3.connect(service.store.path) as connection:
+        attempt = connection.execute(
+            "SELECT attempt_id, status, failure_reason, max_input_tokens, "
+            "max_output_tokens, expected_prompt_hash FROM execution_attempts"
+        ).fetchone()
+        assert attempt[1:5] == (
+            "persistence_failed", "execution_persistence_failed",
+            service.settings.max_input_tokens, service.settings.max_output_tokens,
+        )
+        assert attempt[5] == canonical_provider_request(
+            manifest=service_module.ApprovalManifest(
+                approval_id="placeholder", task_id="placeholder", decision_id="placeholder",
+                graph_fingerprint="a" * 64, context_manifest_hash=_context().manifest.manifest_hash,
+                model_id="kimi-k2.7-code:cloud", effort=Effort.DEFAULT,
+                max_input_tokens=service.settings.max_input_tokens,
+                max_output_tokens=service.settings.max_output_tokens,
+                policy_version="2",
+                issued_at=1, expires_at=2, nonce="placeholder",
+            ),
+            context=_context(), objective="Review this isolated formatting helper",
+        ).prompt_hash
         assert connection.execute(
-            "SELECT status, failure_reason FROM execution_attempts"
-        ).fetchone() == ("persistence_failed", "execution_persistence_failed")
+            "SELECT execution_id, prompt_hash, response_hash FROM staged_execution_receipts"
+        ).fetchone()[0] == "exec-1"
         assert connection.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 0
+    with pytest.raises(StorageError, match="^execution_attempt_conflict$"):
+        service.store.stage_execution_receipt(
+            attempt_id=attempt[0],
+            receipt=replace(captured["receipt"], response_hash="f" * 64),
+            staged_at=100,
+        )
+    persisted = b"".join(path.read_bytes() for path in tmp_path.rglob("*") if path.is_file())
+    assert text.encode() not in persisted
+    fresh = RoutingService(root, state_dir=tmp_path / "machine")
+    assert fresh.recoverable_attempt_ids() == (attempt[0],)
+    first = fresh.reconcile_execution(attempt[0])
+    second = fresh.reconcile_execution(attempt[0])
+    assert first == second
+    assert first["execution_id"] == "exec-1"
+    assert fresh.recoverable_attempt_ids() == ()
+    with sqlite3.connect(fresh.store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM execution_receipts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM execution_evidence").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM staged_execution_receipts").fetchone()[0] == 0
+
+
+def test_fallback_staging_failure_is_sanitized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _root = _service(tmp_path, monkeypatch)
+    recommendation = service.recommend(
+        objective="Review this isolated formatting helper",
+        targets=("src/listing_summary.py",),
+    )
+    text = "NEVER PERSIST THIS FALLBACK BODY"
+    monkeypatch.setattr(
+        service_module, "execute_ollama",
+        lambda **kwargs: _successful_result(kwargs, text, execution_id="exec-fallback"),
+    )
+    monkeypatch.setattr(
+        service.store, "finalize_execution_attempt",
+        lambda **_kwargs: (_ for _ in ()).throw(StorageError("storage_unavailable")),
+    )
+    monkeypatch.setattr(
+        service.store, "stage_execution_receipt",
+        lambda **_kwargs: (_ for _ in ()).throw(StorageError("storage_unavailable")),
+    )
+    with pytest.raises(StorageError, match="^execution_persistence_failed$") as caught:
+        service.execute_approved(recommendation)
+    assert text not in str(caught.value)
     persisted = b"".join(path.read_bytes() for path in tmp_path.rglob("*") if path.is_file())
     assert text.encode() not in persisted

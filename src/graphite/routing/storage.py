@@ -13,7 +13,7 @@ from typing import Any, Final
 
 from .contracts import Effort, ExecutionOutcome, ExecutionReceipt, RiskTier, TaskCategory
 
-SCHEMA_VERSION: Final = "1"
+SCHEMA_VERSION: Final = "2"
 BUSY_TIMEOUT_MS: Final = 2_000
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
@@ -39,6 +39,7 @@ _TABLES = frozenset(
         "execution_evidence",
         "execution_attempts",
         "execution_receipts",
+        "staged_execution_receipts",
         "incident_reviews",
         "blind_comparisons",
     }
@@ -270,11 +271,29 @@ _SCHEMA = (
         model_id TEXT NOT NULL,
         effort TEXT NOT NULL,
         reserved_tokens INTEGER NOT NULL,
+        max_input_tokens INTEGER NOT NULL,
+        max_output_tokens INTEGER NOT NULL,
+        expected_prompt_hash TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'failed', 'persistence_failed')),
         failure_reason TEXT,
         execution_id TEXT UNIQUE REFERENCES executions(execution_id) ON DELETE RESTRICT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS staged_execution_receipts (
+        attempt_id TEXT PRIMARY KEY REFERENCES execution_attempts(attempt_id) ON DELETE CASCADE,
+        execution_id TEXT NOT NULL UNIQUE,
+        approval_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        effort TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        latency_ms INTEGER NOT NULL,
+        prompt_hash TEXT NOT NULL,
+        response_hash TEXT NOT NULL,
+        failure_reason TEXT,
+        staged_at INTEGER NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS execution_receipts (
         execution_id TEXT PRIMARY KEY REFERENCES executions(execution_id) ON DELETE CASCADE,
@@ -353,12 +372,27 @@ class RepositoryStore:
             existing_version = connection.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()
-            if existing_version is not None and existing_version[0] != SCHEMA_VERSION:
+            if existing_version is not None and existing_version[0] not in {"1", SCHEMA_VERSION}:
                 raise StorageError("storage_schema_unsupported")
             for statement in _SCHEMA[1:]:
                 connection.execute(statement)
+            if existing_version is not None and existing_version[0] == "1":
+                attempt_columns = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(execution_attempts)")
+                }
+                for name, declaration in (
+                    ("max_input_tokens", "INTEGER"),
+                    ("max_output_tokens", "INTEGER"),
+                    ("expected_prompt_hash", "TEXT"),
+                ):
+                    if name not in attempt_columns:
+                        connection.execute(
+                            f"ALTER TABLE execution_attempts ADD COLUMN {name} {declaration}"
+                        )
             connection.execute(
-                "INSERT OR IGNORE INTO schema_meta(key, value) VALUES('schema_version', ?)",
+                """INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
                 (SCHEMA_VERSION,),
             )
             connection.commit()
@@ -590,6 +624,9 @@ class RepositoryStore:
         model_id: str,
         effort: str,
         reserved_tokens: int,
+        max_input_tokens: int,
+        max_output_tokens: int,
+        expected_prompt_hash: str,
         created_at: int,
     ) -> bool:
         values = (
@@ -602,54 +639,78 @@ class RepositoryStore:
             _identifier(model_id, "model_id_invalid"),
             Effort(effort).value,
             _nonnegative_integer(reserved_tokens, "reserved_tokens_invalid"),
+            _nonnegative_integer(max_input_tokens, "max_input_tokens_invalid"),
+            _nonnegative_integer(max_output_tokens, "max_output_tokens_invalid"),
+            expected_prompt_hash,
             _nonnegative_integer(created_at, "created_at_invalid"),
         )
         if not _HEX_64.fullmatch(manifest_hash):
             raise ValueError("manifest_hash_invalid")
         if not _HEX_64.fullmatch(graph_fingerprint):
             raise ValueError("graph_fingerprint_invalid")
+        if not _HEX_64.fullmatch(expected_prompt_hash):
+            raise ValueError("prompt_hash_invalid")
+        if values[9] < 1 or values[10] < 1 or values[9] + values[10] != values[8]:
+            raise ValueError("token_bounds_invalid")
+        connection: sqlite3.Connection | None = None
         try:
-            with self._connect() as connection:
-                existing = connection.execute(
-                    "SELECT attempt_id, task_id, decision_id, manifest_hash, "
-                    "graph_fingerprint, model_id, effort, reserved_tokens "
-                    "FROM execution_attempts WHERE approval_id = ?",
-                    (values[1],),
-                ).fetchone()
-                if existing is not None:
-                    expected = (values[0], *values[2:9])
-                    if tuple(existing) != expected:
-                        raise StorageError("execution_attempt_conflict")
-                    return False
-                approval = connection.execute(
-                    "SELECT manifest_hash, reserved_tokens, status FROM approvals "
-                    "WHERE approval_id = ?",
-                    (values[1],),
-                ).fetchone()
-                decision = connection.execute(
-                    "SELECT task_id, model_id, effort FROM decisions WHERE decision_id = ?",
-                    (values[3],),
-                ).fetchone()
-                if (
-                    approval is None
-                    or tuple(approval) != (values[4], values[8], "issued")
-                    or decision is None
-                    or tuple(decision) != (values[2], values[6], values[7])
-                ):
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT attempt_id, task_id, decision_id, manifest_hash, "
+                "graph_fingerprint, model_id, effort, reserved_tokens, max_input_tokens, "
+                "max_output_tokens, expected_prompt_hash "
+                "FROM execution_attempts WHERE approval_id = ?",
+                (values[1],),
+            ).fetchone()
+            if existing is not None:
+                expected = (values[0], *values[2:12])
+                if tuple(existing) != expected:
                     raise StorageError("execution_attempt_conflict")
-                connection.execute(
-                    """INSERT INTO execution_attempts(
-                        attempt_id, approval_id, task_id, decision_id, manifest_hash,
-                        graph_fingerprint, model_id, effort, reserved_tokens, status,
-                        failure_reason, execution_id, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)""",
-                    (*values[:9], values[9], values[9]),
-                )
-                return True
+                connection.rollback()
+                return False
+            approval = connection.execute(
+                "SELECT manifest_hash, reserved_tokens, status FROM approvals "
+                "WHERE approval_id = ?",
+                (values[1],),
+            ).fetchone()
+            decision = connection.execute(
+                "SELECT task_id, model_id, effort FROM decisions WHERE decision_id = ?",
+                (values[3],),
+            ).fetchone()
+            if (
+                approval is None
+                or tuple(approval) != (values[4], values[8], "issued")
+                or decision is None
+                or tuple(decision) != (values[2], values[6], values[7])
+            ):
+                raise StorageError("execution_attempt_conflict")
+            connection.execute(
+                """INSERT INTO execution_attempts(
+                    attempt_id, approval_id, task_id, decision_id, manifest_hash,
+                    graph_fingerprint, model_id, effort, reserved_tokens,
+                    max_input_tokens, max_output_tokens, expected_prompt_hash, status,
+                    failure_reason, execution_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)""",
+                (*values[:12], values[12], values[12]),
+            )
+            connection.commit()
+            return True
         except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
             raise
+        except sqlite3.IntegrityError as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise StorageError("execution_attempt_conflict") from exc
         except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
             raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
 
     def mark_execution_attempt_failed(
         self,
@@ -687,17 +748,10 @@ class RepositoryStore:
         except sqlite3.Error as exc:
             raise _translate_database_error(exc) from exc
 
-    def finalize_execution_attempt(
-        self,
-        *,
-        attempt_id: str,
-        receipt: ExecutionReceipt,
-        completed_at: int,
-    ) -> bool:
-        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+    @staticmethod
+    def _validate_receipt_shape(receipt: ExecutionReceipt) -> None:
         if not isinstance(receipt, ExecutionReceipt):
             raise ValueError("execution_receipt_invalid")
-        completed_at = _nonnegative_integer(completed_at, "completed_at_invalid")
         if (
             receipt.outcome is not ExecutionOutcome.SUCCEEDED
             or receipt.input_tokens is None
@@ -706,6 +760,133 @@ class RepositoryStore:
             or receipt.failure_reason is not None
         ):
             raise ValueError("execution_receipt_invalid")
+
+    @staticmethod
+    def _receipt_tuple(receipt: ExecutionReceipt) -> tuple[Any, ...]:
+        return (
+            receipt.approval_id, receipt.model_id, receipt.effort.value,
+            receipt.outcome.value, receipt.input_tokens, receipt.output_tokens,
+            receipt.latency_ms, receipt.prompt_hash, receipt.response_hash, None,
+        )
+
+    @staticmethod
+    def _receipt_from_row(row: sqlite3.Row) -> ExecutionReceipt:
+        return ExecutionReceipt(
+            execution_id=str(row["execution_id"]),
+            approval_id=str(row["approval_id"]),
+            model_id=str(row["model_id"]),
+            effort=Effort(str(row["effort"])),
+            outcome=ExecutionOutcome(str(row["outcome"])),
+            input_tokens=int(row["input_tokens"]),
+            output_tokens=int(row["output_tokens"]),
+            latency_ms=int(row["latency_ms"]),
+            prompt_hash=str(row["prompt_hash"]),
+            response_hash=str(row["response_hash"]),
+            failure_reason=None,
+        )
+
+    @staticmethod
+    def _validate_attempt_binding(attempt: sqlite3.Row, receipt: ExecutionReceipt) -> None:
+        if (
+            attempt["approval_id"] != receipt.approval_id
+            or attempt["model_id"] != receipt.model_id
+            or attempt["effort"] != receipt.effort.value
+            or attempt["max_input_tokens"] is None
+            or attempt["max_output_tokens"] is None
+            or attempt["expected_prompt_hash"] is None
+            or receipt.input_tokens > attempt["max_input_tokens"]
+            or receipt.output_tokens > attempt["max_output_tokens"]
+            or receipt.input_tokens + receipt.output_tokens > attempt["reserved_tokens"]
+            or receipt.prompt_hash != attempt["expected_prompt_hash"]
+        ):
+            raise StorageError("execution_attempt_conflict")
+
+    @staticmethod
+    def _assert_approval_consumed(
+        connection: sqlite3.Connection, attempt: sqlite3.Row
+    ) -> None:
+        approval = connection.execute(
+            "SELECT status, manifest_hash, reserved_tokens FROM approvals WHERE approval_id = ?",
+            (attempt["approval_id"],),
+        ).fetchone()
+        decision = connection.execute(
+            "SELECT task_id, model_id, effort FROM decisions WHERE decision_id = ?",
+            (attempt["decision_id"],),
+        ).fetchone()
+        if approval is None or approval["status"] != "consumed":
+            raise StorageError("approval_not_consumed")
+        if (
+            approval["manifest_hash"] != attempt["manifest_hash"]
+            or approval["reserved_tokens"] != attempt["reserved_tokens"]
+            or decision is None
+            or tuple(decision)
+            != (attempt["task_id"], attempt["model_id"], attempt["effort"])
+        ):
+            raise StorageError("execution_attempt_conflict")
+
+    @staticmethod
+    def _finalize_rows(
+        connection: sqlite3.Connection,
+        attempt: sqlite3.Row,
+        receipt: ExecutionReceipt,
+        completed_at: int,
+    ) -> None:
+        connection.execute(
+            """INSERT INTO executions(
+                execution_id, idempotency_key, task_id, decision_id, approval_id,
+                model_id, effort, status, reserved_tokens, actual_input_tokens,
+                actual_output_tokens, created_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                receipt.execution_id, attempt["attempt_id"], attempt["task_id"],
+                attempt["decision_id"], receipt.approval_id, receipt.model_id,
+                receipt.effort.value, receipt.outcome.value, attempt["reserved_tokens"],
+                receipt.input_tokens, receipt.output_tokens, attempt["created_at"],
+                completed_at,
+            ),
+        )
+        connection.execute(
+            """INSERT INTO execution_receipts(
+                execution_id, approval_id, model_id, effort, outcome, input_tokens,
+                output_tokens, latency_ms, prompt_hash, response_hash, failure_reason,
+                completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+            (
+                receipt.execution_id,
+                *RepositoryStore._receipt_tuple(receipt)[:-1],
+                completed_at,
+            ),
+        )
+        connection.execute(
+            """INSERT INTO execution_evidence(
+                execution_id, task_id, decision_id, graph_fingerprint
+            ) VALUES (?, ?, ?, ?)""",
+            (
+                receipt.execution_id, attempt["task_id"], attempt["decision_id"],
+                attempt["graph_fingerprint"],
+            ),
+        )
+        connection.execute(
+            """UPDATE execution_attempts
+            SET status = 'completed', failure_reason = NULL, execution_id = ?, updated_at = ?
+            WHERE attempt_id = ?""",
+            (receipt.execution_id, completed_at, attempt["attempt_id"]),
+        )
+        connection.execute(
+            "DELETE FROM staged_execution_receipts WHERE attempt_id = ?",
+            (attempt["attempt_id"],),
+        )
+
+    def finalize_execution_attempt(
+        self,
+        *,
+        attempt_id: str,
+        receipt: ExecutionReceipt,
+        completed_at: int,
+    ) -> bool:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        self._validate_receipt_shape(receipt)
+        completed_at = _nonnegative_integer(completed_at, "completed_at_invalid")
         connection: sqlite3.Connection | None = None
         try:
             connection = self._connect()
@@ -716,12 +897,7 @@ class RepositoryStore:
             ).fetchone()
             if attempt is None:
                 raise StorageError("execution_attempt_missing")
-            approval = connection.execute(
-                "SELECT status FROM approvals WHERE approval_id = ?",
-                (attempt["approval_id"],),
-            ).fetchone()
-            if approval is None or approval["status"] != "consumed":
-                raise StorageError("approval_not_consumed")
+            self._assert_approval_consumed(connection, attempt)
             if attempt["status"] == "completed":
                 stored = connection.execute(
                     "SELECT approval_id, model_id, effort, outcome, input_tokens, "
@@ -729,68 +905,151 @@ class RepositoryStore:
                     "FROM execution_receipts WHERE execution_id = ?",
                     (receipt.execution_id,),
                 ).fetchone()
-                expected = (
-                    receipt.approval_id, receipt.model_id, receipt.effort.value,
-                    receipt.outcome.value, receipt.input_tokens, receipt.output_tokens,
-                    receipt.latency_ms, receipt.prompt_hash, receipt.response_hash, None,
-                )
+                expected = self._receipt_tuple(receipt)
                 if attempt["execution_id"] != receipt.execution_id or tuple(stored or ()) != expected:
                     raise StorageError("execution_attempt_conflict")
                 connection.rollback()
                 return False
             if attempt["status"] not in {"pending", "persistence_failed"}:
                 raise StorageError("execution_attempt_conflict")
+            self._validate_attempt_binding(attempt, receipt)
+            staged = connection.execute(
+                "SELECT * FROM staged_execution_receipts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
             if (
-                attempt["approval_id"] != receipt.approval_id
-                or attempt["model_id"] != receipt.model_id
-                or attempt["effort"] != receipt.effort.value
-                or receipt.input_tokens + receipt.output_tokens > attempt["reserved_tokens"]
+                staged is not None
+                and self._receipt_tuple(self._receipt_from_row(staged))
+                != self._receipt_tuple(receipt)
             ):
                 raise StorageError("execution_attempt_conflict")
+            self._finalize_rows(connection, attempt, receipt, completed_at)
+            connection.commit()
+            return True
+        except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def stage_execution_receipt(
+        self,
+        *,
+        attempt_id: str,
+        receipt: ExecutionReceipt,
+        staged_at: int,
+    ) -> bool:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        self._validate_receipt_shape(receipt)
+        staged_at = _nonnegative_integer(staged_at, "staged_at_invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = connection.execute(
+                "SELECT * FROM execution_attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if attempt is None:
+                raise StorageError("execution_attempt_missing")
+            self._assert_approval_consumed(connection, attempt)
+            if attempt["status"] not in {"pending", "persistence_failed"}:
+                raise StorageError("execution_attempt_conflict")
+            self._validate_attempt_binding(attempt, receipt)
+            existing = connection.execute(
+                "SELECT * FROM staged_execution_receipts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if existing is not None:
+                if self._receipt_tuple(self._receipt_from_row(existing)) != self._receipt_tuple(receipt):
+                    raise StorageError("execution_attempt_conflict")
+                connection.rollback()
+                return False
             connection.execute(
-                """INSERT INTO executions(
-                    execution_id, idempotency_key, task_id, decision_id, approval_id,
-                    model_id, effort, status, reserved_tokens, actual_input_tokens,
-                    actual_output_tokens, created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    receipt.execution_id, attempt_id, attempt["task_id"],
-                    attempt["decision_id"], receipt.approval_id, receipt.model_id,
-                    receipt.effort.value, receipt.outcome.value, attempt["reserved_tokens"],
-                    receipt.input_tokens, receipt.output_tokens, attempt["created_at"],
-                    completed_at,
-                ),
+                """INSERT INTO staged_execution_receipts(
+                    attempt_id, execution_id, approval_id, model_id, effort, outcome,
+                    input_tokens, output_tokens, latency_ms, prompt_hash, response_hash,
+                    failure_reason, staged_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+                (attempt_id, receipt.execution_id, *self._receipt_tuple(receipt)[:-1], staged_at),
             )
             connection.execute(
-                """INSERT INTO execution_receipts(
-                    execution_id, approval_id, model_id, effort, outcome, input_tokens,
-                    output_tokens, latency_ms, prompt_hash, response_hash, failure_reason,
-                    completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
-                (
-                    receipt.execution_id, receipt.approval_id, receipt.model_id,
-                    receipt.effort.value, receipt.outcome.value, receipt.input_tokens,
-                    receipt.output_tokens, receipt.latency_ms, receipt.prompt_hash,
-                    receipt.response_hash, completed_at,
-                ),
-            )
-            connection.execute(
-                """INSERT INTO execution_evidence(
-                    execution_id, task_id, decision_id, graph_fingerprint
-                ) VALUES (?, ?, ?, ?)""",
-                (
-                    receipt.execution_id, attempt["task_id"], attempt["decision_id"],
-                    attempt["graph_fingerprint"],
-                ),
-            )
-            connection.execute(
-                """UPDATE execution_attempts
-                SET status = 'completed', failure_reason = NULL, execution_id = ?, updated_at = ?
+                """UPDATE execution_attempts SET status = 'persistence_failed',
+                failure_reason = 'execution_persistence_failed', updated_at = ?
                 WHERE attempt_id = ?""",
-                (receipt.execution_id, completed_at, attempt_id),
+                (staged_at, attempt_id),
             )
             connection.commit()
             return True
+        except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def recoverable_attempt_ids(self) -> tuple[str, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT a.attempt_id FROM execution_attempts a
+                JOIN staged_execution_receipts s ON s.attempt_id = a.attempt_id
+                WHERE a.status = 'persistence_failed' ORDER BY a.attempt_id"""
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    def reconcile_execution_attempt(
+        self, attempt_id: str, *, completed_at: int
+    ) -> ExecutionReceipt:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        completed_at = _nonnegative_integer(completed_at, "completed_at_invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = connection.execute(
+                "SELECT * FROM execution_attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if attempt is None:
+                raise StorageError("execution_attempt_missing")
+            self._assert_approval_consumed(connection, attempt)
+            if attempt["status"] == "completed":
+                row = connection.execute(
+                    "SELECT * FROM execution_receipts WHERE execution_id = ?",
+                    (attempt["execution_id"],),
+                ).fetchone()
+                evidence = connection.execute(
+                    "SELECT 1 FROM execution_evidence WHERE execution_id = ?",
+                    (attempt["execution_id"],),
+                ).fetchone()
+                if row is None or evidence is None:
+                    raise StorageError("execution_attempt_conflict")
+                receipt = self._receipt_from_row(row)
+                self._validate_attempt_binding(attempt, receipt)
+                connection.rollback()
+                return receipt
+            if attempt["status"] != "persistence_failed":
+                raise StorageError("execution_attempt_conflict")
+            staged = connection.execute(
+                "SELECT * FROM staged_execution_receipts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if staged is None:
+                raise StorageError("execution_attempt_conflict")
+            receipt = self._receipt_from_row(staged)
+            self._validate_attempt_binding(attempt, receipt)
+            self._finalize_rows(connection, attempt, receipt, completed_at)
+            connection.commit()
+            return receipt
         except StorageError:
             if connection is not None and connection.in_transaction:
                 connection.rollback()

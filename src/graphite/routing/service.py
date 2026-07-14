@@ -234,6 +234,11 @@ class RoutingService:
             quota_path=self.state_dir / "quota.sqlite3",
         )
         signed = authority.issue(manifest)
+        provider_request = canonical_provider_request(
+            manifest=manifest,
+            context=prepared.context,
+            objective=prepared.request.objective,
+        )
         attempt_id = "attempt-" + secrets.token_hex(12)
         manifest_hash = hashlib.sha256(
             json.dumps(
@@ -250,17 +255,15 @@ class RoutingService:
             model_id=recommendation.model_id,
             effort=recommendation.effort,
             reserved_tokens=manifest.max_input_tokens + manifest.max_output_tokens,
+            max_input_tokens=manifest.max_input_tokens,
+            max_output_tokens=manifest.max_output_tokens,
+            expected_prompt_hash=provider_request.prompt_hash,
             created_at=now,
         )
         inventory = next(
             model for model in prepared.snapshot.models if model.model_id == recommendation.model_id
         )
         try:
-            provider_request = canonical_provider_request(
-                manifest=manifest,
-                context=prepared.context,
-                objective=prepared.request.objective,
-            )
             result = execute_ollama(
                 authority=authority,
                 signed_approval=signed,
@@ -291,14 +294,21 @@ class RoutingService:
                 self._fail_attempt(attempt_id, exc.code)
                 raise StorageError(exc.code) from None
             try:
-                self.store.mark_execution_attempt_failed(
-                    attempt_id,
-                    "execution_persistence_failed",
-                    persistence_failed=True,
-                    updated_at=int(time.time()),
+                self.store.stage_execution_receipt(
+                    attempt_id=attempt_id,
+                    receipt=receipt,
+                    staged_at=int(time.time()),
                 )
             except (StorageError, OSError, ValueError):
-                pass
+                try:
+                    self.store.mark_execution_attempt_failed(
+                        attempt_id,
+                        "execution_persistence_failed",
+                        persistence_failed=True,
+                        updated_at=int(time.time()),
+                    )
+                except (StorageError, OSError, ValueError):
+                    pass
             raise StorageError("execution_persistence_failed") from None
         return ApprovedExecution(text=result.text, receipt=receipt)
 
@@ -352,6 +362,19 @@ class RoutingService:
             "authority": "single_use_approval_required",
             "automatic_execution": False,
         }
+
+    def recoverable_attempt_ids(self) -> tuple[str, ...]:
+        """List sanitized attempt identifiers that can be finalized without a provider call."""
+        self.store.initialize()
+        return self.store.recoverable_attempt_ids()
+
+    def reconcile_execution(self, attempt_id: str) -> dict[str, Any]:
+        """Finalize one staged receipt without reusing approval or calling a provider."""
+        self.store.initialize()
+        receipt = self.store.reconcile_execution_attempt(
+            attempt_id, completed_at=int(time.time())
+        )
+        return dict(receipt.to_dict())
 
     def policy(
         self,

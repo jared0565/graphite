@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -67,7 +68,7 @@ def test_schema_migration_is_idempotent_and_enables_safety_pragmas(tmp_path: Pat
         "execution_attempts",
         "execution_receipts",
     } <= tables
-    assert version == "1"
+    assert version == "2"
     assert store.pragma_state() == {
         "foreign_keys": 1,
         "journal_mode": "wal",
@@ -93,7 +94,8 @@ def test_execution_finalization_is_atomic_and_idempotent(tmp_path: Path) -> None
         attempt_id="attempt-1", approval_id="approval-1", task_id="task-1",
         decision_id="decision-1", manifest_hash="c" * 64,
         graph_fingerprint="d" * 64, model_id="kimi-k2.7-code:cloud",
-        effort="default", reserved_tokens=10, created_at=11,
+        effort="default", reserved_tokens=10, max_input_tokens=8,
+        max_output_tokens=2, expected_prompt_hash="e" * 64, created_at=11,
     )
     receipt = ExecutionReceipt(
         "exec-1", "approval-1", "kimi-k2.7-code:cloud", Effort.DEFAULT,
@@ -139,6 +141,76 @@ def test_execution_finalization_is_atomic_and_idempotent(tmp_path: Path) -> None
     assert store.row_count("execution_evidence") == 1
     assert store.execution_attempt("attempt-1")["status"] == "completed"
     assert store.approval_status("approval-1") == "consumed"
+
+
+def test_v1_database_migrates_to_v2_without_losing_rows(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    path = root / ".graphite" / "routing" / "events.sqlite3"
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute("INSERT INTO schema_meta VALUES ('schema_version', '1')")
+        connection.execute(
+            "CREATE TABLE tasks (task_id TEXT PRIMARY KEY, category TEXT NOT NULL, "
+            "risk TEXT NOT NULL, objective_hash TEXT NOT NULL, created_at INTEGER NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO tasks VALUES ('legacy-task', 'isolated_code', 'low', ?, 7)",
+            ("a" * 64,),
+        )
+
+    store = RepositoryStore(root)
+    store.initialize()
+    store.initialize()
+
+    with sqlite3.connect(path) as connection:
+        version = connection.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()[0]
+        legacy = connection.execute(
+            "SELECT task_id, created_at FROM tasks WHERE task_id = 'legacy-task'"
+        ).fetchone()
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(execution_attempts)")
+        }
+        staged_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='staged_execution_receipts'"
+        ).fetchone()
+    assert version == "2"
+    assert legacy == ("legacy-task", 7)
+    assert {"max_input_tokens", "max_output_tokens", "expected_prompt_hash"} <= columns
+    assert staged_exists == (1,)
+
+
+def test_attempt_creation_is_transactionally_idempotent_under_concurrency(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    store.record_task("task-1", "isolated_code", "low", "a" * 64, 10)
+    store.record_decision(
+        "decision-1", "task-1", "kimi-k2.7-code:cloud", "default", "2", "1", 10
+    )
+    store.save_approval_record(
+        approval_id="approval-1", task_id="task-1", decision_id="decision-1",
+        nonce_hash="b" * 64, manifest_hash="c" * 64, expires_at=100,
+        reserved_tokens=10,
+    )
+    values = {
+        "attempt_id": "attempt-1", "approval_id": "approval-1", "task_id": "task-1",
+        "decision_id": "decision-1", "manifest_hash": "c" * 64,
+        "graph_fingerprint": "d" * 64, "model_id": "kimi-k2.7-code:cloud",
+        "effort": "default", "reserved_tokens": 10, "max_input_tokens": 8,
+        "max_output_tokens": 2, "expected_prompt_hash": "e" * 64, "created_at": 11,
+    }
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: store.create_execution_attempt(**values), range(2)))
+    assert sorted(results) == [False, True]
+    assert store.row_count("execution_attempts") == 1
 
 
 def test_duplicate_idempotency_key_cannot_create_duplicate_execution(tmp_path: Path) -> None:
