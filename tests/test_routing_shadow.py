@@ -101,6 +101,7 @@ def _manifest() -> ApprovalManifest:
     return ApprovalManifest(
         approval_id="primary", task_id="task-1", decision_id="decision-1",
         graph_fingerprint="a" * 64, context_manifest_hash="b" * 64,
+        inventory_digest="d" * 64,
         model_id="kimi-k2.7-code:cloud", effort=Effort.DEFAULT,
         max_input_tokens=100, max_output_tokens=20, policy_version="1",
         issued_at=10, expires_at=100, nonce="primary-nonce",

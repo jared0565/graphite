@@ -359,6 +359,7 @@ def test_completion_failure_leaves_recoverable_trace_without_text(
             manifest=service_module.ApprovalManifest(
                 approval_id="placeholder", task_id="placeholder", decision_id="placeholder",
                 graph_fingerprint="a" * 64, context_manifest_hash=_context().manifest.manifest_hash,
+                inventory_digest=MODEL_DIGESTS["kimi-k2.7-code:cloud"],
                 model_id="kimi-k2.7-code:cloud", effort=Effort.DEFAULT,
                 max_input_tokens=service.settings.max_input_tokens,
                 max_output_tokens=service.settings.max_output_tokens,

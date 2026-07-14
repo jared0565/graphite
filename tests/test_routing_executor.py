@@ -111,6 +111,7 @@ def _approved(
         decision_id="decision-1",
         graph_fingerprint="a" * 64,
         context_manifest_hash=manifest.manifest_hash,
+        inventory_digest=MODEL_DIGESTS.get(model, "f" * 64),
         model_id=model,
         effort=Effort.DEFAULT,
         max_input_tokens=8000,
@@ -271,6 +272,19 @@ def test_changed_inventory_blocks_before_approval_consumption(tmp_path: Path) ->
                 settings=RoutingSettings(), host="127.0.0.1", port=server.server_port,
                 allowed_ports=frozenset({server.server_port}),
             )
+    assert authority.store.approval_status("approval-1") == "issued"
+
+
+def test_approval_inventory_digest_mismatch_blocks_before_network_or_consumption(
+    tmp_path: Path,
+) -> None:
+    authority, signed, approval, context = _approved(tmp_path)
+    with pytest.raises(ExecutorError, match="model_identity_changed"):
+        execute_ollama(
+            authority=authority, signed_approval=signed, current_manifest=approval,
+            context=context, objective="review", expected_digest="e" * 64,
+            settings=RoutingSettings(), host="127.0.0.1", port=11434,
+        )
     assert authority.store.approval_status("approval-1") == "issued"
 
 

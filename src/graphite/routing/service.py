@@ -213,12 +213,17 @@ class RoutingService:
             decision_id, prepared.task.task_id, recommendation.model_id,
             recommendation.effort, recommendation.policy_version, "1", now,
         )
+        inventory = next(
+            model for model in prepared.snapshot.models
+            if model.model_id == recommendation.model_id
+        )
         manifest = ApprovalManifest(
             approval_id=approval_id,
             task_id=prepared.task.task_id,
             decision_id=decision_id,
             graph_fingerprint=prepared.graph_fingerprint,
             context_manifest_hash=prepared.context.manifest.manifest_hash,
+            inventory_digest=inventory.digest,
             model_id=recommendation.model_id,
             effort=Effort(recommendation.effort),
             max_input_tokens=prepared.request.max_input_tokens,
@@ -259,9 +264,6 @@ class RoutingService:
             max_output_tokens=manifest.max_output_tokens,
             expected_prompt_hash=provider_request.prompt_hash,
             created_at=now,
-        )
-        inventory = next(
-            model for model in prepared.snapshot.models if model.model_id == recommendation.model_id
         )
         try:
             result = execute_ollama(

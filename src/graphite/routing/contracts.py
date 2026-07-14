@@ -340,6 +340,7 @@ class ApprovalManifest(PublicRecord):
     decision_id: str
     graph_fingerprint: str
     context_manifest_hash: str
+    inventory_digest: str
     model_id: str
     effort: Effort
     max_input_tokens: int
@@ -355,6 +356,7 @@ class ApprovalManifest(PublicRecord):
         "decision_id",
         "graph_fingerprint",
         "context_manifest_hash",
+        "inventory_digest",
         "model_id",
         "effort",
         "max_input_tokens",
@@ -370,6 +372,7 @@ class ApprovalManifest(PublicRecord):
             object.__setattr__(self, name, _bounded_identifier(getattr(self, name), code=f"{name}_invalid"))
         object.__setattr__(self, "graph_fingerprint", _hash(self.graph_fingerprint, code="graph_fingerprint_invalid"))
         object.__setattr__(self, "context_manifest_hash", _hash(self.context_manifest_hash, code="context_manifest_hash_invalid"))
+        object.__setattr__(self, "inventory_digest", _hash(self.inventory_digest, code="inventory_digest_invalid"))
         object.__setattr__(self, "effort", _enum(self.effort, Effort, code="effort_invalid"))
         object.__setattr__(self, "max_input_tokens", _bounded_integer(self.max_input_tokens, code="max_input_tokens_invalid", minimum=1, maximum=262_144))
         object.__setattr__(self, "max_output_tokens", _bounded_integer(self.max_output_tokens, code="max_output_tokens_invalid", minimum=1, maximum=32_768))

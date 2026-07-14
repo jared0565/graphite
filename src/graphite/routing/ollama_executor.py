@@ -242,6 +242,8 @@ def execute_ollama(
         authority.verify(signed_approval, current_manifest)
     except ApprovalError as exc:
         raise ExecutorError(exc.code) from exc
+    if current_manifest.inventory_digest != expected_digest:
+        raise ExecutorError("model_identity_changed")
     if context.manifest.manifest_hash != current_manifest.context_manifest_hash:
         raise ExecutorError("context_manifest_changed")
     if cancellation():

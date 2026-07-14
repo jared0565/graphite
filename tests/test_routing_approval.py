@@ -24,6 +24,7 @@ def _manifest(**changes) -> ApprovalManifest:
         "decision_id": "decision-1",
         "graph_fingerprint": "a" * 64,
         "context_manifest_hash": "b" * 64,
+        "inventory_digest": "d" * 64,
         "model_id": "kimi-k2.7-code:cloud",
         "effort": Effort.DEFAULT,
         "max_input_tokens": 8_000,
@@ -112,6 +113,7 @@ def test_signed_approval_is_bound_to_every_manifest_field(tmp_path: Path) -> Non
     for changed in (
         replace(_manifest(), graph_fingerprint="c" * 64),
         replace(_manifest(), context_manifest_hash="c" * 64),
+        replace(_manifest(), inventory_digest="e" * 64),
         replace(_manifest(), model_id="kimi-k2.6:cloud"),
         replace(_manifest(), effort=Effort.LOW),
         replace(_manifest(), max_output_tokens=3_000),
@@ -120,6 +122,16 @@ def test_signed_approval_is_bound_to_every_manifest_field(tmp_path: Path) -> Non
     ):
         with pytest.raises(ApprovalError, match="approval_manifest_changed"):
             authority.verify(signed, changed)
+
+
+@pytest.mark.parametrize("digest", (None, "", "A" * 64, "a" * 63, "g" * 64))
+def test_approval_manifest_rejects_missing_or_malformed_inventory_digest(
+    digest: object,
+) -> None:
+    values = dict(_manifest().to_dict())
+    values["inventory_digest"] = digest
+    with pytest.raises((TypeError, ValueError), match="inventory_digest_invalid"):
+        ApprovalManifest(**values)
 
 
 def test_approval_is_single_use_and_reserves_both_quotas(tmp_path: Path) -> None:
