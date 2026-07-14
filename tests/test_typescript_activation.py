@@ -4230,13 +4230,19 @@ def _activation_boundary_violations(sources: dict[str, str]) -> list[str]:
                 f"{relative_path}:{node.lineno}:activation_definition_invalid"
             )
 
-    for relative_path, tree in trees.items():
-        direct_aliases: set[str] = set()
-        module_aliases: set[str] = set()
-        graphite_aliases: set[str] = set()
-        cli_module_aliases: set[str] = set()
-        helper_aliases: set[str] = set()
+    class Scope:
+        def __init__(self, node: ast.AST, parent: Scope | None, kind: str, label: str):
+            self.node = node
+            self.parent = parent
+            self.kind = kind
+            self.label = label
+            self.capabilities: dict[str, str] = {}
+            self.locals: set[str] = set()
+            self.binding_nodes: dict[str, list[ast.AST]] = {}
+            self.globals: set[str] = set()
+            self.nonlocals: set[str] = set()
 
+    for relative_path, tree in trees.items():
         cli_module_functions = {
             node.name: node
             for node in tree.body
@@ -4271,207 +4277,372 @@ def _activation_boundary_violations(sources: dict[str, str]) -> list[str]:
                 ):
                     violations.append(f"cli.py:0:{protected_name}_definition_invalid")
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name == "graphite":
-                        graphite_aliases.add(alias.asname or "graphite")
-                    elif alias.name == "graphite.typescript_activation":
-                        if alias.asname:
-                            module_aliases.add(alias.asname)
-                        else:
-                            graphite_aliases.add("graphite")
-                        if relative_path != "cli.py":
-                            violations.append(f"{relative_path}:{node.lineno}:import")
-                    elif alias.name == "graphite.cli":
-                        if alias.asname:
-                            cli_module_aliases.add(alias.asname)
-                        else:
-                            graphite_aliases.add("graphite")
-            elif isinstance(node, ast.ImportFrom):
-                resolved = _resolve_import_module(relative_path, node)
-                if resolved == "graphite.typescript_activation":
-                    for alias in node.names:
-                        if alias.name in {"activate_typescript", "*"}:
-                            direct_aliases.add(alias.asname or alias.name)
-                            if relative_path != "cli.py" or alias.name == "*":
-                                violations.append(
-                                    f"{relative_path}:{node.lineno}:attribute_import"
-                                )
-                elif resolved == "graphite":
-                    for alias in node.names:
-                        if alias.name == "typescript_activation":
-                            module_aliases.add(alias.asname or alias.name)
-                            if relative_path != "cli.py":
-                                violations.append(
-                                    f"{relative_path}:{node.lineno}:module_import"
-                                )
-                        elif alias.name == "cli":
-                            cli_module_aliases.add(alias.asname or alias.name)
-                elif resolved == "graphite.cli":
-                    for alias in node.names:
-                        if alias.name == "_activate_typescript_for_onboarding":
-                            helper_aliases.add(alias.asname or alias.name)
-                            if relative_path != "cli.py":
-                                violations.append(
-                                    f"{relative_path}:{node.lineno}:helper_import"
-                                )
+        scope_by_node: dict[ast.AST, Scope] = {}
+        module_scope = Scope(tree, None, "module", "<module>")
+        scope_by_node[tree] = module_scope
 
-        scope_stack: list[tuple[ast.AST, str]] = [(tree, "<module>")]
+        class ScopeBuilder(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.scope = module_scope
 
-        class ReferenceVisitor(ast.NodeVisitor):
-            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-                if node.name in {
-                    *direct_aliases,
-                    *module_aliases,
-                    *helper_aliases,
-                }:
-                    violations.append(
-                        f"{relative_path}:{node.lineno}:import_alias_rebinding"
-                    )
-                for decorator in node.decorator_list:
-                    self.visit(decorator)
-                self.visit(node.args)
-                if node.returns:
-                    self.visit(node.returns)
-                scope_stack.append(
-                    (node, f"{scope_stack[-1][1]}.{node.name}@{node.lineno}")
-                )
-                for statement in node.body:
-                    self.visit(statement)
-                scope_stack.pop()
-
-            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-                self.visit_FunctionDef(node)
-
-            def visit_ClassDef(self, node: ast.ClassDef) -> None:
-                if node.name in {
+            def _bind(self, name: str, node: ast.AST) -> None:
+                target = self.scope
+                if name in target.globals:
+                    target = module_scope
+                elif name in target.nonlocals:
+                    target = target.parent or target
+                if target.kind == "module" and name in {
                     "activate_typescript",
                     "_activate_typescript_for_onboarding",
-                    *direct_aliases,
-                    *module_aliases,
-                    *helper_aliases,
                 }:
                     violations.append(
-                        f"{relative_path}:{node.lineno}:protected_class_rebinding"
+                        f"{relative_path}:{getattr(node, 'lineno', 0)}:"
+                        "protected_module_rebinding"
                     )
+                target.locals.add(name)
+                target.binding_nodes.setdefault(name, []).append(node)
+
+            def _capability(self, name: str, kind: str) -> None:
+                self.scope.capabilities[name] = kind
+
+            def _child_scope(self, node: ast.AST, kind: str, name: str) -> Scope:
+                parent = self.scope
+                if kind == "function" and parent.kind == "class":
+                    parent = parent.parent or parent
+                child = Scope(
+                    node,
+                    parent,
+                    kind,
+                    f"{self.scope.label}.{name}@{getattr(node, 'lineno', 0)}",
+                )
+                scope_by_node[node] = child
+                return child
+
+            def _visit_function(
+                self, node: ast.FunctionDef | ast.AsyncFunctionDef
+            ) -> None:
+                if node in expected_definitions:
+                    self._capability(node.name, "activation_function")
+                elif node is helper_node:
+                    self._capability(node.name, "onboarding_helper")
+                else:
+                    self._bind(node.name, node)
+                for expression in [*node.decorator_list, *node.args.defaults]:
+                    self.visit(expression)
+                for default in node.args.kw_defaults:
+                    if default:
+                        self.visit(default)
+                for argument in [
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                    node.args.vararg,
+                    node.args.kwarg,
+                ]:
+                    if argument and argument.annotation:
+                        self.visit(argument.annotation)
+                if node.returns:
+                    self.visit(node.returns)
+                child = self._child_scope(node, "function", node.name)
+                for argument in [
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                ]:
+                    child.locals.add(argument.arg)
+                    child.binding_nodes.setdefault(argument.arg, []).append(argument)
+                for argument in (node.args.vararg, node.args.kwarg):
+                    if argument:
+                        child.locals.add(argument.arg)
+                        child.binding_nodes.setdefault(argument.arg, []).append(argument)
+                previous, self.scope = self.scope, child
+                for statement in node.body:
+                    self.visit(statement)
+                self.scope = previous
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                self._visit_function(node)
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                self._visit_function(node)
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                self._bind(node.name, node)
                 for expression in [*node.decorator_list, *node.bases, *node.keywords]:
                     self.visit(expression)
-                scope_stack.append(
-                    (node, f"{scope_stack[-1][1]}.{node.name}@{node.lineno}")
-                )
+                child = self._child_scope(node, "class", node.name)
+                previous, self.scope = self.scope, child
                 for statement in node.body:
+                    self.visit(statement)
+                self.scope = previous
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                for default in [*node.args.defaults, *node.args.kw_defaults]:
+                    if default:
+                        self.visit(default)
+                child = self._child_scope(node, "function", "<lambda>")
+                for argument in [
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                    node.args.vararg,
+                    node.args.kwarg,
+                ]:
+                    if argument:
+                        child.locals.add(argument.arg)
+                previous, self.scope = self.scope, child
+                self.visit(node.body)
+                self.scope = previous
+
+            def _visit_comprehension(
+                self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
+            ) -> None:
+                self.visit(node.generators[0].iter)
+                child = self._child_scope(node, "comprehension", "<comprehension>")
+                previous, self.scope = self.scope, child
+                for index, generator in enumerate(node.generators):
+                    if index:
+                        self.visit(generator.iter)
+                    self.visit(generator.target)
+                    for condition in generator.ifs:
+                        self.visit(condition)
+                if isinstance(node, ast.DictComp):
+                    self.visit(node.key)
+                    self.visit(node.value)
+                else:
+                    self.visit(node.elt)
+                self.scope = previous
+
+            visit_ListComp = _visit_comprehension
+            visit_SetComp = _visit_comprehension
+            visit_DictComp = _visit_comprehension
+            visit_GeneratorExp = _visit_comprehension
+
+            def visit_Import(self, node: ast.Import) -> None:
+                for alias in node.names:
+                    bound = alias.asname or alias.name.split(".")[0]
+                    if alias.name == "graphite.typescript_activation":
+                        kind = "activation_module" if alias.asname else "activation_package"
+                        self._capability(bound, kind)
+                        if relative_path != "cli.py":
+                            violations.append(f"{relative_path}:{node.lineno}:import")
+                    elif alias.name == "graphite":
+                        self._capability(bound, "graphite_package")
+                    elif alias.name == "graphite.cli":
+                        self._capability(
+                            bound, "cli_module" if alias.asname else "cli_package"
+                        )
+                    else:
+                        self._bind(bound, node)
+
+            def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+                resolved = _resolve_import_module(relative_path, node)
+                for alias in node.names:
+                    bound = alias.asname or alias.name
+                    if (
+                        resolved == "graphite.typescript_activation"
+                        and alias.name == "activate_typescript"
+                    ):
+                        self._capability(bound, "activation_function")
+                        if relative_path != "cli.py":
+                            violations.append(
+                                f"{relative_path}:{node.lineno}:attribute_import"
+                            )
+                    elif resolved == "graphite.typescript_activation" and alias.name == "*":
+                        violations.append(f"{relative_path}:{node.lineno}:star_import")
+                    elif resolved == "graphite" and alias.name == "typescript_activation":
+                        self._capability(bound, "activation_module")
+                        if relative_path != "cli.py":
+                            violations.append(
+                                f"{relative_path}:{node.lineno}:module_import"
+                            )
+                    elif resolved == "graphite" and alias.name == "cli":
+                        self._capability(bound, "cli_module")
+                    elif (
+                        resolved == "graphite.cli"
+                        and alias.name == "_activate_typescript_for_onboarding"
+                    ):
+                        self._capability(bound, "onboarding_helper")
+                        if relative_path != "cli.py":
+                            violations.append(
+                                f"{relative_path}:{node.lineno}:helper_import"
+                            )
+                    else:
+                        self._bind(bound, node)
+
+            def visit_Global(self, node: ast.Global) -> None:
+                self.scope.globals.update(node.names)
+
+            def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+                self.scope.nonlocals.update(node.names)
+
+            def visit_Name(self, node: ast.Name) -> None:
+                if isinstance(node.ctx, (ast.Store, ast.Del)):
+                    self._bind(node.id, node)
+
+        ScopeBuilder().visit(tree)
+
+        for scope in scope_by_node.values():
+            for name in scope.capabilities.keys() & scope.binding_nodes.keys():
+                for node in scope.binding_nodes[name]:
+                    violations.append(
+                        f"{relative_path}:{getattr(node, 'lineno', 0)}:"
+                        "protected_import_alias_rebinding"
+                    )
+
+        def resolve(scope: Scope, name: str) -> str | None:
+            if name in scope.globals:
+                return resolve(module_scope, name) if scope is not module_scope else None
+            if name in scope.nonlocals:
+                return resolve(scope.parent, name) if scope.parent else None
+            if name in scope.capabilities:
+                return scope.capabilities[name]
+            if name in scope.locals:
+                return None
+            return resolve(scope.parent, name) if scope.parent else None
+
+        scope_stack: list[Scope] = [module_scope]
+
+        class ReferenceVisitor(ast.NodeVisitor):
+            def _push_scope(self, node: ast.AST, body: list[ast.stmt]) -> None:
+                scope_stack.append(scope_by_node[node])
+                for statement in body:
                     self.visit(statement)
                 scope_stack.pop()
 
+            def _visit_function(
+                self, node: ast.FunctionDef | ast.AsyncFunctionDef
+            ) -> None:
+                for expression in [*node.decorator_list, *node.args.defaults]:
+                    self.visit(expression)
+                for default in node.args.kw_defaults:
+                    if default:
+                        self.visit(default)
+                for argument in [
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                    node.args.vararg,
+                    node.args.kwarg,
+                ]:
+                    if argument and argument.annotation:
+                        self.visit(argument.annotation)
+                if node.returns:
+                    self.visit(node.returns)
+                self._push_scope(node, node.body)
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                self._visit_function(node)
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                self._visit_function(node)
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                for expression in [*node.decorator_list, *node.bases, *node.keywords]:
+                    self.visit(expression)
+                self._push_scope(node, node.body)
+
             def visit_Lambda(self, node: ast.Lambda) -> None:
-                self.visit(node.args)
-                scope_stack.append(
-                    (node, f"{scope_stack[-1][1]}.<lambda>@{node.lineno}")
-                )
+                for default in [*node.args.defaults, *node.args.kw_defaults]:
+                    if default:
+                        self.visit(default)
+                scope_stack.append(scope_by_node[node])
                 self.visit(node.body)
                 scope_stack.pop()
 
-            def _record_activator(self, node: ast.AST, kind: str) -> None:
-                if scope_stack[-1][0] is not helper_node:
-                    violations.append(
-                        f"{relative_path}:{getattr(node, 'lineno', 0)}:{kind}:"
-                        f"{scope_stack[-1][1]}"
-                    )
+            def _visit_comprehension(
+                self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
+            ) -> None:
+                self.visit(node.generators[0].iter)
+                scope_stack.append(scope_by_node[node])
+                for index, generator in enumerate(node.generators):
+                    if index:
+                        self.visit(generator.iter)
+                    for condition in generator.ifs:
+                        self.visit(condition)
+                if isinstance(node, ast.DictComp):
+                    self.visit(node.key)
+                    self.visit(node.value)
+                else:
+                    self.visit(node.elt)
+                scope_stack.pop()
 
-            def _record_helper(self, node: ast.AST, kind: str) -> None:
-                if scope_stack[-1][0] not in onboarding_nodes:
-                    violations.append(
-                        f"{relative_path}:{getattr(node, 'lineno', 0)}:{kind}:"
-                        f"{scope_stack[-1][1]}"
-                    )
+            visit_ListComp = _visit_comprehension
+            visit_SetComp = _visit_comprehension
+            visit_DictComp = _visit_comprehension
+            visit_GeneratorExp = _visit_comprehension
+
+            def _is_direct_call(self, node: ast.AST, allowed: set[ast.AST]) -> bool:
+                parent = parent_by_node.get(node)
+                return (
+                    scope_stack[-1].node in allowed
+                    and isinstance(parent, ast.Call)
+                    and parent.func is node
+                )
+
+            def _violation(self, node: ast.AST, kind: str) -> None:
+                violations.append(
+                    f"{relative_path}:{getattr(node, 'lineno', 0)}:{kind}:"
+                    f"{scope_stack[-1].label}"
+                )
 
             def visit_Name(self, node: ast.Name) -> None:
-                if isinstance(node.ctx, ast.Load) and (
-                    node.id in direct_aliases
-                    or (
-                        relative_path == "typescript_activation.py"
-                        and node.id == "activate_typescript"
-                    )
-                ):
-                    self._record_activator(node, "attribute_reference")
-                if (
-                    isinstance(node.ctx, ast.Load)
-                    and (
-                        (relative_path == "cli.py" and helper_node is not None
-                         and node.id == "_activate_typescript_for_onboarding")
-                        or node.id in helper_aliases
-                    )
-                ):
-                    self._record_helper(node, "onboarding_helper_reference")
-                if isinstance(node.ctx, ast.Store) and node.id in {
-                    "activate_typescript",
-                    "_activate_typescript_for_onboarding",
-                    *direct_aliases,
-                    *module_aliases,
-                    *helper_aliases,
-                }:
-                    violations.append(
-                        f"{relative_path}:{node.lineno}:protected_name_rebinding"
-                    )
-
-            def visit_arg(self, node: ast.arg) -> None:
-                if node.arg in {
-                    "activate_typescript",
-                    "_activate_typescript_for_onboarding",
-                    *direct_aliases,
-                    *module_aliases,
-                    *helper_aliases,
-                }:
-                    violations.append(
-                        f"{relative_path}:{node.lineno}:protected_argument_rebinding"
-                    )
-                if node.annotation:
-                    self.visit(node.annotation)
+                if not isinstance(node.ctx, ast.Load):
+                    return
+                kind = resolve(scope_stack[-1], node.id)
+                if kind == "activation_function":
+                    if not self._is_direct_call(node, {helper_node} - {None}):
+                        self._violation(node, "activation_capability_forwarded")
+                elif kind in {"activation_module", "activation_package"}:
+                    self._violation(node, "activation_module_forwarded")
+                elif kind == "onboarding_helper":
+                    if not self._is_direct_call(node, onboarding_nodes):
+                        self._violation(node, "onboarding_helper_forwarded")
+                elif kind in {"cli_module", "cli_package"}:
+                    self._violation(node, "cli_module_forwarded")
 
             def visit_Attribute(self, node: ast.Attribute) -> None:
-                dotted: list[str] = []
+                attributes: list[str] = []
                 current: ast.expr = node
                 while isinstance(current, ast.Attribute):
-                    dotted.append(current.attr)
+                    attributes.append(current.attr)
                     current = current.value
-                if isinstance(current, ast.Name):
-                    dotted.append(current.id)
-                    dotted.reverse()
-                    module_reference = (
-                        dotted[0] in module_aliases
-                        and dotted[1:] == ["activate_typescript"]
-                    )
-                    package_reference = (
-                        dotted[0] in graphite_aliases
-                        and dotted[1:]
-                        == ["typescript_activation", "activate_typescript"]
-                    )
-                    if module_reference or package_reference:
-                        self._record_activator(node, "module_attribute_reference")
-                        return
-                    helper_module_reference = (
-                        dotted[0] in cli_module_aliases
-                        and dotted[1:]
-                        == ["_activate_typescript_for_onboarding"]
-                    )
-                    helper_package_reference = (
-                        dotted[0] in graphite_aliases
-                        and dotted[1:]
-                        == ["cli", "_activate_typescript_for_onboarding"]
-                    )
-                    if helper_module_reference or helper_package_reference:
-                        self._record_helper(node, "module_helper_reference")
-                        return
+                if not isinstance(current, ast.Name):
+                    self.generic_visit(node)
+                    return
+                attributes.reverse()
+                kind = resolve(scope_stack[-1], current.id)
+                activation_function = (
+                    kind == "activation_module" and attributes == ["activate_typescript"]
+                ) or (
+                    kind in {"graphite_package", "activation_package"}
+                    and attributes == ["typescript_activation", "activate_typescript"]
+                )
+                activation_capability = activation_function or (
+                    kind in {"activation_module", "activation_package"}
+                ) or (
+                    kind == "graphite_package"
+                    and attributes[:1] == ["typescript_activation"]
+                ) or kind == "activation_function"
+                if activation_capability:
+                    if not (
+                        activation_function
+                        and self._is_direct_call(node, {helper_node} - {None})
+                    ):
+                        self._violation(node, "activation_attribute_forwarded")
+                    return
+                helper_function = (
+                    kind == "cli_module"
+                    and attributes == ["_activate_typescript_for_onboarding"]
+                ) or (
+                    kind in {"graphite_package", "cli_package"}
+                    and attributes == ["cli", "_activate_typescript_for_onboarding"]
+                )
+                if helper_function:
+                    if not self._is_direct_call(node, onboarding_nodes):
+                        self._violation(node, "onboarding_helper_forwarded")
+                    return
                 self.generic_visit(node)
-
-            def visit_Global(self, node: ast.Global) -> None:
-                if "activate_typescript" in node.names:
-                    violations.append(
-                        f"{relative_path}:{node.lineno}:activation_global_rebinding"
-                    )
-
-            visit_Nonlocal = visit_Global
 
         ReferenceVisitor().visit(tree)
 
@@ -4660,6 +4831,99 @@ def test_activation_boundary_analyzer_allows_authorized_import_spellings(
 
 
 @pytest.mark.parametrize(
+    ("activation_import", "helper_body"),
+    [
+        (
+            "import graphite.typescript_activation as activation",
+            "    forwarded = activation\n"
+            "    return forwarded.activate_typescript(None)\n",
+        ),
+        (
+            "from .typescript_activation import activate_typescript as engage",
+            "    forwarded = engage\n"
+            "    return forwarded(None)\n",
+        ),
+        (
+            "import graphite.typescript_activation as activation",
+            "    return getattr(activation, 'activate_typescript')(None)\n",
+        ),
+        (
+            "import graphite.typescript_activation as activation",
+            "    return {'activation': activation}\n",
+        ),
+        (
+            "from .typescript_activation import activate_typescript as engage",
+            "    return [engage]\n",
+        ),
+        (
+            "import graphite.typescript_activation as activation",
+            "    return (forwarded := activation)\n",
+        ),
+    ],
+)
+def test_activation_boundary_analyzer_rejects_capability_forwarding_and_reflection(
+    activation_import, helper_body
+):
+    cli_source = (
+        f"{activation_import}\n"
+        "def _activate_typescript_for_onboarding():\n"
+        f"{helper_body}"
+        "def cmd_init(): return _activate_typescript_for_onboarding()\n"
+        "def cmd_bootstrap(): return _activate_typescript_for_onboarding()\n"
+    )
+
+    assert _activation_boundary_violations(
+        {**_MINIMAL_ACTIVATION_MODULE, "cli.py": cli_source}
+    )
+
+
+@pytest.mark.parametrize(
+    "shadow_source",
+    [
+        "def unrelated(engage): return engage\n",
+        "def unrelated():\n    engage = object()\n    return engage\n",
+        "def outer():\n"
+        "    engage = object()\n"
+        "    def nested(engage): return {'value': engage}\n"
+        "    return nested(engage)\n",
+    ],
+)
+def test_activation_boundary_analyzer_allows_unrelated_lexical_shadowing(
+    shadow_source
+):
+    cli_source = (
+        "from .typescript_activation import activate_typescript as engage\n"
+        "def _activate_typescript_for_onboarding(): return engage(None)\n"
+        "def cmd_init(): return _activate_typescript_for_onboarding()\n"
+        "def cmd_bootstrap(): return _activate_typescript_for_onboarding()\n"
+        f"{shadow_source}"
+    )
+
+    assert _activation_boundary_violations(
+        {**_MINIMAL_ACTIVATION_MODULE, "cli.py": cli_source}
+    ) == []
+
+
+def test_activation_boundary_analyzer_allows_nested_module_alias_shadowing():
+    cli_source = (
+        "import graphite.typescript_activation as activation\n"
+        "def _activate_typescript_for_onboarding():\n"
+        "    return activation.activate_typescript(None)\n"
+        "def cmd_init(): return _activate_typescript_for_onboarding()\n"
+        "def cmd_bootstrap(): return _activate_typescript_for_onboarding()\n"
+        "def unrelated(activation): return activation\n"
+        "def outer():\n"
+        "    activation = object()\n"
+        "    def nested(activation): return [activation]\n"
+        "    return nested(activation)\n"
+    )
+
+    assert _activation_boundary_violations(
+        {**_MINIMAL_ACTIVATION_MODULE, "cli.py": cli_source}
+    ) == []
+
+
+@pytest.mark.parametrize(
     ("argv", "expected_event"),
     [
         (["build"], "build"),
@@ -4699,6 +4963,9 @@ def test_non_onboarding_parser_paths_run_real_handlers_without_activation(
         }
 
     monkeypatch.setattr(cli, "activate_typescript", forbidden_activation)
+    monkeypatch.setattr(
+        typescript_activation, "activate_typescript", forbidden_activation
+    )
     monkeypatch.setattr(cli, "_build_project", build)
     monkeypatch.setattr(cli, "check_graph_freshness", check)
     monkeypatch.setattr(cli, "run_doctor", doctor)
