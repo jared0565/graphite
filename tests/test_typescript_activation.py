@@ -4291,6 +4291,19 @@ def _activation_boundary_violations(sources: dict[str, str]) -> list[str]:
                     target = module_scope
                 elif name in target.nonlocals:
                     target = target.parent or target
+                if target.kind == "class":
+                    enclosing = target.parent
+                    while enclosing:
+                        if name in enclosing.capabilities:
+                            if enclosing.capabilities[name].startswith("activation_"):
+                                violations.append(
+                                    f"{relative_path}:{getattr(node, 'lineno', 0)}:"
+                                    "class_capability_capture"
+                                )
+                            break
+                        if name in enclosing.locals:
+                            break
+                        enclosing = enclosing.parent
                 if target.kind == "module" and name in {
                     "activate_typescript",
                     "_activate_typescript_for_onboarding",
@@ -4424,6 +4437,11 @@ def _activation_boundary_violations(sources: dict[str, str]) -> list[str]:
                     if alias.name == "graphite.typescript_activation":
                         kind = "activation_module" if alias.asname else "activation_package"
                         self._capability(bound, kind)
+                        if self.scope.kind == "class":
+                            violations.append(
+                                f"{relative_path}:{node.lineno}:"
+                                "class_capability_import"
+                            )
                         if relative_path != "cli.py":
                             violations.append(f"{relative_path}:{node.lineno}:import")
                     elif alias.name == "graphite":
@@ -4444,6 +4462,11 @@ def _activation_boundary_violations(sources: dict[str, str]) -> list[str]:
                         and alias.name == "activate_typescript"
                     ):
                         self._capability(bound, "activation_function")
+                        if self.scope.kind == "class":
+                            violations.append(
+                                f"{relative_path}:{node.lineno}:"
+                                "class_capability_import"
+                            )
                         if relative_path != "cli.py":
                             violations.append(
                                 f"{relative_path}:{node.lineno}:attribute_import"
@@ -4452,6 +4475,11 @@ def _activation_boundary_violations(sources: dict[str, str]) -> list[str]:
                         violations.append(f"{relative_path}:{node.lineno}:star_import")
                     elif resolved == "graphite" and alias.name == "typescript_activation":
                         self._capability(bound, "activation_module")
+                        if self.scope.kind == "class":
+                            violations.append(
+                                f"{relative_path}:{node.lineno}:"
+                                "class_capability_import"
+                            )
                         if relative_path != "cli.py":
                             violations.append(
                                 f"{relative_path}:{node.lineno}:module_import"
@@ -4475,6 +4503,32 @@ def _activation_boundary_violations(sources: dict[str, str]) -> list[str]:
 
             def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
                 self.scope.nonlocals.update(node.names)
+
+            def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+                if node.type:
+                    self.visit(node.type)
+                if node.name:
+                    self._bind(node.name, node)
+                for statement in node.body:
+                    self.visit(statement)
+
+            def visit_MatchAs(self, node: ast.MatchAs) -> None:
+                if node.pattern:
+                    self.visit(node.pattern)
+                if node.name:
+                    self._bind(node.name, node)
+
+            def visit_MatchStar(self, node: ast.MatchStar) -> None:
+                if node.name:
+                    self._bind(node.name, node)
+
+            def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+                for key in node.keys:
+                    self.visit(key)
+                for pattern in node.patterns:
+                    self.visit(pattern)
+                if node.rest:
+                    self._bind(node.rest, node)
 
             def visit_Name(self, node: ast.Name) -> None:
                 if isinstance(node.ctx, (ast.Store, ast.Del)):
@@ -4916,6 +4970,71 @@ def test_activation_boundary_analyzer_allows_nested_module_alias_shadowing():
         "    activation = object()\n"
         "    def nested(activation): return [activation]\n"
         "    return nested(activation)\n"
+    )
+
+    assert _activation_boundary_violations(
+        {**_MINIMAL_ACTIVATION_MODULE, "cli.py": cli_source}
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "class_source",
+    [
+        "class Holder:\n"
+        "    from .typescript_activation import activate_typescript as engage\n",
+        "class Holder:\n"
+        "    activation = activation\n",
+        "class Holder:\n"
+        "    engage = engage\n",
+        "class Holder:\n"
+        "    from .typescript_activation import activate_typescript as engage\n"
+        "captured = Holder.engage\n",
+        "class Holder:\n"
+        "    activation = activation\n"
+        "captured = Holder.activation.activate_typescript\n",
+    ],
+)
+def test_activation_boundary_analyzer_rejects_class_capability_import_and_capture(
+    class_source
+):
+    cli_source = (
+        "from .typescript_activation import activate_typescript as engage\n"
+        "import graphite.typescript_activation as activation\n"
+        "def _activate_typescript_for_onboarding(): return engage(None)\n"
+        "def cmd_init(): return _activate_typescript_for_onboarding()\n"
+        "def cmd_bootstrap(): return _activate_typescript_for_onboarding()\n"
+        f"{class_source}"
+    )
+
+    assert _activation_boundary_violations(
+        {**_MINIMAL_ACTIVATION_MODULE, "cli.py": cli_source}
+    )
+
+
+@pytest.mark.parametrize(
+    "shadow_body",
+    [
+        "    try:\n"
+        "        raise RuntimeError\n"
+        "    except RuntimeError as engage:\n"
+        "        return engage\n",
+        "    with context() as engage:\n"
+        "        return engage\n",
+        "    match value:\n"
+        "        case {'activation': engage}:\n"
+        "            return engage\n",
+    ],
+)
+def test_activation_boundary_analyzer_allows_common_local_binding_shadows(
+    shadow_body
+):
+    cli_source = (
+        "from .typescript_activation import activate_typescript as engage\n"
+        "def _activate_typescript_for_onboarding(): return engage(None)\n"
+        "def cmd_init(): return _activate_typescript_for_onboarding()\n"
+        "def cmd_bootstrap(): return _activate_typescript_for_onboarding()\n"
+        "def unrelated(value=None, context=None):\n"
+        f"{shadow_body}"
     )
 
     assert _activation_boundary_violations(
