@@ -6,11 +6,47 @@ from dataclasses import dataclass
 from typing import Final
 
 from .contracts import Effort, RiskTier, TaskCategory, TaskProfile
-from .registry import BUNDLED_PROFILES, RegistrySnapshot, profile_is_eligible
+from .registry import (
+    BUNDLED_PROFILES,
+    ModelRole,
+    RegistrySnapshot,
+    UsageClass,
+    lifecycle_is_eligible,
+    profile_is_eligible,
+)
 
-POLICY_VERSION: Final = "1"
+POLICY_VERSION: Final = "2"
 EVIDENCE_VERSION: Final = "1"
 _Z_95: Final = 1.959963984540054
+
+_ROLE_BONUSES: Final = {
+    TaskCategory.DOCUMENTATION: {
+        ModelRole.CODING_PRIMARY: 100,
+        ModelRole.CODING: 40,
+    },
+    TaskCategory.ISOLATED_CODE: {
+        ModelRole.CODING_PRIMARY: 100,
+        ModelRole.CODING: 40,
+    },
+    TaskCategory.FEATURE: {
+        ModelRole.CODING_PRIMARY: 100,
+        ModelRole.CODING: 40,
+        ModelRole.AGENTIC: 20,
+    },
+    TaskCategory.REFACTOR: {
+        ModelRole.CODING_PRIMARY: 80,
+        ModelRole.CODING: 40,
+        ModelRole.REASONING: 20,
+    },
+    TaskCategory.ARCHITECTURE: {
+        ModelRole.LONG_CONTEXT: 80,
+        ModelRole.REASONING: 40,
+    },
+}
+_USAGE_PENALTIES: Final = {
+    UsageClass.MEDIUM: 0,
+    UsageClass.HIGH: 40,
+}
 
 
 @dataclass(frozen=True)
@@ -119,8 +155,8 @@ def _candidate_failure(
         return "effort_unsupported"
     if not profile_is_eligible(candidate.model_id, task.risk):
         return "risk_ineligible"
-    if entry.retirement_date is not None and gates.current_date >= entry.retirement_date:
-        return "model_retired"
+    if not lifecycle_is_eligible(entry.retirement_date, gates.current_date):
+        return "model_retiring"
     inventory_model = next(
         (model for model in snapshot.models if model.model_id == candidate.model_id),
         None,
@@ -139,15 +175,11 @@ def _candidate_failure(
         return "budget_exceeded"
     if not gates.task_evaluated and not entry.profile.provisional:
         return "task_not_evaluated"
-    required_capability = {
-        TaskCategory.ARCHITECTURE: "architecture",
-    }.get(task.category, "code")
-    if required_capability not in entry.profile.capabilities:
-        return "capability_missing"
     return None
 
 
-def _score(candidate: CandidateMetrics) -> ScoredCandidate:
+def _score(candidate: CandidateMetrics, task: TaskProfile) -> ScoredCandidate:
+    entry = BUNDLED_PROFILES[candidate.model_id]
     global_success = _bounded_metric(candidate.global_success_millis, "global_success_invalid", 1_000)
     repository_success = candidate.repository_success_millis
     if repository_success is not None:
@@ -165,11 +197,16 @@ def _score(candidate: CandidateMetrics) -> ScoredCandidate:
     retry_penalty = retry // 5
     escalation_penalty = escalation // 5
     scarcity_penalty = scarcity // 10
+    role_bonuses = _ROLE_BONUSES.get(task.category, {})
+    role_fit_bonus = max((role_bonuses.get(role, 0) for role in entry.roles), default=0)
+    usage_penalty = _USAGE_PENALTIES[entry.usage_class]
     score = max(
         0,
         min(
             1_000,
             reliability
+            + role_fit_bonus
+            - usage_penalty
             - token_penalty
             - latency_penalty
             - retry_penalty
@@ -183,6 +220,8 @@ def _score(candidate: CandidateMetrics) -> ScoredCandidate:
         score,
         (
             ("reliability", reliability),
+            ("role_fit_bonus", role_fit_bonus),
+            ("usage_penalty", usage_penalty),
             ("token_penalty", token_penalty),
             ("latency_penalty", latency_penalty),
             ("retry_penalty", retry_penalty),
@@ -211,14 +250,11 @@ def rank_candidates(
     scored: list[ScoredCandidate] = []
     rejected: list[str] = []
     for candidate in candidates:
-        # Validate every numeric input even when an earlier candidate gate would
-        # otherwise reject it, so malformed evidence never becomes advisory.
-        _score(candidate)
         failure = _candidate_failure(task, snapshot, candidate, gates)
         if failure is not None:
             rejected.append(failure)
             continue
-        scored.append(_score(candidate))
+        scored.append(_score(candidate, task))
     ranked = tuple(
         sorted(scored, key=lambda item: (-item.score, item.model_id, item.effort.value))
     )

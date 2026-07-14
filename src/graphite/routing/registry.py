@@ -5,7 +5,7 @@ import http.client
 import json
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Final, Mapping
@@ -92,6 +92,27 @@ def _exact_iso_date(value: object, code: str) -> date:
     if parsed.isoformat() != value:
         raise ValueError(code)
     return parsed
+
+
+def lifecycle_is_eligible(
+    retirement_date: str | None,
+    current_date: str,
+    *,
+    minimum_runway_days: int = 30,
+) -> bool:
+    """Return whether a profile has strictly more than the required runway."""
+    if (
+        isinstance(minimum_runway_days, bool)
+        or not isinstance(minimum_runway_days, int)
+        or minimum_runway_days < 0
+        or minimum_runway_days > 365
+    ):
+        raise ValueError("lifecycle_runway_invalid")
+    current = _exact_iso_date(current_date, "lifecycle_date_invalid")
+    if retirement_date is None:
+        return True
+    retirement = _exact_iso_date(retirement_date, "lifecycle_date_invalid")
+    return retirement > current + timedelta(days=minimum_runway_days)
 
 
 BUNDLED_PROFILES: Final[Mapping[str, RegistryProfile]] = MappingProxyType({
