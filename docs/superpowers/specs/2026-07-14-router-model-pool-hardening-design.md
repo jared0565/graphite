@@ -110,6 +110,11 @@ ambient credentials. If the selected model disappears or changes digest after
 approval, execution stops with a sanitized error. Graphite does not silently switch
 to another model because approval is bound to the exact selection.
 
+The service preserves model text only in an ephemeral execution result for the
+immediate approved interactive caller so a human can evaluate it. Receipt
+serialization, JSON/status output, SQLite evidence, logs, and aggregate telemetry
+must never contain that text.
+
 When no active profile is eligible, Graphite returns the existing manual
 Claude/Codex handoff. Provider or registry failures never relax gates.
 
