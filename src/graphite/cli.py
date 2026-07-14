@@ -1062,6 +1062,24 @@ def cmd_route_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_route_recoverable(args: argparse.Namespace) -> int:
+    attempt_ids = RoutingService(args.path).recoverable_attempt_ids()
+    payload = {
+        "attempts": [
+            {"attempt_id": attempt_id, "status": "recoverable"}
+            for attempt_id in attempt_ids
+        ]
+    }
+    _route_print(payload, json_mode=args.json)
+    return 0
+
+
+def cmd_route_reconcile(args: argparse.Namespace) -> int:
+    payload = RoutingService(args.path).reconcile_execution(args.attempt_id)
+    _route_print(payload, json_mode=args.json)
+    return 0
+
+
 def cmd_route_policy(args: argparse.Namespace) -> int:
     payload = RoutingService(args.path).policy(
         refresh_models=args.refresh_models,
@@ -1140,6 +1158,21 @@ def main(argv: list[str] | None = None) -> int:
     p_route_status.add_argument("path", help="Repository path")
     p_route_status.add_argument("--json", action="store_true")
     p_route_status.set_defaults(func=cmd_route_status)
+
+    p_route_recoverable = route_sub.add_parser(
+        "recoverable", help="List staged execution attempts eligible for reconciliation"
+    )
+    p_route_recoverable.add_argument("path", help="Repository path")
+    p_route_recoverable.add_argument("--json", action="store_true")
+    p_route_recoverable.set_defaults(func=cmd_route_recoverable)
+
+    p_route_reconcile = route_sub.add_parser(
+        "reconcile", help="Finalize one staged receipt without another provider call"
+    )
+    p_route_reconcile.add_argument("path", help="Repository path")
+    p_route_reconcile.add_argument("--attempt-id", required=True)
+    p_route_reconcile.add_argument("--json", action="store_true")
+    p_route_reconcile.set_defaults(func=cmd_route_reconcile)
 
     p_route_policy = route_sub.add_parser("policy", help="Inspect or explicitly manage recommendation policy")
     p_route_policy.add_argument("path", help="Repository path")

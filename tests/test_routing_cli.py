@@ -40,6 +40,14 @@ class _Service:
         self.calls.append("status")
         return {"routing": "ready", "authority": "approval_required"}
 
+    def recoverable_attempt_ids(self):
+        self.calls.append("recoverable")
+        return ("attempt-1",)
+
+    def reconcile_execution(self, attempt_id):
+        self.calls.append(f"reconcile:{attempt_id}")
+        return {"execution_id": "exec-1", "approval_id": "approval-1", "outcome": "succeeded"}
+
     def record_outcome(self, **kwargs):
         self.calls.append("record")
         return {"recorded": True}
@@ -166,6 +174,22 @@ def test_route_status_policy_and_outcome_grammar() -> None:
         "--provenance", "human", "--accepted",
     ]) == 0
     assert _Service.calls == ["status", "policy", "record"]
+
+
+def test_route_recovery_commands_emit_only_sanitized_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli.main(["route", "recoverable", ".", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "attempts": [{"attempt_id": "attempt-1", "status": "recoverable"}]
+    }
+    assert cli.main([
+        "route", "reconcile", ".", "--attempt-id", "attempt-1", "--json",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "approval_id": "approval-1", "execution_id": "exec-1", "outcome": "succeeded",
+    }
+    assert _Service.calls == ["recoverable", "reconcile:attempt-1"]
 
 
 def test_machine_verification_claim_requires_supported_import() -> None:
