@@ -543,7 +543,8 @@ failures are rendered as fixed, path-free codes; `--json` emits only an
 Schema-v3 migration intentionally quarantines schema-v1 pending or
 persistence-failed rows missing token/request bindings and schema-v2 rows missing
 the inventory digest as `legacy_unrecoverable`; they cannot be replayed or
-reconciled. Legacy completed rows missing those bindings are intentionally preserved
+reconciled. Database triggers prevent update, deletion, or reactivation of these
+digestless legacy rows. Legacy completed rows missing those bindings are intentionally preserved
 as read-only history rather than rewritten into new evidence.
 
 Detailed receipts and evidence stay in repository-local `.graphite/routing` storage;

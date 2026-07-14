@@ -15,19 +15,26 @@ ROOT = Path(__file__).resolve().parents[1]
 URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 DANGEROUS_URI_SCHEMES = frozenset(("data", "javascript", "vbscript"))
-ROUTING_OPERATOR_DOCUMENTS = (
-    "README.md",
-    "ARCHITECTURE.md",
-    "docs/superpowers/implementation-notes/2026-07-14-router-model-pool-evidence.md",
-    "docs/superpowers/implementation-notes/2026-07-14-ollama-routing-contracts.md",
-)
-ROUTING_EVIDENCE_DOCUMENTS = ROUTING_OPERATOR_DOCUMENTS[2:]
+CORE_ROUTING_DOCUMENTS = ("README.md", "ARCHITECTURE.md")
+
+
+def discover_routing_evidence_documents(root: Path = ROOT) -> tuple[str, ...]:
+    notes = root / "docs/superpowers/implementation-notes"
+    return tuple(sorted(
+        path.relative_to(root).as_posix()
+        for path in notes.glob("*.md")
+        if "routing" in path.name or "model-pool" in path.name
+    ))
+
+
+def routing_operator_documents() -> tuple[str, ...]:
+    return (*CORE_ROUTING_DOCUMENTS, *discover_routing_evidence_documents())
 DOCUMENTS = (
     "README.md",
     "CONTRIBUTING.md",
     "ARCHITECTURE.md",
     "RELEASING.md",
-    *ROUTING_OPERATOR_DOCUMENTS[2:],
+    *discover_routing_evidence_documents(),
 )
 SECRET_VALUE = re.compile(
     r"(?i)\b(?:sk-(?:proj-)?[a-z0-9_-]{12,}|ghp_[a-z0-9]{20,}|"
@@ -220,7 +227,7 @@ def test_routing_docs_state_each_authority_and_recovery_gate() -> None:
     combined = re.sub(
         r"\s+",
         " ",
-        "\n".join(read_document(name) for name in ROUTING_OPERATOR_DOCUMENTS),
+        "\n".join(read_document(name) for name in routing_operator_documents()),
     ).casefold()
     required = (
         "30-day minimum retirement runway",
@@ -258,13 +265,7 @@ def test_routing_docs_state_each_authority_and_recovery_gate() -> None:
 
 
 def test_glm5_references_are_confined_to_labelled_history_sections() -> None:
-    notes_root = ROOT / "docs/superpowers/implementation-notes"
-    discovered_notes = {
-        path.relative_to(ROOT).as_posix()
-        for path in notes_root.glob("*.md")
-        if "routing" in path.name or "model-pool" in path.name
-    }
-    documents = (*ROUTING_OPERATOR_DOCUMENTS[:2], *sorted(discovered_notes))
+    documents = routing_operator_documents()
     found = 0
     labels = ("removed", "historical", "migration", "superseded")
     for name in documents:
@@ -283,12 +284,12 @@ def test_routing_operator_docs_are_secret_path_and_link_safe() -> None:
         r"(?i)(?:(?<![a-z])[a-z]:[\\/]|\\\\|/(?:home|users|var|tmp)/)[^\s`]*"
     )
     failures: list[str] = []
-    for name in ROUTING_OPERATOR_DOCUMENTS:
+    for name in routing_operator_documents():
         document = read_document(name)
         if credential_example_linter_has_violation(document):
             failures.append(f"{name}: credential-like literal")
         failures.extend(document_link_diagnostics(ROOT / name, document))
-    for name in ROUTING_EVIDENCE_DOCUMENTS:
+    for name in discover_routing_evidence_documents():
         if absolute_host_path.search(read_document(name)):
             failures.append(f"{name}: absolute host path")
     assert not failures, "Unsafe routing documentation:\n" + "\n".join(failures)
@@ -298,7 +299,7 @@ def test_routing_evidence_is_not_described_as_authorization_authority() -> None:
     notes = re.sub(
         r"\s+",
         " ",
-        "\n".join(read_document(name) for name in ROUTING_EVIDENCE_DOCUMENTS),
+        "\n".join(read_document(name) for name in discover_routing_evidence_documents()),
     ).casefold()
     assert not re.search(
         r"evidence (?:note|record)\s+(?:is|serves as|remains)\s+"
@@ -307,6 +308,19 @@ def test_routing_evidence_is_not_described_as_authorization_authority() -> None:
     )
     assert "`routing.registry.bundled_profiles`" in notes
     assert "authorization authority" in notes
+
+
+def test_routing_evidence_discovery_includes_future_relevant_notes(tmp_path: Path) -> None:
+    notes = tmp_path / "docs/superpowers/implementation-notes"
+    notes.mkdir(parents=True)
+    (notes / "future-routing-audit.md").write_text("# Historical\n", encoding="utf-8")
+    (notes / "future-model-pool.md").write_text("# Removed\n", encoding="utf-8")
+    (notes / "unrelated.md").write_text("# Other\n", encoding="utf-8")
+
+    assert discover_routing_evidence_documents(tmp_path) == (
+        "docs/superpowers/implementation-notes/future-model-pool.md",
+        "docs/superpowers/implementation-notes/future-routing-audit.md",
+    )
 
 
 def document_section(document: str, heading: str) -> str:
