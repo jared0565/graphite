@@ -38,6 +38,7 @@ _TABLES = frozenset(
         "registry_snapshots",
         "execution_evidence",
         "incident_reviews",
+        "blind_comparisons",
     }
 )
 
@@ -262,6 +263,17 @@ _SCHEMA = (
         execution_id TEXT NOT NULL REFERENCES executions(execution_id) ON DELETE CASCADE,
         reviewed_at INTEGER NOT NULL,
         UNIQUE(execution_id, reviewed_at)
+    )""",
+    """CREATE TABLE IF NOT EXISTS blind_comparisons (
+        comparison_id TEXT PRIMARY KEY,
+        primary_execution_id TEXT NOT NULL,
+        shadow_execution_id TEXT NOT NULL,
+        label_a_hash TEXT NOT NULL,
+        label_b_hash TEXT NOT NULL,
+        label_a_is_shadow INTEGER NOT NULL CHECK (label_a_is_shadow IN (0, 1)),
+        verdict TEXT,
+        recorded_at INTEGER,
+        created_at INTEGER NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS registry_snapshots (
         snapshot_id INTEGER PRIMARY KEY CHECK (snapshot_id = 1),
@@ -564,6 +576,102 @@ class RepositoryStore:
         with self._connect() as connection:
             row = connection.execute("SELECT MAX(reviewed_at) FROM incident_reviews").fetchone()
         return None if row is None or row[0] is None else int(row[0])
+
+    def reserve_shadow_budget(
+        self,
+        entry_id: str,
+        token_amount: int,
+        quota: int,
+        now: int,
+    ) -> bool:
+        entry_id = _identifier(entry_id, "entry_id_invalid")
+        token_amount = _nonnegative_integer(token_amount, "token_amount_invalid")
+        quota = _nonnegative_integer(quota, "quota_invalid")
+        now = _nonnegative_integer(now, "created_at_invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            used = int(connection.execute(
+                """SELECT COALESCE(SUM(token_amount), 0) FROM budget_ledger
+                WHERE entry_type = 'shadow_reservation' AND created_at >= ?""",
+                (max(0, now - 86_400),),
+            ).fetchone()[0])
+            if token_amount > quota or used + token_amount > quota:
+                connection.rollback()
+                return False
+            connection.execute(
+                """INSERT INTO budget_ledger(
+                    entry_id, approval_id, execution_id, entry_type, token_amount, created_at
+                ) VALUES (?, NULL, NULL, 'shadow_reservation', ?, ?)""",
+                (entry_id, token_amount, now),
+            )
+            connection.commit()
+            return True
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def create_blind_comparison(
+        self,
+        *,
+        comparison_id: str,
+        primary_execution_id: str,
+        shadow_execution_id: str,
+        label_a_hash: str,
+        label_b_hash: str,
+        label_a_is_shadow: bool,
+        created_at: int,
+    ) -> None:
+        for value, code in (
+            (comparison_id, "comparison_id_invalid"),
+            (primary_execution_id, "execution_id_invalid"),
+            (shadow_execution_id, "execution_id_invalid"),
+        ):
+            _identifier(value, code)
+        if not _HEX_64.fullmatch(label_a_hash) or not _HEX_64.fullmatch(label_b_hash):
+            raise ValueError("response_hash_invalid")
+        if not isinstance(label_a_is_shadow, bool):
+            raise ValueError("comparison_invalid")
+        created_at = _nonnegative_integer(created_at, "created_at_invalid")
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """INSERT INTO blind_comparisons(
+                        comparison_id, primary_execution_id, shadow_execution_id,
+                        label_a_hash, label_b_hash, label_a_is_shadow, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (comparison_id, primary_execution_id, shadow_execution_id,
+                     label_a_hash, label_b_hash, int(label_a_is_shadow), created_at),
+                )
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def record_blind_verdict(self, comparison_id: str, verdict: str, recorded_at: int) -> bool:
+        comparison_id = _identifier(comparison_id, "comparison_id_invalid")
+        if verdict not in {"a", "b", "tie", "reject_both"}:
+            raise ValueError("pairwise_verdict_invalid")
+        recorded_at = _nonnegative_integer(recorded_at, "recorded_at_invalid")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """UPDATE blind_comparisons SET verdict = ?, recorded_at = ?
+                WHERE comparison_id = ? AND verdict IS NULL""",
+                (verdict, recorded_at, comparison_id),
+            )
+        return cursor.rowcount == 1
+
+    def blind_comparison(self, comparison_id: str) -> dict[str, Any] | None:
+        comparison_id = _identifier(comparison_id, "comparison_id_invalid")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM blind_comparisons WHERE comparison_id = ?",
+                (comparison_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
 
     def purge_outcomes_before(self, cutoff: int) -> int:
         cutoff = _nonnegative_integer(cutoff, "cutoff_invalid")
