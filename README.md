@@ -487,7 +487,8 @@ measured cost saving. Medium may rank ahead of high only after every hard gate i
 satisfied. The profile allowlist is the authority boundary: inventory presence does
 not authorize a model, and unknown inventory entries and aliases are excluded.
 Exact identifier and digest, required capabilities, context capacity, risk, data
-policy, quota, effort support, registry freshness, and the 30-day minimum retirement
+policy, configured request/repository budget, effort support, registry freshness,
+and the 30-day minimum retirement
 runway are hard gates before ranking. A dated retirement must be strictly more than
 30 days away. While these profiles remain provisional, high-risk work is ineligible
 and returns a manual frontier handoff to the operator.
