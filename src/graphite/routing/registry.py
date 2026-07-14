@@ -5,6 +5,8 @@ import http.client
 import json
 import re
 from dataclasses import dataclass
+from datetime import date
+from enum import StrEnum
 from typing import Any, Final, Mapping
 
 from .contracts import Effort, ModelProfile, RiskTier
@@ -33,20 +35,69 @@ class RegistryError(RuntimeError):
         super().__init__(code)
 
 
+class UsageClass(StrEnum):
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class ModelRole(StrEnum):
+    CODING_PRIMARY = "coding_primary"
+    CODING = "coding"
+    AGENTIC = "agentic"
+    REASONING = "reasoning"
+    REVIEW = "review"
+    LONG_CONTEXT = "long_context"
+
+
 @dataclass(frozen=True)
 class RegistryProfile:
     profile: ModelProfile
     effort_payloads: Mapping[Effort, Mapping[str, Any]]
     evidence_url: str
     evidence_accessed: str
+    roles: tuple[ModelRole, ...]
+    usage_class: UsageClass
     retirement_date: str | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            normalized_roles = tuple(ModelRole(role) for role in self.roles)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("roles_invalid") from exc
+        if not normalized_roles:
+            raise ValueError("roles_empty")
+        if len(set(normalized_roles)) != len(normalized_roles):
+            raise ValueError("roles_duplicate")
+        try:
+            normalized_usage = UsageClass(self.usage_class)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("usage_class_invalid") from exc
+        accessed = _exact_iso_date(self.evidence_accessed, "evidence_accessed_invalid")
+        if self.retirement_date is not None:
+            retirement = _exact_iso_date(self.retirement_date, "retirement_date_invalid")
+            if retirement <= accessed:
+                raise ValueError("retirement_date_invalid")
+        object.__setattr__(self, "roles", normalized_roles)
+        object.__setattr__(self, "usage_class", normalized_usage)
+
+
+def _exact_iso_date(value: object, code: str) -> date:
+    if not isinstance(value, str):
+        raise ValueError(code)
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(code) from exc
+    if parsed.isoformat() != value:
+        raise ValueError(code)
+    return parsed
 
 
 BUNDLED_PROFILES: Final[dict[str, RegistryProfile]] = {
     "kimi-k2.7-code:cloud": RegistryProfile(
         profile=ModelProfile(
             model_id="kimi-k2.7-code:cloud",
-            profile_version="2026-07-14.1",
+            profile_version="2026-07-14.2",
             capabilities=("code", "completion", "tools", "thinking", "vision"),
             context_window_tokens=262_144,
             supported_efforts=(Effort.DEFAULT,),
@@ -55,33 +106,60 @@ BUNDLED_PROFILES: Final[dict[str, RegistryProfile]] = {
         effort_payloads=EFFORT_PAYLOADS["kimi-k2.7-code:cloud"],
         evidence_url="https://ollama.com/library/kimi-k2.7-code",
         evidence_accessed="2026-07-14",
+        roles=(ModelRole.CODING_PRIMARY, ModelRole.CODING),
+        usage_class=UsageClass.HIGH,
     ),
-    "kimi-k2.6:cloud": RegistryProfile(
+    "minimax-m2.7:cloud": RegistryProfile(
         profile=ModelProfile(
-            model_id="kimi-k2.6:cloud",
-            profile_version="2026-07-14.1",
-            capabilities=("code", "completion", "tools", "thinking", "vision"),
+            model_id="minimax-m2.7:cloud",
+            profile_version="2026-07-14.2",
+            capabilities=("code", "completion", "tools", "thinking"),
+            context_window_tokens=204_800,
+            supported_efforts=(Effort.DEFAULT,),
+            provisional=True,
+        ),
+        effort_payloads=EFFORT_PAYLOADS["minimax-m2.7:cloud"],
+        evidence_url="https://ollama.com/library/minimax-m2.7:cloud",
+        evidence_accessed="2026-07-14",
+        roles=(ModelRole.CODING, ModelRole.AGENTIC),
+        usage_class=UsageClass.MEDIUM,
+    ),
+    "nemotron-3-super:cloud": RegistryProfile(
+        profile=ModelProfile(
+            model_id="nemotron-3-super:cloud",
+            profile_version="2026-07-14.2",
+            capabilities=("completion", "reasoning", "tools", "thinking"),
             context_window_tokens=262_144,
             supported_efforts=(Effort.DEFAULT,),
             provisional=True,
         ),
-        effort_payloads=EFFORT_PAYLOADS["kimi-k2.6:cloud"],
-        evidence_url="https://ollama.com/library/kimi-k2.6",
+        effort_payloads=EFFORT_PAYLOADS["nemotron-3-super:cloud"],
+        evidence_url="https://ollama.com/library/nemotron-3-super:cloud",
         evidence_accessed="2026-07-14",
+        roles=(ModelRole.REASONING, ModelRole.REVIEW),
+        usage_class=UsageClass.MEDIUM,
     ),
-    "glm-5:cloud": RegistryProfile(
+    "minimax-m3:cloud": RegistryProfile(
         profile=ModelProfile(
-            model_id="glm-5:cloud",
-            profile_version="2026-07-14.1",
-            capabilities=("architecture", "code", "completion", "reasoning", "tools", "thinking"),
-            context_window_tokens=202_752,
+            model_id="minimax-m3:cloud",
+            profile_version="2026-07-14.2",
+            capabilities=(
+                "architecture",
+                "completion",
+                "reasoning",
+                "tools",
+                "thinking",
+                "vision",
+            ),
+            context_window_tokens=524_288,
             supported_efforts=(Effort.DEFAULT,),
             provisional=True,
         ),
-        effort_payloads=EFFORT_PAYLOADS["glm-5:cloud"],
-        evidence_url="https://ollama.com/library/glm-5",
+        effort_payloads=EFFORT_PAYLOADS["minimax-m3:cloud"],
+        evidence_url="https://ollama.com/library/minimax-m3:cloud",
         evidence_accessed="2026-07-14",
-        retirement_date="2026-07-15",
+        roles=(ModelRole.LONG_CONTEXT, ModelRole.AGENTIC),
+        usage_class=UsageClass.HIGH,
     ),
 }
 
