@@ -513,7 +513,7 @@ evaluation is disabled by default, separately consented, independently budgeted,
 and unavailable for high-risk or sensitive categories.
 
 Execution is single-shot. Graphite performs no automatic fallback, retry, model
-switch, model pull, or approval reuse. Successful text is shown only on the
+switching, model pull, or approval reuse. Successful text is shown only on the
 interactive terminal as framed, escaped, ephemeral text. Only the validated receipt
 and bounded audit metadata are persisted; model text is not. Non-TTY input or
 output, JSON mode, CI, and `--yes` cannot execute.
