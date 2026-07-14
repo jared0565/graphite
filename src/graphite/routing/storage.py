@@ -580,6 +580,136 @@ class RepositoryStore:
             raise StorageError("storage_corrupt")
         return payload
 
+    def save_approval_record(
+        self,
+        *,
+        approval_id: str,
+        task_id: str | None,
+        decision_id: str | None,
+        nonce_hash: str,
+        manifest_hash: str,
+        expires_at: int,
+        reserved_tokens: int,
+    ) -> None:
+        approval_id = _identifier(approval_id, "approval_id_invalid")
+        if task_id is not None:
+            task_id = _identifier(task_id, "task_id_invalid")
+        if decision_id is not None:
+            decision_id = _identifier(decision_id, "decision_id_invalid")
+        if not _HEX_64.fullmatch(nonce_hash) or not _HEX_64.fullmatch(manifest_hash):
+            raise ValueError("approval_hash_invalid")
+        expires_at = _nonnegative_integer(expires_at, "expires_at_invalid")
+        reserved_tokens = _nonnegative_integer(reserved_tokens, "reserved_tokens_invalid")
+        try:
+            with self._connect() as connection:
+                existing = connection.execute(
+                    "SELECT nonce_hash, manifest_hash, expires_at, reserved_tokens FROM approvals WHERE approval_id = ?",
+                    (approval_id,),
+                ).fetchone()
+                if existing is not None:
+                    if tuple(existing) != (nonce_hash, manifest_hash, expires_at, reserved_tokens):
+                        raise StorageError("approval_manifest_changed")
+                    return
+                connection.execute(
+                    """INSERT INTO approvals(
+                        approval_id, task_id, decision_id, nonce_hash, manifest_hash,
+                        status, expires_at, reserved_tokens
+                    ) VALUES (?, ?, ?, ?, ?, 'issued', ?, ?)""",
+                    (
+                        approval_id,
+                        task_id,
+                        decision_id,
+                        nonce_hash,
+                        manifest_hash,
+                        expires_at,
+                        reserved_tokens,
+                    ),
+                )
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def consume_approval_record(
+        self,
+        *,
+        approval_id: str,
+        nonce_hash: str,
+        manifest_hash: str,
+        now: int,
+        token_amount: int,
+        repository_quota: int,
+    ) -> None:
+        approval_id = _identifier(approval_id, "approval_id_invalid")
+        now = _nonnegative_integer(now, "now_invalid")
+        token_amount = _nonnegative_integer(token_amount, "token_amount_invalid")
+        repository_quota = _nonnegative_integer(repository_quota, "repository_quota_invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT nonce_hash, manifest_hash, status, expires_at, reserved_tokens
+                FROM approvals WHERE approval_id = ?""",
+                (approval_id,),
+            ).fetchone()
+            if row is None:
+                raise StorageError("approval_missing")
+            if row["nonce_hash"] != nonce_hash or row["manifest_hash"] != manifest_hash:
+                raise StorageError("approval_manifest_changed")
+            if row["status"] != "issued":
+                raise StorageError("approval_reused")
+            if now >= int(row["expires_at"]):
+                raise StorageError("approval_expired")
+            if int(row["reserved_tokens"]) != token_amount:
+                raise StorageError("approval_manifest_changed")
+            current = int(
+                connection.execute(
+                    "SELECT COALESCE(SUM(token_amount), 0) FROM budget_ledger WHERE entry_type = 'reservation'"
+                ).fetchone()[0]
+            )
+            if token_amount > repository_quota or current + token_amount > repository_quota:
+                raise StorageError("budget_exhausted")
+            connection.execute(
+                "UPDATE approvals SET status = 'consumed' WHERE approval_id = ? AND status = 'issued'",
+                (approval_id,),
+            )
+            connection.execute(
+                """INSERT INTO budget_ledger(
+                    entry_id, approval_id, execution_id, entry_type, token_amount, created_at
+                ) VALUES (?, ?, NULL, 'reservation', ?, ?)""",
+                (f"reserve:{approval_id}", approval_id, token_amount, now),
+            )
+            connection.commit()
+        except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def approval_status(self, approval_id: str) -> str | None:
+        approval_id = _identifier(approval_id, "approval_id_invalid")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+        return None if row is None else str(row[0])
+
+    def reserved_token_total(self) -> int:
+        with self._connect() as connection:
+            return int(
+                connection.execute(
+                    "SELECT COALESCE(SUM(token_amount), 0) FROM budget_ledger WHERE entry_type = 'reservation'"
+                ).fetchone()[0]
+            )
+
 
 @dataclass(frozen=True)
 class AggregateRecord:
