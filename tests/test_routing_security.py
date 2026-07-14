@@ -10,9 +10,19 @@ import networkx as nx
 import pytest
 
 import graphite.routing.context_builder as context_module
+import graphite.routing.ollama_executor as executor_module
 from graphite.routing.context_builder import ContextError, build_routing_context
 from graphite.routing.contracts import TaskRequest
 from graphite.routing.settings import RoutingSettings
+
+
+def test_executor_has_no_shell_model_pull_or_filesystem_execution_path() -> None:
+    source = Path(executor_module.__file__).read_text(encoding="utf-8")
+
+    assert "subprocess" not in source
+    assert "os.system" not in source
+    assert "/api/pull" not in source
+    assert "open(" not in source
 
 
 def _request(root: Path, target: str) -> TaskRequest:
