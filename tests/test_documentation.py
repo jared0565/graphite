@@ -62,6 +62,56 @@ def test_adaptive_routing_boundary_is_documented() -> None:
     assert "cannot mutate code" in combined
 
 
+def test_hardened_routing_model_pool_and_evidence_are_documented() -> None:
+    readme = read_document("README.md")
+    architecture = read_document("ARCHITECTURE.md")
+    evidence = read_document(
+        "docs/superpowers/implementation-notes/2026-07-14-router-model-pool-evidence.md"
+    )
+    combined = "\n".join((readme, architecture, evidence)).casefold()
+
+    for model_id in (
+        "kimi-k2.7-code:cloud",
+        "minimax-m2.7:cloud",
+        "nemotron-3-super:cloud",
+        "minimax-m3:cloud",
+    ):
+        assert model_id in combined
+    for required in (
+        "30-day minimum retirement runway",
+        "provider-reported usage class",
+        "inventory presence does not authorize a model",
+        "recoverable_attempt_ids",
+        "reconcile_execution",
+        "legacy_unrecoverable",
+        "read-only history",
+    ):
+        assert required in combined
+
+    active_pool = document_section(readme, "### Active router model pool")
+    assert "glm-5:cloud" not in active_pool.casefold()
+    assert all(
+        "glm-5:cloud" not in code.casefold()
+        for _, code in markdown_code_fragments(active_pool)
+    )
+    removal_history = document_section(evidence, "## Removed and migration history")
+    assert "glm-5:cloud" in removal_history.casefold()
+    before_removal_history = evidence[: evidence.index("## Removed and migration history")]
+    assert "glm-5:cloud" not in "\n".join(
+        (readme, architecture, before_removal_history)
+    ).casefold()
+
+    observed = {
+        "kimi-k2.7-code:cloud": "eda07a6592375dcbde7cf167b6d6b368cdd28e244f9d71559fb59919aca882fa",
+        "minimax-m2.7:cloud": "06daa293c105f0bd71fd19420e4d15cae66cc5f71cb8f55b4f998e96ec8ab67a",
+        "nemotron-3-super:cloud": "be3943c5a818be61a08f3563b971e392bfc12e506e296fb186c870f5c63377a4",
+        "minimax-m3:cloud": "d03a959f45c04ab183e245922ecb46ebccfb9d5e55bdee5e9055271ee70195e3",
+    }
+    for model_id, digest in observed.items():
+        assert model_id in evidence
+        assert digest in evidence
+
+
 def document_section(document: str, heading: str) -> str:
     """Return one Markdown section without coupling tests to the whole document."""
     start = document.index(heading)
