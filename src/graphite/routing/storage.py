@@ -36,6 +36,8 @@ _TABLES = frozenset(
         "budget_ledger",
         "confidence_stats",
         "registry_snapshots",
+        "execution_evidence",
+        "incident_reviews",
     }
 )
 
@@ -249,6 +251,18 @@ _SCHEMA = (
     )""",
     "CREATE INDEX IF NOT EXISTS outcomes_recorded_at_idx ON outcomes(recorded_at)",
     "CREATE INDEX IF NOT EXISTS executions_task_idx ON executions(task_id)",
+    """CREATE TABLE IF NOT EXISTS execution_evidence (
+        execution_id TEXT PRIMARY KEY REFERENCES executions(execution_id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL,
+        decision_id TEXT NOT NULL,
+        graph_fingerprint TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS incident_reviews (
+        review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        execution_id TEXT NOT NULL REFERENCES executions(execution_id) ON DELETE CASCADE,
+        reviewed_at INTEGER NOT NULL,
+        UNIQUE(execution_id, reviewed_at)
+    )""",
     """CREATE TABLE IF NOT EXISTS registry_snapshots (
         snapshot_id INTEGER PRIMARY KEY CHECK (snapshot_id = 1),
         payload_json TEXT NOT NULL,
@@ -367,6 +381,38 @@ class RepositoryStore:
         except sqlite3.Error as exc:
             raise _translate_database_error(exc) from exc
 
+    def record_decision(
+        self,
+        decision_id: str,
+        task_id: str,
+        model_id: str | None,
+        effort: str | None,
+        policy_version: str,
+        evidence_version: str,
+        created_at: int,
+    ) -> bool:
+        values = (
+            _identifier(decision_id, "decision_id_invalid"),
+            _identifier(task_id, "task_id_invalid"),
+            None if model_id is None else _identifier(model_id, "model_id_invalid"),
+            None if effort is None else Effort(effort).value,
+            _identifier(policy_version, "policy_version_invalid"),
+            _identifier(evidence_version, "evidence_version_invalid"),
+            _nonnegative_integer(created_at, "created_at_invalid"),
+        )
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """INSERT OR IGNORE INTO decisions(
+                        decision_id, task_id, model_id, effort, policy_version,
+                        evidence_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    values,
+                )
+                return cursor.rowcount == 1
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
     def insert_execution(
         self,
         *,
@@ -447,6 +493,77 @@ class RepositoryStore:
                 return cursor.rowcount == 1
         except sqlite3.Error as exc:
             raise _translate_database_error(exc) from exc
+
+    def link_execution_evidence(
+        self,
+        execution_id: str,
+        task_id: str,
+        decision_id: str,
+        graph_fingerprint: str,
+    ) -> bool:
+        values = (
+            _identifier(execution_id, "execution_id_invalid"),
+            _identifier(task_id, "task_id_invalid"),
+            _identifier(decision_id, "decision_id_invalid"),
+            graph_fingerprint,
+        )
+        if not _HEX_64.fullmatch(graph_fingerprint):
+            raise ValueError("graph_fingerprint_invalid")
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """INSERT OR IGNORE INTO execution_evidence(
+                        execution_id, task_id, decision_id, graph_fingerprint
+                    ) VALUES (?, ?, ?, ?)""",
+                    values,
+                )
+                return cursor.rowcount == 1
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def execution_evidence(self, execution_id: str) -> dict[str, str] | None:
+        execution_id = _identifier(execution_id, "execution_id_invalid")
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT ee.task_id, ee.decision_id, ee.graph_fingerprint
+                FROM execution_evidence ee
+                JOIN executions e ON e.execution_id = ee.execution_id
+                WHERE ee.execution_id = ?
+                  AND e.task_id = ee.task_id AND e.decision_id = ee.decision_id""",
+                (execution_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def outcome_evidence_rows(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT o.outcome_id, o.execution_id, o.provenance, o.success,
+                    o.severe_failure, o.recorded_at, e.model_id, e.effort,
+                    t.category, t.risk
+                FROM outcomes o
+                JOIN executions e ON e.execution_id = o.execution_id
+                JOIN tasks t ON t.task_id = e.task_id
+                ORDER BY o.recorded_at, o.outcome_id"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def close_incident(self, execution_id: str, reviewed_at: int) -> bool:
+        execution_id = _identifier(execution_id, "execution_id_invalid")
+        reviewed_at = _nonnegative_integer(reviewed_at, "reviewed_at_invalid")
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO incident_reviews(execution_id, reviewed_at) VALUES (?, ?)",
+                    (execution_id, reviewed_at),
+                )
+                return cursor.rowcount == 1
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def latest_incident_review(self) -> int | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT MAX(reviewed_at) FROM incident_reviews").fetchone()
+        return None if row is None or row[0] is None else int(row[0])
 
     def purge_outcomes_before(self, cutoff: int) -> int:
         cutoff = _nonnegative_integer(cutoff, "cutoff_invalid")
