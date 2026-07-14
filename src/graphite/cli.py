@@ -979,7 +979,7 @@ def _escaped_terminal_text(text: str) -> str:
     for character in text:
         codepoint = ord(character)
         category = unicodedata.category(character)
-        if character in {"\n", "\t"}:
+        if character == "\n":
             characters.append(character)
         elif category in {"Cc", "Cf", "Zl", "Zp"} or codepoint == 0x7F:
             characters.append(

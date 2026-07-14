@@ -11,6 +11,7 @@ import networkx as nx
 import pytest
 
 import graphite.routing.service as service_module
+from graphite.routing.approval import ApprovalError
 from graphite.routing.context_builder import (
     ContextBundle,
     ManifestItem,
@@ -18,7 +19,11 @@ from graphite.routing.context_builder import (
     PrivateContextItem,
 )
 from graphite.routing.contracts import Effort, ExecutionOutcome, ExecutionReceipt
-from graphite.routing.ollama_executor import ExecutionResult, ExecutorError
+from graphite.routing.ollama_executor import (
+    ExecutionResult,
+    ExecutorError,
+    canonical_provider_request,
+)
 from graphite.routing.registry import BUNDLED_PROFILES, InventoryModel, RegistrySnapshot
 from graphite.routing.service import RoutingService
 from graphite.routing.storage import StorageError
@@ -89,6 +94,41 @@ def _service(
     return RoutingService(root, state_dir=tmp_path / "machine"), root
 
 
+def _successful_result(
+    kwargs: dict[str, object], text: str, *, execution_id: str
+) -> ExecutionResult:
+    manifest = kwargs["current_manifest"]
+    authority = kwargs["authority"]
+    settings = kwargs["settings"]
+    authority.consume(
+        kwargs["signed_approval"],
+        manifest,
+        repository_quota_tokens=settings.repository_quota_tokens,
+        machine_quota_tokens=settings.machine_quota_tokens,
+    )
+    request = canonical_provider_request(
+        manifest=manifest,
+        context=kwargs["context"],
+        objective=kwargs["objective"],
+    )
+    return ExecutionResult(
+        text,
+        ExecutionReceipt(
+            execution_id=execution_id,
+            approval_id=manifest.approval_id,
+            model_id=manifest.model_id,
+            effort=manifest.effort,
+            outcome=ExecutionOutcome.SUCCEEDED,
+            input_tokens=20,
+            output_tokens=4,
+            latency_ms=10,
+            prompt_hash=request.prompt_hash,
+            response_hash=service_module.hashlib.sha256(text.encode()).hexdigest(),
+            failure_reason=None,
+        ),
+    )
+
+
 def test_recommendation_is_offline_allowlisted_and_public(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -132,22 +172,8 @@ def test_execution_returns_ephemeral_text_and_persists_only_receipt(
     captured: dict[str, object] = {}
 
     def execute(**kwargs: object) -> ExecutionResult:
-        manifest = kwargs["current_manifest"]
         captured.update(kwargs)
-        receipt = ExecutionReceipt(
-            execution_id="exec-1",
-            approval_id=manifest.approval_id,
-            model_id=manifest.model_id,
-            effort=manifest.effort,
-            outcome=ExecutionOutcome.SUCCEEDED,
-            input_tokens=20,
-            output_tokens=4,
-            latency_ms=10,
-            prompt_hash="4" * 64,
-            response_hash=service_module.hashlib.sha256(secret_text.encode()).hexdigest(),
-            failure_reason=None,
-        )
-        return ExecutionResult(text=secret_text, receipt=receipt)
+        return _successful_result(kwargs, secret_text, execution_id="exec-1")
 
     monkeypatch.setattr(service_module, "execute_ollama", execute)
 
@@ -177,6 +203,14 @@ def test_execution_returns_ephemeral_text_and_persists_only_receipt(
     assert receipt_row[1:] == ("kimi-k2.7-code:cloud", "default", "succeeded", 20, 4)
     assert receipt_row[0] == captured["current_manifest"].approval_id
     assert attempt == ("completed", "exec-1")
+    assert service.store.approval_status(result.receipt.approval_id) == "consumed"
+    with pytest.raises(ApprovalError, match="approval_reused"):
+        captured["authority"].consume(
+            captured["signed_approval"],
+            captured["current_manifest"],
+            repository_quota_tokens=captured["settings"].repository_quota_tokens,
+            machine_quota_tokens=captured["settings"].machine_quota_tokens,
+        )
 
 
 @pytest.mark.parametrize(
@@ -195,6 +229,7 @@ def test_execution_returns_ephemeral_text_and_persists_only_receipt(
             receipt, output_tokens=manifest.max_output_tokens + 1
         ),
         lambda receipt, _manifest: replace(receipt, response_hash="f" * 64),
+        lambda receipt, _manifest: replace(receipt, prompt_hash="f" * 64),
     ],
 )
 def test_executor_receipt_mismatch_fails_closed_without_success_persistence(
@@ -209,12 +244,8 @@ def test_executor_receipt_mismatch_fails_closed_without_success_persistence(
 
     def execute(**kwargs: object) -> ExecutionResult:
         manifest = kwargs["current_manifest"]
-        receipt = ExecutionReceipt(
-            "exec-invalid", manifest.approval_id, manifest.model_id, manifest.effort,
-            ExecutionOutcome.SUCCEEDED, 2, 1, 5, "4" * 64,
-            service_module.hashlib.sha256(text.encode()).hexdigest(), None,
-        )
-        return ExecutionResult(text, mutation(receipt, manifest))
+        result = _successful_result(kwargs, text, execution_id="exec-invalid")
+        return ExecutionResult(text, mutation(result.receipt, manifest))
 
     monkeypatch.setattr(service_module, "execute_ollama", execute)
     with pytest.raises(ExecutorError, match="^executor_receipt_invalid$") as caught:
@@ -252,6 +283,45 @@ def test_provider_failure_leaves_sanitized_durable_attempt(
     assert approval == "issued"
 
 
+def test_unconsumed_success_receipt_is_rejected_as_authority_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _root = _service(tmp_path, monkeypatch)
+    recommendation = service.recommend(
+        objective="Review this isolated formatting helper",
+        targets=("src/listing_summary.py",),
+    )
+    text = "UNAUTHORIZED SUCCESS BODY"
+
+    def execute(**kwargs: object) -> ExecutionResult:
+        manifest = kwargs["current_manifest"]
+        request = canonical_provider_request(
+            manifest=manifest,
+            context=kwargs["context"],
+            objective=kwargs["objective"],
+        )
+        return ExecutionResult(
+            text,
+            ExecutionReceipt(
+                "exec-issued", manifest.approval_id, manifest.model_id, manifest.effort,
+                ExecutionOutcome.SUCCEEDED, 2, 1, 5, request.prompt_hash,
+                service_module.hashlib.sha256(text.encode()).hexdigest(), None,
+            ),
+        )
+
+    monkeypatch.setattr(service_module, "execute_ollama", execute)
+    with pytest.raises(StorageError, match="^approval_not_consumed$"):
+        service.execute_approved(recommendation)
+    with sqlite3.connect(service.store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM execution_receipts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM execution_evidence").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT status, failure_reason FROM execution_attempts"
+        ).fetchone() == ("failed", "approval_not_consumed")
+        assert connection.execute("SELECT status FROM approvals").fetchone()[0] == "issued"
+
+
 def test_completion_failure_leaves_recoverable_trace_without_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -263,15 +333,7 @@ def test_completion_failure_leaves_recoverable_trace_without_text(
     text = "UNPERSISTED PRIVATE BODY"
 
     def execute(**kwargs: object) -> ExecutionResult:
-        manifest = kwargs["current_manifest"]
-        return ExecutionResult(
-            text,
-            ExecutionReceipt(
-                "exec-1", manifest.approval_id, manifest.model_id, manifest.effort,
-                ExecutionOutcome.SUCCEEDED, 2, 1, 5, "4" * 64,
-                service_module.hashlib.sha256(text.encode()).hexdigest(), None,
-            ),
-        )
+        return _successful_result(kwargs, text, execution_id="exec-1")
 
     monkeypatch.setattr(service_module, "execute_ollama", execute)
     monkeypatch.setattr(

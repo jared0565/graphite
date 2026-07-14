@@ -18,7 +18,12 @@ from .approval import ApprovalAuthority
 from .classifier import classify_task
 from .context_builder import ContextBundle, build_routing_context
 from .contracts import ApprovalManifest, Effort, ExecutionOutcome, ExecutionReceipt, TaskRequest
-from .ollama_executor import ExecutionResult, ExecutorError, execute_ollama
+from .ollama_executor import (
+    ExecutionResult,
+    ExecutorError,
+    canonical_provider_request,
+    execute_ollama,
+)
 from .policy import CandidateMetrics, PolicyGates, rank_candidates
 from .registry import (
     BUNDLED_PROFILES,
@@ -251,6 +256,11 @@ class RoutingService:
             model for model in prepared.snapshot.models if model.model_id == recommendation.model_id
         )
         try:
+            provider_request = canonical_provider_request(
+                manifest=manifest,
+                context=prepared.context,
+                objective=prepared.request.objective,
+            )
             result = execute_ollama(
                 authority=authority,
                 signed_approval=signed,
@@ -266,7 +276,7 @@ class RoutingService:
         except Exception:
             self._fail_attempt(attempt_id, "executor_failed")
             raise ExecutorError("executor_failed") from None
-        if not self._receipt_is_valid(result, manifest):
+        if not self._receipt_is_valid(result, manifest, provider_request.prompt_hash):
             self._fail_attempt(attempt_id, "executor_receipt_invalid")
             raise ExecutorError("executor_receipt_invalid")
         receipt = result.receipt
@@ -276,7 +286,10 @@ class RoutingService:
                 receipt=receipt,
                 completed_at=int(time.time()),
             )
-        except StorageError:
+        except StorageError as exc:
+            if exc.code == "approval_not_consumed":
+                self._fail_attempt(attempt_id, exc.code)
+                raise StorageError(exc.code) from None
             try:
                 self.store.mark_execution_attempt_failed(
                     attempt_id,
@@ -298,7 +311,11 @@ class RoutingService:
             raise StorageError("execution_persistence_failed") from None
 
     @staticmethod
-    def _receipt_is_valid(result: object, manifest: ApprovalManifest) -> bool:
+    def _receipt_is_valid(
+        result: object,
+        manifest: ApprovalManifest,
+        expected_prompt_hash: str,
+    ) -> bool:
         if not isinstance(result, ExecutionResult) or not isinstance(result.text, str):
             return False
         receipt = result.receipt
@@ -320,6 +337,7 @@ class RoutingService:
             <= manifest.max_input_tokens + manifest.max_output_tokens
             and receipt.response_hash is not None
             and receipt.response_hash == response_hash
+            and receipt.prompt_hash == expected_prompt_hash
             and receipt.failure_reason is None
         )
 

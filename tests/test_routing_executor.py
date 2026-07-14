@@ -154,6 +154,7 @@ def test_executor_revalidates_then_posts_fixed_bounded_shape(
     assert result.receipt.input_tokens == 123
     assert result.receipt.output_tokens == 17
     assert result.receipt.response_hash == hashlib.sha256(b"suggested change").hexdigest()
+    assert result.receipt.prompt_hash == hashlib.sha256(server.requests[1][3]).hexdigest()
     assert [(method, path) for method, path, _, _ in server.requests] == [
         ("GET", "/api/tags"), ("POST", "/api/chat")
     ]

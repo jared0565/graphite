@@ -716,6 +716,12 @@ class RepositoryStore:
             ).fetchone()
             if attempt is None:
                 raise StorageError("execution_attempt_missing")
+            approval = connection.execute(
+                "SELECT status FROM approvals WHERE approval_id = ?",
+                (attempt["approval_id"],),
+            ).fetchone()
+            if approval is None or approval["status"] != "consumed":
+                raise StorageError("approval_not_consumed")
             if attempt["status"] == "completed":
                 stored = connection.execute(
                     "SELECT approval_id, model_id, effort, outcome, input_tokens, "

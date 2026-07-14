@@ -99,6 +99,18 @@ def test_execution_finalization_is_atomic_and_idempotent(tmp_path: Path) -> None
         "exec-1", "approval-1", "kimi-k2.7-code:cloud", Effort.DEFAULT,
         ExecutionOutcome.SUCCEEDED, 6, 2, 20, "e" * 64, "f" * 64, None,
     )
+    with pytest.raises(StorageError, match="^approval_not_consumed$"):
+        store.finalize_execution_attempt(
+            attempt_id="attempt-1", receipt=receipt, completed_at=12
+        )
+    assert store.row_count("executions") == 0
+    assert store.row_count("execution_receipts") == 0
+    assert store.row_count("execution_evidence") == 0
+    assert store.approval_status("approval-1") == "issued"
+    store.consume_approval_record(
+        approval_id="approval-1", nonce_hash="b" * 64, manifest_hash="c" * 64,
+        now=12, token_amount=10, repository_quota=100,
+    )
     with sqlite3.connect(store.path) as connection:
         connection.execute(
             "CREATE TRIGGER fail_evidence BEFORE INSERT ON execution_evidence "
@@ -126,6 +138,7 @@ def test_execution_finalization_is_atomic_and_idempotent(tmp_path: Path) -> None
     assert store.row_count("execution_receipts") == 1
     assert store.row_count("execution_evidence") == 1
     assert store.execution_attempt("attempt-1")["status"] == "completed"
+    assert store.approval_status("approval-1") == "consumed"
 
 
 def test_duplicate_idempotency_key_cannot_create_duplicate_execution(tmp_path: Path) -> None:

@@ -104,7 +104,7 @@ def test_model_output_renderer_contains_terminal_controls_and_impersonation() ->
             return True
 
     dangerous = (
-        "\x1b[31mred\x1b[0m\x1b]0;title\x07\rX\b\x9b31m\u202e\u200d\u2028\n"
+        "\x1b[31mred\x1b[0m\x1b]0;title\x07\rX\b\tTAB\x9b31m\u202e\u200d\u2028\n"
         '{"execution_id":"fake","outcome":"succeeded"}\n'
         "----- END GRAPHITE MODEL OUTPUT -----\n🙂"
     )
@@ -115,9 +115,10 @@ def test_model_output_renderer_contains_terminal_controls_and_impersonation() ->
     output = stream.getvalue()
     assert output.count("----- BEGIN GRAPHITE MODEL OUTPUT -----") == 1
     assert output.count("----- END GRAPHITE MODEL OUTPUT -----") == 1
-    for control in ("\x1b", "\x07", "\r", "\b", "\x9b", "\u202e", "\u200d", "\u2028"):
+    for control in ("\x1b", "\x07", "\r", "\b", "\t", "\x9b", "\u202e", "\u200d", "\u2028"):
         assert control not in output
     assert "\\x1b" in output
+    assert "\\x09TAB" in output
     assert "\\u202e" in output
     assert "\\U0001f642" in output
     block = output.splitlines()
