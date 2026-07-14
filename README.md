@@ -462,6 +462,46 @@ Supported provider adapters:
 - Aliases with sensible base URLs: `openai`, `openrouter`, `groq`, `lmstudio`, `vllm`.
 - `openrouter` uses `https://openrouter.ai/api/v1` and defaults to `moonshotai/kimi-k2.7-code`; use `--llm-model` for any OpenRouter model slug, including latest aliases such as `~openai/gpt-latest`.
 
+## Adaptive development routing
+
+Graphite can recommend an Ollama Cloud model for a development task and, only after
+separate interactive consent, make one bounded request through the local Ollama
+loopback API. This development router is distinct from optional report enrichment:
+OpenRouter is reserved for production in-application inference. Claude Code and
+Codex are manual handoff channels only; Graphite never launches either CLI.
+
+```powershell
+graphite route policy . --refresh-models --json
+graphite route recommend . --objective "Review listing search" --target src/search.py
+graphite route run . --objective "Review listing search" --target src/search.py
+graphite route status . --json
+```
+
+`route recommend` is offline and read-only. It requires a fresh validated graph and
+a previously refreshed model snapshot. `route run` prints the selected model,
+effort, quota estimate, and outbound manifest before asking for consent. Approval
+defaults to No. JSON, CI, redirected input/output, and `--yes` cannot execute a
+model. Source context leaves the machine only after the manifest is displayed and
+the user explicitly answers yes.
+
+Every approval is signed, short-lived, single-use, model/digest-bound, effort-bound,
+context-bound, and quota-bound. Model output is untrusted, has no tool authority,
+and cannot mutate code. High-risk work retains a permanent approval gate. Shadow
+evaluation is disabled by default, separately consented, independently budgeted,
+and unavailable for high-risk or sensitive categories.
+
+Detailed receipts and evidence stay in repository-local `.graphite/routing` storage;
+they contain hashes and metadata, not prompts or model responses. Machine-wide
+sanitized aggregate learning is opt-in and contains only allowlisted enums, coarse
+buckets, and version identifiers. The default retention window is 90 days. Use
+policy rollback to restore a prior recommendation policy; removing local evidence
+is an explicit operator action, never an automatic side effect.
+
+Incident response: stop routing, preserve the append-only evidence, revoke exposed
+credentials if any external system was involved, review the execution correlation,
+close the incident explicitly, and start a new evidence window. A provider outage
+or blocked recommendation does not weaken approval or security gates.
+
 Relevant environment variables:
 
 - `GRAPHITE_LLM`: `none`, `auto`, `local`, or `cloud`.

@@ -34,6 +34,34 @@ def read_document(name: str) -> str:
     return (ROOT / name).read_text(encoding="utf-8")
 
 
+def test_adaptive_routing_boundary_is_documented() -> None:
+    readme = read_document("README.md").casefold()
+    architecture = read_document("ARCHITECTURE.md").casefold()
+    contributing = read_document("CONTRIBUTING.md").casefold()
+    combined = "\n".join((readme, architecture, contributing))
+
+    for required in (
+        "ollama cloud",
+        "openrouter",
+        "manual handoff",
+        "defaults to no",
+        "outbound manifest",
+        "sanitized aggregate",
+        "shadow",
+        "high-risk",
+        "untrusted",
+        "retention",
+        "incident response",
+        "graphite route recommend",
+        "graphite route run",
+        "graphite route status",
+        "graphite route policy",
+    ):
+        assert required in combined
+    assert "openrouter is reserved for production in-application inference" in combined
+    assert "cannot mutate code" in combined
+
+
 def document_section(document: str, heading: str) -> str:
     """Return one Markdown section without coupling tests to the whole document."""
     start = document.index(heading)

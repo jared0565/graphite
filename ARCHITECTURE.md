@@ -132,3 +132,31 @@ Across all extensions, preserve these invariants:
 - Artifacts and logs contain no secrets, absolute system paths, or unnecessary environment metadata.
 - Contributor target invariant (not universal current behavior): validate and size-bound untrusted structures before consumption; model text is never validation evidence.
 - Public schemas and CLI behavior remain compatible unless an explicit, tested migration is provided.
+# Adaptive routing trust boundary
+
+The development router is a governed recommendation subsystem, not an autonomous
+coding agent. Its trust zones are: repository and validated graph; bounded private
+context; repository-local detailed evidence; machine-local signing/quota state; the
+loopback Ollama API; and Ollama Cloud. OpenRouter is reserved for production
+in-application inference. Claude/Codex remain manual handoff destinations.
+
+The data flow is deterministic classification -> contained context -> outbound
+manifest -> cached model eligibility -> recommendation -> default-No approval ->
+fresh model-digest check -> single request -> hash-only receipt. Untrusted model
+output cannot mutate code, invoke tools, install or pull models, or execute shell
+commands. The endpoint allowlist accepts canonical loopback IPs and the configured
+Ollama port only; redirects, retries, fallbacks, ambient credentials, and automatic
+model pulls are prohibited.
+
+Detailed task, decision, approval, execution, and outcome events remain in the
+repository. A sanitized aggregate is written machine-wide only after opt-in and
+contains typed model/effort/category/risk/outcome values plus coarse usage and
+latency buckets. Recommendation confidence may learn from correlated machine/CI
+evidence. It never changes risk or execution authority. High-risk tasks always
+require approval. Shadow results are separately approved and excluded from
+autonomy confidence unless a later controlled evaluator promotes that provenance.
+
+Retention rebuilds derived confidence from retained append-only events. Reversions
+append corrections instead of rewriting history. Severe failures block eligibility
+until incident response review is explicitly closed, which begins a new evidence
+window. Policy promotion and rollback affect recommendations only.
