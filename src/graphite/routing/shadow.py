@@ -197,4 +197,3 @@ def reveal_comparison(store: RepositoryStore, comparison_id: str) -> dict[str, o
         "provenance": "pairwise",
         "autonomy_admissible": False,
     }
-

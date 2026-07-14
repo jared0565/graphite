@@ -1,8 +1,13 @@
 # Adaptive Development Router Design
 
 **Date:** 2026-07-14
-**Status:** Approved design
+**Status:** Implemented
 **Initial release:** Approval-gated, Ollama Cloud development routing
+
+**Offline acceptance:** 2026-07-14 — 1,256 tests passed, 44 documented
+optional/platform skips; Ruff clean; graph fresh and valid with zero errors and
+warnings. The optional live Ollama Cloud smoke test was not run because it requires
+a separate provider-call approval after cost/quota review.
 
 ## 1. Purpose
 

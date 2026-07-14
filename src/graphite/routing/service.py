@@ -282,4 +282,3 @@ class RoutingService:
         if values.get("provenance") != "human":
             raise ValueError("supported_evidence_import_required")
         return {"recorded": True, "provenance": "human", "autonomy_admissible": False}
-

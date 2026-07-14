@@ -163,4 +163,3 @@ def export_sanitized_aggregate(
         recorded_day=recorded_at // 86_400,
     )
     return aggregate.write(record)
-
