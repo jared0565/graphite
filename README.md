@@ -497,6 +497,8 @@ graphite route policy . --refresh-models --json
 graphite route recommend . --objective "Review listing search" --target src/search.py
 graphite route run . --objective "Review listing search" --target src/search.py
 graphite route status . --json
+graphite route recoverable . --json
+graphite route reconcile . --attempt-id attempt-identifier --json
 ```
 
 `route recommend` is offline and read-only. It requires a fresh validated graph and
@@ -518,13 +520,21 @@ interactive terminal as framed, escaped, ephemeral text. Only the validated rece
 and bounded audit metadata are persisted; model text is not. Non-TTY input or
 output, JSON mode, CI, and `--yes` cannot execute.
 
+The recommendation budget gate uses configured request/repository limits; it is not
+proof that quota remains. Actual repository and machine quota reservation occurs
+when the signed approval is consumed immediately before execution. The signature
+binds the exact inventory digest, and runtime independently revalidates that digest.
+
 The durable audit transition is `pending` to `completed`. If the provider call
-succeeds but final persistence fails, recovery is guaranteed only when fallback
-receipt staging also succeeds. Operators can list `recoverable_attempt_ids()` and
-call `reconcile_execution(attempt_id)` to finish the existing staged receipt; this
-workflow performs no provider call and cannot reuse approval. If storage is
+succeeds but final persistence fails, the attempt is reconcilable only while its
+fallback staged receipt remains intact and available. Use `graphite route
+recoverable . --json` to list sanitized attempt IDs and `graphite route reconcile .
+--attempt-id <id> --json` to finalize one staged receipt. These commands make no
+provider call and cannot issue, consume, or reuse approval. Back up or preserve
+`.graphite/routing` state before repair. If storage is
 unavailable before both finalization and fallback staging complete, Graphite returns
-`execution_persistence_failed` and cannot promise later recovery.
+`execution_persistence_failed`; failed staging, deletion, corruption, or disk loss
+means later reconciliation is unavailable.
 
 Schema migration intentionally quarantines old pending or persistence-failed rows
 that lack the new binding fields as `legacy_unrecoverable`; they cannot be replayed

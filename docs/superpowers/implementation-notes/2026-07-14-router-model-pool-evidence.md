@@ -14,6 +14,14 @@ or measured cost saving. Each profile is provisional, uses only `default` effort
 and is subject to capability, context, risk, quota, and the 30-day minimum
 retirement runway hard gates.
 
+Provenance is intentionally split: model ID, digest, context, and provider
+capabilities were observed in the local loopback inventory; usage class and official
+URL/access date are provider-page metadata; roles, provisional status, and
+default-only effort are Graphite policy metadata. To reproduce a sanitized local
+observation, read `GET http://127.0.0.1:11434/api/tags`, retain only the four approved
+IDs, and emit only `name`, `digest`, `details.context_length`, and `capabilities`.
+Do not retain unrelated inventory entries or local aliases.
+
 ## Approved profile evidence
 
 | Model ID | Digest | Context | Roles | Usage class | Provider capabilities | Official Ollama URL | Accessed | Status | Effort |
