@@ -149,8 +149,12 @@ executions or outcomes.
 
 ## 10. Acceptance Status
 
-Offline acceptance passed on 2026-07-14 with the feature worktree source explicitly
-pinned. The focused routing/documentation suites passed with 279 tests and one
+Offline acceptance passed on 2026-07-14 with feature source commit
+`d88068006da8d6e4677ec4208c3c00a6c998c3aa` explicitly pinned for both the focused
+and full suites. Acceptance evidence was first recorded separately by commit
+`13c23f26ab077b254a1c6ab6fb9c86c94f285c63`. The exact focused command included
+the registry, policy, service, executor, CLI, CLI recovery, approval, security,
+telemetry, shadow, storage, and documentation suites; it passed 279 tests with one
 expected Windows-only POSIX permission skip. The full suite passed with 1,369 tests
 and 44 platform/optional-tooling skips; no routing security or approval-authority
 test was skipped. Ruff and `git diff --check` passed. The rebuilt repository graph
@@ -160,5 +164,9 @@ and zero warnings.
 The isolated fixture passed its unit test and recommends
 `kimi-k2.7-code:cloud` at `default` effort and low risk. Its current approval
 preflight is recorded in the implementation plan. No provider chat/inference call
-was made, and no approval was issued or consumed. The original adaptive-router live
-smoke remains pending explicit approval.
+was made. The controlled preflight used only the recommendation/preparation path,
+which has no approval issuance or consumption operation, and artifact inspection
+found no contrary evidence. A later read-only reviewer could not query the routing
+database because of its ACL, so this record does not claim independent database-row
+verification. The original adaptive-router live smoke remains pending explicit
+approval.

@@ -466,7 +466,7 @@ git commit -m "docs: document hardened router model pool"
 
 ```powershell
 $env:PYTHONPATH=(Resolve-Path 'src').Path
-python -B -m pytest -q -p no:cacheprovider --basetemp F:\tmp\graphite-model-pool-focused tests/test_routing_registry.py tests/test_routing_policy.py tests/test_routing_service.py tests/test_routing_executor.py tests/test_routing_cli.py tests/test_routing_approval.py tests/test_routing_security.py tests/test_routing_telemetry.py tests/test_routing_shadow.py tests/test_documentation.py
+python -B -m pytest -q -p no:cacheprovider --basetemp F:\tmp\graphite-model-pool-focused tests/test_routing_registry.py tests/test_routing_policy.py tests/test_routing_service.py tests/test_routing_executor.py tests/test_routing_cli.py tests/test_routing_cli_recovery.py tests/test_routing_approval.py tests/test_routing_security.py tests/test_routing_telemetry.py tests/test_routing_shadow.py tests/test_routing_storage.py tests/test_documentation.py
 ```
 
 Expected: all pass; only documented platform permission skips are acceptable.
@@ -560,6 +560,10 @@ user direction.
 
 #### Offline acceptance record — 2026-07-14
 
+- Both the focused and full suites tested source commit
+  `d88068006da8d6e4677ec4208c3c00a6c998c3aa`. Acceptance evidence was first
+  recorded separately by commit
+  `13c23f26ab077b254a1c6ab6fb9c86c94f285c63`.
 - Focused routing/documentation suites, with cache disabled and a controlled
   `F:\tmp` basetemp: 279 passed, 1 skipped in 71.36 seconds. The sole skip was
   `tests/test_routing_storage.py:981`, because POSIX permission bits are not
@@ -606,8 +610,12 @@ user direction.
   model pull.
 
 Live smoke state: **pending explicit approval**. No model inference/provider chat
-call occurred, and no approval was issued or consumed. The original adaptive-router
-live-smoke item remains unchecked.
+call occurred. Approval issuance and consumption were absent because the controlled
+preflight used only the recommendation/preparation path, which has no issuance or
+consumption operation, and artifact inspection found no contrary evidence. A later
+read-only reviewer could not query the routing database because of its ACL, so this
+record does not claim independent database-row verification. The original
+adaptive-router live-smoke item remains unchecked.
 
 ---
 
