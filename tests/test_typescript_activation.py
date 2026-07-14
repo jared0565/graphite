@@ -5189,9 +5189,38 @@ def test_non_onboarding_parser_paths_run_real_handlers_without_activation(
     assert events == [expected_event]
 
 
+def _install_mcp_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+
+    mcp = types.ModuleType("mcp")
+    mcp.__path__ = []
+    server = types.ModuleType("mcp.server")
+    server.__path__ = []
+    stdio = types.ModuleType("mcp.server.stdio")
+    mcp_types = types.ModuleType("mcp.types")
+    server.Server = object
+    stdio.stdio_server = object()
+    mcp_types.Tool = object
+    mcp_types.TextContent = object
+    for name, module in (
+        ("mcp", mcp),
+        ("mcp.server", server),
+        ("mcp.server.stdio", stdio),
+        ("mcp.types", mcp_types),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+def _import_mcp_for_boundary_test(monkeypatch: pytest.MonkeyPatch):
+    for module_name in ("graphite.mcp", "graphite.mcp_server"):
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+    return importlib.import_module("graphite.mcp")
+
+
 def test_mcp_import_never_reaches_activation_or_executes_a_process(monkeypatch):
     import subprocess
 
+    _install_mcp_import_stubs(monkeypatch)
     original_import = builtins.__import__
 
     def guarded_import(name, *args, **kwargs):
@@ -5206,30 +5235,68 @@ def test_mcp_import_never_reaches_activation_or_executes_a_process(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
     monkeypatch.setattr(subprocess, "Popen", forbidden_process)
-    for module_name in ("graphite.mcp", "graphite.mcp_server"):
-        monkeypatch.delitem(sys.modules, module_name, raising=False)
-
-    try:
-        imported = importlib.import_module("graphite.mcp")
-    except ImportError as error:
-        pytest.skip(f"optional MCP dependencies unavailable: {error.__class__.__name__}")
+    imported = _import_mcp_for_boundary_test(monkeypatch)
 
     assert callable(imported.main)
 
 
-def test_importing_graphite_in_clean_interpreter_has_no_external_side_effect(tmp_path):
+def test_mcp_import_internal_import_error_is_never_treated_as_optional(monkeypatch):
+    _install_mcp_import_stubs(monkeypatch)
+    original_import = builtins.__import__
+
+    def fail_internal_import(name, *args, **kwargs):
+        if name == "networkx":
+            raise ImportError("internal MCP import failure", name="graphite.internal")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_internal_import)
+
+    with pytest.raises(ImportError, match="internal MCP import failure") as error:
+        _import_mcp_for_boundary_test(monkeypatch)
+
+    assert error.value.name == "graphite.internal"
+
+
+def test_importing_graphite_and_mcp_in_clean_interpreter_has_no_external_side_effect(
+    tmp_path,
+):
     import subprocess
 
     source_root = Path(typescript_activation.__file__).resolve().parents[1]
     script = f"""
 import builtins
+import multiprocessing
 import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+import types
 
 sys.path.insert(0, {str(source_root)!r})
+
+mcp = types.ModuleType("mcp")
+mcp.__path__ = []
+server = types.ModuleType("mcp.server")
+server.__path__ = []
+stdio = types.ModuleType("mcp.server.stdio")
+mcp_types = types.ModuleType("mcp.types")
+server.Server = object
+stdio.stdio_server = object()
+mcp_types.Tool = object
+mcp_types.TextContent = object
+sys.modules.update({{
+    "mcp": mcp,
+    "mcp.server": server,
+    "mcp.server.stdio": stdio,
+    "mcp.types": mcp_types,
+}})
+try:
+    import networkx
+except ModuleNotFoundError as error:
+    if error.name != "networkx":
+        raise
+    sys.modules["networkx"] = types.ModuleType("networkx")
 
 def forbidden(*args, **kwargs):
     raise RuntimeError("forbidden_import_side_effect")
@@ -5253,6 +5320,7 @@ os.open = guarded_os_open
 
 for name in ("Popen", "call", "check_call", "check_output", "run"):
     setattr(subprocess, name, forbidden)
+multiprocessing.Process.start = forbidden
 for name in (
     "makedirs", "mkdir", "remove", "removedirs", "rename", "renames",
     "replace", "rmdir", "system", "unlink",
@@ -5270,9 +5338,11 @@ for name in ("NamedTemporaryFile", "TemporaryDirectory", "mkdtemp", "mkstemp"):
     setattr(tempfile, name, forbidden)
 
 import graphite
+import graphite.mcp
 
 assert graphite.__version__
 assert "graphite.typescript_activation" not in sys.modules
+assert callable(graphite.mcp.main)
 print("side-effect-free")
 """
 
@@ -5373,25 +5443,48 @@ def _approved_typescript_install_argv(manager: Manager, argv: tuple[str, ...]) -
     return argv == approved[manager]
 
 
+def _contains_global_install_form(argv: tuple[str, ...]) -> bool:
+    normalized = tuple(argument.strip().casefold() for argument in argv)
+    for index, argument in enumerate(normalized):
+        if argument.startswith("-g") and not argument.startswith("--"):
+            return True
+        if argument == "--global" or argument.startswith("--global="):
+            return True
+        if argument.startswith("--location=global"):
+            return True
+        if (
+            argument == "--location"
+            and index + 1 < len(normalized)
+            and normalized[index + 1].startswith("global")
+        ):
+            return True
+    return False
+
+
 def test_manager_adapters_construct_only_exact_approved_local_install_arguments():
     for manager in Manager:
         argv = adapter_for(manager).argument_tail(TRUSTED_REGISTRY)
 
         assert _approved_typescript_install_argv(manager, argv)
+        assert not _contains_global_install_form(argv)
 
 
 @pytest.mark.parametrize(
-    "mutant",
+    "injected_global_form",
     [
-        ("install", "-gtypescript"),
-        ("install", "--global=true", "typescript"),
-        ("install", "--location", "global", "typescript"),
-        ("install", "--location=global-prefix", "typescript"),
-        ("install", "--save-dev", "typescript", "--global"),
+        ("-gtypescript",),
+        ("--global=true",),
+        ("--location", "global"),
+        ("--location=global-prefix",),
     ],
 )
-def test_approved_install_argv_rejects_global_and_combined_mutants(mutant):
-    assert not _approved_typescript_install_argv(Manager.NPM, mutant)
+def test_actual_adapter_argv_mutation_rejects_global_forms(injected_global_form):
+    manager = Manager.NPM
+    actual = adapter_for(manager).argument_tail(TRUSTED_REGISTRY)
+    mutated = (*actual[:-1], *injected_global_form, actual[-1])
+
+    assert _contains_global_install_form(mutated)
+    assert not _approved_typescript_install_argv(manager, mutated)
 
 
 def test_unicode_root_and_hostile_process_output_never_enter_serialized_result(tmp_path):
