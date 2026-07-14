@@ -278,6 +278,21 @@ def test_routing_operator_docs_are_secret_path_and_link_safe() -> None:
     assert not failures, "Unsafe routing documentation:\n" + "\n".join(failures)
 
 
+def test_routing_evidence_is_not_described_as_authorization_authority() -> None:
+    notes = re.sub(
+        r"\s+",
+        " ",
+        "\n".join(read_document(name) for name in ROUTING_EVIDENCE_DOCUMENTS),
+    ).casefold()
+    assert not re.search(
+        r"evidence (?:note|record)\s+(?:is|serves as|remains)\s+"
+        r"(?:the\s+)?(?:current\s+)?(?:profile\s+)?(?:authorization\s+)?authority",
+        notes,
+    )
+    assert "`routing.registry.bundled_profiles`" in notes
+    assert "authorization authority" in notes
+
+
 def document_section(document: str, heading: str) -> str:
     """Return one Markdown section without coupling tests to the whole document."""
     start = document.index(heading)
