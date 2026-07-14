@@ -4192,9 +4192,7 @@ def _resolve_import_module(relative_path: str, node: ast.ImportFrom) -> str:
     if node.level == 0:
         return node.module or ""
     module_parts = ["graphite", *Path(relative_path).with_suffix("").parts]
-    package_parts = (
-        module_parts[:-1] if module_parts[-1] != "__init__" else module_parts[:-1]
-    )
+    package_parts = module_parts[:-1]
     ascend = node.level - 1
     base = package_parts[: len(package_parts) - ascend]
     return ".".join([*base, *(node.module or "").split(".")]).rstrip(".")
@@ -4202,12 +4200,76 @@ def _resolve_import_module(relative_path: str, node: ast.ImportFrom) -> str:
 
 def _activation_boundary_violations(sources: dict[str, str]) -> list[str]:
     violations: list[str] = []
+    trees = {
+        relative_path: ast.parse(source, filename=relative_path)
+        for relative_path, source in sources.items()
+    }
+    parent_by_node: dict[ast.AST, ast.AST] = {}
+    definitions: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
 
-    for relative_path, source in sources.items():
-        tree = ast.parse(source, filename=relative_path)
+    for relative_path, tree in trees.items():
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                parent_by_node[child] = parent
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if parent.name == "activate_typescript":
+                    definitions.append((relative_path, parent))
+
+    expected_definitions = [
+        node
+        for relative_path, node in definitions
+        if relative_path == "typescript_activation.py"
+        and isinstance(node, ast.FunctionDef)
+        and isinstance(parent_by_node.get(node), ast.Module)
+    ]
+    if len(definitions) != 1 or len(expected_definitions) != 1:
+        violations.append("activation_definition:not_unique_module_function")
+    for relative_path, node in definitions:
+        if node not in expected_definitions:
+            violations.append(
+                f"{relative_path}:{node.lineno}:activation_definition_invalid"
+            )
+
+    for relative_path, tree in trees.items():
         direct_aliases: set[str] = set()
         module_aliases: set[str] = set()
         graphite_aliases: set[str] = set()
+        cli_module_aliases: set[str] = set()
+        helper_aliases: set[str] = set()
+
+        cli_module_functions = {
+            node.name: node
+            for node in tree.body
+            if relative_path == "cli.py" and isinstance(node, ast.FunctionDef)
+        }
+        helper_node = cli_module_functions.get(
+            "_activate_typescript_for_onboarding"
+        )
+        onboarding_nodes = {
+            cli_module_functions.get("cmd_init"),
+            cli_module_functions.get("cmd_bootstrap"),
+        }
+        onboarding_nodes.discard(None)
+
+        if relative_path == "cli.py":
+            for protected_name in (
+                "_activate_typescript_for_onboarding",
+                "cmd_init",
+                "cmd_bootstrap",
+            ):
+                protected_definitions = [
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == protected_name
+                ]
+                expected = cli_module_functions.get(protected_name)
+                if (
+                    expected is None
+                    or len(protected_definitions) != 1
+                    or protected_definitions[0] is not expected
+                ):
+                    violations.append(f"cli.py:0:{protected_name}_definition_invalid")
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -4221,8 +4283,11 @@ def _activation_boundary_violations(sources: dict[str, str]) -> list[str]:
                             graphite_aliases.add("graphite")
                         if relative_path != "cli.py":
                             violations.append(f"{relative_path}:{node.lineno}:import")
+                    elif alias.name == "graphite.cli":
+                        if alias.asname:
+                            cli_module_aliases.add(alias.asname)
                         else:
-                            violations.append(f"{relative_path}:{node.lineno}:module_import")
+                            graphite_aliases.add("graphite")
             elif isinstance(node, ast.ImportFrom):
                 resolved = _resolve_import_module(relative_path, node)
                 if resolved == "graphite.typescript_activation":
@@ -4237,46 +4302,132 @@ def _activation_boundary_violations(sources: dict[str, str]) -> list[str]:
                     for alias in node.names:
                         if alias.name == "typescript_activation":
                             module_aliases.add(alias.asname or alias.name)
-                            violations.append(f"{relative_path}:{node.lineno}:module_import")
+                            if relative_path != "cli.py":
+                                violations.append(
+                                    f"{relative_path}:{node.lineno}:module_import"
+                                )
+                        elif alias.name == "cli":
+                            cli_module_aliases.add(alias.asname or alias.name)
+                elif resolved == "graphite.cli":
+                    for alias in node.names:
+                        if alias.name == "_activate_typescript_for_onboarding":
+                            helper_aliases.add(alias.asname or alias.name)
+                            if relative_path != "cli.py":
+                                violations.append(
+                                    f"{relative_path}:{node.lineno}:helper_import"
+                                )
 
-        function_stack: list[str] = []
+        scope_stack: list[tuple[ast.AST, str]] = [(tree, "<module>")]
 
         class ReferenceVisitor(ast.NodeVisitor):
             def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-                function_stack.append(node.name)
-                self.generic_visit(node)
-                function_stack.pop()
-
-            visit_AsyncFunctionDef = visit_FunctionDef
-
-            def _allowed(self) -> bool:
-                return relative_path == "typescript_activation.py" or (
-                    relative_path == "cli.py"
-                    and function_stack
-                    and function_stack[-1] == "_activate_typescript_for_onboarding"
-                )
-
-            def _record(self, node: ast.AST, kind: str) -> None:
-                if not self._allowed():
+                if node.name in {
+                    *direct_aliases,
+                    *module_aliases,
+                    *helper_aliases,
+                }:
                     violations.append(
-                        f"{relative_path}:{getattr(node, 'lineno', 0)}:{kind}"
+                        f"{relative_path}:{node.lineno}:import_alias_rebinding"
+                    )
+                for decorator in node.decorator_list:
+                    self.visit(decorator)
+                self.visit(node.args)
+                if node.returns:
+                    self.visit(node.returns)
+                scope_stack.append(
+                    (node, f"{scope_stack[-1][1]}.{node.name}@{node.lineno}")
+                )
+                for statement in node.body:
+                    self.visit(statement)
+                scope_stack.pop()
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                self.visit_FunctionDef(node)
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                if node.name in {
+                    "activate_typescript",
+                    "_activate_typescript_for_onboarding",
+                    *direct_aliases,
+                    *module_aliases,
+                    *helper_aliases,
+                }:
+                    violations.append(
+                        f"{relative_path}:{node.lineno}:protected_class_rebinding"
+                    )
+                for expression in [*node.decorator_list, *node.bases, *node.keywords]:
+                    self.visit(expression)
+                scope_stack.append(
+                    (node, f"{scope_stack[-1][1]}.{node.name}@{node.lineno}")
+                )
+                for statement in node.body:
+                    self.visit(statement)
+                scope_stack.pop()
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                self.visit(node.args)
+                scope_stack.append(
+                    (node, f"{scope_stack[-1][1]}.<lambda>@{node.lineno}")
+                )
+                self.visit(node.body)
+                scope_stack.pop()
+
+            def _record_activator(self, node: ast.AST, kind: str) -> None:
+                if scope_stack[-1][0] is not helper_node:
+                    violations.append(
+                        f"{relative_path}:{getattr(node, 'lineno', 0)}:{kind}:"
+                        f"{scope_stack[-1][1]}"
+                    )
+
+            def _record_helper(self, node: ast.AST, kind: str) -> None:
+                if scope_stack[-1][0] not in onboarding_nodes:
+                    violations.append(
+                        f"{relative_path}:{getattr(node, 'lineno', 0)}:{kind}:"
+                        f"{scope_stack[-1][1]}"
                     )
 
             def visit_Name(self, node: ast.Name) -> None:
-                if isinstance(node.ctx, ast.Load) and node.id in direct_aliases:
-                    self._record(node, "attribute_reference")
-                if (
-                    isinstance(node.ctx, ast.Load)
-                    and relative_path == "cli.py"
-                    and node.id == "_activate_typescript_for_onboarding"
-                    and (
-                        not function_stack
-                        or function_stack[-1] not in {"cmd_bootstrap", "cmd_init"}
+                if isinstance(node.ctx, ast.Load) and (
+                    node.id in direct_aliases
+                    or (
+                        relative_path == "typescript_activation.py"
+                        and node.id == "activate_typescript"
                     )
                 ):
-                    violations.append(
-                        f"{relative_path}:{node.lineno}:onboarding_helper_reference"
+                    self._record_activator(node, "attribute_reference")
+                if (
+                    isinstance(node.ctx, ast.Load)
+                    and (
+                        (relative_path == "cli.py" and helper_node is not None
+                         and node.id == "_activate_typescript_for_onboarding")
+                        or node.id in helper_aliases
                     )
+                ):
+                    self._record_helper(node, "onboarding_helper_reference")
+                if isinstance(node.ctx, ast.Store) and node.id in {
+                    "activate_typescript",
+                    "_activate_typescript_for_onboarding",
+                    *direct_aliases,
+                    *module_aliases,
+                    *helper_aliases,
+                }:
+                    violations.append(
+                        f"{relative_path}:{node.lineno}:protected_name_rebinding"
+                    )
+
+            def visit_arg(self, node: ast.arg) -> None:
+                if node.arg in {
+                    "activate_typescript",
+                    "_activate_typescript_for_onboarding",
+                    *direct_aliases,
+                    *module_aliases,
+                    *helper_aliases,
+                }:
+                    violations.append(
+                        f"{relative_path}:{node.lineno}:protected_argument_rebinding"
+                    )
+                if node.annotation:
+                    self.visit(node.annotation)
 
             def visit_Attribute(self, node: ast.Attribute) -> None:
                 dotted: list[str] = []
@@ -4297,9 +4448,30 @@ def _activation_boundary_violations(sources: dict[str, str]) -> list[str]:
                         == ["typescript_activation", "activate_typescript"]
                     )
                     if module_reference or package_reference:
-                        self._record(node, "module_attribute_reference")
+                        self._record_activator(node, "module_attribute_reference")
+                        return
+                    helper_module_reference = (
+                        dotted[0] in cli_module_aliases
+                        and dotted[1:]
+                        == ["_activate_typescript_for_onboarding"]
+                    )
+                    helper_package_reference = (
+                        dotted[0] in graphite_aliases
+                        and dotted[1:]
+                        == ["cli", "_activate_typescript_for_onboarding"]
+                    )
+                    if helper_module_reference or helper_package_reference:
+                        self._record_helper(node, "module_helper_reference")
                         return
                 self.generic_visit(node)
+
+            def visit_Global(self, node: ast.Global) -> None:
+                if "activate_typescript" in node.names:
+                    violations.append(
+                        f"{relative_path}:{node.lineno}:activation_global_rebinding"
+                    )
+
+            visit_Nonlocal = visit_Global
 
         ReferenceVisitor().visit(tree)
 
@@ -4321,6 +4493,17 @@ def test_activation_orchestration_has_a_single_alias_safe_recursive_boundary():
         for node in activation_tree.body
     )
     assert _activation_boundary_violations(sources) == []
+
+
+_MINIMAL_ACTIVATION_MODULE = {
+    "typescript_activation.py": "def activate_typescript(request): return request\n"
+}
+_MINIMAL_AUTHORIZED_CLI = (
+    "from .typescript_activation import activate_typescript\n"
+    "def _activate_typescript_for_onboarding(): return activate_typescript(None)\n"
+    "def cmd_init(): return _activate_typescript_for_onboarding()\n"
+    "def cmd_bootstrap(): return _activate_typescript_for_onboarding()\n"
+)
 
 
 @pytest.mark.parametrize(
@@ -4353,21 +4536,127 @@ def test_activation_orchestration_has_a_single_alias_safe_recursive_boundary():
         ),
         (
             "cli.py",
-            "from . import typescript_activation as activation\n"
-            "def _activate_typescript_for_onboarding():\n"
+            "import graphite.typescript_activation as activation\n"
+            "def cmd_build_module_alias():\n"
             "    return activation.activate_typescript(None)\n",
+        ),
+        (
+            "cli.py",
+            "from . import typescript_activation as activation_module\n"
+            "def cmd_build_relative_module_alias():\n"
+            "    return activation_module.activate_typescript(None)\n",
+        ),
+        (
+            "cli.py",
+            "from .typescript_activation import activate_typescript as engage\n"
+            "engage = lambda request: request\n",
+        ),
+        (
+            "cli.py",
+            "import graphite.typescript_activation as activation\n"
+            "activation = object()\n",
         ),
         (
             "cli.py",
             "def _activate_typescript_for_onboarding(): return None\n"
             "def cmd_build(): return _activate_typescript_for_onboarding()\n",
         ),
+        (
+            "cli.py",
+            "from .typescript_activation import activate_typescript as engage\n"
+            "def outer():\n"
+            "    def _activate_typescript_for_onboarding(): return engage(None)\n",
+        ),
+        (
+            "cli.py",
+            "from .typescript_activation import activate_typescript as engage\n"
+            "class Commands:\n"
+            "    def _activate_typescript_for_onboarding(self): return engage(None)\n",
+        ),
+        (
+            "cli.py",
+            "def _activate_typescript_for_onboarding(): return None\n"
+            "def outer():\n"
+            "    def cmd_init(): return _activate_typescript_for_onboarding()\n",
+        ),
+        (
+            "worker.py",
+            "def activate_typescript(request): return request\n",
+        ),
+        (
+            "worker.py",
+            "async def activate_typescript(request): return request\n",
+        ),
+        (
+            "worker.py",
+            "class Shadow:\n"
+            "    def activate_typescript(self, request): return request\n",
+        ),
+        (
+            "worker.py",
+            "activate_typescript = lambda request: request\n",
+        ),
+        (
+            "typescript_activation.py",
+            "VALUE = 1\n",
+        ),
+        (
+            "typescript_activation.py",
+            "async def activate_typescript(request): return request\n",
+        ),
+        (
+            "typescript_activation.py",
+            "def activate_typescript(request): return request\n"
+            "def outer():\n"
+            "    def activate_typescript(request): return request\n",
+        ),
+        (
+            "typescript_activation.py",
+            "def activate_typescript(request): return request\n"
+            "activation_alias = activate_typescript\n",
+        ),
     ],
 )
 def test_activation_boundary_analyzer_rejects_alias_and_recursive_mutants(
     relative_path, source
 ):
-    assert _activation_boundary_violations({relative_path: source})
+    sources = {**_MINIMAL_ACTIVATION_MODULE, "cli.py": _MINIMAL_AUTHORIZED_CLI}
+    if relative_path == "cli.py":
+        sources[relative_path] += source
+    else:
+        sources[relative_path] = source
+    assert _activation_boundary_violations(sources)
+
+
+@pytest.mark.parametrize(
+    "activation_import",
+    [
+        "from .typescript_activation import activate_typescript as engage",
+        "import graphite.typescript_activation as activation",
+        "import graphite.typescript_activation",
+        "from . import typescript_activation as activation",
+    ],
+)
+def test_activation_boundary_analyzer_allows_authorized_import_spellings(
+    activation_import
+):
+    if activation_import.startswith("from .typescript_activation"):
+        reference = "engage(None)"
+    elif activation_import == "import graphite.typescript_activation":
+        reference = "graphite.typescript_activation.activate_typescript(None)"
+    else:
+        reference = "activation.activate_typescript(None)"
+    cli_source = (
+        f"{activation_import}\n"
+        "def _activate_typescript_for_onboarding():\n"
+        f"    return {reference}\n"
+        "def cmd_init(): return _activate_typescript_for_onboarding()\n"
+        "def cmd_bootstrap(): return _activate_typescript_for_onboarding()\n"
+    )
+
+    assert _activation_boundary_violations(
+        {**_MINIMAL_ACTIVATION_MODULE, "cli.py": cli_source}
+    ) == []
 
 
 @pytest.mark.parametrize(
