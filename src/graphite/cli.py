@@ -36,6 +36,7 @@ from .io import atomic_write_json
 from .llm import enrich_report
 from .routing.approval import approval_prompt
 from .routing.service import RoutingService
+from .routing.storage import StorageError
 from .query import _find_node, annotate_communities, query
 from .replacement_audit import audit_replacement, format_replacement_audit
 from .review import (
@@ -970,6 +971,44 @@ def _route_print(payload: dict[str, Any], *, json_mode: bool) -> None:
         print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+_ROUTE_RECOVERY_ERROR_CODES = frozenset({
+    "attempt_id_invalid",
+    "execution_attempt_conflict",
+    "execution_attempt_missing",
+    "legacy_attempt_bindings_missing",
+    "legacy_attempt_digest_missing",
+    "repository_root_invalid",
+    "storage_corrupt",
+    "storage_locked",
+    "storage_path_invalid",
+    "storage_schema_unsupported",
+    "storage_unavailable",
+})
+
+
+def _route_recovery_error(
+    error: StorageError | ValueError | OSError, *, json_mode: bool
+) -> int:
+    if isinstance(error, StorageError):
+        candidate = error.code
+    elif isinstance(error, FileNotFoundError):
+        candidate = "repository_root_invalid"
+    elif isinstance(error, OSError):
+        candidate = "storage_unavailable"
+    else:
+        candidate = str(error)
+    code = (
+        candidate
+        if candidate in _ROUTE_RECOVERY_ERROR_CODES
+        else "route_recovery_failed"
+    )
+    if json_mode:
+        print(json.dumps({"error": {"code": code}}, sort_keys=True), file=sys.stderr)
+    else:
+        print(f"[graphite] route recovery error: {code}", file=sys.stderr)
+    return 1
+
+
 _MODEL_OUTPUT_BEGIN = "----- BEGIN GRAPHITE MODEL OUTPUT -----"
 _MODEL_OUTPUT_END = "----- END GRAPHITE MODEL OUTPUT -----"
 
@@ -1063,7 +1102,10 @@ def cmd_route_status(args: argparse.Namespace) -> int:
 
 
 def cmd_route_recoverable(args: argparse.Namespace) -> int:
-    attempt_ids = RoutingService(args.path).recoverable_attempt_ids()
+    try:
+        attempt_ids = RoutingService(args.path).recoverable_attempt_ids()
+    except (StorageError, ValueError, OSError) as exc:
+        return _route_recovery_error(exc, json_mode=args.json)
     payload = {
         "attempts": [
             {"attempt_id": attempt_id, "status": "recoverable"}
@@ -1075,7 +1117,10 @@ def cmd_route_recoverable(args: argparse.Namespace) -> int:
 
 
 def cmd_route_reconcile(args: argparse.Namespace) -> int:
-    payload = RoutingService(args.path).reconcile_execution(args.attempt_id)
+    try:
+        payload = RoutingService(args.path).reconcile_execution(args.attempt_id)
+    except (StorageError, ValueError, OSError) as exc:
+        return _route_recovery_error(exc, json_mode=args.json)
     _route_print(payload, json_mode=args.json)
     return 0
 

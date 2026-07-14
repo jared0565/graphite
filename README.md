@@ -535,12 +535,15 @@ provider call and cannot issue, consume, or reuse approval. Back up or preserve
 `.graphite/routing` state before repair. If storage is
 unavailable before both finalization and fallback staging complete, Graphite returns
 `execution_persistence_failed`; failed staging, deletion, corruption, or disk loss
-means later reconciliation is unavailable.
+means later reconciliation is unavailable. Expected recovery validation and storage
+failures are rendered as fixed, path-free codes; `--json` emits only an
+`{"error":{"code":"..."}}` object and never includes OS errors or repository data.
 
-Schema migration intentionally quarantines old pending or persistence-failed rows
-that lack the new binding fields as `legacy_unrecoverable`; they cannot be replayed
-or reconciled. Legacy completed rows missing those bindings are intentionally
-preserved as read-only history rather than rewritten into new evidence.
+Schema-v3 migration intentionally quarantines schema-v1 pending or
+persistence-failed rows missing token/request bindings and schema-v2 rows missing
+the inventory digest as `legacy_unrecoverable`; they cannot be replayed or
+reconciled. Legacy completed rows missing those bindings are intentionally preserved
+as read-only history rather than rewritten into new evidence.
 
 Detailed receipts and evidence stay in repository-local `.graphite/routing` storage;
 they contain hashes and metadata, not prompts or model responses. Machine-wide
