@@ -1,4 +1,5 @@
 import re
+import shlex
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from string import punctuation
@@ -39,6 +40,55 @@ def document_section(document: str, heading: str) -> str:
     body_start = start + len(heading)
     next_heading = document.find("\n## ", body_start)
     return document[start : next_heading if next_heading != -1 else len(document)]
+
+
+def global_typescript_install_diagnostics(markdown: str) -> list[str]:
+    """Find package-manager command lines that request global TypeScript."""
+    diagnostics: list[str] = []
+    managers = {"npm", "pnpm", "yarn", "bun"}
+    for line_number, raw_line in enumerate(markdown.splitlines(), start=1):
+        normalized = raw_line.replace("`", " ").replace("\\", "/").strip()
+        normalized = re.sub(r"^(?:>\s*)?(?:[-*+]\s+|\d+\.\s+)?", "", normalized)
+        try:
+            tokens = shlex.split(normalized, posix=True)
+        except ValueError:
+            tokens = normalized.split()
+        folded = [token.casefold().rstrip(".,;:") for token in tokens]
+        manager_indexes = [
+            index
+            for index, token in enumerate(folded)
+            if token.replace("\\", "/").rsplit("/", 1)[-1].removesuffix(".cmd").removesuffix(".exe")
+            in managers
+        ]
+        for manager_index in manager_indexes:
+            command = folded[manager_index + 1 :]
+            has_typescript = any(
+                re.fullmatch(r"typescript(?:@[^\s]+)?", token)
+                or re.fullmatch(r"-g(?:=)?typescript(?:@[^\s]+)?", token)
+                for token in command
+            )
+            if not has_typescript:
+                continue
+            has_global_option = any(
+                token == "global"
+                or re.fullmatch(r"-g(?:$|=.*|typescript(?:@[^\s]+)?)", token)
+                or token == "--global"
+                or token.startswith("--global=")
+                or (
+                    token.startswith("--location=")
+                    and token.partition("=")[2].startswith("global")
+                )
+                or (
+                    token == "--location"
+                    and index + 1 < len(command)
+                    and command[index + 1].startswith("global")
+                )
+                for index, token in enumerate(command)
+            )
+            if has_global_option:
+                diagnostics.append(f"line {line_number}: {raw_line.strip()}")
+                break
+    return diagnostics
 
 
 def credential_example_linter_has_violation(text: str) -> bool:
@@ -461,26 +511,6 @@ def test_readme_documents_system_readiness_and_optional_activation() -> None:
         assert phrase.casefold() in readme_folded
 
 
-def test_docs_define_consent_gated_typescript_activation() -> None:
-    combined = "\n".join(
-        read_document(name) for name in ("README.md", "CONTRIBUTING.md", "ARCHITECTURE.md")
-    ).casefold()
-
-    for phrase in (
-        "project-local typescript",
-        "defaults to no",
-        "graphite_package_validator",
-        "non-interactive",
-        "lifecycle scripts",
-        "private registries",
-        "guidance_only",
-        "global typescript",
-    ):
-        assert phrase in combined
-    assert "yarn" in combined
-    assert "does not install global typescript" in combined
-
-
 def test_readme_pins_typescript_consent_and_onboarding_lifecycle() -> None:
     section = document_section(
         read_document("README.md"),
@@ -494,6 +524,9 @@ def test_readme_pins_typescript_consent_and_onboarding_lifecycle() -> None:
         "project-local typescript is missing. install it with <manager> as a development dependency? [y/n]",
         "prompts exactly once",
         "defaults to no",
+        "eligibility reads and snapshots",
+        "before the prompt",
+        "before validator, network, or any manifest, lockfile, or dependency-store mutation",
         "explicit `y` or `yes`",
         "empty input, eof, malformed input",
         "no remembered consent",
@@ -503,6 +536,8 @@ def test_readme_pins_typescript_consent_and_onboarding_lifecycle() -> None:
         "validation_failed`, `installation_failed`, and `verification_failed",
         "exit code 1",
         "preserved",
+        "graphite_package_validator",
+        "does not install global typescript",
     ):
         assert phrase in folded
 
@@ -565,6 +600,7 @@ def test_architecture_pins_typescript_activation_security_boundary() -> None:
         "do not make graphite unhackable",
         "empty temporary root",
         "posix",
+        "typescript activation results expose only",
     ):
         assert phrase in folded
 
@@ -636,26 +672,51 @@ def test_optional_activation_docs_reject_unsafe_examples() -> None:
     readme = read_document("README.md")
     contributing = read_document("CONTRIBUTING.md")
     documents = "\n".join((readme, contributing))
-    validator_command = (
-        'node "C:\\Users\\fbmac\\atlas\\Codex\\.codex_state\\user_home\\scripts\\'
-        'validate-packages.cjs" typescript'
+    assert "<absolute-path-to-validator>" in readme
+    assert "<absolute-path-to-validator>" in contributing
+    concrete_validator_path = re.compile(
+        r"(?i)(?:[A-Z]:[\\/]|\\\\|/(?!<))[^\r\n`\"]*validate-packages\.cjs"
     )
-
-    assert validator_command in readme
-    assert validator_command in contributing
-    forbidden_global_installs = (
-        "npm install -g typescript",
-        "npm i -g typescript",
-        "pnpm add -g typescript",
-        "yarn global add typescript",
-    )
-    for command in forbidden_global_installs:
-        assert command not in documents.casefold()
+    assert concrete_validator_path.search(documents) is None
+    assert global_typescript_install_diagnostics(documents) == []
     assert not credential_example_linter_has_violation(documents)
 
     assert "defaults to 512" in readme
     assert "1–4096" in readme
     assert "16-token cap" in readme
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "npm install -g typescript",
+        "`npm install -gtypescript`",
+        "- pnpm add --global typescript",
+        "bun add --global=true typescript",
+        "npm install --location global typescript",
+        "npm install --location=global typescript",
+        "npm install --location=global-prefix typescript@latest",
+        "yarn global add typescript",
+        r"C:\tools\npm.cmd install --global typescript",
+    ),
+)
+def test_global_typescript_install_diagnostics_rejects_mutants(command: str) -> None:
+    assert global_typescript_install_diagnostics(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "npm install --save-dev --ignore-scripts typescript",
+        "pnpm add -D typescript",
+        "bun add --dev typescript@5.9.0",
+        "Graphite does not install global TypeScript.",
+    ),
+)
+def test_global_typescript_install_diagnostics_allows_local_or_prose(
+    command: str,
+) -> None:
+    assert global_typescript_install_diagnostics(command) == []
 
 
 def test_credential_example_linter_is_precise() -> None:
@@ -743,7 +804,10 @@ def test_validator_workflow_is_portable_fail_closed_and_scoped() -> None:
         assert "relative" in document_folded
         assert "missing" in document_folded
         assert "stop" in document_folded
-        assert "environment-specific" in document_folded
+        assert (
+            "environment-specific" in document_folded
+            or "for your environment" in document_folded
+        )
         assert "do not download" in document_folded
 
     contributing_folded = contributing.casefold()

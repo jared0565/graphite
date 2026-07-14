@@ -113,10 +113,10 @@ For doctor work, assume the selected root is hostile. Neither text nor JSON diag
 
 Before any optional activation install, follow the repository package-validation policy and fail-closed `GRAPHITE_PACKAGE_VALIDATOR` workflow above. For TypeScript, run `node $env:GRAPHITE_PACKAGE_VALIDATOR typescript` in PowerShell or `node "$GRAPHITE_PACKAGE_VALIDATOR" typescript` in a POSIX shell, then stop on any non-zero result.
 
-The exact command below is an environment-specific example for the maintained Codex environment where this trusted validator exists; it is not a universal path:
+The command below uses a clearly marked placeholder. Replace it with the trusted absolute validator path maintained by your environment; never use the placeholder literally or resolve it inside the repository:
 
 ```text
-node "C:\Users\fbmac\atlas\Codex\.codex_state\user_home\scripts\validate-packages.cjs" typescript
+node "<absolute-path-to-validator>" typescript
 ```
 
 In shorthand, the validated target is `validate-packages.cjs typescript`. If validation exits 1, stop; if registry lookup is unavailable, manually verify the spelling and identity before proceeding. After validation, use the target project's existing package manager and project-local dependency declaration. Do not use a global TypeScript install.

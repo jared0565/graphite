@@ -94,13 +94,13 @@ if ($LASTEXITCODE -ne 0) { throw "Package validation failed; stop." }
 node "$GRAPHITE_PACKAGE_VALIDATOR" typescript || exit 1
 ```
 
-The following exact command is an environment-specific example for the maintained Codex environment where this trusted path exists; it is not a universal validator location:
+Use the environment variable commands above, or substitute the clearly marked placeholder below with the trusted absolute validator path for your environment:
 
 ```text
-node "C:\Users\fbmac\atlas\Codex\.codex_state\user_home\scripts\validate-packages.cjs" typescript
+node "<absolute-path-to-validator>" typescript
 ```
 
-Then use the target project's existing package manager to add the verified `typescript` package locally; do not install it globally. Doctor statically detects project-local TypeScript from package metadata but intentionally never executes or transpiles untrusted project JavaScript. A detected compiler therefore remains optional/unverified rather than being treated as executed proof.
+The angle-bracket value is a placeholder, not a literal path or a repository-local validator. Then use the target project's existing package manager to add the verified `typescript` package locally; do not install it globally. Doctor statically detects project-local TypeScript from package metadata but intentionally never executes or transpiles untrusted project JavaScript. A detected compiler therefore remains optional/unverified rather than being treated as executed proof.
 
 The validator target in that command is `validate-packages.cjs typescript`; preserve that package spelling exactly.
 
@@ -227,7 +227,7 @@ After `graphite init` or `graphite bootstrap` writes its normal onboarding files
 
 Automatic activation requires a contained regular `package.json`, exactly one supported root lockfile, matching `package.json#packageManager` metadata when present, safe control-file dependency sources, no manager-specific configuration that could redirect the operation, a supported external manager executable/version, and project-local TypeScript not already being resolvable. The automatic matrix is npm 8–11 with `package-lock.json`, pnpm 11 with `pnpm-lock.yaml`, and Bun 1 with exactly one of `bun.lock` or `bun.lockb`. Yarn is `guidance_only` because Graphite cannot currently prove a version-independent unattended registry, credential, and lifecycle-script boundary. Missing, nested-only, malformed, conflicting, ambiguous, or unsafe evidence also returns `guidance_only`; Graphite never guesses npm or a workspace package.
 
-In an interactive terminal Graphite prompts exactly once, after those eligibility checks and before validator, network, manifest, lockfile, or dependency-store activity:
+Eligibility reads and snapshots of `package.json` and the selected lockfile happen before the prompt. In an interactive terminal Graphite prompts exactly once after those checks and before validator, network, or any manifest, lockfile, or dependency-store mutation:
 
 ```text
 Project-local TypeScript is missing. Install it with <manager> as a development dependency? [y/N]
