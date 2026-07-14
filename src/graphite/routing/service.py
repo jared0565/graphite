@@ -33,7 +33,12 @@ from .registry import (
     refresh_model_inventory,
 )
 from .settings import RoutingSettings
-from .storage import RepositoryStore, StorageError
+from .storage import (
+    DEFAULT_RECOVERY_PAGE_SIZE,
+    RecoverableAttemptPage,
+    RepositoryStore,
+    StorageError,
+)
 
 
 @dataclass(frozen=True)
@@ -368,10 +373,12 @@ class RoutingService:
             "automatic_execution": False,
         }
 
-    def recoverable_attempt_ids(self) -> tuple[str, ...]:
-        """List sanitized attempt identifiers that can be finalized without a provider call."""
+    def recoverable_attempts(
+        self, *, limit: int = DEFAULT_RECOVERY_PAGE_SIZE, after: str | None = None
+    ) -> RecoverableAttemptPage:
+        """List a bounded page of attempts without provider or approval authority."""
         self.store.initialize()
-        return self.store.recoverable_attempt_ids()
+        return self.store.recoverable_attempts(limit=limit, after=after)
 
     def reconcile_execution(self, attempt_id: str) -> dict[str, Any]:
         """Finalize one staged receipt without reusing approval or calling a provider."""

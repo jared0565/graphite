@@ -382,12 +382,12 @@ def test_completion_failure_leaves_recoverable_trace_without_text(
     persisted = b"".join(path.read_bytes() for path in tmp_path.rglob("*") if path.is_file())
     assert text.encode() not in persisted
     fresh = RoutingService(root, state_dir=tmp_path / "machine")
-    assert fresh.recoverable_attempt_ids() == (attempt[0],)
+    assert fresh.recoverable_attempts().attempt_ids == (attempt[0],)
     first = fresh.reconcile_execution(attempt[0])
     second = fresh.reconcile_execution(attempt[0])
     assert first == second
     assert first["execution_id"] == "exec-1"
-    assert fresh.recoverable_attempt_ids() == ()
+    assert fresh.recoverable_attempts().attempt_ids == ()
     with sqlite3.connect(fresh.store.path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM execution_receipts").fetchone()[0] == 1

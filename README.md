@@ -498,7 +498,7 @@ graphite route policy . --refresh-models --json
 graphite route recommend . --objective "Review listing search" --target src/search.py
 graphite route run . --objective "Review listing search" --target src/search.py
 graphite route status . --json
-graphite route recoverable . --json
+graphite route recoverable . --limit 50 --json
 graphite route reconcile . --attempt-id attempt-identifier --json
 ```
 
@@ -529,8 +529,9 @@ binds the exact inventory digest, and runtime independently revalidates that dig
 The durable audit transition is `pending` to `completed`. If the provider call
 succeeds but final persistence fails, the attempt is reconcilable only while its
 fallback staged receipt remains intact and available. Use `graphite route
-recoverable . --json` to list sanitized attempt IDs and `graphite route reconcile .
---attempt-id <id> --json` to finalize one staged receipt. These commands make no
+recoverable . --limit 50 --json` to list a bounded page of sanitized attempt IDs;
+when `has_more` is true, pass `next_cursor` back with `--after`. Use `graphite route
+reconcile . --attempt-id <id> --json` to finalize one staged receipt. These commands make no
 provider call and cannot issue, consume, or reuse approval. Back up or preserve
 `.graphite/routing` state before repair. If storage is
 unavailable before both finalization and fallback staging complete, Graphite returns

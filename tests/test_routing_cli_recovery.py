@@ -183,7 +183,9 @@ def test_real_recovery_success_is_idempotent_and_authority_free(
 
     assert cli.main(["route", "recoverable", str(root), "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
-        "attempts": [{"attempt_id": "attempt-1", "status": "recoverable"}]
+        "attempts": [{"attempt_id": "attempt-1", "status": "recoverable"}],
+        "has_more": False,
+        "next_cursor": None,
     }
     command = [
         "route", "reconcile", str(root), "--attempt-id", "attempt-1", "--json",
@@ -195,3 +197,85 @@ def test_real_recovery_success_is_idempotent_and_authority_free(
     assert first == second == receipt.to_dict()
     assert "PRIVATE" not in json.dumps(first)
     assert "text" not in first
+
+
+@pytest.mark.parametrize(
+    ("arguments", "code"),
+    [
+        (["--limit", "101"], "recovery_limit_invalid"),
+        (["--after", "../PRIVATE-CURSOR"], "recovery_cursor_invalid"),
+    ],
+)
+def test_recoverable_rejects_invalid_pagination_without_reflection(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+    code: str,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+
+    assert cli.main([
+        "route", "recoverable", str(root), *arguments, "--json",
+    ]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {"error": {"code": code}}
+    assert "PRIVATE" not in captured.err
+
+
+def test_recoverable_cli_pages_deterministically_without_silent_truncation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "project"
+    store, _receipt = _attempt(root, "recoverable")
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        for index in (2, 3):
+            connection.execute(
+                "INSERT INTO tasks VALUES (?, 'isolated_code', 'low', ?, 1)",
+                (f"task-{index}", "a" * 64),
+            )
+            connection.execute(
+                "INSERT INTO decisions VALUES (?, ?, 'model:cloud', 'default', '1', '1', 1)",
+                (f"decision-{index}", f"task-{index}"),
+            )
+            connection.execute(
+                "INSERT INTO approvals VALUES (?, ?, ?, ?, ?, 'consumed', 99, 10)",
+                (f"approval-{index}", f"task-{index}", f"decision-{index}",
+                 f"{index:064x}", f"{index + 10:064x}"),
+            )
+            connection.execute(
+                "INSERT INTO execution_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,"
+                "'persistence_failed','execution_persistence_failed',NULL,1,1)",
+                (f"attempt-{index}", f"approval-{index}", f"task-{index}",
+                 f"decision-{index}", f"{index + 10:064x}", "a" * 64,
+                 "model:cloud", "default", 10, 8, 2, _PROMPT_HASH, _DIGEST),
+            )
+            connection.execute(
+                "INSERT INTO staged_execution_receipts VALUES (?,?,?,?,?,'succeeded',"
+                "6,2,5,?,?,?,NULL,1)",
+                (f"attempt-{index}", f"exec-{index}", f"approval-{index}",
+                 "model:cloud", "default", _PROMPT_HASH, "d" * 64, _DIGEST),
+            )
+
+    base = ["route", "recoverable", str(root), "--limit", "2", "--json"]
+    assert cli.main(base) == 0
+    first_output = capsys.readouterr().out
+    first = json.loads(first_output)
+    assert first == {
+        "attempts": [
+            {"attempt_id": "attempt-1", "status": "recoverable"},
+            {"attempt_id": "attempt-2", "status": "recoverable"},
+        ],
+        "has_more": True,
+        "next_cursor": "attempt-2",
+    }
+    assert len(first_output.encode("utf-8")) < 512
+    assert cli.main([*base[:-1], "--after", first["next_cursor"], "--json"]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second == {
+        "attempts": [{"attempt_id": "attempt-3", "status": "recoverable"}],
+        "has_more": False,
+        "next_cursor": None,
+    }

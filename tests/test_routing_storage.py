@@ -392,7 +392,7 @@ def test_v1_database_migrates_to_v2_without_losing_rows(tmp_path: Path) -> None:
     assert {"outcomes_recorded_at_idx", "executions_task_idx"} <= indexes
     assert foreign_key_errors == []
     assert integrity == "ok"
-    assert store.recoverable_attempt_ids() == ()
+    assert store.recoverable_attempts().attempt_ids == ()
     for attempt_id in ("attempt-pending", "attempt-recover"):
         with pytest.raises(StorageError, match="^legacy_attempt_bindings_missing$"):
             store.reconcile_execution_attempt(attempt_id, completed_at=20)
@@ -607,11 +607,183 @@ def test_v2_digestless_recovery_is_quarantined_without_fabrication(tmp_path: Pat
     assert after_attempts == expected_attempts
     assert after_staged == before_staged
     assert after_indexes == before_indexes
-    assert store.recoverable_attempt_ids() == ()
+    assert store.recoverable_attempts().attempt_ids == ()
     assert store.execution_attempt("attempt-completed")["execution_id"] == "exec-completed"
     for attempt_id in ("attempt-pending", "attempt-recover"):
         with pytest.raises(StorageError, match="^legacy_attempt_digest_missing$"):
             store.reconcile_execution_attempt(attempt_id, completed_at=3)
+
+    store.record_task("task-new", "isolated_code", "low", "1" * 64, 5)
+    store.record_decision(
+        "decision-new", "task-new", "model:cloud", "default", "1", "1", 5
+    )
+    store.save_approval_record(
+        approval_id="approval-new", task_id="task-new", decision_id="decision-new",
+        nonce_hash="2" * 64, manifest_hash="3" * 64, expires_at=99,
+        reserved_tokens=10,
+    )
+    store.create_execution_attempt(
+        attempt_id="attempt-new", approval_id="approval-new", task_id="task-new",
+        decision_id="decision-new", manifest_hash="3" * 64,
+        graph_fingerprint="1" * 64, model_id="model:cloud", effort="default",
+        reserved_tokens=10, max_input_tokens=8, max_output_tokens=2,
+        expected_prompt_hash="4" * 64, inventory_digest="5" * 64, created_at=5,
+    )
+    store.save_approval_record(
+        approval_id="approval-insert", task_id="task-new", decision_id="decision-new",
+        nonce_hash="6" * 64, manifest_hash="7" * 64, expires_at=99,
+        reserved_tokens=10,
+    )
+    with sqlite3.connect(path) as connection:
+        for statement, parameters in (
+            (
+                "UPDATE execution_attempts SET status='pending' WHERE attempt_id=?",
+                ("attempt-completed",),
+            ),
+            (
+                "UPDATE execution_attempts SET inventory_digest=? WHERE attempt_id=?",
+                ("6" * 64, "attempt-completed"),
+            ),
+            (
+                "UPDATE execution_attempts SET inventory_digest=? WHERE attempt_id=?",
+                ("A" * 64, "attempt-new"),
+            ),
+            (
+                "UPDATE staged_execution_receipts SET inventory_digest=? WHERE attempt_id=?",
+                ("6" * 64, "attempt-recover"),
+            ),
+            (
+                "DELETE FROM staged_execution_receipts WHERE attempt_id=?",
+                ("attempt-recover",),
+            ),
+            (
+                "DELETE FROM execution_attempts WHERE attempt_id=?",
+                ("attempt-completed",),
+            ),
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(statement, parameters)
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO execution_attempts(attempt_id,approval_id,task_id,decision_id,"
+                "manifest_hash,graph_fingerprint,model_id,effort,reserved_tokens,"
+                "max_input_tokens,max_output_tokens,expected_prompt_hash,status,"
+                "failure_reason,execution_id,created_at,updated_at,inventory_digest) VALUES "
+                "('attempt-insert','approval-insert','task-new','decision-new',?,?,?,?,"
+                "10,8,2,?,'pending',NULL,NULL,6,6,NULL)",
+                ("7" * 64, "1" * 64, "model:cloud", "default", "4" * 64),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO staged_execution_receipts(attempt_id,execution_id,approval_id,"
+                "model_id,effort,outcome,input_tokens,output_tokens,latency_ms,prompt_hash,"
+                "response_hash,failure_reason,staged_at,inventory_digest) VALUES "
+                "('attempt-new','exec-new','approval-new','model:cloud','default',"
+                "'succeeded',6,2,5,?,?,NULL,6,NULL)",
+                ("4" * 64, "7" * 64),
+            )
+        connection.execute(
+            "INSERT INTO staged_execution_receipts(attempt_id,execution_id,approval_id,"
+            "model_id,effort,outcome,input_tokens,output_tokens,latency_ms,prompt_hash,"
+            "response_hash,failure_reason,staged_at,inventory_digest) VALUES "
+            "('attempt-new','exec-new','approval-new','model:cloud','default',"
+            "'succeeded',6,2,5,?,?,NULL,6,?)",
+            ("4" * 64, "7" * 64, "5" * 64),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE staged_execution_receipts SET inventory_digest=? "
+                "WHERE attempt_id='attempt-new'", ("A" * 64,),
+            )
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_recoverable_enumeration_is_validated_bounded_and_paginated(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        for index in range(105):
+            suffix = f"{index:03d}"
+            connection.execute(
+                "INSERT INTO tasks VALUES (?, 'isolated_code', 'low', ?, 1)",
+                (f"task-{suffix}", "1" * 64),
+            )
+            connection.execute(
+                "INSERT INTO decisions VALUES (?, ?, 'model:cloud', 'default', '1', '1', 1)",
+                (f"decision-{suffix}", f"task-{suffix}"),
+            )
+            connection.execute(
+                "INSERT INTO approvals VALUES (?, ?, ?, ?, ?, 'consumed', 99, 10)",
+                (f"approval-{suffix}", f"task-{suffix}", f"decision-{suffix}",
+                 f"{index:064x}", f"{index + 200:064x}"),
+            )
+            connection.execute(
+                "INSERT INTO execution_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,"
+                "'persistence_failed','execution_persistence_failed',NULL,1,1)",
+                (f"attempt-{suffix}", f"approval-{suffix}", f"task-{suffix}",
+                 f"decision-{suffix}", f"{index + 200:064x}", "2" * 64,
+                 "model:cloud", "default", 10, 8, 2, "3" * 64, "4" * 64),
+            )
+            connection.execute(
+                "INSERT INTO staged_execution_receipts VALUES (?,?,?,?,?,'succeeded',"
+                "6,2,5,?,?,?,NULL,1)",
+                (f"attempt-{suffix}", f"exec-{suffix}", f"approval-{suffix}",
+                 "model:cloud", "default", "3" * 64, "5" * 64, "4" * 64),
+            )
+
+    collected: list[str] = []
+    cursor: str | None = None
+    while True:
+        page = store.recoverable_attempts(limit=17, after=cursor)
+        assert len(page.attempt_ids) <= 17
+        collected.extend(page.attempt_ids)
+        if not page.has_more:
+            assert page.next_cursor is None
+            break
+        assert page.next_cursor == page.attempt_ids[-1]
+        cursor = page.next_cursor
+    assert collected == [f"attempt-{index:03d}" for index in range(105)]
+    assert len(collected) == len(set(collected))
+    assert len(store.recoverable_attempts().attempt_ids) == 50
+    for invalid in (0, 101, True):
+        with pytest.raises(ValueError, match="^recovery_limit_invalid$"):
+            store.recoverable_attempts(limit=invalid)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="^recovery_cursor_invalid$"):
+        store.recoverable_attempts(after="../PRIVATE")
+
+
+@pytest.mark.parametrize(
+    "corrupt_id",
+    ["C:\\PRIVATE\\secret\n\x1b", "a" * 257],
+)
+def test_recoverable_enumeration_never_reflects_corrupt_attempt_id(
+    tmp_path: Path, corrupt_id: str,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            "INSERT INTO execution_attempts VALUES (?, 'approval-x', 'task-x', 'decision-x',"
+            "?,?,?,?,?,?,?,?,?,'persistence_failed',NULL,NULL,1,1)",
+            (corrupt_id, "1" * 64, "2" * 64, "model:cloud", "default", 10, 8, 2,
+             "3" * 64, "4" * 64),
+        )
+        connection.execute(
+            "INSERT INTO staged_execution_receipts VALUES (?, 'exec-x', 'approval-x',"
+            "'model:cloud','default','succeeded',6,2,5,?,?,?,NULL,1)",
+            (corrupt_id, "3" * 64, "5" * 64, "4" * 64),
+        )
+    with pytest.raises(StorageError, match="^storage_corrupt$") as caught:
+        store.recoverable_attempts()
+    assert corrupt_id not in str(caught.value)
 
 
 def test_duplicate_idempotency_key_cannot_create_duplicate_execution(tmp_path: Path) -> None:

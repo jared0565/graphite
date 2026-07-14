@@ -40,9 +40,15 @@ class _Service:
         self.calls.append("status")
         return {"routing": "ready", "authority": "approval_required"}
 
-    def recoverable_attempt_ids(self):
-        self.calls.append("recoverable")
-        return ("attempt-1",)
+    def recoverable_attempts(self, *, limit, after):
+        self.calls.append(f"recoverable:{limit}:{after}")
+        return type("Page", (), {
+            "to_dict": lambda self: {
+                "attempts": [{"attempt_id": "attempt-1", "status": "recoverable"}],
+                "has_more": False,
+                "next_cursor": None,
+            },
+        })()
 
     def reconcile_execution(self, attempt_id):
         self.calls.append(f"reconcile:{attempt_id}")
@@ -181,7 +187,9 @@ def test_route_recovery_commands_emit_only_sanitized_json(
 ) -> None:
     assert cli.main(["route", "recoverable", ".", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
-        "attempts": [{"attempt_id": "attempt-1", "status": "recoverable"}]
+        "attempts": [{"attempt_id": "attempt-1", "status": "recoverable"}],
+        "has_more": False,
+        "next_cursor": None,
     }
     assert cli.main([
         "route", "reconcile", ".", "--attempt-id", "attempt-1", "--json",
@@ -189,7 +197,7 @@ def test_route_recovery_commands_emit_only_sanitized_json(
     assert json.loads(capsys.readouterr().out) == {
         "approval_id": "approval-1", "execution_id": "exec-1", "outcome": "succeeded",
     }
-    assert _Service.calls == ["recoverable", "reconcile:attempt-1"]
+    assert _Service.calls == ["recoverable:50:None", "reconcile:attempt-1"]
 
 
 def test_machine_verification_claim_requires_supported_import() -> None:

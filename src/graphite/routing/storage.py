@@ -15,6 +15,8 @@ from .contracts import Effort, ExecutionOutcome, ExecutionReceipt, RiskTier, Tas
 
 SCHEMA_VERSION: Final = "3"
 BUSY_TIMEOUT_MS: Final = 2_000
+DEFAULT_RECOVERY_PAGE_SIZE: Final = 50
+MAX_RECOVERY_PAGE_SIZE: Final = 100
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}(?::cloud)?$")
@@ -343,7 +345,72 @@ _SCHEMA = (
         refreshed_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL
     )""",
+    """CREATE TRIGGER IF NOT EXISTS execution_attempt_digest_insert_guard
+    BEFORE INSERT ON execution_attempts
+    WHEN NEW.inventory_digest IS NULL
+      OR length(NEW.inventory_digest) != 64
+      OR NEW.inventory_digest GLOB '*[^0-9a-f]*'
+    BEGIN
+        SELECT RAISE(ABORT, 'inventory_digest_invalid');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS execution_attempt_digest_update_guard
+    BEFORE UPDATE ON execution_attempts
+    WHEN OLD.inventory_digest IS NULL
+      OR NEW.inventory_digest IS NULL
+      OR length(NEW.inventory_digest) != 64
+      OR NEW.inventory_digest GLOB '*[^0-9a-f]*'
+    BEGIN
+        SELECT RAISE(ABORT, 'inventory_digest_invalid');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS execution_attempt_digest_delete_guard
+    BEFORE DELETE ON execution_attempts
+    WHEN OLD.inventory_digest IS NULL
+    BEGIN
+        SELECT RAISE(ABORT, 'inventory_digest_invalid');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS staged_receipt_digest_insert_guard
+    BEFORE INSERT ON staged_execution_receipts
+    WHEN NEW.inventory_digest IS NULL
+      OR length(NEW.inventory_digest) != 64
+      OR NEW.inventory_digest GLOB '*[^0-9a-f]*'
+    BEGIN
+        SELECT RAISE(ABORT, 'inventory_digest_invalid');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS staged_receipt_digest_update_guard
+    BEFORE UPDATE ON staged_execution_receipts
+    WHEN OLD.inventory_digest IS NULL
+      OR NEW.inventory_digest IS NULL
+      OR length(NEW.inventory_digest) != 64
+      OR NEW.inventory_digest GLOB '*[^0-9a-f]*'
+    BEGIN
+        SELECT RAISE(ABORT, 'inventory_digest_invalid');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS staged_receipt_digest_delete_guard
+    BEFORE DELETE ON staged_execution_receipts
+    WHEN OLD.inventory_digest IS NULL
+    BEGIN
+        SELECT RAISE(ABORT, 'inventory_digest_invalid');
+    END""",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class RecoverableAttemptPage:
+    """Bounded public recovery enumeration with an opaque validated cursor."""
+
+    attempt_ids: tuple[str, ...]
+    next_cursor: str | None
+    has_more: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempts": [
+                {"attempt_id": attempt_id, "status": "recoverable"}
+                for attempt_id in self.attempt_ids
+            ],
+            "has_more": self.has_more,
+            "next_cursor": self.next_cursor,
+        }
 
 
 class RepositoryStore:
@@ -1123,14 +1190,45 @@ class RepositoryStore:
             if connection is not None:
                 connection.close()
 
-    def recoverable_attempt_ids(self) -> tuple[str, ...]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """SELECT a.attempt_id FROM execution_attempts a
-                JOIN staged_execution_receipts s ON s.attempt_id = a.attempt_id
-                WHERE a.status = 'persistence_failed' ORDER BY a.attempt_id"""
-            ).fetchall()
-        return tuple(str(row[0]) for row in rows)
+    def recoverable_attempts(
+        self,
+        *,
+        limit: int = DEFAULT_RECOVERY_PAGE_SIZE,
+        after: str | None = None,
+    ) -> RecoverableAttemptPage:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_RECOVERY_PAGE_SIZE
+        ):
+            raise ValueError("recovery_limit_invalid")
+        if after is not None:
+            after = _identifier(after, "recovery_cursor_invalid")
+        query = """SELECT a.attempt_id FROM execution_attempts a
+            JOIN staged_execution_receipts s ON s.attempt_id = a.attempt_id
+            WHERE a.status = 'persistence_failed'"""
+        parameters: list[Any] = []
+        if after is not None:
+            query += " AND a.attempt_id > ?"
+            parameters.append(after)
+        query += " ORDER BY a.attempt_id LIMIT ?"
+        parameters.append(limit + 1)
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(query, parameters).fetchall()
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+        try:
+            validated = tuple(_identifier(row[0], "storage_corrupt") for row in rows)
+        except ValueError as exc:
+            raise StorageError("storage_corrupt") from exc
+        has_more = len(validated) > limit
+        attempt_ids = validated[:limit]
+        return RecoverableAttemptPage(
+            attempt_ids=attempt_ids,
+            next_cursor=attempt_ids[-1] if has_more else None,
+            has_more=has_more,
+        )
 
     def reconcile_execution_attempt(
         self, attempt_id: str, *, completed_at: int

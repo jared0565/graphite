@@ -36,7 +36,7 @@ from .io import atomic_write_json
 from .llm import enrich_report
 from .routing.approval import approval_prompt
 from .routing.service import RoutingService
-from .routing.storage import StorageError
+from .routing.storage import DEFAULT_RECOVERY_PAGE_SIZE, StorageError
 from .query import _find_node, annotate_communities, query
 from .replacement_audit import audit_replacement, format_replacement_audit
 from .review import (
@@ -977,6 +977,8 @@ _ROUTE_RECOVERY_ERROR_CODES = frozenset({
     "execution_attempt_missing",
     "legacy_attempt_bindings_missing",
     "legacy_attempt_digest_missing",
+    "recovery_cursor_invalid",
+    "recovery_limit_invalid",
     "repository_root_invalid",
     "storage_corrupt",
     "storage_locked",
@@ -1107,16 +1109,12 @@ def cmd_route_status(args: argparse.Namespace) -> int:
 
 def cmd_route_recoverable(args: argparse.Namespace) -> int:
     try:
-        attempt_ids = RoutingService(args.path).recoverable_attempt_ids()
+        page = RoutingService(args.path).recoverable_attempts(
+            limit=args.limit, after=args.after
+        )
     except (StorageError, ValueError, OSError) as exc:
         return _route_recovery_error(exc, json_mode=args.json)
-    payload = {
-        "attempts": [
-            {"attempt_id": attempt_id, "status": "recoverable"}
-            for attempt_id in attempt_ids
-        ]
-    }
-    _route_print(payload, json_mode=args.json)
+    _route_print(page.to_dict(), json_mode=args.json)
     return 0
 
 
@@ -1212,6 +1210,13 @@ def main(argv: list[str] | None = None) -> int:
         "recoverable", help="List staged execution attempts eligible for reconciliation"
     )
     p_route_recoverable.add_argument("path", help="Repository path")
+    p_route_recoverable.add_argument(
+        "--limit", type=int, default=DEFAULT_RECOVERY_PAGE_SIZE,
+        help="Page size from 1 to 100 (default: 50)",
+    )
+    p_route_recoverable.add_argument(
+        "--after", default=None, help="Validated attempt ID cursor from next_cursor"
+    )
     p_route_recoverable.add_argument("--json", action="store_true")
     p_route_recoverable.set_defaults(func=cmd_route_recoverable)
 
