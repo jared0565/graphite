@@ -90,6 +90,53 @@ def test_typescript_resolver_can_be_disabled_for_heuristic_fallback(tmp_path: Pa
     assert ("src_app", "src_lib_foo", "imports", "EXACT_IMPORT") in imports
 
 
+def test_heuristic_resolves_js_extension_import_to_ts_source(tmp_path: Path) -> None:
+    """NodeNext/ESM: a relative import written with a ``.js`` extension must
+    resolve to the ``.ts`` source of the same stem on the heuristic (no-compiler)
+    path. Regression for the ``_candidate_paths`` bug that bailed on any suffix,
+    so ``import '../db/queries.js'`` never tried ``queries.ts`` and produced no
+    edge (real-world: worker code that imports with explicit ``.js`` extensions).
+    """
+    _write(tmp_path / "src" / "db" / "queries.ts", "export const q = 1;\n")
+    _write(
+        tmp_path / "src" / "routes" / "invites.ts",
+        "import { q } from '../db/queries.js';\nconsole.log(q);\n",
+    )
+
+    cfg = Config(workers=1, typescript_resolver="disabled", cache_dir=tmp_path / ".cache" / "graphite")
+    entries = collect_files(tmp_path, cfg)
+    source_index = SourceIndex.from_entries(entries, cfg)
+
+    assert source_index.typescript.available is False
+    resolved = source_index.resolve_ts_import_detail("src/routes/invites.ts", "../db/queries.js")
+    assert resolved is not None
+    assert resolved.rel_path == "src/db/queries.ts"
+    assert resolved.confidence == "EXACT_IMPORT"
+
+    result = extract_all(entries, cfg)
+    imports = {(e["source"], e["target"], e["relation"], e.get("confidence")) for e in result.edges if e["relation"] == "imports"}
+    assert ("src_routes_invites", "src_db_queries", "imports", "EXACT_IMPORT") in imports
+
+
+def test_heuristic_prefers_ts_source_over_js_twin_for_js_extension_import(tmp_path: Path) -> None:
+    """When both a ``.ts`` source and a compiled ``.js`` twin exist, a ``.js``
+    specifier must resolve to the ``.ts`` source (matches TypeScript, and avoids
+    pointing edges at build artefacts). Guards the .ts-before-literal ordering.
+    """
+    _write(tmp_path / "src" / "util.ts", "export const u = 1;\n")
+    _write(tmp_path / "src" / "util.js", "export const u = 1;\n")
+    _write(tmp_path / "src" / "app.ts", "import { u } from './util.js';\nconsole.log(u);\n")
+
+    cfg = Config(workers=1, typescript_resolver="disabled", cache_dir=tmp_path / ".cache" / "graphite")
+    entries = collect_files(tmp_path, cfg)
+    source_index = SourceIndex.from_entries(entries, cfg)
+
+    assert source_index.typescript.available is False
+    resolved = source_index.resolve_ts_import_detail("src/app.ts", "./util.js")
+    assert resolved is not None
+    assert resolved.rel_path == "src/util.ts"
+
+
 def test_typescript_compiler_adds_file_level_symbol_reference_edges(tmp_path: Path) -> None:
     _write(
         tmp_path / "tsconfig.json",

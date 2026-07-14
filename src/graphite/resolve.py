@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import posixpath
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable
@@ -143,11 +144,34 @@ def should_keep_call_target(called: str) -> bool:
     return True
 
 
+# TypeScript NodeNext/ESM writes relative import specifiers with a JS-family
+# extension (the *emitted* file name) while the source on disk is the matching
+# TS extension — e.g. `import '../db/queries.js'` resolves to `queries.ts`. Map
+# each JS extension to the TS source extensions to try. Order matters: TS source
+# is preferred over the literal path so a `.js` specifier resolves to the source,
+# not a compiled `.js` twin sitting beside it.
+_JS_TO_TS_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    ".js": (".ts", ".tsx"),
+    ".jsx": (".tsx",),
+    ".mjs": (".mts",),
+    ".cjs": (".cts",),
+}
+
+
 def _candidate_paths(base: PurePosixPath) -> list[str]:
-    base_str = base.as_posix()
+    # Collapse any ".."/"." segments so a relative specifier like
+    # "../db/queries" from "src/routes/x.ts" becomes "src/db/queries" and can
+    # match a scanned rel_path (PurePosixPath.joinpath does NOT normalize "..").
+    base_str = posixpath.normpath(base.as_posix())
+    root, suffix = posixpath.splitext(base_str)
+    if suffix:
+        ts_swaps = _JS_TO_TS_EXTENSIONS.get(suffix)
+        if ts_swaps:
+            # Prefer the TS source of the same stem, then fall back to the
+            # literal path (a real .js/.jsx file with no TS source may exist).
+            return [f"{root}{ext}" for ext in ts_swaps] + [base_str]
+        return [base_str]
     out = [base_str]
-    if base.suffix:
-        return out
     out.extend(f"{base_str}{ext}" for ext in _TS_EXTENSIONS)
     out.extend(f"{base_str}/{name}" for name in _INDEX_NAMES)
     return out
