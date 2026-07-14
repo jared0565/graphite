@@ -8,7 +8,13 @@ import pytest
 
 import graphite.routing.policy as policy_module
 import graphite.routing.registry as registry_module
-from graphite.routing.contracts import Effort, RiskTier, TaskCategory, TaskProfile
+from graphite.routing.contracts import (
+    Effort,
+    ModelProfile,
+    RiskTier,
+    TaskCategory,
+    TaskProfile,
+)
 from graphite.routing.policy import (
     CandidateMetrics,
     PolicyGates,
@@ -20,6 +26,7 @@ from graphite.routing.registry import (
     BUNDLED_PROFILES,
     ModelRole,
     RegistryProfile,
+    RegistrySnapshot,
     UsageClass,
     lifecycle_is_eligible,
     parse_inventory,
@@ -284,15 +291,52 @@ def test_low_risk_isolated_code_uses_role_and_usage_ranking() -> None:
     assert first == second
     assert first.selected is not None
     assert first.selected.model_id == "kimi-k2.7-code:cloud"
-    assert [item.model_id for item in first.ranked[:3]] == [
+    assert [item.model_id for item in first.ranked] == [
         "kimi-k2.7-code:cloud",
         "minimax-m2.7:cloud",
-        "nemotron-3-super:cloud",
     ]
-    assert [item.score for item in first.ranked[:3]] == [727, 707, 667]
+    assert [item.score for item in first.ranked] == [727, 707]
     assert first.policy_version == "2"
     assert dict(first.selected.components)["role_fit_bonus"] == 100
     assert dict(first.selected.components)["usage_penalty"] == 40
+
+
+def test_capability_ineligible_sole_candidate_cannot_be_selected() -> None:
+    result = rank_candidates(
+        _task(category=TaskCategory.ISOLATED_CODE),
+        _snapshot(),
+        (_candidate("nemotron-3-super:cloud"),),
+        PolicyGates(),
+    )
+
+    assert result.selected is None
+    assert result.manual_handoff is True
+    assert result.reasons == ("capability_missing",)
+
+
+def test_refactor_keeps_reasoning_review_model_as_deterministic_alternative() -> None:
+    candidates = _all_candidates()
+
+    first = rank_candidates(
+        _task(category=TaskCategory.REFACTOR),
+        _snapshot(),
+        candidates,
+        PolicyGates(),
+    )
+    second = rank_candidates(
+        _task(category=TaskCategory.REFACTOR),
+        _snapshot(),
+        tuple(reversed(candidates)),
+        PolicyGates(),
+    )
+
+    assert first == second
+    assert [item.model_id for item in first.ranked] == [
+        "kimi-k2.7-code:cloud",
+        "minimax-m2.7:cloud",
+        "nemotron-3-super:cloud",
+        "minimax-m3:cloud",
+    ]
 
 
 def test_medium_usage_beats_high_usage_when_role_and_evidence_match(monkeypatch) -> None:
@@ -340,6 +384,161 @@ def test_high_risk_architecture_hands_off_when_all_profiles_are_provisional() ->
     assert result.selected is None
     assert result.manual_handoff is True
     assert result.reasons == ("risk_ineligible",)
+
+
+@pytest.mark.parametrize(
+    ("rejected", "task", "snapshot", "error"),
+    [
+        (
+            _candidate("unknown:cloud", expected_latency_ms=-1),
+            _task(),
+            _snapshot(),
+            "expected_latency_invalid",
+        ),
+        (
+            _candidate("minimax-m2.7:cloud", retry_rate_millis=float("nan")),
+            _task(),
+            parse_inventory({"models": []}, refreshed_at=100, ttl_seconds=300),
+            "retry_rate_invalid",
+        ),
+        (
+            _candidate("nemotron-3-super:cloud", escalation_rate_millis=-1),
+            _task(category=TaskCategory.ISOLATED_CODE),
+            _snapshot(),
+            "escalation_rate_invalid",
+        ),
+        (
+            _candidate("kimi-k2.7-code:cloud", quota_scarcity_millis=-1),
+            _task(RiskTier.HIGH),
+            _snapshot(),
+            "quota_scarcity_invalid",
+        ),
+    ],
+)
+def test_rejected_candidate_evidence_remains_fail_closed_in_mixed_pool(
+    rejected: CandidateMetrics,
+    task: TaskProfile,
+    snapshot: RegistrySnapshot,
+    error: str,
+) -> None:
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        rank_candidates(
+            task,
+            snapshot,
+            (_candidate(), rejected),
+            PolicyGates(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("category", "role", "capability", "expected_bonus"),
+    [
+        (TaskCategory.DOCUMENTATION, ModelRole.CODING_PRIMARY, "code", 100),
+        (TaskCategory.DOCUMENTATION, ModelRole.CODING, "code", 40),
+        (TaskCategory.ISOLATED_CODE, ModelRole.CODING_PRIMARY, "code", 100),
+        (TaskCategory.ISOLATED_CODE, ModelRole.CODING, "code", 40),
+        (TaskCategory.FEATURE, ModelRole.CODING_PRIMARY, "code", 100),
+        (TaskCategory.FEATURE, ModelRole.CODING, "code", 40),
+        (TaskCategory.FEATURE, ModelRole.AGENTIC, "code", 20),
+        (TaskCategory.REFACTOR, ModelRole.CODING_PRIMARY, "code", 80),
+        (TaskCategory.REFACTOR, ModelRole.CODING, "code", 40),
+        (TaskCategory.REFACTOR, ModelRole.REASONING, "reasoning", 20),
+        (TaskCategory.ARCHITECTURE, ModelRole.LONG_CONTEXT, "architecture", 80),
+        (TaskCategory.ARCHITECTURE, ModelRole.REASONING, "architecture", 40),
+    ],
+)
+def test_role_bonus_category_vectors_are_exact(
+    monkeypatch,
+    category: TaskCategory,
+    role: ModelRole,
+    capability: str,
+    expected_bonus: int,
+) -> None:
+    model_id = "test-model:cloud"
+    profile = RegistryProfile(
+        profile=ModelProfile(
+            model_id=model_id,
+            profile_version="1",
+            capabilities=(capability,),
+            context_window_tokens=128_000,
+            supported_efforts=(Effort.DEFAULT,),
+            provisional=True,
+        ),
+        effort_payloads={Effort.DEFAULT: {}},
+        evidence_url="https://ollama.com/library/test-model",
+        evidence_accessed="2026-07-14",
+        roles=(role,),
+        usage_class=UsageClass.MEDIUM,
+    )
+    replacement = MappingProxyType({model_id: profile})
+    monkeypatch.setattr(policy_module, "BUNDLED_PROFILES", replacement)
+    monkeypatch.setattr(registry_module, "BUNDLED_PROFILES", replacement)
+    snapshot = parse_inventory(
+        {
+            "models": [
+                {
+                    "name": model_id,
+                    "model": model_id,
+                    "digest": "e" * 64,
+                    "details": {"context_length": 128_000},
+                    "capabilities": [capability],
+                }
+            ]
+        },
+        refreshed_at=100,
+        ttl_seconds=300,
+    )
+
+    result = rank_candidates(
+        _task(category=category),
+        snapshot,
+        (_candidate(model_id),),
+        PolicyGates(),
+    )
+
+    assert result.selected is not None
+    assert dict(result.selected.components)["role_fit_bonus"] == expected_bonus
+    assert result.selected.score == 667 + expected_bonus
+
+
+def test_score_is_clamped_to_floor_and_ceiling() -> None:
+    ceiling = rank_candidates(
+        _task(),
+        _snapshot(),
+        (
+            _candidate(
+                global_success_millis=1_000,
+                expected_input_tokens=0,
+                expected_output_tokens=0,
+                expected_latency_ms=0,
+                retry_rate_millis=0,
+                escalation_rate_millis=0,
+                quota_scarcity_millis=0,
+            ),
+        ),
+        PolicyGates(),
+    )
+    floor = rank_candidates(
+        _task(),
+        _snapshot(),
+        (
+            _candidate(
+                global_success_millis=0,
+                expected_input_tokens=20_000,
+                expected_output_tokens=10_000,
+                expected_latency_ms=200_000,
+                retry_rate_millis=1_000,
+                escalation_rate_millis=1_000,
+                quota_scarcity_millis=1_000,
+            ),
+        ),
+        PolicyGates(budget_tokens=100_000),
+    )
+
+    assert ceiling.selected is not None
+    assert floor.selected is not None
+    assert ceiling.selected.score == 1_000
+    assert floor.selected.score == 0
 
 
 @pytest.mark.parametrize(
