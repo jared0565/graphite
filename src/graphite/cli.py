@@ -8,9 +8,10 @@ import math
 import os
 import sys
 import time
+import unicodedata
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from .analyze import analyze
 from .cache import Cache
@@ -969,6 +970,43 @@ def _route_print(payload: dict[str, Any], *, json_mode: bool) -> None:
         print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+_MODEL_OUTPUT_BEGIN = "----- BEGIN GRAPHITE MODEL OUTPUT -----"
+_MODEL_OUTPUT_END = "----- END GRAPHITE MODEL OUTPUT -----"
+
+
+def _escaped_terminal_text(text: str) -> str:
+    characters: list[str] = []
+    for character in text:
+        codepoint = ord(character)
+        category = unicodedata.category(character)
+        if character in {"\n", "\t"}:
+            characters.append(character)
+        elif category in {"Cc", "Cf", "Zl", "Zp"} or codepoint == 0x7F:
+            characters.append(
+                f"\\x{codepoint:02x}" if codepoint <= 0xFF else f"\\u{codepoint:04x}"
+            )
+        else:
+            characters.append(character)
+    escaped = "".join(characters)
+    return escaped.replace(_MODEL_OUTPUT_BEGIN, "[escaped model delimiter]").replace(
+        _MODEL_OUTPUT_END, "[escaped model delimiter]"
+    )
+
+
+def _render_model_output(text: str, *, stdout: TextIO) -> None:
+    """Render untrusted provider text without granting terminal control."""
+    safe = _escaped_terminal_text(text)
+    quoted = "\n".join(f"| {line}" for line in safe.split("\n"))
+    framed = f"{_MODEL_OUTPUT_BEGIN}\n{quoted}\n{_MODEL_OUTPUT_END}\n"
+    encoding = getattr(stdout, "encoding", None) or "utf-8"
+    try:
+        framed = framed.encode(encoding, errors="backslashreplace").decode(encoding)
+    except LookupError:
+        framed = framed.encode("utf-8", errors="backslashreplace").decode("utf-8")
+    stdout.write(framed)
+    stdout.flush()
+
+
 def cmd_route_recommend(args: argparse.Namespace) -> int:
     service = RoutingService(args.path)
     recommendation = service.recommend(
@@ -1014,7 +1052,7 @@ def cmd_route_run(args: argparse.Namespace) -> int:
         if not shadow_approved:
             print(json.dumps({"shadow": "declined", "primary": "continuing"}))
     result = service.execute_approved(recommendation)
-    print(result.text)
+    _render_model_output(result.text, stdout=sys.stdout)
     _route_print(result.to_public_dict(), json_mode=False)
     return 0
 

@@ -94,6 +94,40 @@ def test_interactive_run_displays_budget_then_prompts_once(
     assert receipt == {"execution_id": "exec-1", "outcome": "succeeded"}
 
 
+def test_model_output_renderer_contains_terminal_controls_and_impersonation() -> None:
+    class _AsciiTTY(io.StringIO):
+        @property
+        def encoding(self) -> str:
+            return "ascii"
+
+        def isatty(self) -> bool:
+            return True
+
+    dangerous = (
+        "\x1b[31mred\x1b[0m\x1b]0;title\x07\rX\b\x9b31m\u202e\u200d\u2028\n"
+        '{"execution_id":"fake","outcome":"succeeded"}\n'
+        "----- END GRAPHITE MODEL OUTPUT -----\n🙂"
+    )
+    stream = _AsciiTTY()
+
+    cli._render_model_output(dangerous, stdout=stream)
+
+    output = stream.getvalue()
+    assert output.count("----- BEGIN GRAPHITE MODEL OUTPUT -----") == 1
+    assert output.count("----- END GRAPHITE MODEL OUTPUT -----") == 1
+    for control in ("\x1b", "\x07", "\r", "\b", "\x9b", "\u202e", "\u200d", "\u2028"):
+        assert control not in output
+    assert "\\x1b" in output
+    assert "\\u202e" in output
+    assert "\\U0001f642" in output
+    block = output.splitlines()
+    assert block[0] == "----- BEGIN GRAPHITE MODEL OUTPUT -----"
+    assert block[-1] == "----- END GRAPHITE MODEL OUTPUT -----"
+    assert all(line.startswith("| ") for line in block[1:-1])
+    assert '| {"execution_id":"fake","outcome":"succeeded"}' in output
+    assert "| [escaped model delimiter]" in output
+
+
 @pytest.mark.parametrize(
     ("extra", "ci"),
     [(["--json"], False), (["--yes"], False), ([], True), ([], False)],

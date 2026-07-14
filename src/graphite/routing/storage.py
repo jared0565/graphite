@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from .contracts import Effort, ExecutionOutcome, RiskTier, TaskCategory
+from .contracts import Effort, ExecutionOutcome, ExecutionReceipt, RiskTier, TaskCategory
 
 SCHEMA_VERSION: Final = "1"
 BUSY_TIMEOUT_MS: Final = 2_000
@@ -37,6 +37,8 @@ _TABLES = frozenset(
         "confidence_stats",
         "registry_snapshots",
         "execution_evidence",
+        "execution_attempts",
+        "execution_receipts",
         "incident_reviews",
         "blind_comparisons",
     }
@@ -257,6 +259,36 @@ _SCHEMA = (
         task_id TEXT NOT NULL,
         decision_id TEXT NOT NULL,
         graph_fingerprint TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS execution_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        approval_id TEXT NOT NULL UNIQUE REFERENCES approvals(approval_id) ON DELETE RESTRICT,
+        task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
+        decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE RESTRICT,
+        manifest_hash TEXT NOT NULL,
+        graph_fingerprint TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        effort TEXT NOT NULL,
+        reserved_tokens INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'failed', 'persistence_failed')),
+        failure_reason TEXT,
+        execution_id TEXT UNIQUE REFERENCES executions(execution_id) ON DELETE RESTRICT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS execution_receipts (
+        execution_id TEXT PRIMARY KEY REFERENCES executions(execution_id) ON DELETE CASCADE,
+        approval_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        effort TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        latency_ms INTEGER NOT NULL,
+        prompt_hash TEXT NOT NULL,
+        response_hash TEXT NOT NULL,
+        failure_reason TEXT,
+        completed_at INTEGER NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS incident_reviews (
         review_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -543,6 +575,234 @@ class RepositoryStore:
                 WHERE ee.execution_id = ?
                   AND e.task_id = ee.task_id AND e.decision_id = ee.decision_id""",
                 (execution_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def create_execution_attempt(
+        self,
+        *,
+        attempt_id: str,
+        approval_id: str,
+        task_id: str,
+        decision_id: str,
+        manifest_hash: str,
+        graph_fingerprint: str,
+        model_id: str,
+        effort: str,
+        reserved_tokens: int,
+        created_at: int,
+    ) -> bool:
+        values = (
+            _identifier(attempt_id, "attempt_id_invalid"),
+            _identifier(approval_id, "approval_id_invalid"),
+            _identifier(task_id, "task_id_invalid"),
+            _identifier(decision_id, "decision_id_invalid"),
+            manifest_hash,
+            graph_fingerprint,
+            _identifier(model_id, "model_id_invalid"),
+            Effort(effort).value,
+            _nonnegative_integer(reserved_tokens, "reserved_tokens_invalid"),
+            _nonnegative_integer(created_at, "created_at_invalid"),
+        )
+        if not _HEX_64.fullmatch(manifest_hash):
+            raise ValueError("manifest_hash_invalid")
+        if not _HEX_64.fullmatch(graph_fingerprint):
+            raise ValueError("graph_fingerprint_invalid")
+        try:
+            with self._connect() as connection:
+                existing = connection.execute(
+                    "SELECT attempt_id, task_id, decision_id, manifest_hash, "
+                    "graph_fingerprint, model_id, effort, reserved_tokens "
+                    "FROM execution_attempts WHERE approval_id = ?",
+                    (values[1],),
+                ).fetchone()
+                if existing is not None:
+                    expected = (values[0], *values[2:9])
+                    if tuple(existing) != expected:
+                        raise StorageError("execution_attempt_conflict")
+                    return False
+                approval = connection.execute(
+                    "SELECT manifest_hash, reserved_tokens, status FROM approvals "
+                    "WHERE approval_id = ?",
+                    (values[1],),
+                ).fetchone()
+                decision = connection.execute(
+                    "SELECT task_id, model_id, effort FROM decisions WHERE decision_id = ?",
+                    (values[3],),
+                ).fetchone()
+                if (
+                    approval is None
+                    or tuple(approval) != (values[4], values[8], "issued")
+                    or decision is None
+                    or tuple(decision) != (values[2], values[6], values[7])
+                ):
+                    raise StorageError("execution_attempt_conflict")
+                connection.execute(
+                    """INSERT INTO execution_attempts(
+                        attempt_id, approval_id, task_id, decision_id, manifest_hash,
+                        graph_fingerprint, model_id, effort, reserved_tokens, status,
+                        failure_reason, execution_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)""",
+                    (*values[:9], values[9], values[9]),
+                )
+                return True
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def mark_execution_attempt_failed(
+        self,
+        attempt_id: str,
+        reason: str,
+        *,
+        persistence_failed: bool = False,
+        updated_at: int,
+    ) -> bool:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        reason = _identifier(reason, "failure_reason_invalid")
+        updated_at = _nonnegative_integer(updated_at, "updated_at_invalid")
+        status = "persistence_failed" if persistence_failed else "failed"
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """UPDATE execution_attempts
+                    SET status = ?, failure_reason = ?, updated_at = ?
+                    WHERE attempt_id = ? AND status IN ('pending', 'persistence_failed')""",
+                    (status, reason, updated_at, attempt_id),
+                )
+                if cursor.rowcount == 1:
+                    return True
+                row = connection.execute(
+                    "SELECT status, failure_reason FROM execution_attempts WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()
+                if row is None:
+                    raise StorageError("execution_attempt_missing")
+                if tuple(row) == (status, reason):
+                    return False
+                raise StorageError("execution_attempt_conflict")
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def finalize_execution_attempt(
+        self,
+        *,
+        attempt_id: str,
+        receipt: ExecutionReceipt,
+        completed_at: int,
+    ) -> bool:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        if not isinstance(receipt, ExecutionReceipt):
+            raise ValueError("execution_receipt_invalid")
+        completed_at = _nonnegative_integer(completed_at, "completed_at_invalid")
+        if (
+            receipt.outcome is not ExecutionOutcome.SUCCEEDED
+            or receipt.input_tokens is None
+            or receipt.output_tokens is None
+            or receipt.response_hash is None
+            or receipt.failure_reason is not None
+        ):
+            raise ValueError("execution_receipt_invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = connection.execute(
+                "SELECT * FROM execution_attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if attempt is None:
+                raise StorageError("execution_attempt_missing")
+            if attempt["status"] == "completed":
+                stored = connection.execute(
+                    "SELECT approval_id, model_id, effort, outcome, input_tokens, "
+                    "output_tokens, latency_ms, prompt_hash, response_hash, failure_reason "
+                    "FROM execution_receipts WHERE execution_id = ?",
+                    (receipt.execution_id,),
+                ).fetchone()
+                expected = (
+                    receipt.approval_id, receipt.model_id, receipt.effort.value,
+                    receipt.outcome.value, receipt.input_tokens, receipt.output_tokens,
+                    receipt.latency_ms, receipt.prompt_hash, receipt.response_hash, None,
+                )
+                if attempt["execution_id"] != receipt.execution_id or tuple(stored or ()) != expected:
+                    raise StorageError("execution_attempt_conflict")
+                connection.rollback()
+                return False
+            if attempt["status"] not in {"pending", "persistence_failed"}:
+                raise StorageError("execution_attempt_conflict")
+            if (
+                attempt["approval_id"] != receipt.approval_id
+                or attempt["model_id"] != receipt.model_id
+                or attempt["effort"] != receipt.effort.value
+                or receipt.input_tokens + receipt.output_tokens > attempt["reserved_tokens"]
+            ):
+                raise StorageError("execution_attempt_conflict")
+            connection.execute(
+                """INSERT INTO executions(
+                    execution_id, idempotency_key, task_id, decision_id, approval_id,
+                    model_id, effort, status, reserved_tokens, actual_input_tokens,
+                    actual_output_tokens, created_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    receipt.execution_id, attempt_id, attempt["task_id"],
+                    attempt["decision_id"], receipt.approval_id, receipt.model_id,
+                    receipt.effort.value, receipt.outcome.value, attempt["reserved_tokens"],
+                    receipt.input_tokens, receipt.output_tokens, attempt["created_at"],
+                    completed_at,
+                ),
+            )
+            connection.execute(
+                """INSERT INTO execution_receipts(
+                    execution_id, approval_id, model_id, effort, outcome, input_tokens,
+                    output_tokens, latency_ms, prompt_hash, response_hash, failure_reason,
+                    completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+                (
+                    receipt.execution_id, receipt.approval_id, receipt.model_id,
+                    receipt.effort.value, receipt.outcome.value, receipt.input_tokens,
+                    receipt.output_tokens, receipt.latency_ms, receipt.prompt_hash,
+                    receipt.response_hash, completed_at,
+                ),
+            )
+            connection.execute(
+                """INSERT INTO execution_evidence(
+                    execution_id, task_id, decision_id, graph_fingerprint
+                ) VALUES (?, ?, ?, ?)""",
+                (
+                    receipt.execution_id, attempt["task_id"], attempt["decision_id"],
+                    attempt["graph_fingerprint"],
+                ),
+            )
+            connection.execute(
+                """UPDATE execution_attempts
+                SET status = 'completed', failure_reason = NULL, execution_id = ?, updated_at = ?
+                WHERE attempt_id = ?""",
+                (receipt.execution_id, completed_at, attempt_id),
+            )
+            connection.commit()
+            return True
+        except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def execution_attempt(self, attempt_id: str) -> dict[str, Any] | None:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM execution_attempts WHERE attempt_id = ?",
+                (attempt_id,),
             ).fetchone()
         return None if row is None else dict(row)
 

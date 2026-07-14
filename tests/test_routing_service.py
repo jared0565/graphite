@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 import socket
+import sqlite3
+from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import networkx as nx
 import pytest
@@ -17,8 +18,10 @@ from graphite.routing.context_builder import (
     PrivateContextItem,
 )
 from graphite.routing.contracts import Effort, ExecutionOutcome, ExecutionReceipt
+from graphite.routing.ollama_executor import ExecutionResult, ExecutorError
 from graphite.routing.registry import BUNDLED_PROFILES, InventoryModel, RegistrySnapshot
 from graphite.routing.service import RoutingService
+from graphite.routing.storage import StorageError
 
 
 MODEL_DIGESTS = {
@@ -120,37 +123,168 @@ def test_recommendation_is_offline_allowlisted_and_public(
 def test_execution_returns_ephemeral_text_and_persists_only_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    service, root = _service(tmp_path, monkeypatch)
+    service, _root = _service(tmp_path, monkeypatch)
     recommendation = service.recommend(
         objective="Review this isolated formatting helper",
         targets=("src/listing_summary.py",),
     )
     secret_text = "BOUNDED EPHEMERAL SUGGESTION"
-    receipt = ExecutionReceipt(
-        execution_id="exec-1",
-        approval_id="approval-1",
-        model_id="kimi-k2.7-code:cloud",
-        effort=Effort.DEFAULT,
-        outcome=ExecutionOutcome.SUCCEEDED,
-        input_tokens=20,
-        output_tokens=4,
-        latency_ms=10,
-        prompt_hash="4" * 64,
-        response_hash="5" * 64,
-        failure_reason=None,
-    )
-    monkeypatch.setattr(
-        service_module,
-        "execute_ollama",
-        lambda **_kwargs: SimpleNamespace(text=secret_text, receipt=receipt),
-    )
+    captured: dict[str, object] = {}
+
+    def execute(**kwargs: object) -> ExecutionResult:
+        manifest = kwargs["current_manifest"]
+        captured.update(kwargs)
+        receipt = ExecutionReceipt(
+            execution_id="exec-1",
+            approval_id=manifest.approval_id,
+            model_id=manifest.model_id,
+            effort=manifest.effort,
+            outcome=ExecutionOutcome.SUCCEEDED,
+            input_tokens=20,
+            output_tokens=4,
+            latency_ms=10,
+            prompt_hash="4" * 64,
+            response_hash=service_module.hashlib.sha256(secret_text.encode()).hexdigest(),
+            failure_reason=None,
+        )
+        return ExecutionResult(text=secret_text, receipt=receipt)
+
+    monkeypatch.setattr(service_module, "execute_ollama", execute)
 
     result = service.execute_approved(recommendation)
 
     assert result.text == secret_text
+    assert secret_text not in repr(result)
     assert result.receipt.outcome is ExecutionOutcome.SUCCEEDED
     public = result.to_public_dict()
-    assert public == receipt.to_dict()
+    assert public == result.receipt.to_dict()
     assert secret_text not in json.dumps(public, sort_keys=True)
-    persisted = b"".join(path.read_bytes() for path in root.rglob("*") if path.is_file())
+    persisted = b"".join(path.read_bytes() for path in tmp_path.rglob("*") if path.is_file())
     assert secret_text.encode() not in persisted
+    with sqlite3.connect(service.store.path) as connection:
+        execution = connection.execute(
+            "SELECT model_id, effort, status, actual_input_tokens, actual_output_tokens "
+            "FROM executions"
+        ).fetchone()
+        receipt_row = connection.execute(
+            "SELECT approval_id, model_id, effort, outcome, input_tokens, output_tokens "
+            "FROM execution_receipts"
+        ).fetchone()
+        attempt = connection.execute(
+            "SELECT status, execution_id FROM execution_attempts"
+        ).fetchone()
+    assert execution == ("kimi-k2.7-code:cloud", "default", "succeeded", 20, 4)
+    assert receipt_row[1:] == ("kimi-k2.7-code:cloud", "default", "succeeded", 20, 4)
+    assert receipt_row[0] == captured["current_manifest"].approval_id
+    assert attempt == ("completed", "exec-1")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda receipt, _manifest: replace(receipt, approval_id="approval-other"),
+        lambda receipt, _manifest: replace(receipt, model_id="minimax-m2.7:cloud"),
+        lambda receipt, _manifest: replace(receipt, effort=Effort.LOW),
+        lambda receipt, _manifest: replace(
+            receipt, outcome=ExecutionOutcome.PROVIDER_FAILED
+        ),
+        lambda receipt, manifest: replace(
+            receipt, input_tokens=manifest.max_input_tokens + 1
+        ),
+        lambda receipt, manifest: replace(
+            receipt, output_tokens=manifest.max_output_tokens + 1
+        ),
+        lambda receipt, _manifest: replace(receipt, response_hash="f" * 64),
+    ],
+)
+def test_executor_receipt_mismatch_fails_closed_without_success_persistence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation
+) -> None:
+    service, _root = _service(tmp_path, monkeypatch)
+    recommendation = service.recommend(
+        objective="Review this isolated formatting helper",
+        targets=("src/listing_summary.py",),
+    )
+    text = "PRIVATE PROVIDER BODY"
+
+    def execute(**kwargs: object) -> ExecutionResult:
+        manifest = kwargs["current_manifest"]
+        receipt = ExecutionReceipt(
+            "exec-invalid", manifest.approval_id, manifest.model_id, manifest.effort,
+            ExecutionOutcome.SUCCEEDED, 2, 1, 5, "4" * 64,
+            service_module.hashlib.sha256(text.encode()).hexdigest(), None,
+        )
+        return ExecutionResult(text, mutation(receipt, manifest))
+
+    monkeypatch.setattr(service_module, "execute_ollama", execute)
+    with pytest.raises(ExecutorError, match="^executor_receipt_invalid$") as caught:
+        service.execute_approved(recommendation)
+    assert str(caught.value) == "executor_receipt_invalid"
+    assert text not in str(caught.value)
+    with sqlite3.connect(service.store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM execution_receipts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM execution_evidence").fetchone()[0] == 0
+        assert connection.execute("SELECT status FROM execution_attempts").fetchone()[0] == "failed"
+
+
+def test_provider_failure_leaves_sanitized_durable_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _root = _service(tmp_path, monkeypatch)
+    recommendation = service.recommend(
+        objective="Review this isolated formatting helper",
+        targets=("src/listing_summary.py",),
+    )
+
+    def fail(**_kwargs: object) -> ExecutionResult:
+        raise ExecutorError("provider_unavailable")
+
+    monkeypatch.setattr(service_module, "execute_ollama", fail)
+    with pytest.raises(ExecutorError, match="^provider_unavailable$"):
+        service.execute_approved(recommendation)
+    with sqlite3.connect(service.store.path) as connection:
+        attempt = connection.execute(
+            "SELECT status, failure_reason FROM execution_attempts"
+        ).fetchone()
+        approval = connection.execute("SELECT status FROM approvals").fetchone()[0]
+    assert attempt == ("failed", "provider_unavailable")
+    assert approval == "issued"
+
+
+def test_completion_failure_leaves_recoverable_trace_without_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _root = _service(tmp_path, monkeypatch)
+    recommendation = service.recommend(
+        objective="Review this isolated formatting helper",
+        targets=("src/listing_summary.py",),
+    )
+    text = "UNPERSISTED PRIVATE BODY"
+
+    def execute(**kwargs: object) -> ExecutionResult:
+        manifest = kwargs["current_manifest"]
+        return ExecutionResult(
+            text,
+            ExecutionReceipt(
+                "exec-1", manifest.approval_id, manifest.model_id, manifest.effort,
+                ExecutionOutcome.SUCCEEDED, 2, 1, 5, "4" * 64,
+                service_module.hashlib.sha256(text.encode()).hexdigest(), None,
+            ),
+        )
+
+    monkeypatch.setattr(service_module, "execute_ollama", execute)
+    monkeypatch.setattr(
+        service.store,
+        "finalize_execution_attempt",
+        lambda **_kwargs: (_ for _ in ()).throw(StorageError("storage_unavailable")),
+    )
+    with pytest.raises(StorageError, match="^execution_persistence_failed$"):
+        service.execute_approved(recommendation)
+    with sqlite3.connect(service.store.path) as connection:
+        assert connection.execute(
+            "SELECT status, failure_reason FROM execution_attempts"
+        ).fetchone() == ("persistence_failed", "execution_persistence_failed")
+        assert connection.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 0
+    persisted = b"".join(path.read_bytes() for path in tmp_path.rglob("*") if path.is_file())
+    assert text.encode() not in persisted

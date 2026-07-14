@@ -15,6 +15,7 @@ from graphite.routing.approval import ApprovalAuthority
 from graphite.routing.context_builder import ContextBundle, OutboundManifest, PrivateContextItem
 from graphite.routing.contracts import ApprovalManifest, Effort, ExecutionOutcome
 from graphite.routing.ollama_executor import ExecutorError, execute_ollama
+from graphite.routing.registry import BUNDLED_PROFILES
 from graphite.routing.settings import RoutingSettings
 from graphite.routing.storage import RepositoryStore
 
@@ -122,10 +123,16 @@ def _approved(
     return authority, authority.issue(approval), approval, context
 
 
-@pytest.mark.parametrize("model", tuple(MODEL_DIGESTS))
+@pytest.mark.parametrize("model", tuple(BUNDLED_PROFILES))
 def test_executor_revalidates_then_posts_fixed_bounded_shape(
     tmp_path: Path, model: str
 ) -> None:
+    assert set(BUNDLED_PROFILES) == set(MODEL_DIGESTS) == {
+        "kimi-k2.7-code:cloud",
+        "minimax-m2.7:cloud",
+        "nemotron-3-super:cloud",
+        "minimax-m3:cloud",
+    }
     digest = MODEL_DIGESTS[model]
     authority, signed, approval, context = _approved(tmp_path, model)
     with _server(model=model, digest=digest) as server:

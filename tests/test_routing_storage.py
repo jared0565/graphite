@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from graphite.routing.contracts import Effort, ExecutionOutcome, ExecutionReceipt
 from graphite.routing.storage import (
     AggregateRecord,
     AggregateStore,
@@ -63,6 +64,8 @@ def test_schema_migration_is_idempotent_and_enables_safety_pragmas(tmp_path: Pat
         "policy_versions",
         "budget_ledger",
         "confidence_stats",
+        "execution_attempts",
+        "execution_receipts",
     } <= tables
     assert version == "1"
     assert store.pragma_state() == {
@@ -70,6 +73,59 @@ def test_schema_migration_is_idempotent_and_enables_safety_pragmas(tmp_path: Pat
         "journal_mode": "wal",
         "busy_timeout": 2_000,
     }
+
+
+def test_execution_finalization_is_atomic_and_idempotent(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    store.record_task("task-1", "isolated_code", "low", "a" * 64, 10)
+    store.record_decision(
+        "decision-1", "task-1", "kimi-k2.7-code:cloud", "default", "2", "1", 10
+    )
+    store.save_approval_record(
+        approval_id="approval-1", task_id="task-1", decision_id="decision-1",
+        nonce_hash="b" * 64, manifest_hash="c" * 64, expires_at=100,
+        reserved_tokens=10,
+    )
+    store.create_execution_attempt(
+        attempt_id="attempt-1", approval_id="approval-1", task_id="task-1",
+        decision_id="decision-1", manifest_hash="c" * 64,
+        graph_fingerprint="d" * 64, model_id="kimi-k2.7-code:cloud",
+        effort="default", reserved_tokens=10, created_at=11,
+    )
+    receipt = ExecutionReceipt(
+        "exec-1", "approval-1", "kimi-k2.7-code:cloud", Effort.DEFAULT,
+        ExecutionOutcome.SUCCEEDED, 6, 2, 20, "e" * 64, "f" * 64, None,
+    )
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "CREATE TRIGGER fail_evidence BEFORE INSERT ON execution_evidence "
+            "BEGIN SELECT RAISE(ABORT, 'fault injection'); END"
+        )
+
+    with pytest.raises(StorageError, match="storage_unavailable"):
+        store.finalize_execution_attempt(
+            attempt_id="attempt-1", receipt=receipt, completed_at=12
+        )
+    assert store.row_count("executions") == 0
+    assert store.row_count("execution_receipts") == 0
+    assert store.row_count("execution_evidence") == 0
+    assert store.execution_attempt("attempt-1")["status"] == "pending"
+
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("DROP TRIGGER fail_evidence")
+    assert store.finalize_execution_attempt(
+        attempt_id="attempt-1", receipt=receipt, completed_at=12
+    ) is True
+    assert store.finalize_execution_attempt(
+        attempt_id="attempt-1", receipt=receipt, completed_at=12
+    ) is False
+    assert store.row_count("executions") == 1
+    assert store.row_count("execution_receipts") == 1
+    assert store.row_count("execution_evidence") == 1
+    assert store.execution_attempt("attempt-1")["status"] == "completed"
 
 
 def test_duplicate_idempotency_key_cannot_create_duplicate_execution(tmp_path: Path) -> None:

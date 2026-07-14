@@ -6,7 +6,7 @@ import json
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +17,8 @@ from graphite.graph_io import GraphReadError, load_validated_graph_bundle
 from .approval import ApprovalAuthority
 from .classifier import classify_task
 from .context_builder import ContextBundle, build_routing_context
-from .contracts import ApprovalManifest, Effort, ExecutionReceipt, TaskRequest
-from .ollama_executor import execute_ollama
+from .contracts import ApprovalManifest, Effort, ExecutionOutcome, ExecutionReceipt, TaskRequest
+from .ollama_executor import ExecutionResult, ExecutorError, execute_ollama
 from .policy import CandidateMetrics, PolicyGates, rank_candidates
 from .registry import (
     BUNDLED_PROFILES,
@@ -60,14 +60,15 @@ class RoutingRecommendation:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ApprovedExecution:
     """Ephemeral provider text paired with its persistence-safe receipt."""
 
-    text: str
+    text: str = field(repr=False, compare=False)
     receipt: ExecutionReceipt
 
     def to_public_dict(self) -> dict[str, Any]:
+        """Return the only representation safe for logs, storage, or serialization."""
         return dict(self.receipt.to_dict())
 
 
@@ -228,36 +229,99 @@ class RoutingService:
             quota_path=self.state_dir / "quota.sqlite3",
         )
         signed = authority.issue(manifest)
-        inventory = next(
-            model for model in prepared.snapshot.models if model.model_id == recommendation.model_id
-        )
-        result = execute_ollama(
-            authority=authority,
-            signed_approval=signed,
-            current_manifest=manifest,
-            context=prepared.context,
-            objective=prepared.request.objective,
-            expected_digest=inventory.digest,
-            settings=self.settings,
-        )
-        receipt = result.receipt
-        self.store.insert_execution(
-            execution_id=receipt.execution_id,
-            idempotency_key=receipt.execution_id,
+        attempt_id = "attempt-" + secrets.token_hex(12)
+        manifest_hash = hashlib.sha256(
+            json.dumps(
+                manifest.to_dict(), sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        self.store.create_execution_attempt(
+            attempt_id=attempt_id,
+            approval_id=approval_id,
             task_id=prepared.task.task_id,
             decision_id=decision_id,
-            approval_id=approval_id,
-            model_id=receipt.model_id,
-            effort=receipt.effort.value,
-            status=receipt.outcome.value,
+            manifest_hash=manifest_hash,
+            graph_fingerprint=prepared.graph_fingerprint,
+            model_id=recommendation.model_id,
+            effort=recommendation.effort,
             reserved_tokens=manifest.max_input_tokens + manifest.max_output_tokens,
             created_at=now,
         )
-        self.store.link_execution_evidence(
-            receipt.execution_id, prepared.task.task_id, decision_id,
-            prepared.graph_fingerprint,
+        inventory = next(
+            model for model in prepared.snapshot.models if model.model_id == recommendation.model_id
         )
+        try:
+            result = execute_ollama(
+                authority=authority,
+                signed_approval=signed,
+                current_manifest=manifest,
+                context=prepared.context,
+                objective=prepared.request.objective,
+                expected_digest=inventory.digest,
+                settings=self.settings,
+            )
+        except ExecutorError as exc:
+            self._fail_attempt(attempt_id, exc.code)
+            raise
+        except Exception:
+            self._fail_attempt(attempt_id, "executor_failed")
+            raise ExecutorError("executor_failed") from None
+        if not self._receipt_is_valid(result, manifest):
+            self._fail_attempt(attempt_id, "executor_receipt_invalid")
+            raise ExecutorError("executor_receipt_invalid")
+        receipt = result.receipt
+        try:
+            self.store.finalize_execution_attempt(
+                attempt_id=attempt_id,
+                receipt=receipt,
+                completed_at=int(time.time()),
+            )
+        except StorageError:
+            try:
+                self.store.mark_execution_attempt_failed(
+                    attempt_id,
+                    "execution_persistence_failed",
+                    persistence_failed=True,
+                    updated_at=int(time.time()),
+                )
+            except (StorageError, OSError, ValueError):
+                pass
+            raise StorageError("execution_persistence_failed") from None
         return ApprovedExecution(text=result.text, receipt=receipt)
+
+    def _fail_attempt(self, attempt_id: str, reason: str) -> None:
+        try:
+            self.store.mark_execution_attempt_failed(
+                attempt_id, reason, updated_at=int(time.time())
+            )
+        except (StorageError, OSError, ValueError):
+            raise StorageError("execution_persistence_failed") from None
+
+    @staticmethod
+    def _receipt_is_valid(result: object, manifest: ApprovalManifest) -> bool:
+        if not isinstance(result, ExecutionResult) or not isinstance(result.text, str):
+            return False
+        receipt = result.receipt
+        try:
+            response_hash = hashlib.sha256(result.text.encode("utf-8")).hexdigest()
+        except UnicodeError:
+            return False
+        return (
+            isinstance(receipt, ExecutionReceipt)
+            and receipt.approval_id == manifest.approval_id
+            and receipt.model_id == manifest.model_id
+            and receipt.effort is manifest.effort
+            and receipt.outcome is ExecutionOutcome.SUCCEEDED
+            and receipt.input_tokens is not None
+            and receipt.output_tokens is not None
+            and receipt.input_tokens <= manifest.max_input_tokens
+            and receipt.output_tokens <= manifest.max_output_tokens
+            and receipt.input_tokens + receipt.output_tokens
+            <= manifest.max_input_tokens + manifest.max_output_tokens
+            and receipt.response_hash is not None
+            and receipt.response_hash == response_hash
+            and receipt.failure_reason is None
+        )
 
     def status(self) -> dict[str, Any]:
         try:
