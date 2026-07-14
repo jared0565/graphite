@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import MutableMapping, cast
 
 import pytest
 
@@ -58,53 +59,65 @@ def test_bundled_profiles_are_the_approved_nonexpiring_pool() -> None:
     expected = {
         "kimi-k2.7-code:cloud": (
             UsageClass.HIGH,
-            {ModelRole.CODING_PRIMARY, ModelRole.CODING},
+            (ModelRole.CODING_PRIMARY, ModelRole.CODING),
             262_144,
         ),
         "minimax-m2.7:cloud": (
             UsageClass.MEDIUM,
-            {ModelRole.CODING, ModelRole.AGENTIC},
+            (ModelRole.CODING, ModelRole.AGENTIC),
             204_800,
         ),
         "nemotron-3-super:cloud": (
             UsageClass.MEDIUM,
-            {ModelRole.REASONING, ModelRole.REVIEW},
+            (ModelRole.REASONING, ModelRole.REVIEW),
             262_144,
         ),
         "minimax-m3:cloud": (
             UsageClass.HIGH,
-            {ModelRole.LONG_CONTEXT, ModelRole.AGENTIC},
+            (ModelRole.LONG_CONTEXT, ModelRole.AGENTIC),
             524_288,
         ),
     }
     expected_capabilities = {
-        "kimi-k2.7-code:cloud": {"code", "completion", "tools", "thinking", "vision"},
-        "minimax-m2.7:cloud": {"code", "completion", "tools", "thinking"},
-        "nemotron-3-super:cloud": {"completion", "reasoning", "tools", "thinking"},
-        "minimax-m3:cloud": {
+        "kimi-k2.7-code:cloud": ("code", "completion", "tools", "thinking", "vision"),
+        "minimax-m2.7:cloud": ("code", "completion", "tools", "thinking"),
+        "nemotron-3-super:cloud": ("completion", "reasoning", "tools", "thinking"),
+        "minimax-m3:cloud": (
             "architecture",
             "completion",
             "reasoning",
             "tools",
             "thinking",
             "vision",
-        },
+        ),
     }
     assert set(EFFORT_PAYLOADS) == set(BUNDLED_PROFILES)
     for model_id, entry in BUNDLED_PROFILES.items():
         usage, roles, context_window = expected[model_id]
         assert entry.profile.model_id == model_id
         assert entry.profile.profile_version == "2026-07-14.2"
-        assert set(entry.profile.capabilities) == expected_capabilities[model_id]
+        assert entry.profile.capabilities == expected_capabilities[model_id]
+        assert len(entry.profile.capabilities) == len(set(entry.profile.capabilities))
         assert entry.profile.context_window_tokens == context_window
         assert entry.profile.provisional is True
         assert entry.usage_class is usage
-        assert set(entry.roles) == roles
+        assert entry.roles == roles
+        assert len(entry.roles) == len(set(entry.roles))
         assert entry.retirement_date is None
         assert entry.profile.supported_efforts == (Effort.DEFAULT,)
         assert entry.effort_payloads == {Effort.DEFAULT: {}}
         assert entry.evidence_url.startswith("https://ollama.com/library/")
         assert entry.evidence_accessed == "2026-07-14"
+
+
+def test_bundled_profiles_allowlist_is_immutable() -> None:
+    mutable_view = cast(MutableMapping[str, RegistryProfile], BUNDLED_PROFILES)
+    profile = BUNDLED_PROFILES["kimi-k2.7-code:cloud"]
+
+    with pytest.raises(TypeError):
+        mutable_view["unapproved:cloud"] = profile
+    with pytest.raises(TypeError):
+        del mutable_view["kimi-k2.7-code:cloud"]
 
 
 def test_removed_and_unapproved_models_are_not_profiles() -> None:
@@ -146,9 +159,13 @@ def _registry_profile(**changes: object) -> RegistryProfile:
         ({"roles": (ModelRole.CODING, "coding")}, "roles_duplicate"),
         ({"evidence_accessed": "2026-7-14"}, "evidence_accessed_invalid"),
         ({"evidence_accessed": "not-a-date"}, "evidence_accessed_invalid"),
+        ({"evidence_accessed": 20260714}, "evidence_accessed_invalid"),
         ({"usage_class": "low"}, "usage_class_invalid"),
         ({"retirement_date": "2026-07-14"}, "retirement_date_invalid"),
         ({"retirement_date": "2026-07-13"}, "retirement_date_invalid"),
+        ({"retirement_date": "2026-7-15"}, "retirement_date_invalid"),
+        ({"retirement_date": "not-a-date"}, "retirement_date_invalid"),
+        ({"retirement_date": 20260715}, "retirement_date_invalid"),
     ],
 )
 def test_registry_profile_rejects_invalid_metadata(
@@ -157,6 +174,12 @@ def test_registry_profile_rejects_invalid_metadata(
 ) -> None:
     with pytest.raises(ValueError, match=f"^{code}$"):
         _registry_profile(**changes)
+
+
+def test_registry_profile_accepts_valid_future_retirement_date() -> None:
+    profile = _registry_profile(retirement_date="2026-07-15")
+
+    assert profile.retirement_date == "2026-07-15"
 
 
 def test_unknown_models_aliases_and_unsupported_efforts_are_ineligible() -> None:

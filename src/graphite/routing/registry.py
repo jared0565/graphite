@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, Final, Mapping
 
 from .contracts import Effort, ModelProfile, RiskTier
@@ -93,7 +94,7 @@ def _exact_iso_date(value: object, code: str) -> date:
     return parsed
 
 
-BUNDLED_PROFILES: Final[dict[str, RegistryProfile]] = {
+BUNDLED_PROFILES: Final[Mapping[str, RegistryProfile]] = MappingProxyType({
     "kimi-k2.7-code:cloud": RegistryProfile(
         profile=ModelProfile(
             model_id="kimi-k2.7-code:cloud",
@@ -161,7 +162,7 @@ BUNDLED_PROFILES: Final[dict[str, RegistryProfile]] = {
         roles=(ModelRole.LONG_CONTEXT, ModelRole.AGENTIC),
         usage_class=UsageClass.HIGH,
     ),
-}
+})
 
 
 @dataclass(frozen=True)
