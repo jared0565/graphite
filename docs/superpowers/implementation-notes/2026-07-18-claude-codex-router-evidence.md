@@ -55,16 +55,24 @@ and a tested forward fix.
 
 ## Remaining external gates
 
-This capability is not yet production-ready. A separately approved Claude Code
-`sonnet`/high/read-only verification call ran once against the synthetic fixture on
-2026-07-18. It made no edit but failed closed with
-`model_identity_unverified`: the current result did not contain exactly one
-verifiable `modelUsage` identity. No capability snapshot was saved, and a sanitized
-blocked telemetry event with unknown cost was appended. There was no retry,
-fallback, or model substitution.
+This capability is not yet production-ready. The first separately approved Claude
+Code `sonnet`/high/read-only verification failed closed because a terminal
+`modelUsage` map can contain more than one entry. After an offline contract fix,
+a separately approved streaming verification bound every assistant event to
+`claude-sonnet-5`, returned the exact expected response, reported 6 input and 2960
+output tokens, made no edit, saved the verified snapshot, and received an accepted
+human verdict. Both the initial blocked event and successful evidence remain
+append-only; there was no automatic retry, fallback, or model substitution.
 
-Claude profile verification therefore remains an open production blocker. Codex
-no-edit verification, both isolated edit smokes, the read-only cross-provider
-high-risk review, and final live audit persistence also remain unexecuted. Any
+Codex
+no-edit verification initially failed closed because the adapter expected an
+invented `turn.completed.model` field that Codex's documented JSONL event does not
+provide. No Codex snapshot was saved and a sanitized blocked event was appended.
+The offline contract now binds Codex to the full non-alias model slug in the signed
+snapshot and strict command, accepts the documented model-less terminal event, and
+still rejects any conflicting future model echo. A repeat remains unexecuted.
+
+Both isolated edit smokes, the read-only cross-provider high-risk review, and final
+live audit persistence also remain unexecuted. Any
 diagnostic repeat or subsequent provider call requires a new bounded manifest and
 explicit approval. The offline schema rollback drill remains passed.

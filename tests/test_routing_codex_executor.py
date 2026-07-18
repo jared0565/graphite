@@ -197,10 +197,47 @@ def test_execution_uses_canonical_argv_and_allowlisted_jsonl(tmp_path: Path) -> 
     assert len(transport.calls) == 1
 
 
+def test_execution_binds_full_requested_slug_when_terminal_omits_model(
+    tmp_path: Path,
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    transport = ScriptedTransport(
+        [
+            _result(
+                _jsonl(
+                    {"type": "thread.started", "thread_id": "discard-me"},
+                    {"type": "turn.started"},
+                    {
+                        "type": "item.completed",
+                        "item": {"type": "agent_message", "text": "verified"},
+                    },
+                    {
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 3, "output_tokens": 1},
+                    },
+                )
+            )
+        ]
+    )
+    outcome = execute_codex(
+        executable=executable,
+        workspace=workspace,
+        credential_home=credentials,
+        prompt=b"verify",
+        requested_model="gpt-5.6-sol",
+        expected_effective_model="gpt-5.6-sol",
+        effort=Effort.HIGH,
+        permission_mode=PermissionMode.READ_ONLY,
+        transport=transport,
+    )
+    assert outcome.effective_model == "gpt-5.6-sol"
+    assert (outcome.input_tokens, outcome.output_tokens) == (3, 1)
+
+
 @pytest.mark.parametrize(
     ("events", "code"),
     [
-        (({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},), "model_identity_unverified"),
+        (({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},), "protocol"),
         (
             (
                 {"type": "turn.completed", "model": "other", "usage": {"input_tokens": 1, "output_tokens": 1}},

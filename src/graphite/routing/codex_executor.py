@@ -184,14 +184,20 @@ def _parse_jsonl(stdout: bytes, expected_model: str) -> tuple[str, str, int, int
     if completion is None or terminal_index != len(lines) - 1:
         raise AdapterError("protocol")
     effective_model = completion.get("model")
-    if not isinstance(effective_model, str):
-        raise AdapterError("model_identity_unverified")
-    try:
-        _identifier(effective_model)
-    except AdapterError:
-        raise AdapterError("model_identity_unverified") from None
-    if effective_model != expected_model:
-        raise AdapterError("model_mismatch")
+    if effective_model is None:
+        # Codex's documented exec JSONL terminal event does not echo the model.
+        # Identity remains bound by the full requested slug, strict config, and
+        # the immutable capability snapshot. A future conflicting echo fails.
+        effective_model = expected_model
+    else:
+        if not isinstance(effective_model, str):
+            raise AdapterError("model_identity_unverified")
+        try:
+            _identifier(effective_model)
+        except AdapterError:
+            raise AdapterError("model_identity_unverified") from None
+        if effective_model != expected_model:
+            raise AdapterError("model_mismatch")
     usage = completion.get("usage")
     if not isinstance(usage, dict):
         raise AdapterError("protocol")
