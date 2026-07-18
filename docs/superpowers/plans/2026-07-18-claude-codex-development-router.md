@@ -146,14 +146,14 @@
 - Add `tests/test_routing_diff_policy.py`
 - Modify `src/graphite/routing/settings.py`
 
-- [ ] Write failing tests for clean and dirty source repositories, commit drift, nested repositories, symlinks, Windows reparse points, path aliases, case collisions, submodules, and worktree roots outside the controlled state directory.
-- [ ] Create worktrees with fixed Git argv at the approval-bound commit under a private Graphite task directory. Record canonical root, Git common-dir identity, baseline commit, and quarantine state.
-- [ ] Never remove an unaccepted worktree automatically. Cleanup requires explicit task identity, containment revalidation, terminal audit state, and user authority.
-- [ ] Parse Git's machine-readable diff/name-status output with bounds. Reject path escape, sensitive configuration and credential locations, `.git*` control changes, submodules, binary patches, executable-policy violations, excessive files, excessive bytes, and unmerged states.
-- [ ] Revalidate the filesystem after execution to detect symlink/reparse replacement and writes outside the approved worktree. A containment uncertainty fails closed and quarantines evidence.
-- [ ] Hash the accepted diff deterministically without storing its contents in routing telemetry.
-- [ ] Run worktree/diff tests plus existing Git security tests.
-- [ ] Commit: `feat: contain routed edits in inspected worktrees`.
+- [x] Write failing tests for clean and dirty source repositories, commit drift, nested repositories, symlinks, Windows reparse points, path aliases, case collisions, submodules, and worktree roots outside the controlled state directory.
+- [x] Create worktrees with fixed Git argv at the approval-bound commit under a private Graphite task directory. Record canonical root, Git common-dir identity, baseline commit, and quarantine state.
+- [x] Never remove an unaccepted worktree automatically. Cleanup requires explicit task identity, containment revalidation, terminal audit state, and user authority.
+- [x] Parse Git's machine-readable diff/name-status output with bounds. Reject path escape, sensitive configuration and credential locations, `.git*` control changes, submodules, binary patches, executable-policy violations, excessive files, excessive bytes, and unmerged states.
+- [x] Revalidate the filesystem after execution to detect symlink/reparse replacement and writes outside the approved worktree. A containment uncertainty fails closed and quarantines evidence.
+- [x] Hash the accepted diff deterministically without storing its contents in routing telemetry.
+- [x] Run worktree/diff tests plus existing Git security tests.
+- [x] Commit: `feat: contain routed edits in inspected worktrees`.
 
 ## Task 7: Rewire service, CLI, review, validation, and integration gates
 

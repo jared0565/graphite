@@ -64,6 +64,8 @@ class RoutingSettings:
     approval_ttl_seconds: int = 300
     retention_days: int = 90
     aggregate_opt_in: bool = False
+    max_changed_files: int = 64
+    max_changed_bytes: int = 1_048_576
 
     @classmethod
     def from_env(cls, overrides: Mapping[str, str] | None = None) -> "RoutingSettings":
@@ -84,6 +86,10 @@ class RoutingSettings:
             approval_ttl_seconds=_integer(env, "approval_ttl_seconds", 300, 30, 3_600),
             retention_days=_integer(env, "retention_days", 90, 1, 3_650),
             aggregate_opt_in=_boolean(env, "aggregate_opt_in", False),
+            max_changed_files=_integer(env, "max_changed_files", 64, 1, 10_000),
+            max_changed_bytes=_integer(
+                env, "max_changed_bytes", 1_048_576, 1_024, 104_857_600
+            ),
         )
         if settings.machine_quota_tokens < settings.repository_quota_tokens:
             raise RoutingSettingsError("machine_quota_tokens_invalid")
