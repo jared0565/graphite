@@ -464,100 +464,106 @@ Supported provider adapters:
 
 ## Adaptive development routing
 
-Graphite can recommend an Ollama Cloud model for a development task and, only after
-separate interactive consent, make one bounded request through the local Ollama
-loopback API. This development router is distinct from optional report enrichment:
-OpenRouter is reserved for production in-application inference. Claude Code and
-Codex are manual handoff channels only; Graphite never launches either CLI.
+Graphite's governed development router invokes only locally installed Claude Code
+and Codex CLIs that are already authenticated through a Claude subscription or a
+ChatGPT subscription. It does not accept or use Anthropic/OpenAI API keys. Ollama is
+not a development-routing provider. The optional Ollama/OpenAI-compatible report
+enrichment described above remains separate, and OpenRouter is reserved for
+production in-application inference.
 
-### Active router model pool
+Authenticated Claude Code and Codex subscription CLIs are the only governed
+development execution providers.
 
-The bundled allowlist is deliberately small. Every active profile is provisional
-and supports only the `default` effort:
-
-| Exact model ID | Approved roles | Provider-reported usage class |
-|---|---|---|
-| `kimi-k2.7-code:cloud` | Primary coding; coding | high |
-| `minimax-m2.7:cloud` | Coding; agentic | medium |
-| `nemotron-3-super:cloud` | Reasoning; review | medium |
-| `minimax-m3:cloud` | Long-context; agentic | high |
-
-The provider-reported usage class is coarse routing metadata, not a USD price or
-measured cost saving. Medium may rank ahead of high only after every hard gate is
-satisfied. The profile allowlist is the authority boundary: inventory presence does
-not authorize a model, and unknown inventory entries and aliases are excluded.
-Exact identifier and digest, required capabilities, context capacity, risk, data
-policy, configured request/repository budget, effort support, registry freshness,
-and the 30-day minimum retirement
-runway are hard gates before ranking. A dated retirement must be strictly more than
-30 days away. While these profiles remain provisional, high-risk work is ineligible
-and returns a manual frontier handoff to the operator.
+Before routing, install the vendor CLIs through their official distribution paths,
+authenticate them interactively, and verify the exact subscription identity:
 
 ```powershell
-graphite route policy . --refresh-models --json
+claude --version
+claude auth status --json
+codex --version
+codex login status
+```
+
+Claude must report `claude.ai` first-party authentication; Codex must report
+`Logged in using ChatGPT`. Graphite hashes the resolved executable and binds its
+version, adapter protocol, requested model, effective model, effort, permission
+mode, risk ceiling, verification time, and expiry into a capability snapshot.
+Profile evidence is explicit and short-lived. A CLI update, executable replacement,
+authentication change, effective-model mismatch, or expired snapshot fails closed.
+Capability evidence helps establish eligibility; it is not authorization authority.
+
+```powershell
 graphite route recommend . --objective "Review listing search" --target src/search.py
 graphite route run . --objective "Review listing search" --target src/search.py
+graphite route review . --task-id task-identifier
+graphite route accept . --task-id task-identifier
+graphite route reject . --task-id task-identifier
+graphite route cleanup . --task-id task-identifier
 graphite route status . --json
-graphite route recoverable . --limit 50 --json
-graphite route reconcile . --attempt-id attempt-identifier --json
+graphite route policy . --json
 ```
 
 `route recommend` is offline and read-only. It requires a fresh validated graph and
-a previously refreshed model snapshot. `route run` prints the selected model,
-effort, quota estimate, and outbound manifest before asking for consent. Approval
-defaults to No. JSON, CI, redirected input/output, and `--yes` cannot execute a
-model. Source context leaves the machine only after the manifest is displayed and
-the user explicitly answers yes.
+a current verified capability snapshot. `route run` creates a detached worktree at
+the approved commit, prints the exact provider/model/effort/permission manifest, and
+then asks for consent. Approval defaults to No. Non-TTY input/output, JSON mode, CI,
+and `--yes` cannot grant consent. Approval is signed, short-lived, single-use,
+snapshot-bound, prompt-hash-bound, commit-bound, and token-bound. It is consumed
+immediately before exactly one provider process.
 
-Every approval is signed, short-lived, single-use, model/digest-bound, effort-bound,
-context-bound, and quota-bound. Model output is untrusted, has no tool authority,
-and cannot mutate code. High-risk work retains a permanent approval gate. Shadow
-evaluation is disabled by default, separately consented, independently budgeted,
-and unavailable for high-risk or sensitive categories.
+The provider may edit only the isolated worktree under the selected permission
+mode. Graphite rejects symlinks/reparse points, nested repositories, submodule
+changes, case collisions, out-of-scope files, excessive file/byte counts, identity
+drift, and diff drift. It runs bounded, credential-free validation and records a
+content hash—not diff contents. Provider output remains untrusted and is never
+validation or merge authority.
 
-Execution is single-shot. Graphite performs no automatic fallback, retry, model
-switching, model pull, or approval reuse. Successful text is shown only on the
-interactive terminal as framed, escaped, ephemeral text. Only the validated receipt
-and bounded audit metadata are persisted; model text is not. Non-TTY input or
-output, JSON mode, CI, and `--yes` cannot execute.
+High-risk work requires a second, separately approved, read-only review by the
+other provider. The reviewer receives an ephemeral synthetic diff and cannot edit.
+`route accept` rechecks the diff and validation evidence, then creates a detached,
+cherry-pickable commit; it never merges the source branch. `route reject` records the
+human verdict. `route cleanup` is a separate destructive authority step.
 
-The recommendation budget gate uses configured request/repository limits; it is not
-proof that quota remains. Actual repository and machine quota reservation occurs
-when the signed approval is consumed immediately before execution. The signature
-binds the exact inventory digest, and runtime independently revalidates that digest.
+There is no automatic retry, fallback, provider/model switch, session reuse,
+acceptance, cleanup, cherry-pick, or merge. A failure remains failed until the
+operator starts a new approval flow. Legacy Ollama executions are retained as
+read-only history and cannot be replayed as Claude or Codex attempts.
 
-The durable audit transition is `pending` to `completed`. If the provider call
-succeeds but final persistence fails, the attempt is reconcilable only while its
-fallback staged receipt remains intact and available. Use `graphite route
-recoverable . --limit 50 --json` to list a bounded page of sanitized attempt IDs;
-when `has_more` is true, pass `next_cursor` back with `--after`. Use `graphite route
-reconcile . --attempt-id <id> --json` to finalize one staged receipt. These commands make no
-provider call and cannot issue, consume, or reuse approval. Back up or preserve
-`.graphite/routing` state before repair. If storage is
-unavailable before both finalization and fallback staging complete, Graphite returns
-`execution_persistence_failed`; failed staging, deletion, corruption, or disk loss
-means later reconciliation is unavailable. Expected recovery validation and storage
-failures are rendered as fixed, path-free codes; `--json` emits only an
-`{"error":{"code":"..."}}` object and never includes OS errors or repository data.
+Telemetry is append-only and restricted to provider/profile identity, category and
+risk, latency, reported token usage, diff size, validation outcome, defect classes,
+rework count, human verdict, and provenance. Source, prompts, responses, diff
+contents, paths, secrets, and raw diagnostics have no telemetry field. Subscription
+cost is `unknown`, never zero. Learning can create a signed candidate and comparison
+evidence, but cannot change the provider allowlist, permission ceiling, risk
+ceilings, or autonomy. Promotion and rollback both require interactive human
+approval and never delete evidence.
 
-Schema-v3 migration intentionally quarantines schema-v1 pending or
-persistence-failed rows missing token/request bindings and schema-v2 rows missing
-the inventory digest as `legacy_unrecoverable`; they cannot be replayed or
-reconciled. Database triggers prevent update, deletion, or reactivation of these
-digestless legacy rows. Legacy completed rows missing those bindings are intentionally preserved
-as read-only history rather than rewritten into new evidence.
+### Schema-v3 to schema-v4 migration and rollback
 
-Detailed receipts and evidence stay in repository-local `.graphite/routing` storage;
-they contain hashes and metadata, not prompts or model responses. Machine-wide
-sanitized aggregate learning is opt-in and contains only allowlisted enums, coarse
-buckets, and version identifiers. The default retention window is 90 days. Use
-policy rollback to restore a prior recommendation policy; removing local evidence
-is an explicit operator action, never an automatic side effect.
+Stop all Graphite routing writers before upgrade or rollback. On the first v4 open,
+Graphite creates `backups/events-schema-v3.sqlite3` and a SHA-256 marker beside it,
+verifies the backup is schema v3 and passes SQLite integrity checks, then performs
+the v4 migration. Live legacy Ollama attempts become `legacy_unrecoverable`; legacy
+completed history remains readable. After migration, verify `graphite route status
+. --json` and preserve both backup files.
 
-Incident response: stop routing, preserve the append-only evidence, revoke exposed
-credentials if any external system was involved, review the execution correlation,
-close the incident explicitly, and start a new evidence window. A provider outage
-or blocked recommendation does not weaken approval or security gates.
+Rollback is a database restore, not an in-place downgrade:
+
+1. Stop every process that can write `.graphite/routing/events.sqlite3`.
+2. Verify the backup SHA-256 against `backups/events-schema-v3.sha256.json` and run
+   SQLite `PRAGMA integrity_check` against the backup.
+3. Preserve the current v4 database for incident analysis, then atomically restore
+   the verified v3 backup as `events.sqlite3`.
+4. Restore the matching v3 application build and confirm the schema version and
+   historical row counts with its read-only status path before allowing writers.
+
+If the v4 database is partially migrated, the backup marker is absent/mismatched,
+or integrity fails, keep routing stopped. Restore the verified backup or deploy a
+tested forward fix; do not hand-edit schema metadata or delete evidence.
+
+Incident response follows the same containment rule: stop routing, preserve the
+database and worktree evidence, revoke an affected subscription session when
+credential exposure is suspected, and resume only after explicit review.
 
 Relevant environment variables:
 

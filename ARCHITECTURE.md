@@ -148,29 +148,41 @@ Across all extensions, preserve these invariants:
 - Public schemas and CLI behavior remain compatible unless an explicit, tested migration is provided.
 # Adaptive routing trust boundary
 
-The development router is a governed recommendation subsystem, not an autonomous
-coding agent. Its trust zones are: repository and validated graph; bounded private
-context; repository-local detailed evidence; machine-local signing/quota state; the
-loopback Ollama API; and Ollama Cloud. OpenRouter is reserved for production
-in-application inference. Claude/Codex remain manual handoff destinations.
+The development router is an approval-gated change broker for two authenticated
+subscription CLIs: Claude Code and Codex. Ollama is excluded from governed
+development execution; OpenRouter remains reserved for in-application inference.
+Trust zones are the source repository and validated graph, detached task worktrees,
+the provider CLI process and its existing credential home, repository-local audit
+storage, and machine-local signing state. Graphite neither reads API keys nor copies
+subscription credentials into prompts, telemetry, child arguments, or storage.
 
-The data flow is deterministic classification -> contained context -> outbound
-manifest -> cached model eligibility -> recommendation -> default-No approval ->
-fresh model-digest check -> single request -> hash-only receipt. Untrusted model
-output cannot mutate code, invoke tools, install or pull models, or execute shell
-commands. The endpoint allowlist accepts canonical loopback IPs and the configured
-Ollama port only; redirects, retries, fallbacks, ambient credentials, and automatic
-model pulls are prohibited.
+The authority sequence is capability verification -> deterministic recommendation
+-> detached worktree -> canonical prompt and manifest -> default-No single-use
+approval -> CLI identity recheck -> one bounded process -> diff inspection ->
+credential-free validation -> human accept/reject -> optional explicit cleanup.
+Each transition binds the repository commit, capability snapshot, requested and
+effective model, effort, executable hash/version, adapter protocol, permission
+mode, prompt hash, token reservation, and timeout. No later stage can widen an
+earlier permission. Worktree, approval, attempt, validation, and review identities
+are immutable database evidence.
 
-Detailed task, decision, approval, execution, and outcome events remain in the
-repository. A sanitized aggregate is written machine-wide only after opt-in and
-contains typed model/effort/category/risk/outcome values plus coarse usage and
-latency buckets. Recommendation confidence may learn from correlated machine/CI
-evidence. It never changes risk or execution authority. High-risk tasks always
-require approval. Shadow results are separately approved and excluded from
-autonomy confidence unless a later controlled evaluator promotes that provenance.
+Provider output and edits are untrusted. The diff boundary rejects filesystem
+indirection, repository nesting, submodule changes, case collisions, scope or size
+violations, and source/diff drift. High-risk tasks require a separately approved
+read-only review by the other provider. Acceptance produces only a detached commit;
+it never merges. Retry, fallback, provider switching, session reuse, cleanup, and
+merge are never automatic.
 
-Retention rebuilds derived confidence from retained append-only events. Reversions
-append corrections instead of rewriting history. Severe failures block eligibility
-until incident response review is explicitly closed, which begins a new evidence
-window. Policy promotion and rollback affect recommendations only.
+Telemetry has a closed typed schema and excludes source, prompt/response text, diff
+contents, paths, secrets, and raw diagnostics. Subscription cost remains `unknown`.
+Recency weighting and Wilson confidence penalties can propose a signed policy
+candidate. Candidate creation grants no authority. Interactive promotion cannot
+alter provider allowlists, permission ceilings, risk ceilings, or autonomy; rollback
+appends an activation event and retains all prior evidence.
+
+Schema v4 is a forward cutover. Before changing a v3 database, Graphite creates a
+private v3 backup and SHA-256 marker, validates schema and integrity, and quarantines
+live legacy-provider attempts. Rollback requires stopped writers, verified backup
+restore, and the matching old code; v4 is not edited into v3. A partial schema,
+missing marker, lock, or failed integrity check leaves routing stopped for verified
+restore or a tested forward fix.

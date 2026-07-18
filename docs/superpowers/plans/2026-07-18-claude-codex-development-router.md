@@ -202,10 +202,10 @@
 - Add `docs/superpowers/implementation-notes/2026-07-18-claude-codex-router-evidence.md`
 - Update the design status only from source-derived evidence.
 
-- [ ] Document the trust boundaries, authenticated-CLI-only setup, explicit profile verification, worktree lifecycle, review policy, telemetry minimization, and absence of automatic fallback/merge.
-- [ ] Document v3 backup, v4 migration, integrity verification, stop-routing requirement, restore procedure, and forward-fix path.
-- [ ] Exercise the rollback fixture: migrate a v3 copy to v4, validate history, stop writers, restore the verified v3 backup, and prove the old schema reader succeeds. Do not alter the operator's real routing database during tests.
-- [ ] Run focused routing tests and Ruff, then the complete suite with an explicit writable base temp:
+- [x] Document the trust boundaries, authenticated-CLI-only setup, explicit profile verification, worktree lifecycle, review policy, telemetry minimization, and absence of automatic fallback/merge.
+- [x] Document v3 backup, v4 migration, integrity verification, stop-routing requirement, restore procedure, and forward-fix path.
+- [x] Exercise the rollback fixture: migrate a v3 copy to v4, validate history, stop writers, restore the verified v3 backup, and prove the old schema reader succeeds. Do not alter the operator's real routing database during tests.
+- [x] Run focused routing tests and Ruff, then the complete suite with an explicit writable base temp:
 
   ```powershell
   python -B -m pytest -q --basetemp F:\tmp\graphite-cli-router-full
@@ -216,7 +216,7 @@
   git status --short --branch
   ```
 
-- [ ] Record exact commit, test counts, intentional skips, graph counts, schema drill result, and unresolved external-readiness gates. Commit documentation and evidence.
+- [x] Record exact commit, test counts, intentional skips, graph counts, schema drill result, and unresolved external-readiness gates. Commit documentation and evidence.
 
 ## Task 10: Explicit bounded live acceptance
 

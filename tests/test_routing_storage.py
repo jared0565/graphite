@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import os
+import gc
 import hashlib
 import json
+import shutil
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -159,6 +161,9 @@ def _downgrade_fixture_to_v3(store: RepositoryStore) -> None:
     """Turn a fresh v4 test database into a representative committed v3 database."""
     with sqlite3.connect(store.path) as connection:
         for table in (
+            "cli_policy_events",
+            "cli_policy_versions",
+            "cli_telemetry_events",
             "review_links",
             "validation_results",
             "cli_execution_attempts",
@@ -279,6 +284,53 @@ def test_v3_to_v4_creates_verified_backup_and_quarantines_live_ollama_attempts(
     assert store.recoverable_attempts().attempt_ids == ()
     with pytest.raises(StorageError, match="^legacy_provider_retired$"):
         store.reconcile_execution_attempt("attempt-legacy", completed_at=3)
+
+
+def test_v3_v4_rollback_drill_restores_verified_backup_for_old_reader(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    _downgrade_fixture_to_v3(store)
+    store.record_task("task-history", "documentation", "low", "a" * 64, 1)
+
+    store.initialize()
+    backup = store.schema_v3_backup_path
+    marker = json.loads(store.schema_v3_backup_marker_path.read_text(encoding="utf-8"))
+    assert marker["backup_sha256"] == hashlib.sha256(backup.read_bytes()).hexdigest()
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+    # All connections above are closed: this is the fixture's stop-writers boundary.
+    preserved_v4 = store.path.with_name("events-schema-v4-preserved.sqlite3")
+    shutil.copy2(store.path, preserved_v4)
+    restore_stage = store.path.with_name("events-restore-stage.sqlite3")
+    shutil.copy2(backup, restore_stage)
+    live_path = store.path
+    del store
+    gc.collect()
+    live_path.unlink()
+    os.replace(restore_stage, live_path)
+
+    # Simulate the old read-only schema consumer; do not initialize with v4 code.
+    with sqlite3.connect(live_path) as old_reader:
+        assert old_reader.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert old_reader.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone() == ("3",)
+        assert old_reader.execute(
+            "SELECT category,risk FROM tasks WHERE task_id='task-history'"
+        ).fetchone() == ("documentation", "low")
+        assert old_reader.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='cli_execution_attempts'"
+        ).fetchone() is None
+    with sqlite3.connect(preserved_v4) as v4_reader:
+        assert v4_reader.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone() == ("4",)
 
 
 def test_v3_migration_fails_closed_while_another_writer_holds_lock(tmp_path: Path) -> None:

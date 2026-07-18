@@ -61,19 +61,20 @@ def test_adaptive_routing_boundary_is_documented() -> None:
     readme = read_document("README.md").casefold()
     architecture = read_document("ARCHITECTURE.md").casefold()
     contributing = read_document("CONTRIBUTING.md").casefold()
-    combined = "\n".join((readme, architecture, contributing))
+    combined = re.sub(r"\s+", " ", "\n".join((readme, architecture, contributing)))
 
     for required in (
-        "ollama cloud",
+        "claude code",
+        "codex",
+        "subscription",
         "openrouter",
-        "manual handoff",
-        "defaults to no",
-        "outbound manifest",
-        "sanitized aggregate",
-        "shadow",
+        "capability snapshot",
+        "detached worktree",
+        "single-use approval",
+        "no automatic retry",
+        "no automatic retry, fallback",
         "high-risk",
         "untrusted",
-        "retention",
         "incident response",
         "graphite route recommend",
         "graphite route run",
@@ -81,8 +82,9 @@ def test_adaptive_routing_boundary_is_documented() -> None:
         "graphite route policy",
     ):
         assert required in combined
-    assert "openrouter is reserved for production in-application inference" in combined
-    assert "cannot mutate code" in combined
+    assert "openrouter is reserved for" in combined
+    assert "ollama is not a development-routing provider" in combined
+    assert "it never merges" in combined
 
 
 def test_hardened_routing_model_pool_and_evidence_are_documented() -> None:
@@ -106,12 +108,6 @@ def test_hardened_routing_model_pool_and_evidence_are_documented() -> None:
     ):
         assert required in combined
 
-    active_pool = document_section(readme, "### Active router model pool")
-    assert "glm-5:cloud" not in active_pool.casefold()
-    assert all(
-        "glm-5:cloud" not in code.casefold()
-        for _, code in markdown_code_fragments(active_pool)
-    )
     removal_history = document_section(evidence, "## Removed and migration history")
     assert "glm-5:cloud" in removal_history.casefold()
     before_removal_history = evidence[: evidence.index("## Removed and migration history")]
@@ -223,6 +219,28 @@ def test_active_routing_evidence_table_matches_the_approved_snapshot() -> None:
     assert hashlib.sha256(encoded).hexdigest() in evidence
 
 
+def test_cli_router_trust_migration_and_readiness_boundaries_are_documented() -> None:
+    combined = re.sub(
+        r"\s+",
+        " ",
+        "\n".join((read_document("README.md"), read_document("ARCHITECTURE.md"))),
+    ).casefold()
+    for phrase in (
+        "claude.ai",
+        "logged in using chatgpt",
+        "executable replacement",
+        "separately approved, read-only review by the other provider",
+        "source, prompts, responses, diff contents, paths, secrets, and raw diagnostics",
+        "subscription cost is `unknown`, never zero",
+        "cannot change the provider allowlist, permission ceiling, risk ceilings, or autonomy",
+        "stop all graphite routing writers",
+        "events-schema-v3.sha256.json",
+        "rollback is a database restore, not an in-place downgrade",
+        "tested forward fix",
+    ):
+        assert phrase in combined, phrase
+
+
 def test_routing_docs_state_each_authority_and_recovery_gate() -> None:
     combined = re.sub(
         r"\s+",
@@ -230,33 +248,27 @@ def test_routing_docs_state_each_authority_and_recovery_gate() -> None:
         "\n".join(read_document(name) for name in routing_operator_documents()),
     ).casefold()
     required = (
-        "30-day minimum retirement runway",
-        "capability and context",
-        "inventory presence does not authorize a model",
-        "exact digest revalidation",
-        "default-only effort",
-        "manual frontier handoff",
+        "authenticated claude code and codex subscription clis",
+        "does not accept or use anthropic/openai api keys",
+        "executable replacement",
+        "detached worktree",
         "single-use approval",
-        "context-bound",
-        "quota-bound",
-        "configured request/repository budget",
-        "actual repository and machine quota reservation occurs when the signed approval is consumed",
-        "not proof that quota remains",
-        "no automatic fallback",
-        "retry",
-        "model switching",
-        "framed, escaped, ephemeral text",
+        "prompt-hash-bound",
+        "commit-bound",
+        "token-bound",
+        "no automatic retry, fallback, provider/model switch",
+        "read-only review by the other provider",
+        "cherry-pickable commit",
+        "it never merges",
         "non-tty",
         "json mode",
         "ci",
-        "`--yes` cannot execute",
-        "`pending` to `completed`",
-        "graphite route recoverable",
-        "graphite route reconcile",
-        "no provider call",
-        "approval reuse",
-        "reconcilable only while",
-        "storage is unavailable",
+        "`--yes` cannot grant consent",
+        "source, prompts, responses, diff contents, paths, secrets, and raw diagnostics",
+        "subscription cost is `unknown`, never zero",
+        "rollback is a database restore, not an in-place downgrade",
+        "stop every process that can write",
+        "tested forward fix",
         "legacy_unrecoverable",
         "read-only history",
     )
