@@ -55,9 +55,16 @@ and a tested forward fix.
 
 ## Remaining external gates
 
-This capability is not yet production-ready. It still requires separately approved,
-bounded live calls on a synthetic repository: no-edit verification for both CLIs,
-one isolated edit smoke for each provider, one read-only cross-provider high-risk
-review, audit persistence verification, and final rollback confirmation. A failure
-does not authorize retry, fallback, or model substitution; another attempt requires
-a new manifest and explicit approval.
+This capability is not yet production-ready. A separately approved Claude Code
+`sonnet`/high/read-only verification call ran once against the synthetic fixture on
+2026-07-18. It made no edit but failed closed with
+`model_identity_unverified`: the current result did not contain exactly one
+verifiable `modelUsage` identity. No capability snapshot was saved, and a sanitized
+blocked telemetry event with unknown cost was appended. There was no retry,
+fallback, or model substitution.
+
+Claude profile verification therefore remains an open production blocker. Codex
+no-edit verification, both isolated edit smokes, the read-only cross-provider
+high-risk review, and final live audit persistence also remain unexecuted. Any
+diagnostic repeat or subsequent provider call requires a new bounded manifest and
+explicit approval. The offline schema rollback drill remains passed.
