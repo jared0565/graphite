@@ -114,3 +114,17 @@ but the active fixture has no current Claude snapshot and snapshots are short-li
 Any diagnostic repeat, profile refresh, edit smoke, review, or subsequent provider
 call requires a new bounded manifest and explicit approval. The offline schema
 rollback drill remains passed.
+
+After Codex acceptance, local preflight found that Claude Code had upgraded from
+2.1.208 to 2.1.214 and its executable digest had changed, invalidating the earlier
+snapshot identity. A separately approved `sonnet` high-effort read-only refresh
+bound the updated executable, graph fingerprint
+`f494a0da32593b6daff69aeca667c724e5e83345c00a9fb68467c6afd79c6d0f`, and candidate
+snapshot digest `8ce9d71b5f9c03103f6cd70ae79690719aabcc48036c7b7ea18ba12159ef50ac`.
+Exactly one provider request completed in 4.898 seconds and reported
+`claude-sonnet-5`, 2 input tokens, and 45 output tokens within the approved limits.
+It failed closed because the result was not exactly the required verification
+marker. No Claude snapshot was saved, no file changed, and no retry or model
+substitution occurred. One sanitized machine-failure event was appended; raw output
+was neither persisted nor committed. A fresh Claude verification remains an
+external gate and requires a new exact manifest and approval.

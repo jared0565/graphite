@@ -223,7 +223,7 @@
 **Authority gate:** Stop and request the user's approval for each exact call after displaying provider, requested model, effort, CLI version, capability snapshot digest, repository/fixture fingerprint, permission mode, maximum usage reservation, and timeout.
 
 - [x] Use a disposable synthetic Git fixture containing no secrets or user source. Verify canonical paths and Graphite graph freshness.
-- [x] Make one no-edit profile-verification call for the selected Claude profile. No retry or fallback. Record only sanitized receipt metadata and human verdict.
+- [x] Make one no-edit profile-verification call for the selected Claude profile. No retry or fallback. Record only sanitized receipt metadata and human verdict. The original identity was accepted, but a later CLI upgrade invalidated it; a separately approved refresh matched the model and budget but failed the exact-response contract, so no current Claude snapshot exists.
 - [x] Make one no-edit profile-verification call for the selected Codex profile. No retry or fallback. Record only sanitized receipt metadata and human verdict. The first identity-correct result exceeded its approved input reservation and was quarantined. After pre-save budget hardening and a new explicit approval, exactly one provider repeat passed identity, response, read-only, and usage checks; its machine evidence and accepted human verdict are append-only.
 - [ ] After both profiles are verified, request separate approval for one bounded edit smoke per provider in isolated disposable worktrees. Each call must create a trivial tested change, pass diff policy and validation, and remain unmerged.
 - [ ] Exercise one separately approved read-only cross-provider review against a synthetic high-risk diff.
