@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import hmac
 import json
 import re
 import secrets
@@ -15,6 +16,7 @@ from typing import Any, Final
 
 from .contracts import (
     CapabilitySnapshot,
+    EvidenceProvenance,
     Effort,
     ExecutionOutcome,
     ExecutionReceipt,
@@ -41,6 +43,22 @@ _SEMANTIC_VERSION = re.compile(
     r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
     r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$"
 )
+_CLI_TELEMETRY_KEYS: Final = frozenset(
+    {
+        "provider", "requested_model", "effective_model", "effort",
+        "capability_snapshot_digest", "category", "risk", "latency_ms",
+        "input_tokens", "output_tokens", "cost_status", "changed_file_count",
+        "changed_byte_count", "validation_outcome", "review_defect_classes",
+        "rework_count", "human_verdict", "provenance", "observed_at",
+    }
+)
+_CLI_POLICY_KEYS: Final = frozenset(
+    {
+        "schema_version", "autonomy", "allowed_providers", "permission_ceiling",
+        "risk_ceilings", "scoring_weights", "minimum_samples",
+        "recency_half_life_days", "source_policy_version",
+    }
+)
 _TABLES = frozenset(
     {
         "tasks",
@@ -64,6 +82,9 @@ _TABLES = frozenset(
         "cli_execution_attempts",
         "validation_results",
         "review_links",
+        "cli_telemetry_events",
+        "cli_policy_versions",
+        "cli_policy_events",
     }
 )
 
@@ -461,6 +482,36 @@ _SCHEMA = (
         created_at INTEGER NOT NULL,
         CHECK(review_attempt_id != primary_attempt_id)
     )""",
+    """CREATE TABLE IF NOT EXISTS cli_telemetry_events (
+        event_hash TEXT PRIMARY KEY CHECK(
+            length(event_hash) = 64 AND event_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        payload_json TEXT NOT NULL CHECK(length(payload_json) <= 8192),
+        observed_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS cli_policy_versions (
+        policy_version TEXT PRIMARY KEY,
+        parent_version TEXT REFERENCES cli_policy_versions(policy_version) ON DELETE RESTRICT,
+        payload_json TEXT NOT NULL CHECK(length(payload_json) <= 16384),
+        payload_hash TEXT NOT NULL CHECK(
+            length(payload_hash) = 64 AND payload_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        signature TEXT NOT NULL CHECK(
+            length(signature) = 64 AND signature NOT GLOB '*[^0-9a-f]*'
+        ),
+        evidence_hash TEXT NOT NULL CHECK(
+            length(evidence_hash) = 64 AND evidence_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        created_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS cli_policy_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        policy_version TEXT NOT NULL REFERENCES cli_policy_versions(policy_version) ON DELETE RESTRICT,
+        action TEXT NOT NULL CHECK(action IN ('candidate', 'promote', 'rollback')),
+        prior_version TEXT REFERENCES cli_policy_versions(policy_version) ON DELETE RESTRICT,
+        actor TEXT NOT NULL CHECK(actor = 'human'),
+        created_at INTEGER NOT NULL
+    )""",
     """CREATE TRIGGER IF NOT EXISTS cli_attempt_identity_update_guard
     BEFORE UPDATE OF approval_id, task_id, decision_id, worktree_id, provider,
         requested_model, effective_model, effort, cli_version, executable_sha256,
@@ -539,6 +590,36 @@ _SCHEMA = (
     BEFORE DELETE ON review_links
     BEGIN
         SELECT RAISE(ABORT, 'review_link_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS cli_telemetry_update_guard
+    BEFORE UPDATE ON cli_telemetry_events
+    BEGIN
+        SELECT RAISE(ABORT, 'cli_telemetry_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS cli_telemetry_delete_guard
+    BEFORE DELETE ON cli_telemetry_events
+    BEGIN
+        SELECT RAISE(ABORT, 'cli_telemetry_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS cli_policy_version_update_guard
+    BEFORE UPDATE ON cli_policy_versions
+    BEGIN
+        SELECT RAISE(ABORT, 'cli_policy_version_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS cli_policy_version_delete_guard
+    BEFORE DELETE ON cli_policy_versions
+    BEGIN
+        SELECT RAISE(ABORT, 'cli_policy_version_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS cli_policy_event_update_guard
+    BEFORE UPDATE ON cli_policy_events
+    BEGIN
+        SELECT RAISE(ABORT, 'cli_policy_event_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS cli_policy_event_delete_guard
+    BEFORE DELETE ON cli_policy_events
+    BEGIN
+        SELECT RAISE(ABORT, 'cli_policy_event_immutable');
     END""",
     """CREATE TRIGGER IF NOT EXISTS execution_attempt_digest_insert_guard
     BEFORE INSERT ON execution_attempts
@@ -2230,6 +2311,285 @@ class RepositoryStore:
         finally:
             if connection is not None:
                 connection.close()
+
+    def record_cli_telemetry(self, payload: dict[str, Any]) -> bool:
+        """Persist one immutable, allowlisted telemetry event."""
+        if not isinstance(payload, dict) or set(payload) != _CLI_TELEMETRY_KEYS:
+            raise ValueError("cli_telemetry_payload_invalid")
+        try:
+            ProviderId(payload["provider"])
+            Effort(payload["effort"])
+            TaskCategory(payload["category"])
+            RiskTier(payload["risk"])
+            EvidenceProvenance(payload["provenance"])
+            _identifier(payload["requested_model"], "cli_telemetry_payload_invalid")
+            _identifier(payload["effective_model"], "cli_telemetry_payload_invalid")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("cli_telemetry_payload_invalid") from exc
+        if (
+            not isinstance(payload["capability_snapshot_digest"], str)
+            or _HEX_64.fullmatch(payload["capability_snapshot_digest"]) is None
+            or payload["cost_status"] != "unknown"
+            or payload["validation_outcome"] not in {"passed", "failed", "blocked", "not_run"}
+            or payload["human_verdict"] not in {None, "accepted", "rejected", "rework"}
+        ):
+            raise ValueError("cli_telemetry_payload_invalid")
+        defects = payload["review_defect_classes"]
+        allowed_defects = {
+            "correctness", "security", "reliability", "maintainability",
+            "performance", "test_coverage", "requirement_miss",
+        }
+        if (
+            not isinstance(defects, list)
+            or any(not isinstance(item, str) for item in defects)
+            or len(defects) != len(set(defects))
+            or not set(defects) <= allowed_defects
+        ):
+            raise ValueError("cli_telemetry_payload_invalid")
+        for name, maximum, optional in (
+            ("latency_ms", 86_400_000, True),
+            ("input_tokens", 100_000_000, True),
+            ("output_tokens", 100_000_000, True),
+            ("changed_file_count", 100_000, False),
+            ("changed_byte_count", 10**12, False),
+            ("rework_count", 1_000, False),
+            ("observed_at", 10**12, False),
+        ):
+            value = payload[name]
+            if optional and value is None:
+                continue
+            _nonnegative_integer(value, "cli_telemetry_payload_invalid", maximum)
+        try:
+            canonical = json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("cli_telemetry_payload_invalid") from exc
+        if len(canonical.encode("utf-8")) > 8192:
+            raise ValueError("cli_telemetry_payload_invalid")
+        observed_at = _nonnegative_integer(payload["observed_at"], "observed_at_invalid")
+        event_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO cli_telemetry_events VALUES (?,?,?)",
+                    (event_hash, canonical, observed_at),
+                )
+                if cursor.rowcount == 1:
+                    return True
+                row = connection.execute(
+                    "SELECT payload_json,observed_at FROM cli_telemetry_events "
+                    "WHERE event_hash=?", (event_hash,),
+                ).fetchone()
+                if tuple(row or ()) == (canonical, observed_at):
+                    return False
+                raise StorageError("cli_telemetry_conflict")
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def cli_telemetry_records(self, *, limit: int = 1000) -> tuple[dict[str, Any], ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
+            raise ValueError("cli_telemetry_limit_invalid")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM cli_telemetry_events "
+                "ORDER BY observed_at DESC,event_hash DESC LIMIT ?", (limit,),
+            ).fetchall()
+        try:
+            return tuple(json.loads(str(row[0])) for row in rows)
+        except (TypeError, ValueError) as exc:
+            raise StorageError("storage_corrupt") from exc
+
+    @staticmethod
+    def _policy_signature_payload(
+        policy_version: str,
+        parent_version: str | None,
+        payload_hash: str,
+        evidence_hash: str,
+    ) -> bytes:
+        return json.dumps(
+            {
+                "evidence_hash": evidence_hash,
+                "parent_version": parent_version,
+                "payload_hash": payload_hash,
+                "policy_version": policy_version,
+            },
+            sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ).encode("utf-8")
+
+    def record_cli_policy_candidate(
+        self,
+        *,
+        policy_version: str,
+        parent_version: str | None,
+        payload: dict[str, Any],
+        evidence_hash: str,
+        signature: str,
+        signing_key: bytes,
+        created_at: int,
+    ) -> bool:
+        """Record a signed candidate; recording never activates it."""
+        policy_version = _identifier(policy_version, "policy_version_invalid")
+        if parent_version is not None:
+            parent_version = _identifier(parent_version, "parent_policy_version_invalid")
+        if not isinstance(payload, dict) or set(payload) != _CLI_POLICY_KEYS:
+            raise ValueError("cli_policy_payload_invalid")
+        if (
+            payload["schema_version"] != 1
+            or payload["autonomy"] is not False
+            or payload["allowed_providers"] != ["claude-code", "codex"]
+            or payload["permission_ceiling"] != "workspace-write"
+            or payload["risk_ceilings"] != {"claude-code": "medium", "codex": "medium"}
+            or payload["source_policy_version"] != "3"
+        ):
+            raise ValueError("cli_policy_guardrail_invalid")
+        weights = payload["scoring_weights"]
+        if (
+            not isinstance(weights, dict)
+            or not weights
+            or not set(weights) <= {
+                "reliability", "tokens", "latency", "scarcity",
+                "effort", "confidence", "recency",
+            }
+        ):
+            raise ValueError("cli_policy_payload_invalid")
+        for value in weights.values():
+            _nonnegative_integer(value, "cli_policy_payload_invalid", 1_000)
+        minimum_samples = _nonnegative_integer(
+            payload["minimum_samples"], "cli_policy_payload_invalid", 10_000
+        )
+        half_life = _nonnegative_integer(
+            payload["recency_half_life_days"], "cli_policy_payload_invalid", 365
+        )
+        if minimum_samples < 20 or half_life < 7:
+            raise ValueError("cli_policy_payload_invalid")
+        if not isinstance(signing_key, bytes) or len(signing_key) < 32:
+            raise ValueError("policy_signing_key_invalid")
+        if not isinstance(evidence_hash, str) or not _HEX_64.fullmatch(evidence_hash):
+            raise ValueError("evidence_hash_invalid")
+        if not isinstance(signature, str) or not _HEX_64.fullmatch(signature):
+            raise ValueError("policy_signature_invalid")
+        created_at = _nonnegative_integer(created_at, "created_at_invalid")
+        try:
+            canonical = json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("cli_policy_payload_invalid") from exc
+        if len(canonical.encode("utf-8")) > 16384:
+            raise ValueError("cli_policy_payload_invalid")
+        payload_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        expected = hmac.new(
+            signing_key,
+            self._policy_signature_payload(
+                policy_version, parent_version, payload_hash, evidence_hash
+            ),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise ValueError("policy_signature_invalid")
+        values = (
+            policy_version, parent_version, canonical, payload_hash,
+            signature, evidence_hash, created_at,
+        )
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO cli_policy_versions VALUES (?,?,?,?,?,?,?)", values
+                )
+                if cursor.rowcount != 1:
+                    row = connection.execute(
+                        "SELECT policy_version,parent_version,payload_json,payload_hash,"
+                        "signature,evidence_hash,created_at FROM cli_policy_versions "
+                        "WHERE policy_version=?", (policy_version,),
+                    ).fetchone()
+                    if tuple(row or ()) == values:
+                        connection.rollback()
+                        return False
+                    raise StorageError("cli_policy_version_conflict")
+                connection.execute(
+                    "INSERT INTO cli_policy_events(policy_version,action,prior_version,actor,created_at) "
+                    "VALUES (?,'candidate',?,'human',?)",
+                    (policy_version, parent_version, created_at),
+                )
+                connection.commit()
+                return True
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    @staticmethod
+    def _active_cli_policy(connection: sqlite3.Connection) -> str | None:
+        row = connection.execute(
+            "SELECT policy_version FROM cli_policy_events "
+            "WHERE action IN ('promote','rollback') ORDER BY event_id DESC LIMIT 1"
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def activate_cli_policy(
+        self,
+        policy_version: str,
+        *,
+        action: str,
+        authority_granted: bool,
+        created_at: int,
+    ) -> bool:
+        """Append a human promotion or rollback without rewriting evidence."""
+        policy_version = _identifier(policy_version, "policy_version_invalid")
+        if action not in {"promote", "rollback"}:
+            raise ValueError("policy_action_invalid")
+        if authority_granted is not True:
+            raise ValueError("human_authority_required")
+        created_at = _nonnegative_integer(created_at, "created_at_invalid")
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                exists = connection.execute(
+                    "SELECT 1 FROM cli_policy_versions WHERE policy_version=?",
+                    (policy_version,),
+                ).fetchone()
+                if exists is None:
+                    raise StorageError("cli_policy_version_missing")
+                prior = self._active_cli_policy(connection)
+                if prior == policy_version:
+                    connection.rollback()
+                    return False
+                if action == "rollback":
+                    previously_active = connection.execute(
+                        "SELECT 1 FROM cli_policy_events WHERE policy_version=? "
+                        "AND action IN ('promote','rollback') LIMIT 1", (policy_version,),
+                    ).fetchone()
+                    if previously_active is None:
+                        raise StorageError("cli_policy_rollback_target_invalid")
+                connection.execute(
+                    "INSERT INTO cli_policy_events(policy_version,action,prior_version,actor,created_at) "
+                    "VALUES (?,?,?,'human',?)",
+                    (policy_version, action, prior, created_at),
+                )
+                connection.commit()
+                return True
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def active_cli_policy_version(self) -> str | None:
+        with self._connect() as connection:
+            return self._active_cli_policy(connection)
+
+    def cli_policy_event_records(self) -> tuple[dict[str, Any], ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT policy_version,action,prior_version,actor,created_at "
+                "FROM cli_policy_events ORDER BY event_id"
+            ).fetchall()
+        return tuple(dict(row) for row in rows)
 
     def row_count(self, table: str) -> int:
         if table not in _TABLES:

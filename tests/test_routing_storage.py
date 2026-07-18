@@ -11,12 +11,76 @@ from pathlib import Path
 import pytest
 
 from graphite.routing.contracts import Effort, ExecutionOutcome, ExecutionReceipt
+from graphite.routing.policy import CliLearnedPolicy, sign_cli_policy
 from graphite.routing.storage import (
     AggregateRecord,
     AggregateStore,
     RepositoryStore,
     StorageError,
 )
+
+
+def test_signed_cli_policy_requires_human_promotion_and_preserves_rollback_evidence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    key = b"policy-signing-key-material-32!!"
+
+    first = CliLearnedPolicy("learned-1", None, (("reliability", 900),))
+    first_signature = sign_cli_policy(first, "a" * 64, key)
+    assert store.record_cli_policy_candidate(
+        policy_version=first.policy_version,
+        parent_version=first.parent_version,
+        payload=first.to_payload(),
+        evidence_hash="a" * 64,
+        signature=first_signature,
+        signing_key=key,
+        created_at=10,
+    ) is True
+    assert store.active_cli_policy_version() is None
+    with pytest.raises(ValueError, match="human_authority_required"):
+        store.activate_cli_policy(
+            "learned-1", action="promote", authority_granted=False, created_at=11
+        )
+    assert store.activate_cli_policy(
+        "learned-1", action="promote", authority_granted=True, created_at=11
+    ) is True
+
+    second = CliLearnedPolicy("learned-2", "learned-1", (("reliability", 850),))
+    store.record_cli_policy_candidate(
+        policy_version=second.policy_version,
+        parent_version=second.parent_version,
+        payload=second.to_payload(),
+        evidence_hash="b" * 64,
+        signature=sign_cli_policy(second, "b" * 64, key),
+        signing_key=key,
+        created_at=12,
+    )
+    store.activate_cli_policy(
+        "learned-2", action="promote", authority_granted=True, created_at=13
+    )
+    assert store.activate_cli_policy(
+        "learned-1", action="rollback", authority_granted=True, created_at=14
+    ) is True
+    assert store.active_cli_policy_version() == "learned-1"
+    assert store.row_count("cli_policy_versions") == 2
+    assert [event["action"] for event in store.cli_policy_event_records()] == [
+        "candidate", "promote", "candidate", "promote", "rollback"
+    ]
+
+    with pytest.raises(ValueError, match="policy_signature_invalid"):
+        store.record_cli_policy_candidate(
+            policy_version="tampered",
+            parent_version="learned-1",
+            payload=second.to_payload(),
+            evidence_hash="b" * 64,
+            signature="0" * 64,
+            signing_key=key,
+            created_at=15,
+        )
 
 
 def test_repository_database_is_fixed_under_selected_root(tmp_path: Path) -> None:

@@ -24,10 +24,13 @@ from graphite.routing.policy import (
     CandidateMetrics,
     CliCandidateMetrics,
     CliPolicyGates,
+    CliLearnedPolicy,
     PolicyGates,
     rank_candidates,
     rank_cli_candidates,
     promotion_eligibility,
+    compare_cli_policy_candidate,
+    sign_cli_policy,
     wilson_lower_bound,
 )
 from graphite.routing.registry import (
@@ -225,6 +228,52 @@ def test_cli_ranking_is_deterministic_and_ignores_undersampled_repository_signal
     assert first == second
     assert first.selected is not None
     assert first.selected.provider is ProviderId.CODEX
+
+
+def test_cli_ranking_penalizes_missing_confidence_recency_and_unknown_cost() -> None:
+    snapshot = _cli_snapshot()
+    candidate = _cli_candidate(snapshot)
+    result = rank_cli_candidates(_task(), (snapshot,), (candidate,), _cli_gates(snapshot))
+    assert result.selected is not None
+    components = dict(result.selected.components)
+    assert components["confidence_penalty"] == 150
+    assert components["recency_penalty"] == 50
+    assert components["cost_unknown_penalty"] == 25
+    with pytest.raises(ValueError, match="cost_status_invalid"):
+        rank_cli_candidates(
+            _task(), (snapshot,), (_cli_candidate(snapshot, cost_status="zero"),),
+            _cli_gates(snapshot),
+        )
+
+
+def test_learned_policy_can_only_tune_scoring_and_never_grants_autonomy() -> None:
+    candidate = CliLearnedPolicy(
+        "candidate-4", "candidate-3",
+        (("reliability", 900), ("latency", 100), ("confidence", 200)),
+    )
+    payload = candidate.to_payload()
+    assert payload["autonomy"] is False
+    assert payload["allowed_providers"] == ["claude-code", "codex"]
+    assert payload["permission_ceiling"] == "workspace-write"
+    assert payload["risk_ceilings"] == {"claude-code": "medium", "codex": "medium"}
+    assert len(sign_cli_policy(candidate, "a" * 64, b"k" * 32)) == 64
+    insufficient = compare_cli_policy_candidate(
+        candidate,
+        evidence_hash="a" * 64,
+        sample_count=19,
+        baseline_score_millis=700,
+        candidate_score_millis=800,
+    )
+    sufficient = compare_cli_policy_candidate(
+        candidate,
+        evidence_hash="a" * 64,
+        sample_count=20,
+        baseline_score_millis=700,
+        candidate_score_millis=800,
+    )
+    assert insufficient.promotion_eligible is False
+    assert insufficient.reason == "sample_size_insufficient"
+    assert sufficient.promotion_eligible is True
 
 
 @pytest.mark.parametrize(

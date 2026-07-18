@@ -186,11 +186,11 @@
 - Modify `tests/test_routing_policy.py`
 - Modify `tests/test_routing_storage.py`
 
-- [ ] Record only provider/profile identity, task category/risk, latency, reported usage, diff size, validation outcome, review defect classes, rework count, human verdict, and provenance.
-- [ ] Prove source, prompt, response, diff contents, secrets, paths, and raw diagnostics cannot enter telemetry schemas or public serialization.
-- [ ] Add minimum evidence counts, bounded confidence intervals or conservative scoring penalties, recency weighting, and deterministic tie-breaking. Missing cost is `unknown`, never zero.
-- [ ] Policy learning produces a candidate version and comparison evidence only. Promotion requires an explicit human action and cannot change allowlists, permission ceilings, risk ceilings, or autonomy.
-- [ ] Add rollback to the previous signed policy version without deleting evidence.
+- [x] Record only provider/profile identity, task category/risk, latency, reported usage, diff size, validation outcome, review defect classes, rework count, human verdict, and provenance.
+- [x] Prove source, prompt, response, diff contents, secrets, paths, and raw diagnostics cannot enter telemetry schemas or public serialization.
+- [x] Add minimum evidence counts, bounded confidence intervals or conservative scoring penalties, recency weighting, and deterministic tie-breaking. Missing cost is `unknown`, never zero.
+- [x] Policy learning produces a candidate version and comparison evidence only. Promotion requires an explicit human action and cannot change allowlists, permission ceilings, risk ceilings, or autonomy.
+- [x] Add rollback to the previous signed policy version without deleting evidence.
 - [ ] Commit: `feat: learn CLI routing performance under promotion gates`.
 
 ## Task 9: Documentation, rollback drill, and offline acceptance

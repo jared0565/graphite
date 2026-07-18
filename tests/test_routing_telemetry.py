@@ -17,10 +17,15 @@ from graphite.routing.contracts import (
 from graphite.routing.storage import AggregateStore, RepositoryStore
 from graphite.routing.telemetry import (
     EvidenceCorrelation,
+    CliTelemetryRecord,
+    HumanVerdict,
+    ReviewDefectClass,
     close_incident_review,
     evidence_summary,
     export_sanitized_aggregate,
     record_verified_outcome,
+    record_cli_telemetry,
+    summarize_cli_telemetry,
 )
 
 
@@ -166,3 +171,64 @@ def test_aggregate_rejects_untyped_or_unknown_labels(tmp_path: Path) -> None:
             aggregate, receipt, category=TaskCategory.FEATURE, risk=RiskTier.LOW,
             policy_version="1", recorded_at=0,
         )
+
+
+def _cli_record(**changes: object) -> CliTelemetryRecord:
+    values: dict[str, object] = {
+        "provider": "codex",
+        "requested_model": "gpt-tested-codex",
+        "effective_model": "gpt-tested-codex-2026-07-18",
+        "effort": "high",
+        "capability_snapshot_digest": "e" * 64,
+        "category": "feature",
+        "risk": "medium",
+        "latency_ms": 1200,
+        "input_tokens": 500,
+        "output_tokens": 200,
+        "changed_file_count": 3,
+        "changed_byte_count": 1500,
+        "validation_outcome": "passed",
+        "review_defect_classes": (),
+        "rework_count": 0,
+        "human_verdict": HumanVerdict.ACCEPTED,
+        "provenance": "machine_verified",
+        "observed_at": 1_000,
+    }
+    values.update(changes)
+    return CliTelemetryRecord(**values)
+
+
+def test_cli_telemetry_schema_is_allowlisted_append_only_and_cost_unknown(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    record = _cli_record(review_defect_classes=(ReviewDefectClass.MAINTAINABILITY,))
+    assert record_cli_telemetry(store, record) is True
+    assert record_cli_telemetry(store, record) is False
+    assert store.row_count("cli_telemetry_events") == 1
+    public = record.to_dict()
+    assert public["cost_status"] == "unknown"
+    forbidden = {"source", "prompt", "response", "diff", "path", "diagnostics", "secret"}
+    assert forbidden.isdisjoint(public)
+    raw = store.path.read_bytes()
+    for sensitive in (b"super-secret", b"src/private.py", b"raw prompt", b"raw diff"):
+        assert sensitive not in raw
+
+    with pytest.raises(TypeError):
+        CliTelemetryRecord(**{**record.__dict__, "source": "super-secret"})
+    with pytest.raises(ValueError, match="telemetry_model_invalid"):
+        _cli_record(requested_model="../../src/private.py")
+    with pytest.raises(ValueError, match="telemetry_cost_status_invalid"):
+        _cli_record(cost_status="0-usd")
+
+
+def test_cli_telemetry_recency_weighting_is_deterministic() -> None:
+    recent = _cli_record(observed_at=100 * 86_400)
+    old_failure = _cli_record(
+        observed_at=40 * 86_400,
+        validation_outcome="failed",
+        human_verdict=HumanVerdict.REJECTED,
+    )
+    first = summarize_cli_telemetry((old_failure, recent), now=100 * 86_400)
+    second = summarize_cli_telemetry((recent, old_failure), now=100 * 86_400)
+    assert first == second
+    assert first.samples == 2
+    assert first.success_millis > 500

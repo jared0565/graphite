@@ -1182,10 +1182,27 @@ def cmd_route_reconcile(args: argparse.Namespace) -> int:
 
 
 def cmd_route_policy(args: argparse.Namespace) -> int:
-    payload = RoutingService(args.path).policy(
-        promote=args.promote,
-        rollback=args.rollback,
-    )
+    authority_granted = False
+    if args.promote or args.rollback:
+        authority_granted = approval_prompt(
+            stdin=sys.stdin,
+            stdout=sys.stdout,
+            stdin_is_tty=sys.stdin.isatty(),
+            stdout_is_tty=sys.stdout.isatty(),
+            json_mode=args.json,
+            assume_yes=False,
+            ci=bool(os.environ.get("CI")),
+        )
+        if not authority_granted:
+            return 2
+    try:
+        payload = RoutingService(args.path).policy(
+            promote=args.promote,
+            rollback=args.rollback,
+            authority_granted=authority_granted,
+        )
+    except (StorageError, RoutingServiceError, ValueError, OSError) as exc:
+        return _route_recovery_error(exc, json_mode=args.json)
     _route_print(payload, json_mode=args.json)
     return 0
 

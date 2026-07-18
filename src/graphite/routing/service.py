@@ -1130,7 +1130,23 @@ class RoutingService:
         *,
         promote: str | None = None,
         rollback: str | None = None,
+        authority_granted: bool = False,
     ) -> dict[str, Any]:
+        if promote is not None and rollback is not None:
+            raise RoutingServiceError("policy_action_conflict")
+        if promote is not None or rollback is not None:
+            self.store.initialize()
+            selected = promote or rollback
+            assert selected is not None
+            try:
+                self.store.activate_cli_policy(
+                    selected,
+                    action="promote" if promote else "rollback",
+                    authority_granted=authority_granted,
+                    created_at=int(time.time()),
+                )
+            except ValueError as exc:
+                raise RoutingServiceError(str(exc)) from exc
         return {
             "policy_version": promote or rollback or "3",
             "requested_action": (

@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import hmac
+import json
 from dataclasses import dataclass
 from typing import Final
 
@@ -59,6 +62,11 @@ _USAGE_PENALTIES: Final = {
 _CODE_CAPABILITIES: Final = frozenset({"code"})
 _REFACTOR_CAPABILITIES: Final = frozenset({"code", "reasoning"})
 _ARCHITECTURE_CAPABILITIES: Final = frozenset({"architecture"})
+CLI_MINIMUM_LEARNING_SAMPLES: Final = 20
+CLI_RECENCY_HALF_LIFE_DAYS: Final = 30
+_LEARNED_PROVIDERS: Final = ("claude-code", "codex")
+_LEARNED_RISK_CEILINGS: Final = {"claude-code": "medium", "codex": "medium"}
+_LEARNED_PERMISSION_CEILING: Final = "workspace-write"
 
 
 @dataclass(frozen=True)
@@ -138,6 +146,9 @@ class CliCandidateMetrics:
     expected_output_tokens: int
     expected_latency_ms: int
     quota_scarcity_millis: int
+    success_count: int | None = None
+    latest_observed_at: int | None = None
+    cost_status: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -175,6 +186,126 @@ class CliPolicyResult:
     manual_handoff: bool
     reasons: tuple[str, ...]
     policy_version: str = "3"
+
+
+@dataclass(frozen=True)
+class CliLearnedPolicy:
+    policy_version: str
+    parent_version: str | None
+    scoring_weights: tuple[tuple[str, int], ...]
+    minimum_samples: int = CLI_MINIMUM_LEARNING_SAMPLES
+    recency_half_life_days: int = CLI_RECENCY_HALF_LIFE_DAYS
+    source_policy_version: str = "3"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.policy_version, str) or not self.policy_version:
+            raise ValueError("policy_version_invalid")
+        if self.parent_version is not None and (
+            not isinstance(self.parent_version, str) or not self.parent_version
+        ):
+            raise ValueError("parent_policy_version_invalid")
+        if (
+            not isinstance(self.scoring_weights, tuple)
+            or not self.scoring_weights
+            or len({name for name, _ in self.scoring_weights}) != len(self.scoring_weights)
+        ):
+            raise ValueError("policy_weights_invalid")
+        allowed = {"reliability", "tokens", "latency", "scarcity", "effort", "confidence", "recency"}
+        for name, value in self.scoring_weights:
+            if name not in allowed:
+                raise ValueError("policy_weights_invalid")
+            _bounded_metric(value, "policy_weights_invalid", 1_000)
+        if (
+            isinstance(self.minimum_samples, bool)
+            or not isinstance(self.minimum_samples, int)
+            or not 20 <= self.minimum_samples <= 10_000
+        ):
+            raise ValueError("policy_minimum_samples_invalid")
+        if (
+            isinstance(self.recency_half_life_days, bool)
+            or not isinstance(self.recency_half_life_days, int)
+            or not 7 <= self.recency_half_life_days <= 365
+        ):
+            raise ValueError("policy_recency_invalid")
+
+    def to_payload(self) -> dict[str, object]:
+        """Return fixed guardrails plus tunable ranking weights only."""
+        return {
+            "schema_version": 1,
+            "autonomy": False,
+            "allowed_providers": list(_LEARNED_PROVIDERS),
+            "permission_ceiling": _LEARNED_PERMISSION_CEILING,
+            "risk_ceilings": dict(_LEARNED_RISK_CEILINGS),
+            "scoring_weights": dict(sorted(self.scoring_weights)),
+            "minimum_samples": self.minimum_samples,
+            "recency_half_life_days": self.recency_half_life_days,
+            "source_policy_version": self.source_policy_version,
+        }
+
+
+@dataclass(frozen=True)
+class PolicyComparisonEvidence:
+    baseline_version: str
+    candidate_version: str
+    evidence_hash: str
+    sample_count: int
+    score_delta_millis: int
+    promotion_eligible: bool
+    reason: str
+
+
+def cli_policy_payload_hash(candidate: CliLearnedPolicy) -> str:
+    payload = json.dumps(
+        candidate.to_payload(), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def sign_cli_policy(candidate: CliLearnedPolicy, evidence_hash: str, signing_key: bytes) -> str:
+    if not isinstance(signing_key, bytes) or len(signing_key) < 32:
+        raise ValueError("policy_signing_key_invalid")
+    if not isinstance(evidence_hash, str) or len(evidence_hash) != 64 or any(
+        character not in "0123456789abcdef" for character in evidence_hash
+    ):
+        raise ValueError("evidence_hash_invalid")
+    signed = json.dumps(
+        {
+            "evidence_hash": evidence_hash,
+            "parent_version": candidate.parent_version,
+            "payload_hash": cli_policy_payload_hash(candidate),
+            "policy_version": candidate.policy_version,
+        },
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    return hmac.new(signing_key, signed, hashlib.sha256).hexdigest()
+
+
+def compare_cli_policy_candidate(
+    candidate: CliLearnedPolicy,
+    *,
+    evidence_hash: str,
+    sample_count: int,
+    baseline_score_millis: int,
+    candidate_score_millis: int,
+) -> PolicyComparisonEvidence:
+    sample_count = _bounded_metric(sample_count, "sample_count_invalid")
+    baseline = _bounded_metric(baseline_score_millis, "baseline_score_invalid", 1_000)
+    proposed = _bounded_metric(candidate_score_millis, "candidate_score_invalid", 1_000)
+    if len(evidence_hash) != 64 or any(c not in "0123456789abcdef" for c in evidence_hash):
+        raise ValueError("evidence_hash_invalid")
+    enough = sample_count >= candidate.minimum_samples
+    improved = proposed > baseline
+    return PolicyComparisonEvidence(
+        candidate.source_policy_version,
+        candidate.policy_version,
+        evidence_hash,
+        sample_count,
+        proposed - baseline,
+        enough and improved,
+        "candidate_improves_with_sufficient_evidence"
+        if enough and improved
+        else "sample_size_insufficient" if not enough else "candidate_not_better",
+    )
 
 
 def _global_failures(gates: PolicyGates) -> list[str]:
@@ -504,6 +635,8 @@ def rank_cli_candidates(
             rejected.append("capability_missing")
             continue
         sample_count = _bounded_metric(candidate.sample_count, "sample_count_invalid")
+        if candidate.cost_status != "unknown":
+            raise ValueError("cost_status_invalid")
         global_success = _bounded_metric(
             candidate.global_success_millis, "global_success_invalid", 1_000
         )
@@ -513,6 +646,25 @@ def rank_cli_candidates(
             reliability = _bounded_metric(
                 repository_success, "repository_success_invalid", 1_000
             )
+        if candidate.success_count is None:
+            confidence_penalty = 150
+        else:
+            successes = _bounded_metric(candidate.success_count, "success_count_invalid")
+            if successes > sample_count:
+                raise ValueError("success_count_invalid")
+            confidence_penalty = (
+                150
+                if sample_count < CLI_MINIMUM_LEARNING_SAMPLES
+                else min(200, round((1 - wilson_lower_bound(successes, sample_count)) * 200))
+            )
+        if candidate.latest_observed_at is None:
+            recency_penalty = 50
+        else:
+            latest = _bounded_metric(candidate.latest_observed_at, "latest_observed_at_invalid")
+            if latest > gates.now:
+                raise ValueError("latest_observed_at_invalid")
+            age_days = (gates.now - latest) // 86_400
+            recency_penalty = min(100, age_days * 2)
         latency = _bounded_metric(candidate.expected_latency_ms, "expected_latency_invalid")
         scarcity = _bounded_metric(
             candidate.quota_scarcity_millis, "quota_scarcity_invalid", 1_000
@@ -521,6 +673,7 @@ def rank_cli_candidates(
         latency_penalty = min(200, latency // 1_000)
         scarcity_penalty = scarcity // 10
         effort_penalty = _EFFORT_PENALTY[effort]
+        cost_unknown_penalty = 25
         score = max(
             0,
             min(
@@ -529,7 +682,10 @@ def rank_cli_candidates(
                 - token_penalty
                 - latency_penalty
                 - scarcity_penalty
-                - effort_penalty,
+                - effort_penalty
+                - confidence_penalty
+                - recency_penalty
+                - cost_unknown_penalty,
             ),
         )
         scored.append(
@@ -546,6 +702,9 @@ def rank_cli_candidates(
                     ("latency_penalty", latency_penalty),
                     ("quota_scarcity_penalty", scarcity_penalty),
                     ("effort_penalty", effort_penalty),
+                    ("confidence_penalty", confidence_penalty),
+                    ("recency_penalty", recency_penalty),
+                    ("cost_unknown_penalty", cost_unknown_penalty),
                 ),
             )
         )
