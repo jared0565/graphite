@@ -1,6 +1,8 @@
 """Immutable public contracts for development routing."""
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -17,7 +19,13 @@ MAX_STRING_LENGTH = 256
 
 _WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[\\/]")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+_GIT_OBJECT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_SEMANTIC_VERSION = re.compile(
+    r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$"
+)
 _DATA_POLICIES = frozenset({"metadata_only", "source_allowed"})
+_VALIDATION_OUTCOMES = frozenset({"passed", "failed", "blocked", "not_run"})
 
 
 class TaskCategory(StrEnum):
@@ -49,7 +57,18 @@ class Effort(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+    XHIGH = "xhigh"
     MAX = "max"
+
+
+class ProviderId(StrEnum):
+    CLAUDE_CODE = "claude-code"
+    CODEX = "codex"
+
+
+class PermissionMode(StrEnum):
+    READ_ONLY = "read-only"
+    WORKSPACE_WRITE = "workspace-write"
 
 
 class EvidenceProvenance(StrEnum):
@@ -142,6 +161,19 @@ def _strings(values: object, *, code: str, maximum: int) -> tuple[str, ...]:
 
 def _hash(value: object, *, code: str) -> str:
     if not isinstance(value, str) or not _HEX_64.fullmatch(value):
+        raise ValueError(code)
+    return value
+
+
+def _semantic_version(value: object, *, code: str) -> str:
+    text = _bounded_identifier(value, code=code)
+    if not _SEMANTIC_VERSION.fullmatch(text):
+        raise ValueError(code)
+    return text
+
+
+def _git_object(value: object, *, code: str) -> str:
+    if not isinstance(value, str) or not _GIT_OBJECT.fullmatch(value):
         raise ValueError(code)
     return value
 
@@ -291,6 +323,152 @@ class ModelProfile(PublicRecord):
 
 
 @dataclass(frozen=True)
+class CliIdentity(PublicRecord):
+    provider: ProviderId
+    executable_sha256: str
+    cli_version: str
+    adapter_protocol_version: str
+
+    _public_fields = (
+        "provider",
+        "executable_sha256",
+        "cli_version",
+        "adapter_protocol_version",
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "provider", _enum(self.provider, ProviderId, code="provider_invalid"))
+        object.__setattr__(
+            self,
+            "executable_sha256",
+            _hash(self.executable_sha256, code="executable_sha256_invalid"),
+        )
+        object.__setattr__(
+            self, "cli_version", _semantic_version(self.cli_version, code="cli_version_invalid")
+        )
+        object.__setattr__(
+            self,
+            "adapter_protocol_version",
+            _semantic_version(
+                self.adapter_protocol_version, code="adapter_protocol_version_invalid"
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class CapabilityProfile(PublicRecord):
+    provider: ProviderId
+    requested_model: str
+    effective_model: str
+    profile_version: str
+    capabilities: tuple[str, ...]
+    context_window_tokens: int
+    supported_efforts: tuple[Effort, ...]
+    risk_ceiling: RiskTier
+    permission_mode: PermissionMode
+
+    _public_fields = (
+        "provider",
+        "requested_model",
+        "effective_model",
+        "profile_version",
+        "capabilities",
+        "context_window_tokens",
+        "supported_efforts",
+        "risk_ceiling",
+        "permission_mode",
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "provider", _enum(self.provider, ProviderId, code="provider_invalid"))
+        object.__setattr__(
+            self,
+            "requested_model",
+            _bounded_identifier(self.requested_model, code="requested_model_invalid"),
+        )
+        object.__setattr__(
+            self,
+            "effective_model",
+            _bounded_identifier(self.effective_model, code="effective_model_invalid"),
+        )
+        object.__setattr__(
+            self,
+            "profile_version",
+            _bounded_identifier(self.profile_version, code="profile_version_invalid"),
+        )
+        capabilities = _strings(self.capabilities, code="capabilities_invalid", maximum=32)
+        if not capabilities or len(set(capabilities)) != len(capabilities):
+            raise ValueError("capabilities_invalid")
+        object.__setattr__(self, "capabilities", tuple(sorted(capabilities)))
+        object.__setattr__(
+            self,
+            "context_window_tokens",
+            _bounded_integer(
+                self.context_window_tokens,
+                code="context_window_tokens_invalid",
+                minimum=1,
+                maximum=10_000_000,
+            ),
+        )
+        if not isinstance(self.supported_efforts, (tuple, list)) or not self.supported_efforts:
+            raise ValueError("effort_invalid")
+        efforts = tuple(_enum(item, Effort, code="effort_invalid") for item in self.supported_efforts)
+        if len(set(efforts)) != len(efforts):
+            raise ValueError("effort_invalid")
+        object.__setattr__(self, "supported_efforts", tuple(sorted(efforts, key=lambda item: item.value)))
+        object.__setattr__(
+            self, "risk_ceiling", _enum(self.risk_ceiling, RiskTier, code="risk_ceiling_invalid")
+        )
+        object.__setattr__(
+            self,
+            "permission_mode",
+            _enum(self.permission_mode, PermissionMode, code="permission_mode_invalid"),
+        )
+
+
+@dataclass(frozen=True)
+class CapabilitySnapshot(PublicRecord):
+    schema_version: int
+    verified_at: int
+    expires_at: int
+    identity: CliIdentity
+    profile: CapabilityProfile
+
+    _public_fields = ("schema_version", "verified_at", "expires_at", "identity", "profile")
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "schema_version",
+            _bounded_integer(self.schema_version, code="snapshot_schema_invalid", minimum=1, maximum=10),
+        )
+        verified = _bounded_integer(self.verified_at, code="snapshot_time_invalid")
+        expires = _bounded_integer(self.expires_at, code="snapshot_time_invalid")
+        if expires <= verified:
+            raise ValueError("snapshot_time_invalid")
+        if not isinstance(self.identity, CliIdentity) or not isinstance(self.profile, CapabilityProfile):
+            raise ValueError("snapshot_identity_invalid")
+        if self.identity.provider is not self.profile.provider:
+            raise ValueError("snapshot_identity_invalid")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "verified_at": self.verified_at,
+            "expires_at": self.expires_at,
+            "identity": self.identity.to_dict(),
+            "profile": self.profile.to_dict(),
+        }
+
+    @property
+    def digest(self) -> str:
+        payload = json.dumps(
+            self.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+
+@dataclass(frozen=True)
 class RoutingDecision(PublicRecord):
     decision_id: str
     task_id: str
@@ -383,6 +561,124 @@ class ApprovalManifest(PublicRecord):
 
 
 @dataclass(frozen=True)
+class CliApprovalManifest(PublicRecord):
+    approval_id: str
+    task_id: str
+    decision_id: str
+    provider: ProviderId
+    requested_model: str
+    effective_model: str
+    effort: Effort
+    cli_executable_sha256: str
+    cli_version: str
+    adapter_protocol_version: str
+    capability_snapshot_digest: str
+    graph_fingerprint: str
+    context_manifest_hash: str
+    repository_commit: str
+    worktree_id: str
+    permission_mode: PermissionMode
+    max_input_tokens: int
+    max_output_tokens: int
+    policy_version: str
+    issued_at: int
+    expires_at: int
+    nonce: str
+
+    _public_fields = (
+        "approval_id",
+        "task_id",
+        "decision_id",
+        "provider",
+        "requested_model",
+        "effective_model",
+        "effort",
+        "cli_executable_sha256",
+        "cli_version",
+        "adapter_protocol_version",
+        "capability_snapshot_digest",
+        "graph_fingerprint",
+        "context_manifest_hash",
+        "repository_commit",
+        "worktree_id",
+        "permission_mode",
+        "max_input_tokens",
+        "max_output_tokens",
+        "policy_version",
+        "issued_at",
+        "expires_at",
+        "nonce",
+    )
+
+    def __post_init__(self) -> None:
+        for name in ("approval_id", "task_id", "decision_id", "policy_version", "nonce"):
+            object.__setattr__(
+                self, name, _bounded_identifier(getattr(self, name), code=f"{name}_invalid")
+            )
+        object.__setattr__(self, "provider", _enum(self.provider, ProviderId, code="provider_invalid"))
+        for name in ("requested_model", "effective_model", "worktree_id"):
+            object.__setattr__(
+                self, name, _bounded_identifier(getattr(self, name), code=f"{name}_invalid")
+            )
+        object.__setattr__(self, "effort", _enum(self.effort, Effort, code="effort_invalid"))
+        object.__setattr__(
+            self,
+            "cli_executable_sha256",
+            _hash(self.cli_executable_sha256, code="cli_executable_sha256_invalid"),
+        )
+        object.__setattr__(
+            self, "cli_version", _semantic_version(self.cli_version, code="cli_version_invalid")
+        )
+        object.__setattr__(
+            self,
+            "adapter_protocol_version",
+            _semantic_version(
+                self.adapter_protocol_version, code="adapter_protocol_version_invalid"
+            ),
+        )
+        for name in (
+            "capability_snapshot_digest",
+            "graph_fingerprint",
+            "context_manifest_hash",
+        ):
+            object.__setattr__(self, name, _hash(getattr(self, name), code=f"{name}_invalid"))
+        object.__setattr__(
+            self,
+            "repository_commit",
+            _git_object(self.repository_commit, code="repository_commit_invalid"),
+        )
+        object.__setattr__(
+            self,
+            "permission_mode",
+            _enum(self.permission_mode, PermissionMode, code="permission_mode_invalid"),
+        )
+        object.__setattr__(
+            self,
+            "max_input_tokens",
+            _bounded_integer(
+                self.max_input_tokens,
+                code="max_input_tokens_invalid",
+                minimum=1,
+                maximum=262_144,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "max_output_tokens",
+            _bounded_integer(
+                self.max_output_tokens,
+                code="max_output_tokens_invalid",
+                minimum=1,
+                maximum=32_768,
+            ),
+        )
+        issued = _bounded_integer(self.issued_at, code="issued_at_invalid")
+        expires = _bounded_integer(self.expires_at, code="expires_at_invalid")
+        if expires <= issued:
+            raise ValueError("expires_at_invalid")
+
+
+@dataclass(frozen=True)
 class ExecutionReceipt(PublicRecord):
     execution_id: str
     approval_id: str
@@ -395,6 +691,12 @@ class ExecutionReceipt(PublicRecord):
     prompt_hash: str
     response_hash: str | None
     failure_reason: FailureReason | None
+    provider: ProviderId | None = None
+    effective_model: str | None = None
+    cli_version: str | None = None
+    changed_file_count: int | None = None
+    changed_byte_count: int | None = None
+    validation_outcome: str | None = None
 
     _public_fields = (
         "execution_id",
@@ -408,6 +710,12 @@ class ExecutionReceipt(PublicRecord):
         "prompt_hash",
         "response_hash",
         "failure_reason",
+        "provider",
+        "effective_model",
+        "cli_version",
+        "changed_file_count",
+        "changed_byte_count",
+        "validation_outcome",
     )
 
     def __post_init__(self) -> None:
@@ -425,6 +733,26 @@ class ExecutionReceipt(PublicRecord):
             object.__setattr__(self, "response_hash", _hash(self.response_hash, code="response_hash_invalid"))
         if self.failure_reason is not None:
             object.__setattr__(self, "failure_reason", _enum(self.failure_reason, FailureReason, code="failure_reason_invalid"))
+        if self.provider is not None:
+            object.__setattr__(self, "provider", _enum(self.provider, ProviderId, code="provider_invalid"))
+        if self.effective_model is not None:
+            object.__setattr__(
+                self,
+                "effective_model",
+                _bounded_identifier(self.effective_model, code="effective_model_invalid"),
+            )
+        if self.cli_version is not None:
+            object.__setattr__(
+                self, "cli_version", _semantic_version(self.cli_version, code="cli_version_invalid")
+            )
+        for name in ("changed_file_count", "changed_byte_count"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self, name, _bounded_integer(value, code=f"{name}_invalid", maximum=10_000_000)
+                )
+        if self.validation_outcome is not None and self.validation_outcome not in _VALIDATION_OUTCOMES:
+            raise ValueError("validation_outcome_invalid")
 
 
 @dataclass(frozen=True)

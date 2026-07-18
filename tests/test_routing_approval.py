@@ -13,7 +13,13 @@ from graphite.routing.approval import (
     ApprovalError,
     approval_prompt,
 )
-from graphite.routing.contracts import ApprovalManifest, Effort
+from graphite.routing.contracts import (
+    ApprovalManifest,
+    CliApprovalManifest,
+    Effort,
+    PermissionMode,
+    ProviderId,
+)
 from graphite.routing.storage import RepositoryStore
 
 
@@ -36,6 +42,35 @@ def _manifest(**changes) -> ApprovalManifest:
     }
     values.update(changes)
     return ApprovalManifest(**values)
+
+
+def _cli_manifest(**changes) -> CliApprovalManifest:
+    values = {
+        "approval_id": "approval-cli-1",
+        "task_id": "task-1",
+        "decision_id": "decision-1",
+        "provider": ProviderId.CLAUDE_CODE,
+        "requested_model": "sonnet",
+        "effective_model": "claude-sonnet-5",
+        "effort": Effort.HIGH,
+        "cli_executable_sha256": "a" * 64,
+        "cli_version": "2.1.208",
+        "adapter_protocol_version": "1.0.0",
+        "capability_snapshot_digest": "b" * 64,
+        "graph_fingerprint": "c" * 64,
+        "context_manifest_hash": "d" * 64,
+        "repository_commit": "e" * 40,
+        "worktree_id": "worktree-1",
+        "permission_mode": PermissionMode.WORKSPACE_WRITE,
+        "max_input_tokens": 8_000,
+        "max_output_tokens": 2_000,
+        "policy_version": "1",
+        "issued_at": 100,
+        "expires_at": 200,
+        "nonce": "nonce-cli-1",
+    }
+    values.update(changes)
+    return CliApprovalManifest(**values)
 
 
 @pytest.mark.parametrize(
@@ -63,7 +98,7 @@ def test_prompt_defaults_no_and_accepts_only_explicit_yes(answer: str, approved:
     )
 
     assert result is approved
-    assert output.getvalue() == "Approve this Ollama model call? [y/N] "
+    assert output.getvalue() == "Approve this development model call? [y/N] "
 
 
 @pytest.mark.parametrize(
@@ -119,6 +154,30 @@ def test_signed_approval_is_bound_to_every_manifest_field(tmp_path: Path) -> Non
         replace(_manifest(), max_output_tokens=3_000),
         replace(_manifest(), policy_version="2"),
         replace(_manifest(), expires_at=201),
+    ):
+        with pytest.raises(ApprovalError, match="approval_manifest_changed"):
+            authority.verify(signed, changed)
+
+
+def test_cli_approval_is_bound_to_provider_cli_model_worktree_and_permissions(
+    tmp_path: Path,
+) -> None:
+    authority, _ = _authority(tmp_path)
+    signed = authority.issue(_cli_manifest())
+
+    authority.verify(signed, _cli_manifest())
+    for changed in (
+        replace(_cli_manifest(), provider=ProviderId.CODEX),
+        replace(_cli_manifest(), requested_model="opus"),
+        replace(_cli_manifest(), effective_model="claude-opus-4-8"),
+        replace(_cli_manifest(), effort=Effort.XHIGH),
+        replace(_cli_manifest(), cli_executable_sha256="f" * 64),
+        replace(_cli_manifest(), cli_version="2.1.209"),
+        replace(_cli_manifest(), adapter_protocol_version="1.0.1"),
+        replace(_cli_manifest(), capability_snapshot_digest="f" * 64),
+        replace(_cli_manifest(), repository_commit="f" * 40),
+        replace(_cli_manifest(), worktree_id="worktree-2"),
+        replace(_cli_manifest(), permission_mode=PermissionMode.READ_ONLY),
     ):
         with pytest.raises(ApprovalError, match="approval_manifest_changed"):
             authority.verify(signed, changed)

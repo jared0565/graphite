@@ -101,7 +101,7 @@ def test_interactive_run_displays_budget_then_prompts_once(
     assert cli.main(["route", "run", ".", "--objective", "review"]) == 0
     assert _Service.calls == ["recommend", "execute"]
     output = stdout.getvalue()
-    assert output.count("Approve this Ollama model call?") == 1
+    assert output.count("Approve this development model call?") == 1
     assert output.index("estimated_tokens") < output.index("Approve")
     assert output.count("bounded suggestion") == 1
     receipt = json.loads(output[output.rfind("{"):])

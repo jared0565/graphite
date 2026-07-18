@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, TextIO
 
-from .contracts import ApprovalManifest
+from .contracts import ApprovalManifest, CliApprovalManifest
 from .storage import RepositoryStore, StorageError
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -29,7 +29,7 @@ class ApprovalError(RuntimeError):
 
 @dataclass(frozen=True)
 class SignedApproval:
-    manifest: ApprovalManifest
+    manifest: ApprovalManifest | CliApprovalManifest
     signature: str
 
     def to_dict(self) -> dict[str, object]:
@@ -58,7 +58,7 @@ def approval_prompt(
         or ci
     ):
         return False
-    stdout.write("Approve this Ollama model call? [y/N] ")
+    stdout.write("Approve this development model call? [y/N] ")
     stdout.flush()
     try:
         answer = stdin.readline(16)
@@ -67,7 +67,7 @@ def approval_prompt(
     return answer.strip().casefold() in {"y", "yes"}
 
 
-def _canonical_manifest(manifest: ApprovalManifest) -> bytes:
+def _canonical_manifest(manifest: ApprovalManifest | CliApprovalManifest) -> bytes:
     return json.dumps(
         manifest.to_dict(),
         sort_keys=True,
@@ -247,7 +247,7 @@ class ApprovalAuthority:
         self._quota = _MachineQuotaStore(quota_path, store.root)
         self._now = now or (lambda: int(time.time()))
 
-    def issue(self, manifest: ApprovalManifest) -> SignedApproval:
+    def issue(self, manifest: ApprovalManifest | CliApprovalManifest) -> SignedApproval:
         payload = _canonical_manifest(manifest)
         manifest_hash = hashlib.sha256(payload).hexdigest()
         nonce_hash = hashlib.sha256(manifest.nonce.encode("utf-8")).hexdigest()
@@ -266,7 +266,11 @@ class ApprovalAuthority:
             raise ApprovalError(exc.code) from exc
         return SignedApproval(manifest, signature)
 
-    def verify(self, signed: SignedApproval, current_manifest: ApprovalManifest) -> None:
+    def verify(
+        self,
+        signed: SignedApproval,
+        current_manifest: ApprovalManifest | CliApprovalManifest,
+    ) -> None:
         if not isinstance(signed, SignedApproval):
             raise ApprovalError("approval_invalid")
         signed_payload = _canonical_manifest(signed.manifest)
@@ -280,7 +284,7 @@ class ApprovalAuthority:
     def consume(
         self,
         signed: SignedApproval,
-        current_manifest: ApprovalManifest,
+        current_manifest: ApprovalManifest | CliApprovalManifest,
         *,
         repository_quota_tokens: int,
         machine_quota_tokens: int,

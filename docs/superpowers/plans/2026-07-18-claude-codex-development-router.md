@@ -55,11 +55,11 @@
 - Add `tests/test_routing_cli_contracts.py`
 - Modify `tests/test_routing_approval.py`
 
-- [ ] Write failing tests for `ProviderId`, `CliIdentity`, `CapabilityProfile`, and `CapabilitySnapshot`. Require exact bounded identifiers, semantic CLI versions, normalized executable hashes, supported efforts, permission mode, risk ceiling, and a canonical SHA-256 snapshot digest.
-- [ ] Write a failing approval test proving provider, effective model, CLI identity/version, capability digest, repository commit, canonical worktree identity, and permission policy are signature-bound. Mutating any field must yield `approval_manifest_changed`.
-- [ ] Add a v4 CLI approval manifest with `capability_snapshot_digest`, provider, CLI, commit, worktree, and permission fields. Preserve the schema-v3 `ApprovalManifest` unchanged until Task 2 performs the atomic storage cutover; after cutover it remains a historical decoder only and can never receive new authority.
-- [ ] Extend `ExecutionReceipt` with provider, effective model, CLI version, changed-file count, changed-byte count, validation outcome, and optional provider-reported usage. Do not add raw text, prompt, paths, or diagnostics.
-- [ ] Run:
+- [x] Write failing tests for `ProviderId`, `CliIdentity`, `CapabilityProfile`, and `CapabilitySnapshot`. Require exact bounded identifiers, semantic CLI versions, normalized executable hashes, supported efforts, permission mode, risk ceiling, and a canonical SHA-256 snapshot digest.
+- [x] Write a failing approval test proving provider, effective model, CLI identity/version, capability digest, repository commit, canonical worktree identity, and permission policy are signature-bound. Mutating any field must yield `approval_manifest_changed`.
+- [x] Add a v4 CLI approval manifest with `capability_snapshot_digest`, provider, CLI, commit, worktree, and permission fields. Preserve the schema-v3 `ApprovalManifest` unchanged until Task 2 performs the atomic storage cutover; after cutover it remains a historical decoder only and can never receive new authority.
+- [x] Extend `ExecutionReceipt` with provider, effective model, CLI version, changed-file count, changed-byte count, validation outcome, and optional provider-reported usage. Do not add raw text, prompt, paths, or diagnostics.
+- [x] Run:
 
   ```powershell
   python -B -m pytest -q --basetemp F:\tmp\graphite-cli-router-task1 tests/test_routing_cli_contracts.py tests/test_routing_approval.py tests/test_routing_contracts.py
@@ -67,7 +67,7 @@
   git diff --check
   ```
 
-- [ ] Commit: `feat: add provider-neutral routing authority contracts`.
+- [x] Commit: `feat: add provider-neutral routing authority contracts`.
 
 ## Task 2: Add schema-v4 migration, backup gate, and legacy quarantine
 
