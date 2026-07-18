@@ -13,7 +13,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from .contracts import Effort, ExecutionOutcome, ExecutionReceipt, RiskTier, TaskCategory
+from .contracts import (
+    CapabilitySnapshot,
+    Effort,
+    ExecutionOutcome,
+    ExecutionReceipt,
+    RiskTier,
+    TaskCategory,
+)
 
 SCHEMA_VERSION: Final = "4"
 BUSY_TIMEOUT_MS: Final = 2_000
@@ -1793,6 +1800,83 @@ class RepositoryStore:
             raise ValueError("table_invalid")
         with self._connect() as connection:
             return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+    def save_capability_snapshot_record(self, snapshot: CapabilitySnapshot) -> bool:
+        if not isinstance(snapshot, CapabilitySnapshot):
+            raise ValueError("capability_snapshot_invalid")
+        if len(snapshot.profile.supported_efforts) != 1:
+            raise ValueError("capability_snapshot_invalid")
+        payload_json = json.dumps(
+            snapshot.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+        if len(payload_json.encode("utf-8")) > 64 * 1024:
+            raise ValueError("capability_snapshot_invalid")
+        values = (
+            snapshot.digest,
+            snapshot.profile.provider.value,
+            snapshot.profile.requested_model,
+            snapshot.profile.effective_model,
+            snapshot.profile.supported_efforts[0].value,
+            snapshot.identity.executable_sha256,
+            snapshot.identity.cli_version,
+            snapshot.identity.adapter_protocol_version,
+            snapshot.profile.permission_mode.value,
+            payload_json,
+            snapshot.verified_at,
+            snapshot.expires_at,
+        )
+        try:
+            with self._connect() as connection:
+                existing = connection.execute(
+                    "SELECT capability_snapshot_digest,provider,requested_model,"
+                    "effective_model,effort,executable_sha256,cli_version,"
+                    "adapter_protocol_version,permission_mode,payload_json,verified_at,expires_at "
+                    "FROM capability_snapshots WHERE capability_snapshot_digest=?",
+                    (snapshot.digest,),
+                ).fetchone()
+                if existing is not None:
+                    if tuple(existing) != values:
+                        raise StorageError("storage_corrupt")
+                    return False
+                connection.execute(
+                    """INSERT INTO capability_snapshots(
+                        capability_snapshot_digest,provider,requested_model,effective_model,
+                        effort,executable_sha256,cli_version,adapter_protocol_version,
+                        permission_mode,payload_json,verified_at,expires_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    values,
+                )
+                return True
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def capability_snapshot_records(self, *, limit: int) -> tuple[dict[str, Any], ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 64:
+            raise ValueError("capability_snapshot_limit_invalid")
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT capability_snapshot_digest,payload_json FROM capability_snapshots "
+                    "ORDER BY capability_snapshot_digest LIMIT ?",
+                    (limit + 1,),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+        if len(rows) > limit:
+            raise StorageError("capability_snapshot_limit")
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            payload_json = row["payload_json"]
+            if not isinstance(payload_json, str) or len(payload_json.encode("utf-8")) > 64 * 1024:
+                raise StorageError("storage_corrupt")
+            try:
+                payload = json.loads(payload_json)
+            except (json.JSONDecodeError, RecursionError) as exc:
+                raise StorageError("storage_corrupt") from exc
+            result.append({"digest": str(row["capability_snapshot_digest"]), "payload": payload})
+        return tuple(result)
 
     def save_registry_snapshot(self, payload: dict[str, Any]) -> None:
         if not isinstance(payload, dict) or set(payload) != {

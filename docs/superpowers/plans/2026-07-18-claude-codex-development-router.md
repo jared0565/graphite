@@ -110,14 +110,14 @@
 - Add `tests/test_routing_profiles.py`
 - Modify `tests/test_routing_policy.py`
 
-- [ ] Define provisional requested profiles without claiming subscription availability. Claude may use aliases documented by the installed CLI (`fable`, `sonnet`, `opus`) only with explicitly supported effort levels. Codex identifiers must come from operator-selected, official evidence and remain ineligible until effective identity is verified.
-- [ ] Do not bundle a guessed Codex default or translate API model availability into subscription availability.
-- [ ] Implement an explicit verification workflow that performs one approved no-edit request, parses the effective model and CLI metadata, and records a short-lived capability snapshot. Verification cannot grant repository-write authority or count as task execution evidence.
-- [ ] Hash the sorted snapshot including provider, requested and effective model, effort, executable hash, CLI version, adapter protocol version, permission capability, evidence reference, and verification time.
-- [ ] Apply hard gates for snapshot expiry, executable/version drift, auth health, context, task capability, risk ceiling, permission mismatch, and budget. Unknown identity fails closed.
-- [ ] Add deterministic provider-aware priors only after hard gates. Keep evidence adjustments bounded and require the configured minimum sample count.
-- [ ] Run profile and policy tests, including property-style permutation tests for canonical digest stability and deterministic ranking.
-- [ ] Commit: `feat: add verified CLI capability profiles`.
+- [x] Define provisional requested profiles without claiming subscription availability. Claude may use aliases documented by the installed CLI (`fable`, `sonnet`, `opus`) only with explicitly supported effort levels. Codex identifiers must come from operator-selected, official evidence and remain ineligible until effective identity is verified.
+- [x] Do not bundle a guessed Codex default or translate API model availability into subscription availability.
+- [x] Implement an explicit verification workflow that performs one approved no-edit request, parses the effective model and CLI metadata, and records a short-lived capability snapshot. Verification cannot grant repository-write authority or count as task execution evidence.
+- [x] Hash the sorted snapshot including provider, requested and effective model, effort, executable hash, CLI version, adapter protocol version, permission capability, evidence reference, and verification time.
+- [x] Apply hard gates for snapshot expiry, executable/version drift, auth health, context, task capability, risk ceiling, permission mismatch, and budget. Unknown identity fails closed.
+- [x] Add deterministic provider-aware priors only after hard gates. Keep evidence adjustments bounded and require the configured minimum sample count.
+- [x] Run profile and policy tests, including property-style permutation tests for canonical digest stability and deterministic ranking.
+- [x] Commit: `feat: add verified CLI capability profiles`.
 
 ## Task 5: Implement Claude Code and Codex adapters
 

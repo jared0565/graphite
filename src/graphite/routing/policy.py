@@ -5,7 +5,16 @@ import math
 from dataclasses import dataclass
 from typing import Final
 
-from .contracts import Effort, RiskTier, TaskCategory, TaskProfile
+from .contracts import (
+    CapabilitySnapshot,
+    CliIdentity,
+    Effort,
+    PermissionMode,
+    ProviderId,
+    RiskTier,
+    TaskCategory,
+    TaskProfile,
+)
 from .registry import (
     BUNDLED_PROFILES,
     ModelRole,
@@ -116,6 +125,56 @@ class PromotionEligibility:
     reason: str
     required_samples: int | None
     required_lower_bound: float | None
+
+
+@dataclass(frozen=True)
+class CliCandidateMetrics:
+    capability_snapshot_digest: str
+    effort: Effort
+    repository_success_millis: int | None
+    global_success_millis: int
+    sample_count: int
+    expected_input_tokens: int
+    expected_output_tokens: int
+    expected_latency_ms: int
+    quota_scarcity_millis: int
+
+
+@dataclass(frozen=True)
+class CliPolicyGates:
+    graph_valid: bool = True
+    graph_fresh: bool = True
+    data_policy_allowed: bool = True
+    storage_available: bool = True
+    authenticated_providers: tuple[ProviderId, ...] = (
+        ProviderId.CLAUDE_CODE,
+        ProviderId.CODEX,
+    )
+    current_cli_identities: tuple[CliIdentity, ...] = ()
+    permission_mode: PermissionMode = PermissionMode.WORKSPACE_WRITE
+    context_tokens: int = 1_000
+    budget_tokens: int = 10_000
+    now: int = 150
+
+
+@dataclass(frozen=True)
+class ScoredCliCandidate:
+    provider: ProviderId
+    requested_model: str
+    effective_model: str
+    effort: Effort
+    capability_snapshot_digest: str
+    score: int
+    components: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True)
+class CliPolicyResult:
+    selected: ScoredCliCandidate | None
+    ranked: tuple[ScoredCliCandidate, ...]
+    manual_handoff: bool
+    reasons: tuple[str, ...]
+    policy_version: str = "3"
 
 
 def _global_failures(gates: PolicyGates) -> list[str]:
@@ -328,6 +387,188 @@ def rank_candidates(
         (),
         ("eligible_ranked",),
     )
+
+
+_RISK_ORDER: Final = {RiskTier.LOW: 0, RiskTier.MEDIUM: 1, RiskTier.HIGH: 2}
+_EFFORT_PENALTY: Final = {
+    Effort.DEFAULT: 30,
+    Effort.LOW: 0,
+    Effort.MEDIUM: 10,
+    Effort.HIGH: 30,
+    Effort.XHIGH: 60,
+    Effort.MAX: 80,
+}
+
+
+def _cli_global_failures(gates: CliPolicyGates) -> list[str]:
+    failures: list[str] = []
+    for allowed, reason in (
+        (gates.graph_valid, "graph_invalid"),
+        (gates.graph_fresh, "graph_stale"),
+        (gates.data_policy_allowed, "data_policy_blocked"),
+        (gates.storage_available, "storage_unavailable"),
+    ):
+        if not isinstance(allowed, bool) or not allowed:
+            failures.append(reason)
+    try:
+        providers = tuple(ProviderId(item) for item in gates.authenticated_providers)
+        PermissionMode(gates.permission_mode)
+    except (TypeError, ValueError):
+        failures.append("policy_gate_invalid")
+        providers = ()
+    if len(set(providers)) != len(providers):
+        failures.append("policy_gate_invalid")
+    if (
+        not isinstance(gates.current_cli_identities, tuple)
+        or any(not isinstance(item, CliIdentity) for item in gates.current_cli_identities)
+        or len({item.provider for item in gates.current_cli_identities})
+        != len(gates.current_cli_identities)
+    ):
+        failures.append("policy_gate_invalid")
+    for value, reason in (
+        (gates.context_tokens, "context_invalid"),
+        (gates.budget_tokens, "budget_invalid"),
+        (gates.now, "policy_time_invalid"),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            failures.append(reason)
+    if failures:
+        return failures
+    return failures
+
+
+def rank_cli_candidates(
+    task: TaskProfile,
+    snapshots: tuple[CapabilitySnapshot, ...],
+    candidates: tuple[CliCandidateMetrics, ...],
+    gates: CliPolicyGates,
+) -> CliPolicyResult:
+    """Apply provider-neutral hard gates before deterministic CLI profile scoring."""
+    failures = _cli_global_failures(gates)
+    if failures:
+        return CliPolicyResult(None, (), True, tuple(sorted(set(failures))))
+    snapshot_by_digest: dict[str, CapabilitySnapshot] = {}
+    for snapshot in snapshots:
+        if not isinstance(snapshot, CapabilitySnapshot) or snapshot.digest in snapshot_by_digest:
+            raise ValueError("capability_snapshot_invalid")
+        snapshot_by_digest[snapshot.digest] = snapshot
+    authenticated = {ProviderId(item) for item in gates.authenticated_providers}
+    current_identities = {item.provider: item for item in gates.current_cli_identities}
+    required_permission = PermissionMode(gates.permission_mode)
+    scored: list[ScoredCliCandidate] = []
+    rejected: list[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, CliCandidateMetrics):
+            raise ValueError("candidate_invalid")
+        snapshot = snapshot_by_digest.get(candidate.capability_snapshot_digest)
+        if snapshot is None:
+            rejected.append("capability_snapshot_missing")
+            continue
+        profile = snapshot.profile
+        if snapshot.expires_at <= gates.now:
+            rejected.append("capability_snapshot_expired")
+            continue
+        if profile.provider not in authenticated:
+            rejected.append("provider_unauthenticated")
+            continue
+        if current_identities.get(profile.provider) != snapshot.identity:
+            rejected.append("cli_identity_changed")
+            continue
+        if profile.permission_mode is not required_permission:
+            rejected.append("permission_mismatch")
+            continue
+        try:
+            effort = Effort(candidate.effort)
+        except (TypeError, ValueError):
+            rejected.append("effort_unsupported")
+            continue
+        if effort not in profile.supported_efforts:
+            rejected.append("effort_unsupported")
+            continue
+        if _RISK_ORDER[task.risk] > _RISK_ORDER[profile.risk_ceiling]:
+            rejected.append("risk_ineligible")
+            continue
+        input_tokens = _bounded_metric(
+            candidate.expected_input_tokens, "expected_input_tokens_invalid"
+        )
+        output_tokens = _bounded_metric(
+            candidate.expected_output_tokens, "expected_output_tokens_invalid"
+        )
+        if max(gates.context_tokens, input_tokens) + output_tokens > profile.context_window_tokens:
+            rejected.append("context_exceeded")
+            continue
+        if input_tokens + output_tokens > gates.budget_tokens:
+            rejected.append("budget_exceeded")
+            continue
+        if _accepted_capabilities(task.category).isdisjoint(profile.capabilities):
+            rejected.append("capability_missing")
+            continue
+        sample_count = _bounded_metric(candidate.sample_count, "sample_count_invalid")
+        global_success = _bounded_metric(
+            candidate.global_success_millis, "global_success_invalid", 1_000
+        )
+        repository_success = candidate.repository_success_millis
+        reliability = global_success
+        if sample_count >= 5 and repository_success is not None:
+            reliability = _bounded_metric(
+                repository_success, "repository_success_invalid", 1_000
+            )
+        latency = _bounded_metric(candidate.expected_latency_ms, "expected_latency_invalid")
+        scarcity = _bounded_metric(
+            candidate.quota_scarcity_millis, "quota_scarcity_invalid", 1_000
+        )
+        token_penalty = min(250, (input_tokens + output_tokens) // 100)
+        latency_penalty = min(200, latency // 1_000)
+        scarcity_penalty = scarcity // 10
+        effort_penalty = _EFFORT_PENALTY[effort]
+        score = max(
+            0,
+            min(
+                1_000,
+                reliability
+                - token_penalty
+                - latency_penalty
+                - scarcity_penalty
+                - effort_penalty,
+            ),
+        )
+        scored.append(
+            ScoredCliCandidate(
+                profile.provider,
+                profile.requested_model,
+                profile.effective_model,
+                effort,
+                snapshot.digest,
+                score,
+                (
+                    ("reliability", reliability),
+                    ("token_penalty", token_penalty),
+                    ("latency_penalty", latency_penalty),
+                    ("quota_scarcity_penalty", scarcity_penalty),
+                    ("effort_penalty", effort_penalty),
+                ),
+            )
+        )
+    ranked = tuple(
+        sorted(
+            scored,
+            key=lambda item: (
+                -item.score,
+                item.provider.value,
+                item.effective_model,
+                item.effort.value,
+                item.capability_snapshot_digest,
+            ),
+        )
+    )
+    if not ranked:
+        return CliPolicyResult(
+            None,
+            (),
+            True,
+            tuple(sorted(set(rejected))) or ("no_candidates",),
+        )
+    return CliPolicyResult(ranked[0], ranked, False, ("eligible_ranked",))
 
 
 def wilson_lower_bound(successes: int, total: int) -> float:

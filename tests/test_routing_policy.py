@@ -9,16 +9,24 @@ import pytest
 import graphite.routing.policy as policy_module
 import graphite.routing.registry as registry_module
 from graphite.routing.contracts import (
+    CapabilityProfile,
+    CapabilitySnapshot,
+    CliIdentity,
     Effort,
     ModelProfile,
+    PermissionMode,
+    ProviderId,
     RiskTier,
     TaskCategory,
     TaskProfile,
 )
 from graphite.routing.policy import (
     CandidateMetrics,
+    CliCandidateMetrics,
+    CliPolicyGates,
     PolicyGates,
     rank_candidates,
+    rank_cli_candidates,
     promotion_eligibility,
     wilson_lower_bound,
 )
@@ -114,6 +122,109 @@ def _candidate(model_id: str = "kimi-k2.7-code:cloud", **changes) -> CandidateMe
 
 def _all_candidates() -> tuple[CandidateMetrics, ...]:
     return tuple(_candidate(model_id) for model_id in BUNDLED_PROFILES)
+
+
+def _cli_snapshot(
+    provider: ProviderId = ProviderId.CLAUDE_CODE,
+    requested_model: str = "sonnet",
+    effective_model: str = "claude-sonnet-5",
+    risk_ceiling: RiskTier = RiskTier.MEDIUM,
+    permission_mode: PermissionMode = PermissionMode.WORKSPACE_WRITE,
+    expires_at: int = 200,
+) -> CapabilitySnapshot:
+    return CapabilitySnapshot(
+        1,
+        100,
+        expires_at,
+        CliIdentity(provider, "a" * 64, "2.1.208", "1.0.0"),
+        CapabilityProfile(
+            provider,
+            requested_model,
+            effective_model,
+            "2026-07-18.1",
+            ("code", "reasoning", "architecture"),
+            200_000,
+            (Effort.LOW, Effort.MEDIUM, Effort.HIGH),
+            risk_ceiling,
+            permission_mode,
+        ),
+    )
+
+
+def _cli_candidate(snapshot: CapabilitySnapshot, **changes) -> CliCandidateMetrics:
+    values = {
+        "capability_snapshot_digest": snapshot.digest,
+        "effort": Effort.HIGH,
+        "repository_success_millis": None,
+        "global_success_millis": 750,
+        "sample_count": 0,
+        "expected_input_tokens": 4_000,
+        "expected_output_tokens": 1_000,
+        "expected_latency_ms": 3_000,
+        "quota_scarcity_millis": 0,
+    }
+    values.update(changes)
+    return CliCandidateMetrics(**values)
+
+
+def _cli_gates(snapshot: CapabilitySnapshot, **changes) -> CliPolicyGates:
+    values = {"current_cli_identities": (snapshot.identity,)}
+    values.update(changes)
+    return CliPolicyGates(**values)
+
+
+def test_cli_ranking_applies_identity_auth_expiry_risk_context_and_permission_gates() -> None:
+    snapshot = _cli_snapshot()
+    cases = (
+        (_cli_gates(snapshot, authenticated_providers=()), "provider_unauthenticated"),
+        (_cli_gates(snapshot, now=201), "capability_snapshot_expired"),
+        (_cli_gates(snapshot, permission_mode=PermissionMode.READ_ONLY), "permission_mismatch"),
+        (_cli_gates(snapshot, context_tokens=199_001, budget_tokens=300_000), "context_exceeded"),
+        (
+            _cli_gates(
+                snapshot,
+                current_cli_identities=(
+                    replace(snapshot.identity, cli_version="2.1.209"),
+                ),
+            ),
+            "cli_identity_changed",
+        ),
+    )
+    for gates, reason in cases:
+        result = rank_cli_candidates(_task(), (snapshot,), (_cli_candidate(snapshot),), gates)
+        assert result.selected is None
+        assert reason in result.reasons
+    high = rank_cli_candidates(
+        _task(RiskTier.HIGH),
+        (snapshot,),
+        (_cli_candidate(snapshot),),
+        _cli_gates(snapshot),
+    )
+    assert high.selected is None
+    assert "risk_ineligible" in high.reasons
+
+
+def test_cli_ranking_is_deterministic_and_ignores_undersampled_repository_signal() -> None:
+    claude = _cli_snapshot()
+    codex = _cli_snapshot(
+        ProviderId.CODEX,
+        "gpt-tested-codex",
+        "gpt-tested-codex-2026-07-18",
+    )
+    candidates = (
+        _cli_candidate(claude, repository_success_millis=100, global_success_millis=700),
+        _cli_candidate(codex, repository_success_millis=1_000, global_success_millis=800),
+    )
+
+    gates = CliPolicyGates(current_cli_identities=(claude.identity, codex.identity))
+    first = rank_cli_candidates(_task(), (claude, codex), candidates, gates)
+    second = rank_cli_candidates(
+        _task(), tuple(reversed((claude, codex))), tuple(reversed(candidates)), gates
+    )
+
+    assert first == second
+    assert first.selected is not None
+    assert first.selected.provider is ProviderId.CODEX
 
 
 @pytest.mark.parametrize(
