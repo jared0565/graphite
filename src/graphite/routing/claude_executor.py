@@ -24,6 +24,7 @@ EXECUTION_TIMEOUT_SECONDS: Final = 1_800.0
 MAX_EXECUTABLE_BYTES: Final = 512 * 1024 * 1024
 MAX_MESSAGE_LENGTH: Final = 1_048_576
 MAX_TOKEN_COUNT: Final = 10_000_000
+PROFILE_VERIFICATION_MARKER: Final = "GRAPHITE_PROFILE_OK"
 MAX_EVENT_COUNT: Final = 10_000
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*) \(Claude Code\)\r?\n?$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
@@ -178,7 +179,11 @@ def _token(value: object) -> int:
     return value
 
 
-def _parse_result(stdout: bytes, expected_model: str) -> tuple[str, str, int, int]:
+def _parse_result(
+    stdout: bytes,
+    expected_model: str,
+    expected_structured_output: dict[str, object] | None = None,
+) -> tuple[str, str, int, int]:
     try:
         lines = decode_cli_output(stdout).splitlines()
     except CliProcessError:
@@ -208,9 +213,14 @@ def _parse_result(stdout: bytes, expected_model: str) -> tuple[str, str, int, in
         if "quota" in subtype or "rate" in subtype or "limit" in subtype:
             raise AdapterError("quota")
         raise AdapterError("unavailable")
-    message = payload.get("result")
-    if not isinstance(message, str) or not message or len(message) > MAX_MESSAGE_LENGTH:
-        raise AdapterError("protocol")
+    if expected_structured_output is None:
+        message = payload.get("result")
+        if not isinstance(message, str) or not message or len(message) > MAX_MESSAGE_LENGTH:
+            raise AdapterError("protocol")
+    else:
+        if payload.get("structured_output") != expected_structured_output:
+            raise AdapterError("protocol")
+        message = PROFILE_VERIFICATION_MARKER
     assistant_models: list[str] = []
     for event in events[:-1]:
         if event.get("type") != "assistant":
@@ -247,6 +257,7 @@ def execute_claude(
     permission_mode: PermissionMode,
     transport: Transport = run_cli_process,
     timeout_seconds: float = EXECUTION_TIMEOUT_SECONDS,
+    _verification_marker: str | None = None,
 ) -> ClaudeExecutionResult:
     """Execute exactly one noninteractive, non-resumable Claude task."""
     resolved = _canonical_file(executable)
@@ -261,6 +272,32 @@ def execute_claude(
         raise AdapterError("request_invalid")
     permission_value = "acceptEdits" if permission is PermissionMode.WORKSPACE_WRITE else "plan"
     allowed_tools = "Read,Edit,Write" if permission is PermissionMode.WORKSPACE_WRITE else "Read"
+    structured_output: dict[str, object] | None = None
+    structured_args: tuple[str, ...] = ()
+    if _verification_marker is not None:
+        if (
+            _verification_marker != PROFILE_VERIFICATION_MARKER
+            or permission is not PermissionMode.READ_ONLY
+        ):
+            raise AdapterError("request_invalid")
+        structured_output = {"verification": PROFILE_VERIFICATION_MARKER}
+        schema = {
+            "additionalProperties": False,
+            "properties": {
+                "verification": {
+                    "const": PROFILE_VERIFICATION_MARKER,
+                    "type": "string",
+                }
+            },
+            "required": ["verification"],
+            "type": "object",
+        }
+        structured_args = (
+            "--max-turns",
+            "1",
+            "--json-schema",
+            json.dumps(schema, sort_keys=True, separators=(",", ":")),
+        )
     argv = (
         str(resolved),
         "--safe-mode",
@@ -275,6 +312,7 @@ def execute_claude(
         requested,
         "--effort",
         normalized_effort.value,
+        *structured_args,
         "--no-session-persistence",
         "--output-format",
         "stream-json",
@@ -293,7 +331,7 @@ def execute_claude(
         timeout_seconds=timeout_seconds,
     )
     message, effective_model, input_tokens, output_tokens = _parse_result(
-        result.stdout, expected
+        result.stdout, expected, structured_output
     )
     return ClaudeExecutionResult(
         effective_model,
@@ -304,4 +342,33 @@ def execute_claude(
         result.input_sha256,
         result.stdout_sha256,
         result.stderr_sha256,
+    )
+
+
+def execute_claude_profile_verification(
+    *,
+    executable: Path,
+    workspace: Path,
+    credential_home: Path | None,
+    prompt: bytes,
+    requested_model: str,
+    expected_effective_model: str,
+    effort: Effort,
+    permission_mode: PermissionMode,
+    transport: Transport = run_cli_process,
+    timeout_seconds: float = EXECUTION_TIMEOUT_SECONDS,
+) -> ClaudeExecutionResult:
+    """Run one read-only, schema-constrained capability verification turn."""
+    return execute_claude(
+        executable=executable,
+        workspace=workspace,
+        credential_home=credential_home,
+        prompt=prompt,
+        requested_model=requested_model,
+        expected_effective_model=expected_effective_model,
+        effort=effort,
+        permission_mode=permission_mode,
+        transport=transport,
+        timeout_seconds=timeout_seconds,
+        _verification_marker=PROFILE_VERIFICATION_MARKER,
     )

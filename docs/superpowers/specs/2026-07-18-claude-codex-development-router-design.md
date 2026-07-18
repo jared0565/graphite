@@ -48,6 +48,8 @@ A canonical capability snapshot is sorted and hashed. The approval binds its dig
 
 The no-edit verifier must also return reported input and output usage. Graphite validates both values against the approved reservation before snapshot persistence. Missing, malformed, or over-budget usage fails closed; the live acceptance path must use the single ordered verify-and-save boundary and cannot save first and validate later.
 
+Claude profile verification uses the vendor-documented Claude Code `--json-schema` print-mode contract and validates the exact terminal `structured_output` object while retaining streaming assistant-event model checks. It is capped at one turn and read-only. The fixed schema permits only the verification marker field and rejects missing, different, or additional properties. This verification-only path does not alter general task execution. Evidence: https://code.claude.com/docs/en/cli-reference and https://code.claude.com/docs/en/headless, accessed 2026-07-19.
+
 ## 5. Routing and Learning
 
 Hard eligibility gates precede scoring: authenticated CLI health, tested version compatibility, task capability, context size, risk ceiling, requested permissions, and remaining repository and machine budgets.

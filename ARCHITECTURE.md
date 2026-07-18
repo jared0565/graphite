@@ -172,6 +172,13 @@ active authority. Invalid, missing, or over-budget usage cannot produce a persis
 snapshot; acceptance tooling uses the ordered verify-and-save operation rather than
 an independently ordered persistence step.
 
+Claude capability verification uses the CLI's vendor-documented `--json-schema`
+contract with `--max-turns 1`. The terminal structured object must equal the fixed
+verification payload, every assistant event must retain the expected model identity,
+and usage must pass the approved bounds. Free text, missing or additional fields,
+schema drift, and multi-turn completion fail closed. This constrained mode is not
+used for ordinary development execution.
+
 Provider output and edits are untrusted. The diff boundary rejects filesystem
 indirection, repository nesting, submodule changes, case collisions, scope or size
 violations, and source/diff drift. High-risk tasks require a separately approved

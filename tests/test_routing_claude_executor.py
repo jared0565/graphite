@@ -8,7 +8,9 @@ import pytest
 
 from graphite.routing.claude_executor import (
     AdapterError,
+    PROFILE_VERIFICATION_MARKER,
     execute_claude,
+    execute_claude_profile_verification,
     preflight_claude,
 )
 from graphite.routing.contracts import Effort, PermissionMode, ProviderId
@@ -261,6 +263,88 @@ def test_execution_accepts_repeated_consistent_assistant_identity(tmp_path: Path
         transport=ScriptedTransport([_result(payload)]),
     )
     assert outcome.effective_model == "claude-sonnet-4-6"
+
+
+def test_profile_verification_uses_one_turn_and_exact_structured_output(
+    tmp_path: Path,
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": "free text is not verification authority",
+        "structured_output": {"verification": PROFILE_VERIFICATION_MARKER},
+        "usage": {"input_tokens": 2, "output_tokens": 8},
+    }
+    transport = ScriptedTransport(
+        [_result(_stream_result(payload, model="claude-sonnet-5"))]
+    )
+
+    outcome = execute_claude_profile_verification(
+        executable=executable,
+        workspace=workspace,
+        credential_home=credentials,
+        prompt=b"verify the approved profile",
+        requested_model="sonnet",
+        expected_effective_model="claude-sonnet-5",
+        effort=Effort.HIGH,
+        permission_mode=PermissionMode.READ_ONLY,
+        transport=transport,
+    )
+
+    assert outcome.message == PROFILE_VERIFICATION_MARKER
+    argv = transport.calls[0]["argv"]
+    schema_index = argv.index("--json-schema")
+    assert argv[schema_index - 2 : schema_index] == ("--max-turns", "1")
+    assert json.loads(argv[schema_index + 1]) == {
+        "additionalProperties": False,
+        "properties": {
+            "verification": {
+                "const": PROFILE_VERIFICATION_MARKER,
+                "type": "string",
+            }
+        },
+        "required": ["verification"],
+        "type": "object",
+    }
+    assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "structured_output",
+    (None, {}, {"verification": "wrong"}, {"verification": PROFILE_VERIFICATION_MARKER, "extra": True}),
+)
+def test_profile_verification_rejects_nonexact_structured_output(
+    tmp_path: Path,
+    structured_output: object,
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": PROFILE_VERIFICATION_MARKER,
+        "structured_output": structured_output,
+        "usage": {"input_tokens": 2, "output_tokens": 8},
+    }
+    transport = ScriptedTransport(
+        [_result(_stream_result(payload, model="claude-sonnet-5"))]
+    )
+
+    with pytest.raises(AdapterError, match="^protocol$"):
+        execute_claude_profile_verification(
+            executable=executable,
+            workspace=workspace,
+            credential_home=credentials,
+            prompt=b"verify the approved profile",
+            requested_model="sonnet",
+            expected_effective_model="claude-sonnet-5",
+            effort=Effort.HIGH,
+            permission_mode=PermissionMode.READ_ONLY,
+            transport=transport,
+        )
+    assert len(transport.calls) == 1
 
 
 @pytest.mark.parametrize(

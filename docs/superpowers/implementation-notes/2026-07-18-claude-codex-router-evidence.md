@@ -128,3 +128,12 @@ marker. No Claude snapshot was saved, no file changed, and no retry or model
 substitution occurred. One sanitized machine-failure event was appended; raw output
 was neither persisted nor committed. A fresh Claude verification remains an
 external gate and requires a new exact manifest and approval.
+
+Offline follow-up confirmed that Claude Code 2.1.214 exposes the documented
+`--json-schema` contract and returns validated data in terminal
+`structured_output`. The adapter now has a verification-only, one-turn structured
+path with a fixed single-field schema. It preserves assistant-event model binding,
+read-only permissions, bounded usage, and pre-save validation while refusing to
+treat free text as authority. Focused tests cover the exact canonical arguments and
+reject missing, wrong, or additional structured fields. No live retry was made as
+part of this correction.
