@@ -166,6 +166,12 @@ mode, prompt hash, token reservation, and timeout. No later stage can widen an
 earlier permission. Worktree, approval, attempt, validation, and review identities
 are immutable database evidence.
 
+Capability verification reports actual input and output usage. The profile boundary
+validates both values against the approved limits before constructing and saving
+active authority. Invalid, missing, or over-budget usage cannot produce a persisted
+snapshot; acceptance tooling uses the ordered verify-and-save operation rather than
+an independently ordered persistence step.
+
 Provider output and edits are untrusted. The diff boundary rejects filesystem
 indirection, repository nesting, submodule changes, case collisions, scope or size
 violations, and source/diff drift. High-risk tasks require a separately approved

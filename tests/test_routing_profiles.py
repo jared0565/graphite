@@ -22,6 +22,7 @@ from graphite.routing.profiles import (
     load_verified_capability_snapshots,
     operator_codex_profile,
     save_capability_snapshot,
+    verify_and_save_approved_profile,
     verify_approved_profile,
 )
 from graphite.routing.storage import RepositoryStore, StorageError
@@ -107,6 +108,8 @@ def test_approved_verification_invokes_exactly_one_read_only_adapter_call() -> N
             ("code", "reasoning"),
             200_000,
             RiskTier.MEDIUM,
+            1_024,
+            256,
         )
 
     snapshot = verify_approved_profile(
@@ -116,6 +119,8 @@ def test_approved_verification_invokes_exactly_one_read_only_adapter_call() -> N
         verified_at=1_700_000_000,
         ttl_seconds=3_600,
         approval_granted=True,
+        max_input_tokens=32_768,
+        max_output_tokens=4_096,
         verifier=verifier,
     )
 
@@ -129,8 +134,77 @@ def test_approved_verification_invokes_exactly_one_read_only_adapter_call() -> N
             verified_at=1_700_000_000,
             ttl_seconds=3_600,
             approval_granted=False,
+            max_input_tokens=32_768,
+            max_output_tokens=4_096,
             verifier=lambda *_: (_ for _ in ()).throw(AssertionError("must not call")),
         )
+
+
+@pytest.mark.parametrize(
+    ("input_tokens", "output_tokens"),
+    ((32_769, 1), (1, 4_097)),
+)
+def test_over_budget_verification_never_persists_authority(
+    tmp_path: Path,
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+
+    with pytest.raises(ProfileError, match="^profile_verification_budget_exceeded$"):
+        verify_and_save_approved_profile(
+            store,
+            requested=BUNDLED_REQUESTED_PROFILES["claude-code/sonnet"],
+            identity=_identity(),
+            effort=Effort.HIGH,
+            verified_at=1_700_000_000,
+            ttl_seconds=3_600,
+            approval_granted=True,
+            max_input_tokens=32_768,
+            max_output_tokens=4_096,
+            verifier=lambda *_: VerificationEvidence(
+                "claude-sonnet-5",
+                ("code", "reasoning"),
+                200_000,
+                RiskTier.MEDIUM,
+                input_tokens,
+                output_tokens,
+            ),
+        )
+
+    assert load_verified_capability_snapshots(store, now=1_700_000_001) == ()
+
+
+def test_verify_and_save_persists_only_validated_authority(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+
+    snapshot = verify_and_save_approved_profile(
+        store,
+        requested=BUNDLED_REQUESTED_PROFILES["claude-code/sonnet"],
+        identity=_identity(),
+        effort=Effort.HIGH,
+        verified_at=1_700_000_000,
+        ttl_seconds=3_600,
+        approval_granted=True,
+        max_input_tokens=32_768,
+        max_output_tokens=4_096,
+        verifier=lambda *_: VerificationEvidence(
+            "claude-sonnet-5",
+            ("code", "reasoning"),
+            200_000,
+            RiskTier.MEDIUM,
+            1_024,
+            256,
+        ),
+    )
+
+    assert load_verified_capability_snapshots(store, now=1_700_000_001) == (snapshot,)
 
 
 def test_snapshot_persistence_is_canonical_bounded_and_expiry_aware(tmp_path: Path) -> None:

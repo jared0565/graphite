@@ -22,6 +22,8 @@ from .storage import RepositoryStore, StorageError
 MAX_VERIFIED_SNAPSHOTS: Final = 64
 MIN_SNAPSHOT_TTL_SECONDS: Final = 60
 MAX_SNAPSHOT_TTL_SECONDS: Final = 86_400
+MAX_VERIFICATION_INPUT_TOKENS: Final = 262_144
+MAX_VERIFICATION_OUTPUT_TOKENS: Final = 32_768
 
 
 class ProfileError(RuntimeError):
@@ -83,6 +85,13 @@ class VerificationEvidence:
     capabilities: tuple[str, ...]
     context_window_tokens: int
     risk_ceiling: RiskTier
+    input_tokens: int
+    output_tokens: int
+
+    def __post_init__(self) -> None:
+        for value in (self.input_tokens, self.output_tokens):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ProfileError("profile_verification_usage_invalid")
 
 
 _CLAUDE_EFFORTS = (Effort.LOW, Effort.MEDIUM, Effort.HIGH, Effort.XHIGH, Effort.MAX)
@@ -182,11 +191,24 @@ def verify_approved_profile(
     verified_at: int,
     ttl_seconds: int,
     approval_granted: bool,
+    max_input_tokens: int,
+    max_output_tokens: int,
     verifier: Callable[[RequestedProfile, Effort], VerificationEvidence],
 ) -> CapabilitySnapshot:
     """Invoke one approved read-only adapter verification and bind its evidence."""
     if approval_granted is not True:
         raise ProfileError("profile_verification_approval_required")
+    limits = (
+        (max_input_tokens, MAX_VERIFICATION_INPUT_TOKENS),
+        (max_output_tokens, MAX_VERIFICATION_OUTPUT_TOKENS),
+    )
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= maximum
+        for value, maximum in limits
+    ):
+        raise ProfileError("profile_verification_budget_invalid")
     try:
         evidence = verifier(requested, Effort(effort))
     except ProfileError:
@@ -195,6 +217,13 @@ def verify_approved_profile(
         raise ProfileError("profile_verification_failed") from None
     if not isinstance(evidence, VerificationEvidence):
         raise ProfileError("profile_verification_invalid")
+    if (
+        evidence.input_tokens > max_input_tokens
+        or evidence.output_tokens > max_output_tokens
+        or evidence.input_tokens + evidence.output_tokens
+        > max_input_tokens + max_output_tokens
+    ):
+        raise ProfileError("profile_verification_budget_exceeded")
     return create_capability_snapshot(
         requested=requested,
         identity=identity,
@@ -207,6 +236,35 @@ def verify_approved_profile(
         verified_at=verified_at,
         ttl_seconds=ttl_seconds,
     )
+
+
+def verify_and_save_approved_profile(
+    store: RepositoryStore,
+    *,
+    requested: RequestedProfile,
+    identity: CliIdentity,
+    effort: Effort,
+    verified_at: int,
+    ttl_seconds: int,
+    approval_granted: bool,
+    max_input_tokens: int,
+    max_output_tokens: int,
+    verifier: Callable[[RequestedProfile, Effort], VerificationEvidence],
+) -> CapabilitySnapshot:
+    """Persist authority only after identity, evidence, and usage validation pass."""
+    snapshot = verify_approved_profile(
+        requested=requested,
+        identity=identity,
+        effort=effort,
+        verified_at=verified_at,
+        ttl_seconds=ttl_seconds,
+        approval_granted=approval_granted,
+        max_input_tokens=max_input_tokens,
+        max_output_tokens=max_output_tokens,
+        verifier=verifier,
+    )
+    save_capability_snapshot(store, snapshot)
+    return snapshot
 
 
 def _snapshot_from_dict(value: object) -> CapabilitySnapshot:

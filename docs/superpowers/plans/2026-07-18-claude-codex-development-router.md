@@ -222,12 +222,12 @@
 
 **Authority gate:** Stop and request the user's approval for each exact call after displaying provider, requested model, effort, CLI version, capability snapshot digest, repository/fixture fingerprint, permission mode, maximum usage reservation, and timeout.
 
-- [ ] Use a disposable synthetic Git fixture containing no secrets or user source. Verify canonical paths and Graphite graph freshness.
-- [ ] Make one no-edit profile-verification call for the selected Claude profile. No retry or fallback. Record only sanitized receipt metadata and human verdict.
-- [ ] Make one no-edit profile-verification call for the selected Codex profile. No retry or fallback. Record only sanitized receipt metadata and human verdict.
+- [x] Use a disposable synthetic Git fixture containing no secrets or user source. Verify canonical paths and Graphite graph freshness.
+- [x] Make one no-edit profile-verification call for the selected Claude profile. No retry or fallback. Record only sanitized receipt metadata and human verdict.
+- [x] Make one no-edit profile-verification call for the selected Codex profile. No retry or fallback. Record only sanitized receipt metadata and human verdict. The identity/response checks passed, but reported input usage exceeded the approval, so the result is invalid and no active snapshot remains.
 - [ ] After both profiles are verified, request separate approval for one bounded edit smoke per provider in isolated disposable worktrees. Each call must create a trivial tested change, pass diff policy and validation, and remain unmerged.
 - [ ] Exercise one separately approved read-only cross-provider review against a synthetic high-risk diff.
-- [ ] If any call fails, preserve failed-closed evidence and do not substitute another model. Fix only offline-contract defects without another call; any repeat requires a new explicit approval.
+- [x] If any call fails, preserve failed-closed evidence and do not substitute another model. Fix only offline-contract defects without another call; any repeat requires a new explicit approval.
 - [ ] Mark the capability production-ready only if both adapters pass profile verification, edit smoke, cross-provider review, audit persistence, and the rollback drill. Otherwise document the exact remaining gate.
 
 ## Final branch gate

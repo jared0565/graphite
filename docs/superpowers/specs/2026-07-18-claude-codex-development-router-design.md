@@ -46,6 +46,8 @@ Graphite uses a maintained allowlist of tested tuples and never invents availabi
 
 A canonical capability snapshot is sorted and hashed. The approval binds its digest in place of the Ollama inventory digest. The snapshot includes the selected profile, CLI identity and version, adapter protocol version, and verification time. It contains no credential material.
 
+The no-edit verifier must also return reported input and output usage. Graphite validates both values against the approved reservation before snapshot persistence. Missing, malformed, or over-budget usage fails closed; the live acceptance path must use the single ordered verify-and-save boundary and cannot save first and validate later.
+
 ## 5. Routing and Learning
 
 Hard eligibility gates precede scoring: authenticated CLI health, tested version compatibility, task capability, context size, risk ceiling, requested permissions, and remaining repository and machine budgets.

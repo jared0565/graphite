@@ -70,9 +70,32 @@ invented `turn.completed.model` field that Codex's documented JSONL event does n
 provide. No Codex snapshot was saved and a sanitized blocked event was appended.
 The offline contract now binds Codex to the full non-alias model slug in the signed
 snapshot and strict command, accepts the documented model-less terminal event, and
-still rejects any conflicting future model echo. A repeat remains unexecuted.
+still rejects any conflicting future model echo.
+
+A separately approved repeat used `gpt-5.6-sol` at high effort, read-only mode,
+snapshot digest `b1be74a8ba19542246d524ef2f90815a47cef8546d17d0c747ca1d0f88b9dcbe`,
+and the unchanged synthetic graph fingerprint. The exact response and full-slug
+contract checks passed in 14.347 seconds, with 41,854 reported input tokens and 84
+reported output tokens. The approved maxima were 32,768 input and 4,096 output.
+The result is therefore invalid: it is not accepted capability evidence and cannot
+authorize Codex routing.
+
+The acceptance harness had saved the snapshot before performing its usage check.
+The entire disposable fixture database was immediately moved out of the active path
+to `events-overbudget-quarantined.sqlite3`; its SHA-256 is
+`aaae2e5537a96eeb3d1122146272e42c05f68db340e71bfdb7ea22dc821723dc`.
+The active `events.sqlite3` path is absent. The quarantine preserves the prior
+append-only fixture audit, including valid Claude evidence, but exposes no active
+snapshot. No operator database was involved.
+
+The production boundary now requires reported input/output usage, validates each
+against the approved limits, and persists only through an ordered verify-and-save
+operation. Regression tests prove over-budget input or output leaves the capability
+store empty. This offline correction does not retroactively validate Codex, and no
+automatic retry or substitute model was used.
 
 Both isolated edit smokes, the read-only cross-provider high-risk review, and final
-live audit persistence also remain unexecuted. Any
+live audit persistence also remain unexecuted. Codex profile verification remains
+open, and the active fixture has no capability snapshots. Any
 diagnostic repeat or subsequent provider call requires a new bounded manifest and
 explicit approval. The offline schema rollback drill remains passed.

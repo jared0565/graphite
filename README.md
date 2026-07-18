@@ -488,6 +488,9 @@ Claude must report `claude.ai` first-party authentication; Codex must report
 `Logged in using ChatGPT`. Graphite hashes the resolved executable and binds its
 version, adapter protocol, requested model, effective model, effort, permission
 mode, risk ceiling, verification time, and expiry into a capability snapshot.
+The no-edit verifier must report input and output usage. Graphite validates both
+against the exact approved reservation before saving the snapshot; missing,
+invalid, or over-budget usage fails closed and creates no active authority.
 Profile evidence is explicit and short-lived. A CLI update, executable replacement,
 authentication change, effective-model mismatch, or expired snapshot fails closed.
 Capability evidence helps establish eligibility; it is not authorization authority.
