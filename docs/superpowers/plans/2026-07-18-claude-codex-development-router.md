@@ -77,14 +77,14 @@
 - Modify `tests/test_routing_storage.py`
 - Modify `tests/test_routing_cli_recovery.py`
 
-- [ ] Capture the current schema-v3 DDL as an immutable fixture with provenance and sanitized sample Ollama history.
-- [ ] Write failing migration tests for v3 to v4, fresh v4 creation, idempotent reopen, malformed digest rejection, partial-migration quarantine, concurrent-writer refusal, and preservation of historical Ollama attempts.
-- [ ] Require a verified pre-migration backup marker before destructive schema replacement. Use an atomic same-volume backup, SQLite integrity check, restrictive permissions, and a digest recorded outside the migrated database.
-- [ ] Migrate stored identity to provider plus `capability_snapshot_digest`. Add capability snapshot, task-worktree, validation-result, and review-link tables with bounded fields, foreign keys, uniqueness, state-transition triggers, and immutable terminal evidence.
-- [ ] Prevent any v3 Ollama record from becoming a v4 approval, executable attempt, reconciliation input, or reviewer authority.
-- [ ] Add stable CLI error codes for backup failure, migration busy, unsupported schema, quarantined state, and rollback-required state.
-- [ ] Run focused migration, recovery, integrity, and trigger tests with a writable `--basetemp`.
-- [ ] Commit: `feat: migrate routing authority to CLI capability snapshots`.
+- [x] Capture the current schema-v3 DDL as an immutable fixture with provenance and sanitized sample Ollama history.
+- [x] Write failing migration tests for v3 to v4, fresh v4 creation, idempotent reopen, malformed digest rejection, partial-migration quarantine, concurrent-writer refusal, and preservation of historical Ollama attempts.
+- [x] Require a verified pre-migration backup marker before destructive schema replacement. Use an atomic same-volume backup, SQLite integrity check, restrictive permissions, and a digest recorded outside the migrated database.
+- [x] Migrate stored identity to provider plus `capability_snapshot_digest`. Add capability snapshot, task-worktree, validation-result, and review-link tables with bounded fields, foreign keys, uniqueness, state-transition triggers, and immutable terminal evidence.
+- [x] Prevent any v3 Ollama record from becoming a v4 approval, executable attempt, reconciliation input, or reviewer authority.
+- [x] Add stable CLI error codes for backup failure, migration busy, unsupported schema, quarantined state, and rollback-required state.
+- [x] Run focused migration, recovery, integrity, and trigger tests with a writable `--basetemp`.
+- [x] Commit: `feat: migrate routing authority to CLI capability snapshots`.
 
 ## Task 3: Build the hardened common CLI process boundary
 

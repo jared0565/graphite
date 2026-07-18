@@ -5,15 +5,17 @@ import os
 import hashlib
 import json
 import re
+import secrets
 import sqlite3
 import stat
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
 from .contracts import Effort, ExecutionOutcome, ExecutionReceipt, RiskTier, TaskCategory
 
-SCHEMA_VERSION: Final = "3"
+SCHEMA_VERSION: Final = "4"
 BUSY_TIMEOUT_MS: Final = 2_000
 DEFAULT_RECOVERY_PAGE_SIZE: Final = 50
 MAX_RECOVERY_PAGE_SIZE: Final = 100
@@ -44,6 +46,11 @@ _TABLES = frozenset(
         "staged_execution_receipts",
         "incident_reviews",
         "blind_comparisons",
+        "capability_snapshots",
+        "task_worktrees",
+        "cli_execution_attempts",
+        "validation_results",
+        "review_links",
     }
 )
 
@@ -345,6 +352,168 @@ _SCHEMA = (
         refreshed_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS capability_snapshots (
+        capability_snapshot_digest TEXT PRIMARY KEY CHECK(
+            length(capability_snapshot_digest) = 64
+            AND capability_snapshot_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex')),
+        requested_model TEXT NOT NULL,
+        effective_model TEXT NOT NULL,
+        effort TEXT NOT NULL CHECK(effort IN ('default', 'low', 'medium', 'high', 'xhigh', 'max')),
+        executable_sha256 TEXT NOT NULL CHECK(
+            length(executable_sha256) = 64
+            AND executable_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        cli_version TEXT NOT NULL,
+        adapter_protocol_version TEXT NOT NULL,
+        permission_mode TEXT NOT NULL CHECK(permission_mode IN ('read-only', 'workspace-write')),
+        payload_json TEXT NOT NULL,
+        verified_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL CHECK(expires_at > verified_at)
+    )""",
+    """CREATE TABLE IF NOT EXISTS task_worktrees (
+        worktree_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
+        baseline_commit TEXT NOT NULL CHECK(
+            (length(baseline_commit) = 40 OR length(baseline_commit) = 64)
+            AND baseline_commit NOT GLOB '*[^0-9a-f]*'
+        ),
+        canonical_root_hash TEXT NOT NULL CHECK(
+            length(canonical_root_hash) = 64
+            AND canonical_root_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        status TEXT NOT NULL CHECK(status IN ('prepared', 'executed', 'accepted', 'rejected', 'quarantined', 'cleaned')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS cli_execution_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        approval_id TEXT NOT NULL UNIQUE REFERENCES approvals(approval_id) ON DELETE RESTRICT,
+        task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
+        decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE RESTRICT,
+        worktree_id TEXT NOT NULL REFERENCES task_worktrees(worktree_id) ON DELETE RESTRICT,
+        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex')),
+        requested_model TEXT NOT NULL,
+        effective_model TEXT NOT NULL,
+        effort TEXT NOT NULL CHECK(effort IN ('default', 'low', 'medium', 'high', 'xhigh', 'max')),
+        cli_version TEXT NOT NULL,
+        executable_sha256 TEXT NOT NULL CHECK(
+            length(executable_sha256) = 64
+            AND executable_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        capability_snapshot_digest TEXT NOT NULL REFERENCES capability_snapshots(capability_snapshot_digest) ON DELETE RESTRICT,
+        manifest_hash TEXT NOT NULL CHECK(
+            length(manifest_hash) = 64 AND manifest_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        expected_prompt_hash TEXT NOT NULL CHECK(
+            length(expected_prompt_hash) = 64 AND expected_prompt_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        reserved_tokens INTEGER NOT NULL CHECK(reserved_tokens > 0),
+        status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'failed', 'persistence_failed', 'quarantined')),
+        failure_reason TEXT,
+        execution_id TEXT UNIQUE REFERENCES executions(execution_id) ON DELETE RESTRICT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS validation_results (
+        attempt_id TEXT PRIMARY KEY REFERENCES cli_execution_attempts(attempt_id) ON DELETE RESTRICT,
+        diff_hash TEXT NOT NULL CHECK(
+            length(diff_hash) = 64 AND diff_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        changed_file_count INTEGER NOT NULL CHECK(changed_file_count >= 0),
+        changed_byte_count INTEGER NOT NULL CHECK(changed_byte_count >= 0),
+        outcome TEXT NOT NULL CHECK(outcome IN ('passed', 'failed', 'blocked', 'not_run')),
+        recorded_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS review_links (
+        review_attempt_id TEXT PRIMARY KEY REFERENCES cli_execution_attempts(attempt_id) ON DELETE RESTRICT,
+        primary_attempt_id TEXT NOT NULL REFERENCES cli_execution_attempts(attempt_id) ON DELETE RESTRICT,
+        primary_diff_hash TEXT NOT NULL CHECK(
+            length(primary_diff_hash) = 64 AND primary_diff_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        created_at INTEGER NOT NULL,
+        CHECK(review_attempt_id != primary_attempt_id)
+    )""",
+    """CREATE TRIGGER IF NOT EXISTS cli_attempt_identity_update_guard
+    BEFORE UPDATE OF approval_id, task_id, decision_id, worktree_id, provider,
+        requested_model, effective_model, effort, cli_version, executable_sha256,
+        capability_snapshot_digest, manifest_hash, expected_prompt_hash, reserved_tokens
+    ON cli_execution_attempts
+    BEGIN
+        SELECT RAISE(ABORT, 'cli_attempt_identity_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS capability_snapshot_update_guard
+    BEFORE UPDATE ON capability_snapshots
+    BEGIN
+        SELECT RAISE(ABORT, 'capability_snapshot_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS capability_snapshot_delete_guard
+    BEFORE DELETE ON capability_snapshots
+    BEGIN
+        SELECT RAISE(ABORT, 'capability_snapshot_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS cli_attempt_status_transition_guard
+    BEFORE UPDATE OF status ON cli_execution_attempts
+    WHEN NOT (
+        (OLD.status = 'pending' AND NEW.status IN (
+            'completed', 'failed', 'persistence_failed', 'quarantined'
+        ))
+        OR (OLD.status = 'persistence_failed' AND NEW.status IN (
+            'completed', 'failed', 'quarantined'
+        ))
+        OR OLD.status = NEW.status
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'cli_attempt_transition_invalid');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS cli_attempt_delete_guard
+    BEFORE DELETE ON cli_execution_attempts
+    BEGIN
+        SELECT RAISE(ABORT, 'cli_attempt_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS worktree_identity_update_guard
+    BEFORE UPDATE OF worktree_id, task_id, baseline_commit, canonical_root_hash, created_at
+    ON task_worktrees
+    BEGIN
+        SELECT RAISE(ABORT, 'worktree_identity_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS worktree_status_transition_guard
+    BEFORE UPDATE OF status ON task_worktrees
+    WHEN NOT (
+        (OLD.status = 'prepared' AND NEW.status IN ('executed', 'quarantined'))
+        OR (OLD.status = 'executed' AND NEW.status IN ('accepted', 'rejected', 'quarantined'))
+        OR (OLD.status IN ('accepted', 'rejected', 'quarantined') AND NEW.status = 'cleaned')
+        OR OLD.status = NEW.status
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'worktree_transition_invalid');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS worktree_delete_guard
+    BEFORE DELETE ON task_worktrees
+    BEGIN
+        SELECT RAISE(ABORT, 'worktree_evidence_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS validation_result_update_guard
+    BEFORE UPDATE ON validation_results
+    BEGIN
+        SELECT RAISE(ABORT, 'validation_result_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS validation_result_delete_guard
+    BEFORE DELETE ON validation_results
+    BEGIN
+        SELECT RAISE(ABORT, 'validation_result_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS review_link_update_guard
+    BEFORE UPDATE ON review_links
+    BEGIN
+        SELECT RAISE(ABORT, 'review_link_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS review_link_delete_guard
+    BEFORE DELETE ON review_links
+    BEGIN
+        SELECT RAISE(ABORT, 'review_link_immutable');
+    END""",
     """CREATE TRIGGER IF NOT EXISTS execution_attempt_digest_insert_guard
     BEFORE INSERT ON execution_attempts
     WHEN NEW.inventory_digest IS NULL
@@ -423,6 +592,14 @@ class RepositoryStore:
         self.busy_timeout_ms = busy_timeout_ms
         self.path = self.root / ".graphite" / "routing" / "events.sqlite3"
 
+    @property
+    def schema_v3_backup_path(self) -> Path:
+        return self.path.parent / "backups" / "events-schema-v3.sqlite3"
+
+    @property
+    def schema_v3_backup_marker_path(self) -> Path:
+        return self.path.parent / "backups" / "events-schema-v3.sha256.json"
+
     def _connect(self) -> sqlite3.Connection:
         try:
             connection = sqlite3.connect(
@@ -450,13 +627,18 @@ class RepositoryStore:
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()
             if existing_version is not None and existing_version[0] not in {
-                "1", "2", SCHEMA_VERSION
+                "1", "2", "3", SCHEMA_VERSION
             }:
                 raise StorageError("storage_schema_unsupported")
+            if existing_version is not None and existing_version[0] == SCHEMA_VERSION:
+                self._validate_v4_schema(connection)
             if existing_version is not None and existing_version[0] == "1":
                 self._migrate_v1_attempts(connection)
             if existing_version is not None and existing_version[0] in {"1", "2"}:
                 self._migrate_v2_digest(connection)
+            if existing_version is not None and existing_version[0] == "3":
+                self._create_schema_v3_backup()
+                self._migrate_v3_cli_cutover(connection)
             for statement in _SCHEMA[1:]:
                 connection.execute(statement)
             connection.execute(
@@ -481,6 +663,143 @@ class RepositoryStore:
                 connection.close()
         _validate_database_file(self.path)
         _secure_file(self.path)
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+        except OSError as exc:
+            raise StorageError("storage_backup_failed") from exc
+        return digest.hexdigest()
+
+    @staticmethod
+    def _atomic_private_write(path: Path, payload: bytes) -> None:
+        temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
+            written = os.write(descriptor, payload)
+            if written != len(payload):
+                raise StorageError("storage_backup_failed")
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = None
+            os.replace(temporary, path)
+            _secure_file(path)
+        except StorageError:
+            raise
+        except OSError as exc:
+            raise StorageError("storage_backup_failed") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _create_schema_v3_backup(self) -> None:
+        backup = self.schema_v3_backup_path
+        marker = self.schema_v3_backup_marker_path
+        _secure_repository_directory(self.root, backup.parent)
+        temporary = backup.with_name(f".{backup.name}.{secrets.token_hex(8)}.tmp")
+        try:
+            _validate_database_file(backup)
+            with closing(
+                sqlite3.connect(self.path, timeout=self.busy_timeout_ms / 1_000)
+            ) as source:
+                with closing(sqlite3.connect(temporary)) as destination:
+                    source.backup(destination)
+                    integrity = destination.execute("PRAGMA integrity_check").fetchone()
+                    version = destination.execute(
+                        "SELECT value FROM schema_meta WHERE key='schema_version'"
+                    ).fetchone()
+                    if integrity != ("ok",) or version != ("3",):
+                        raise StorageError("storage_backup_failed")
+            _secure_file(temporary)
+            os.replace(temporary, backup)
+            _secure_file(backup)
+            evidence = json.dumps(
+                {
+                    "backup_sha256": self._file_sha256(backup),
+                    "schema_version": "3",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            self._atomic_private_write(marker, evidence)
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise StorageError("storage_backup_failed") from exc
+        except OSError as exc:
+            raise StorageError("storage_backup_failed") from exc
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _migrate_v3_cli_cutover(connection: sqlite3.Connection) -> None:
+        required = {
+            "attempt_id",
+            "status",
+            "failure_reason",
+            "inventory_digest",
+        }
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_attempts'"
+        ).fetchone()
+        if exists is None:
+            raise StorageError("storage_migration_quarantined")
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(execution_attempts)")
+        }
+        if not required <= columns:
+            raise StorageError("storage_migration_quarantined")
+        connection.execute(
+            """UPDATE execution_attempts
+            SET status='legacy_unrecoverable', failure_reason='legacy_provider_retired'
+            WHERE status IN ('pending', 'persistence_failed')"""
+        )
+
+    @staticmethod
+    def _validate_v4_schema(connection: sqlite3.Connection) -> None:
+        required_tables = {
+            "capability_snapshots",
+            "task_worktrees",
+            "cli_execution_attempts",
+            "validation_results",
+            "review_links",
+        }
+        existing_tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if not required_tables <= existing_tables:
+            raise StorageError("storage_rollback_required")
+        cli_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(cli_execution_attempts)")
+        }
+        if not {
+            "provider",
+            "effective_model",
+            "capability_snapshot_digest",
+            "worktree_id",
+            "status",
+        } <= cli_columns:
+            raise StorageError("storage_rollback_required")
 
     @staticmethod
     def _migrate_v1_attempts(connection: sqlite3.Connection) -> None:
