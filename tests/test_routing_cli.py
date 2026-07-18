@@ -27,7 +27,24 @@ class _Service:
             },
         })()
 
-    def execute_approved(self, recommendation):
+    def prepare(self, recommendation):
+        self.calls.append("prepare")
+        return type("Prepared", (), {
+            "task_id": "task-1",
+            "to_dict": lambda self: {
+                "task_id": "task-1", "worktree_id": "worktree-1",
+                "provider": "codex", "requested_model": "gpt-5.6-codex",
+                "effective_model": "gpt-5.6-codex", "effort": "xhigh",
+                "approval_required": True,
+            },
+        })()
+
+    def decline(self, prepared):
+        self.calls.append("decline")
+        return {"status": "quarantined"}
+
+    def run_approved(self, prepared, *, approval_granted):
+        assert approval_granted is True
         self.calls.append("execute")
         return type("ApprovedExecution", (), {
             "text": "bounded suggestion",
@@ -62,6 +79,41 @@ class _Service:
         self.calls.append("policy")
         return {"policy_version": "1", "execution_authority": "approval_required"}
 
+    def accept(self, task_id, *, authority_granted):
+        self.calls.append("accept")
+        return {"task_id": task_id, "status": "accepted", "commit_id": "a" * 40}
+
+    def reject(self, task_id, *, authority_granted):
+        self.calls.append("reject")
+        return {"task_id": task_id, "status": "rejected"}
+
+    def cleanup(self, task_id, *, authority_granted):
+        self.calls.append("cleanup")
+        return {"task_id": task_id, "status": "cleaned"}
+
+    def prepare_review(self, task_id):
+        self.calls.append("prepare_review")
+        return type("PreparedReview", (), {
+            "task_id": task_id,
+            "to_dict": lambda self: {
+                "task_id": task_id,
+                "worktree_id": "review-worktree-1",
+                "provider": "claude-code",
+                "permission_mode": "read-only",
+                "approval_required": True,
+            },
+        })()
+
+    def run_review_approved(self, prepared, *, approval_granted):
+        assert approval_granted is True
+        self.calls.append("review")
+        return type("ReviewResult", (), {
+            "text": "bounded review",
+            "to_public_dict": lambda self: {
+                "outcome": "succeeded", "execution_id": "review-exec-1",
+            },
+        })()
+
 
 @pytest.fixture(autouse=True)
 def _service(monkeypatch: pytest.MonkeyPatch):
@@ -84,7 +136,7 @@ def test_json_and_yes_never_grant_execution_consent(
     monkeypatch.setattr(cli.sys, "stdin", io.StringIO("yes\n"))
     monkeypatch.setattr(cli.sys, "stdout", io.StringIO())
     assert cli.main(["route", "run", ".", "--objective", "review", *extra]) == 2
-    assert _Service.calls == ["recommend"]
+    assert _Service.calls == ["recommend", "prepare", "decline"]
 
 
 def test_interactive_run_displays_budget_then_prompts_once(
@@ -99,7 +151,7 @@ def test_interactive_run_displays_budget_then_prompts_once(
     monkeypatch.setattr(cli.sys, "stdin", stdin)
     monkeypatch.setattr(cli.sys, "stdout", stdout)
     assert cli.main(["route", "run", ".", "--objective", "review"]) == 0
-    assert _Service.calls == ["recommend", "execute"]
+    assert _Service.calls == ["recommend", "prepare", "execute"]
     output = stdout.getvalue()
     assert output.count("Approve this development model call?") == 1
     assert output.index("estimated_tokens") < output.index("Approve")
@@ -155,7 +207,7 @@ def test_noninteractive_modes_never_execute_or_print_provider_text(
     if ci:
         monkeypatch.setenv("CI", "1")
     assert cli.main(["route", "run", ".", "--objective", "review", *extra]) == 2
-    assert _Service.calls == ["recommend"]
+    assert _Service.calls == ["recommend", "prepare", "decline"]
     assert "bounded suggestion" not in cli.sys.stdout.getvalue()
 
 
@@ -180,6 +232,44 @@ def test_route_status_policy_and_outcome_grammar() -> None:
         "--provenance", "human", "--accepted",
     ]) == 0
     assert _Service.calls == ["status", "policy", "record"]
+
+
+@pytest.mark.parametrize("action", ["accept", "reject", "cleanup"])
+def test_terminal_actions_require_interactive_authority(
+    action: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("yes\n"))
+    monkeypatch.setattr(cli.sys, "stdout", io.StringIO())
+    assert cli.main([
+        "route", action, ".", "--task-id", "task-1", "--yes"
+    ]) == 2
+    assert action not in _Service.calls
+
+
+def test_interactive_accept_emits_cherry_pickable_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TTY(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(cli.sys, "stdin", _TTY("yes\n"))
+    stdout = _TTY()
+    monkeypatch.setattr(cli.sys, "stdout", stdout)
+    assert cli.main(["route", "accept", ".", "--task-id", "task-1"]) == 0
+    assert _Service.calls == ["accept"]
+    assert '"commit_id"' in stdout.getvalue()
+
+
+def test_noninteractive_review_prepares_but_never_executes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("yes\n"))
+    monkeypatch.setattr(cli.sys, "stdout", io.StringIO())
+    assert cli.main([
+        "route", "review", ".", "--task-id", "task-1", "--json"
+    ]) == 2
+    assert _Service.calls == ["prepare_review", "decline"]
 
 
 def test_route_recovery_commands_emit_only_sanitized_json(

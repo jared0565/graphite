@@ -40,7 +40,9 @@ class TaskWorktree:
     status: str = "prepared"
 
 
-_CLEANUP_TERMINAL_STATES: Final = frozenset({"accepted", "rejected", "abandoned"})
+_CLEANUP_TERMINAL_STATES: Final = frozenset(
+    {"accepted", "rejected", "abandoned", "quarantined"}
+)
 
 
 def _is_reparse(metadata: os.stat_result) -> bool:

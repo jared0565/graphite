@@ -35,7 +35,7 @@ from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
 from .llm import enrich_report
 from .routing.approval import approval_prompt
-from .routing.service import RoutingService
+from .routing.service import RoutingService, RoutingServiceError
 from .routing.storage import DEFAULT_RECOVERY_PAGE_SIZE, StorageError
 from .query import _find_node, annotate_communities, query
 from .replacement_audit import audit_replacement, format_replacement_audit
@@ -989,9 +989,9 @@ _ROUTE_RECOVERY_ERROR_CODES = frozenset({
 
 
 def _route_recovery_error(
-    error: StorageError | ValueError | OSError, *, json_mode: bool
+    error: StorageError | RoutingServiceError | ValueError | OSError, *, json_mode: bool
 ) -> int:
-    if isinstance(error, StorageError):
+    if isinstance(error, (StorageError, RoutingServiceError)):
         candidate = error.code
     elif isinstance(error, FileNotFoundError):
         candidate = "repository_root_invalid"
@@ -1072,6 +1072,31 @@ def cmd_route_run(args: argparse.Namespace) -> int:
     _route_print(public, json_mode=args.json)
     if recommendation.manual_handoff:
         return 3
+    try:
+        prepared = service.prepare(recommendation)
+    except RoutingServiceError as exc:
+        _route_print({"error": {"code": exc.code}}, json_mode=args.json)
+        return 1
+    _route_print(prepared.to_dict(), json_mode=args.json)
+    approved = approval_prompt(
+        stdin=sys.stdin,
+        stdout=sys.stdout,
+        stdin_is_tty=sys.stdin.isatty(),
+        stdout_is_tty=sys.stdout.isatty(),
+        json_mode=args.json,
+        assume_yes=args.yes,
+        ci=bool(os.environ.get("CI")),
+    )
+    if not approved:
+        service.decline(prepared)
+        return 2
+    result = service.run_approved(prepared, approval_granted=True)
+    _render_model_output(result.text, stdout=sys.stdout)
+    _route_print(result.to_public_dict(), json_mode=False)
+    return 0
+
+
+def _route_terminal_action(args: argparse.Namespace, action: str) -> int:
     approved = approval_prompt(
         stdin=sys.stdin,
         stdout=sys.stdout,
@@ -1083,20 +1108,49 @@ def cmd_route_run(args: argparse.Namespace) -> int:
     )
     if not approved:
         return 2
-    if args.shadow:
-        print(json.dumps({"shadow": "separate_approval_required", "budget": "bounded"}))
-        shadow_approved = approval_prompt(
-            stdin=sys.stdin,
-            stdout=sys.stdout,
-            stdin_is_tty=sys.stdin.isatty(),
-            stdout_is_tty=sys.stdout.isatty(),
-            json_mode=args.json,
-            assume_yes=args.yes,
-            ci=bool(os.environ.get("CI")),
-        )
-        if not shadow_approved:
-            print(json.dumps({"shadow": "declined", "primary": "continuing"}))
-    result = service.execute_approved(recommendation)
+    service = RoutingService(args.path)
+    try:
+        payload = getattr(service, action)(args.task_id, authority_granted=True)
+    except RoutingServiceError as exc:
+        _route_print({"error": {"code": exc.code}}, json_mode=args.json)
+        return 1
+    _route_print(payload, json_mode=args.json)
+    return 0
+
+
+def cmd_route_accept(args: argparse.Namespace) -> int:
+    return _route_terminal_action(args, "accept")
+
+
+def cmd_route_reject(args: argparse.Namespace) -> int:
+    return _route_terminal_action(args, "reject")
+
+
+def cmd_route_cleanup(args: argparse.Namespace) -> int:
+    return _route_terminal_action(args, "cleanup")
+
+
+def cmd_route_review(args: argparse.Namespace) -> int:
+    service = RoutingService(args.path)
+    try:
+        prepared = service.prepare_review(args.task_id)
+    except RoutingServiceError as exc:
+        _route_print({"error": {"code": exc.code}}, json_mode=args.json)
+        return 1
+    _route_print(prepared.to_dict(), json_mode=args.json)
+    approved = approval_prompt(
+        stdin=sys.stdin,
+        stdout=sys.stdout,
+        stdin_is_tty=sys.stdin.isatty(),
+        stdout_is_tty=sys.stdout.isatty(),
+        json_mode=args.json,
+        assume_yes=args.yes,
+        ci=bool(os.environ.get("CI")),
+    )
+    if not approved:
+        service.decline(prepared)
+        return 2
+    result = service.run_review_approved(prepared, approval_granted=True)
     _render_model_output(result.text, stdout=sys.stdout)
     _route_print(result.to_public_dict(), json_mode=False)
     return 0
@@ -1112,7 +1166,7 @@ def cmd_route_recoverable(args: argparse.Namespace) -> int:
         page = RoutingService(args.path).recoverable_attempts(
             limit=args.limit, after=args.after
         )
-    except (StorageError, ValueError, OSError) as exc:
+    except (StorageError, RoutingServiceError, ValueError, OSError) as exc:
         return _route_recovery_error(exc, json_mode=args.json)
     _route_print(page.to_dict(), json_mode=args.json)
     return 0
@@ -1121,7 +1175,7 @@ def cmd_route_recoverable(args: argparse.Namespace) -> int:
 def cmd_route_reconcile(args: argparse.Namespace) -> int:
     try:
         payload = RoutingService(args.path).reconcile_execution(args.attempt_id)
-    except (StorageError, ValueError, OSError) as exc:
+    except (StorageError, RoutingServiceError, ValueError, OSError) as exc:
         return _route_recovery_error(exc, json_mode=args.json)
     _route_print(payload, json_mode=args.json)
     return 0
@@ -1129,7 +1183,6 @@ def cmd_route_reconcile(args: argparse.Namespace) -> int:
 
 def cmd_route_policy(args: argparse.Namespace) -> int:
     payload = RoutingService(args.path).policy(
-        refresh_models=args.refresh_models,
         promote=args.promote,
         rollback=args.rollback,
     )
@@ -1180,14 +1233,50 @@ def main(argv: list[str] | None = None) -> int:
     p_route_recommend.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_route_recommend.set_defaults(func=cmd_route_recommend)
 
-    p_route_run = route_sub.add_parser("run", help="Run one separately approved Ollama call")
+    p_route_run = route_sub.add_parser(
+        "run", help="Prepare and run one separately approved authenticated CLI task"
+    )
     p_route_run.add_argument("path", help="Repository path")
     p_route_run.add_argument("--objective", required=True, help="Bounded task objective")
     p_route_run.add_argument("--target", action="append", default=[], help="Repository-relative target")
-    p_route_run.add_argument("--shadow", action="store_true", help="Offer a separate bounded shadow evaluation")
     p_route_run.add_argument("--yes", action="store_true", help="Never grants routing consent; interactive approval is still required")
     p_route_run.add_argument("--json", action="store_true", help="Non-interactive output; execution is disabled")
     p_route_run.set_defaults(func=cmd_route_run)
+
+    for action, handler in (
+        ("accept", cmd_route_accept),
+        ("reject", cmd_route_reject),
+        ("cleanup", cmd_route_cleanup),
+    ):
+        action_parser = route_sub.add_parser(
+            action, help=f"Explicitly {action} one prepared routing task"
+        )
+        action_parser.add_argument("path", help="Repository path")
+        action_parser.add_argument("--task-id", required=True)
+        action_parser.add_argument(
+            "--yes",
+            action="store_true",
+            help="Never grants consent; interactive approval is still required",
+        )
+        action_parser.add_argument(
+            "--json", action="store_true", help="Non-interactive output; action is disabled"
+        )
+        action_parser.set_defaults(func=handler)
+
+    p_route_review = route_sub.add_parser(
+        "review", help="Run a separately approved read-only other-provider review"
+    )
+    p_route_review.add_argument("path", help="Repository path")
+    p_route_review.add_argument("--task-id", required=True)
+    p_route_review.add_argument(
+        "--yes",
+        action="store_true",
+        help="Never grants consent; interactive approval is still required",
+    )
+    p_route_review.add_argument(
+        "--json", action="store_true", help="Non-interactive output; review is disabled"
+    )
+    p_route_review.set_defaults(func=cmd_route_review)
 
     p_route_outcome = route_sub.add_parser("record-outcome", help="Append supported outcome evidence")
     p_route_outcome.add_argument("path", help="Repository path")
@@ -1230,7 +1319,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_route_policy = route_sub.add_parser("policy", help="Inspect or explicitly manage recommendation policy")
     p_route_policy.add_argument("path", help="Repository path")
-    p_route_policy.add_argument("--refresh-models", action="store_true")
     p_route_policy.add_argument("--promote", default=None)
     p_route_policy.add_argument("--rollback", default=None)
     p_route_policy.add_argument("--json", action="store_true")

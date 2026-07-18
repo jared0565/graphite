@@ -165,16 +165,16 @@
 - Modify `tests/test_routing_cli.py`
 - Modify `tests/test_routing_shadow.py`
 
-- [ ] Replace the cached Ollama inventory flow with verified capability snapshots. Recommendations expose provider, requested/effective model, effort, snapshot expiry, permission mode, rationale, limits, and `single_use_approval_required`.
-- [ ] Split execution into explicit prepare, approve, run, inspect, validate, review, accept, reject, and cleanup state transitions. Every transition is idempotent or rejects replay with a stable code.
-- [ ] Bind the canonical prompt hash before approval consumption. Consume approval and reserve quota immediately before starting the one provider process.
-- [ ] Run configured validation commands through a separate bounded process policy after diff inspection. Validation cannot inherit provider credentials or model-generated shell state.
-- [ ] Implement high-risk cross-provider review as read-only, separately approved, independently budgeted, and linked to the primary diff hash. It cannot mutate or reuse the primary worktree.
-- [ ] Add explicit accept/reject CLI commands. Accept records human authority and creates a bounded integration commit or emits a cherry-pickable commit ID; it never merges automatically. Reject quarantines the worktree. Cleanup remains separate.
-- [ ] Ensure JSON and non-TTY modes cannot grant approval. `--yes` remains incapable of consent.
-- [ ] Remove governed-routing Ollama refresh and run commands while keeping unrelated report enrichment commands compatible.
-- [ ] Run service, CLI, approval, review, recovery, and security tests.
-- [ ] Commit: `feat: orchestrate approval-gated CLI development tasks`.
+- [x] Replace the cached Ollama inventory flow with verified capability snapshots. Recommendations expose provider, requested/effective model, effort, snapshot expiry, permission mode, rationale, limits, and `single_use_approval_required`.
+- [x] Split execution into explicit prepare, approve, run, inspect, validate, review, accept, reject, and cleanup state transitions. Every transition is idempotent or rejects replay with a stable code.
+- [x] Bind the canonical prompt hash before approval consumption. Consume approval and reserve quota immediately before starting the one provider process.
+- [x] Run configured validation commands through a separate bounded process policy after diff inspection. Validation cannot inherit provider credentials or model-generated shell state.
+- [x] Implement high-risk cross-provider review as read-only, separately approved, independently budgeted, and linked to the primary diff hash. It cannot mutate or reuse the primary worktree.
+- [x] Add explicit accept/reject CLI commands. Accept records human authority and creates a bounded integration commit or emits a cherry-pickable commit ID; it never merges automatically. Reject quarantines the worktree. Cleanup remains separate.
+- [x] Ensure JSON and non-TTY modes cannot grant approval. `--yes` remains incapable of consent.
+- [x] Remove governed-routing Ollama refresh and run commands while keeping unrelated report enrichment commands compatible.
+- [x] Run service, CLI, approval, review, recovery, and security tests.
+- [x] Commit: `feat: orchestrate approval-gated CLI development tasks`.
 
 ## Task 8: Complete evidence learning and policy promotion controls
 

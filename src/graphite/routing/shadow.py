@@ -1,42 +1,30 @@
-"""Explicitly budgeted shadow selection and blinded pairwise evidence."""
+"""Deterministic, separately authorized cross-provider review policy."""
 from __future__ import annotations
 
 import secrets
 from dataclasses import dataclass, replace
-from typing import Callable, Final
 
-from .contracts import ApprovalManifest, Effort, RiskTier, TaskCategory
-from .settings import RoutingSettings
+from .contracts import (
+    CapabilitySnapshot,
+    CliApprovalManifest,
+    PermissionMode,
+    ProviderId,
+    RiskTier,
+)
 from .storage import RepositoryStore
 
-_SENSITIVE_CATEGORIES: Final = frozenset(
-    {
-        TaskCategory.AUTHENTICATION,
-        TaskCategory.AUTHORIZATION,
-        TaskCategory.TENANT_ISOLATION,
-        TaskCategory.MIGRATION,
-        TaskCategory.DEPLOYMENT,
-        TaskCategory.INFRASTRUCTURE,
-        TaskCategory.CONCURRENCY,
-        TaskCategory.FINANCIAL,
-        TaskCategory.LEGAL,
-    }
-)
 
-
-@dataclass(frozen=True)
-class ShadowCandidate:
-    model_id: str
-    effort: Effort
+@dataclass(frozen=True, slots=True)
+class ReviewCandidate:
+    snapshot: CapabilitySnapshot
     reserved_tokens: int
     independently_eligible: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.model_id, str) or not self.model_id or any(
-            character.isspace() for character in self.model_id
-        ):
-            raise ValueError("model_id_invalid")
-        object.__setattr__(self, "effort", Effort(self.effort))
+        if not isinstance(self.snapshot, CapabilitySnapshot):
+            raise ValueError("review_snapshot_invalid")
+        if self.snapshot.profile.permission_mode is not PermissionMode.READ_ONLY:
+            raise ValueError("review_permission_invalid")
         if (
             isinstance(self.reserved_tokens, bool)
             or not isinstance(self.reserved_tokens, int)
@@ -47,14 +35,14 @@ class ShadowCandidate:
             raise ValueError("eligibility_invalid")
 
 
-@dataclass(frozen=True)
-class ShadowPlan:
-    candidate: ShadowCandidate
-    budget_entry_id: str
-    incremental_tokens: int
+@dataclass(frozen=True, slots=True)
+class ReviewPlan:
+    candidate: ReviewCandidate
+    primary_diff_hash: str
+    authority: str = "separate_single_use_approval_required"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BlindedComparison:
     comparison_id: str
     label_a_hash: str
@@ -68,68 +56,82 @@ class BlindedComparison:
         }
 
 
-def plan_shadow(
+def plan_cross_provider_review(
     *,
-    store: RepositoryStore,
-    primary_model: str,
-    primary_effort: Effort,
-    alternatives: tuple[ShadowCandidate, ...],
+    primary_provider: ProviderId,
+    primary_diff_hash: str,
+    candidates: tuple[ReviewCandidate, ...],
     risk: RiskTier,
-    category: TaskCategory,
-    settings: RoutingSettings,
-    now: int,
-    randbelow: Callable[[int], int] = secrets.randbelow,
-) -> ShadowPlan | None:
-    """Select at most one independently eligible, materially different shadow."""
-    rate = settings.shadow_rate_percent
-    if rate == 0 or RiskTier(risk) is RiskTier.HIGH or TaskCategory(category) in _SENSITIVE_CATEGORIES:
+) -> ReviewPlan | None:
+    """Select one other-provider reviewer only for high-risk primary work."""
+    provider = ProviderId(primary_provider)
+    if RiskTier(risk) is not RiskTier.HIGH:
         return None
-    draw = randbelow(100)
-    if isinstance(draw, bool) or not isinstance(draw, int) or not 0 <= draw < 100:
-        raise ValueError("shadow_random_invalid")
-    if draw >= rate:
-        return None
-    normalized_effort = Effort(primary_effort)
+    if (
+        not isinstance(primary_diff_hash, str)
+        or len(primary_diff_hash) != 64
+        or any(character not in "0123456789abcdef" for character in primary_diff_hash)
+    ):
+        raise ValueError("primary_diff_hash_invalid")
     eligible = sorted(
         (
-            candidate for candidate in alternatives
+            candidate
+            for candidate in candidates
             if candidate.independently_eligible
-            and (candidate.model_id != primary_model or candidate.effort is not normalized_effort)
+            and candidate.snapshot.profile.provider is not provider
         ),
-        key=lambda item: (item.reserved_tokens, item.model_id, item.effort.value),
+        key=lambda item: (
+            item.reserved_tokens,
+            item.snapshot.profile.provider.value,
+            item.snapshot.profile.requested_model,
+            item.snapshot.profile.supported_efforts[0].value,
+            item.snapshot.digest,
+        ),
     )
-    if not eligible:
-        return None
-    candidate = eligible[0]
-    entry_id = f"shadow:{secrets.token_hex(16)}"
-    if not store.reserve_shadow_budget(
-        entry_id, candidate.reserved_tokens, settings.shadow_quota_tokens, now
-    ):
-        return None
-    return ShadowPlan(candidate, entry_id, candidate.reserved_tokens)
+    return None if not eligible else ReviewPlan(eligible[0], primary_diff_hash)
 
 
-def make_shadow_manifest(
-    primary: ApprovalManifest,
-    candidate: ShadowCandidate,
+def make_review_manifest(
+    primary: CliApprovalManifest,
+    plan: ReviewPlan,
     *,
     approval_id: str,
+    decision_id: str,
+    worktree_id: str,
     issued_at: int,
     expires_at: int,
     nonce: str,
-) -> ApprovalManifest:
-    """Create a separately signable approval; never reuse primary identity or quota."""
-    if approval_id == primary.approval_id or nonce == primary.nonce:
-        raise ValueError("shadow_approval_not_independent")
-    output = min(primary.max_output_tokens, candidate.reserved_tokens - 1)
-    input_tokens = candidate.reserved_tokens - output
+) -> CliApprovalManifest:
+    """Derive a separately signable read-only manifest without primary authority reuse."""
+    snapshot = plan.candidate.snapshot
+    if (
+        approval_id == primary.approval_id
+        or decision_id == primary.decision_id
+        or worktree_id == primary.worktree_id
+        or nonce == primary.nonce
+        or snapshot.profile.provider is primary.provider
+    ):
+        raise ValueError("review_approval_not_independent")
+    output = min(primary.max_output_tokens, plan.candidate.reserved_tokens - 1)
+    input_tokens = plan.candidate.reserved_tokens - output
     return replace(
         primary,
         approval_id=approval_id,
-        model_id=candidate.model_id,
-        effort=candidate.effort,
+        decision_id=decision_id,
+        provider=snapshot.profile.provider,
+        requested_model=snapshot.profile.requested_model,
+        effective_model=snapshot.profile.effective_model,
+        effort=snapshot.profile.supported_efforts[0],
+        cli_executable_sha256=snapshot.identity.executable_sha256,
+        cli_version=snapshot.identity.cli_version,
+        adapter_protocol_version=snapshot.identity.adapter_protocol_version,
+        capability_snapshot_digest=snapshot.digest,
+        context_manifest_hash=plan.primary_diff_hash,
+        worktree_id=worktree_id,
+        permission_mode=PermissionMode.READ_ONLY,
         max_input_tokens=input_tokens,
         max_output_tokens=output,
+        policy_version="review-1",
         issued_at=issued_at,
         expires_at=expires_at,
         nonce=nonce,
@@ -149,7 +151,9 @@ def create_blinded_comparison(
 ) -> BlindedComparison:
     label_a_is_shadow = bool(secrets.randbelow(2)) if swap is None else bool(swap)
     label_a_hash, label_b_hash = (
-        (shadow_hash, primary_hash) if label_a_is_shadow else (primary_hash, shadow_hash)
+        (shadow_hash, primary_hash)
+        if label_a_is_shadow
+        else (primary_hash, shadow_hash)
     )
     store.create_blind_comparison(
         comparison_id=comparison_id,
@@ -164,11 +168,7 @@ def create_blinded_comparison(
 
 
 def record_pairwise_verdict(
-    store: RepositoryStore,
-    comparison_id: str,
-    verdict: str,
-    *,
-    recorded_at: int,
+    store: RepositoryStore, comparison_id: str, verdict: str, *, recorded_at: int
 ) -> None:
     if not store.record_blind_verdict(comparison_id, verdict, recorded_at):
         raise ValueError("pairwise_verdict_invalid")
@@ -186,7 +186,9 @@ def reveal_comparison(store: RepositoryStore, comparison_id: str) -> dict[str, o
         a_is_shadow = bool(row["label_a_is_shadow"])
         winner_is_shadow = a_is_shadow if verdict == "a" else not a_is_shadow
         winner = str(
-            row["shadow_execution_id"] if winner_is_shadow else row["primary_execution_id"]
+            row["shadow_execution_id"]
+            if winner_is_shadow
+            else row["primary_execution_id"]
         )
     return {
         "comparison_id": comparison_id,

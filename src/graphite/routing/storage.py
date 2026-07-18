@@ -18,6 +18,7 @@ from .contracts import (
     Effort,
     ExecutionOutcome,
     ExecutionReceipt,
+    ProviderId,
     RiskTier,
     TaskCategory,
 )
@@ -35,6 +36,11 @@ _SNAPSHOT_MODEL_ID = re.compile(
 _CAPABILITY = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _VERSION = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+_GIT_OBJECT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_SEMANTIC_VERSION = re.compile(
+    r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$"
+)
 _TABLES = frozenset(
     {
         "tasks",
@@ -99,6 +105,19 @@ def _identifier(value: object, code: str) -> str:
 
 def _nonnegative_integer(value: object, code: str, maximum: int = 10**12) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > maximum:
+        raise ValueError(code)
+    return value
+
+
+def _positive_integer(value: object, code: str, maximum: int = 10**12) -> int:
+    normalized = _nonnegative_integer(value, code, maximum)
+    if normalized == 0:
+        raise ValueError(code)
+    return normalized
+
+
+def _semantic_version(value: object, code: str) -> str:
+    if not isinstance(value, str) or _SEMANTIC_VERSION.fullmatch(value) is None:
         raise ValueError(code)
     return value
 
@@ -1794,6 +1813,423 @@ class RepositoryStore:
                 ORDER BY model_id, effort, category, risk"""
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def create_task_worktree_record(
+        self,
+        *,
+        worktree_id: str,
+        task_id: str,
+        baseline_commit: str,
+        canonical_root_hash: str,
+        created_at: int,
+    ) -> bool:
+        values = (
+            _identifier(worktree_id, "worktree_id_invalid"),
+            _identifier(task_id, "task_id_invalid"),
+            baseline_commit,
+            canonical_root_hash,
+            _nonnegative_integer(created_at, "created_at_invalid"),
+        )
+        if not _GIT_OBJECT.fullmatch(baseline_commit):
+            raise ValueError("baseline_commit_invalid")
+        if not _HEX_64.fullmatch(canonical_root_hash):
+            raise ValueError("canonical_root_hash_invalid")
+        try:
+            with self._connect() as connection:
+                existing = connection.execute(
+                    "SELECT worktree_id,task_id,baseline_commit,canonical_root_hash,created_at "
+                    "FROM task_worktrees WHERE worktree_id=?",
+                    (values[0],),
+                ).fetchone()
+                expected = (*values,)
+                if existing is not None:
+                    if tuple(existing) != expected:
+                        raise StorageError("worktree_conflict")
+                    return False
+                connection.execute(
+                    "INSERT INTO task_worktrees(worktree_id,task_id,baseline_commit,"
+                    "canonical_root_hash,status,created_at,updated_at) "
+                    "VALUES (?,?,?,?,'prepared',?,?)",
+                    (*values, values[-1]),
+                )
+                return True
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def transition_task_worktree(
+        self, worktree_id: str, *, expected_status: str, new_status: str, updated_at: int
+    ) -> bool:
+        worktree_id = _identifier(worktree_id, "worktree_id_invalid")
+        allowed = {"prepared", "executed", "accepted", "rejected", "quarantined", "cleaned"}
+        if expected_status not in allowed or new_status not in allowed:
+            raise ValueError("worktree_status_invalid")
+        updated_at = _nonnegative_integer(updated_at, "updated_at_invalid")
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    "UPDATE task_worktrees SET status=?,updated_at=? "
+                    "WHERE worktree_id=? AND status=?",
+                    (new_status, updated_at, worktree_id, expected_status),
+                )
+                if cursor.rowcount == 1:
+                    return True
+                row = connection.execute(
+                    "SELECT status FROM task_worktrees WHERE worktree_id=?", (worktree_id,)
+                ).fetchone()
+                if row is None:
+                    raise StorageError("worktree_missing")
+                if str(row[0]) == new_status:
+                    return False
+                raise StorageError("worktree_transition_invalid")
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def task_worktree_record(self, worktree_id: str) -> dict[str, Any] | None:
+        worktree_id = _identifier(worktree_id, "worktree_id_invalid")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_worktrees WHERE worktree_id=?", (worktree_id,)
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def latest_task_worktree_record(self, task_id: str) -> dict[str, Any] | None:
+        task_id = _identifier(task_id, "task_id_invalid")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_worktrees WHERE task_id=? "
+                "ORDER BY created_at DESC,worktree_id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def worktree_validation_record(self, worktree_id: str) -> dict[str, Any] | None:
+        worktree_id = _identifier(worktree_id, "worktree_id_invalid")
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT v.*,a.attempt_id,a.execution_id,a.status AS attempt_status,
+                    a.provider,a.task_id,a.decision_id,a.worktree_id,t.risk,t.category
+                FROM cli_execution_attempts a
+                JOIN validation_results v ON v.attempt_id=a.attempt_id
+                JOIN tasks t ON t.task_id=a.task_id
+                WHERE a.worktree_id=?
+                ORDER BY a.created_at DESC,a.attempt_id DESC LIMIT 1""",
+                (worktree_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def create_review_link_record(
+        self,
+        *,
+        review_attempt_id: str,
+        primary_attempt_id: str,
+        primary_diff_hash: str,
+        created_at: int,
+    ) -> bool:
+        values = (
+            _identifier(review_attempt_id, "review_attempt_id_invalid"),
+            _identifier(primary_attempt_id, "primary_attempt_id_invalid"),
+            primary_diff_hash,
+            _nonnegative_integer(created_at, "created_at_invalid"),
+        )
+        if values[0] == values[1]:
+            raise ValueError("review_attempt_not_independent")
+        if not _HEX_64.fullmatch(primary_diff_hash):
+            raise ValueError("primary_diff_hash_invalid")
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO review_links VALUES (?,?,?,?)", values
+                )
+                if cursor.rowcount == 1:
+                    return True
+                row = connection.execute(
+                    "SELECT review_attempt_id,primary_attempt_id,primary_diff_hash,created_at "
+                    "FROM review_links WHERE review_attempt_id=?",
+                    (values[0],),
+                ).fetchone()
+                if tuple(row or ()) == values:
+                    return False
+                raise StorageError("review_link_conflict")
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def create_cli_execution_attempt_record(
+        self,
+        *,
+        attempt_id: str,
+        approval_id: str,
+        task_id: str,
+        decision_id: str,
+        worktree_id: str,
+        provider: str,
+        requested_model: str,
+        effective_model: str,
+        effort: str,
+        cli_version: str,
+        executable_sha256: str,
+        capability_snapshot_digest: str,
+        manifest_hash: str,
+        expected_prompt_hash: str,
+        reserved_tokens: int,
+        created_at: int,
+    ) -> bool:
+        values = (
+            _identifier(attempt_id, "attempt_id_invalid"),
+            _identifier(approval_id, "approval_id_invalid"),
+            _identifier(task_id, "task_id_invalid"),
+            _identifier(decision_id, "decision_id_invalid"),
+            _identifier(worktree_id, "worktree_id_invalid"),
+            ProviderId(provider).value,
+            _identifier(requested_model, "requested_model_invalid"),
+            _identifier(effective_model, "effective_model_invalid"),
+            Effort(effort).value,
+            _semantic_version(cli_version, "cli_version_invalid"),
+            executable_sha256,
+            capability_snapshot_digest,
+            manifest_hash,
+            expected_prompt_hash,
+            _positive_integer(reserved_tokens, "reserved_tokens_invalid"),
+            _nonnegative_integer(created_at, "created_at_invalid"),
+        )
+        for value, code in (
+            (executable_sha256, "executable_sha256_invalid"),
+            (capability_snapshot_digest, "capability_snapshot_digest_invalid"),
+            (manifest_hash, "manifest_hash_invalid"),
+            (expected_prompt_hash, "prompt_hash_invalid"),
+        ):
+            if not _HEX_64.fullmatch(value):
+                raise ValueError(code)
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """INSERT OR IGNORE INTO cli_execution_attempts(
+                        attempt_id,approval_id,task_id,decision_id,worktree_id,provider,
+                        requested_model,effective_model,effort,cli_version,executable_sha256,
+                        capability_snapshot_digest,manifest_hash,expected_prompt_hash,
+                        reserved_tokens,status,failure_reason,execution_id,created_at,updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,NULL,?,?)""",
+                    (*values, values[-1]),
+                )
+                if cursor.rowcount == 1:
+                    return True
+                raise StorageError("cli_attempt_conflict")
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def mark_cli_execution_attempt(
+        self,
+        attempt_id: str,
+        *,
+        status: str,
+        failure_reason: str | None,
+        execution_id: str | None = None,
+        updated_at: int,
+    ) -> bool:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        if status not in {"completed", "failed", "persistence_failed", "quarantined"}:
+            raise ValueError("cli_attempt_status_invalid")
+        if failure_reason is not None:
+            failure_reason = _identifier(failure_reason, "failure_reason_invalid")
+        if execution_id is not None:
+            execution_id = _identifier(execution_id, "execution_id_invalid")
+        updated_at = _nonnegative_integer(updated_at, "updated_at_invalid")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE cli_execution_attempts SET status=?,failure_reason=?,execution_id=?,"
+                "updated_at=? WHERE attempt_id=? AND status IN ('pending','persistence_failed')",
+                (status, failure_reason, execution_id, updated_at, attempt_id),
+            )
+            if cursor.rowcount == 1:
+                return True
+            row = connection.execute(
+                "SELECT status,failure_reason,execution_id FROM cli_execution_attempts "
+                "WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            if row is None:
+                raise StorageError("cli_attempt_missing")
+            if tuple(row) == (status, failure_reason, execution_id):
+                return False
+            raise StorageError("cli_attempt_transition_invalid")
+
+    def record_validation_result(
+        self,
+        *,
+        attempt_id: str,
+        diff_hash: str,
+        changed_file_count: int,
+        changed_byte_count: int,
+        outcome: str,
+        recorded_at: int,
+    ) -> bool:
+        values = (
+            _identifier(attempt_id, "attempt_id_invalid"),
+            diff_hash,
+            _nonnegative_integer(changed_file_count, "changed_file_count_invalid"),
+            _nonnegative_integer(changed_byte_count, "changed_byte_count_invalid"),
+            outcome,
+            _nonnegative_integer(recorded_at, "recorded_at_invalid"),
+        )
+        if not _HEX_64.fullmatch(diff_hash):
+            raise ValueError("diff_hash_invalid")
+        if outcome not in {"passed", "failed", "blocked", "not_run"}:
+            raise ValueError("validation_outcome_invalid")
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO validation_results VALUES (?,?,?,?,?,?)", values
+                )
+                if cursor.rowcount == 1:
+                    return True
+                row = connection.execute(
+                    "SELECT attempt_id,diff_hash,changed_file_count,changed_byte_count,"
+                    "outcome,recorded_at FROM validation_results WHERE attempt_id=?",
+                    (values[0],),
+                ).fetchone()
+                if tuple(row or ()) == values:
+                    return False
+                raise StorageError("validation_result_conflict")
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def finalize_cli_execution(
+        self,
+        *,
+        attempt_id: str,
+        receipt: ExecutionReceipt,
+        graph_fingerprint: str,
+        completed_at: int,
+    ) -> bool:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        if not isinstance(receipt, ExecutionReceipt):
+            raise ValueError("execution_receipt_invalid")
+        if (
+            receipt.outcome is not ExecutionOutcome.SUCCEEDED
+            or receipt.input_tokens is None
+            or receipt.output_tokens is None
+            or receipt.response_hash is None
+            or receipt.failure_reason is not None
+        ):
+            raise ValueError("execution_receipt_invalid")
+        if not _HEX_64.fullmatch(graph_fingerprint):
+            raise ValueError("graph_fingerprint_invalid")
+        completed_at = _nonnegative_integer(completed_at, "completed_at_invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = connection.execute(
+                "SELECT * FROM cli_execution_attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if attempt is None:
+                raise StorageError("cli_attempt_missing")
+            if attempt["status"] == "completed":
+                if attempt["execution_id"] != receipt.execution_id:
+                    raise StorageError("cli_attempt_conflict")
+                connection.rollback()
+                return False
+            if attempt["status"] != "pending":
+                raise StorageError("cli_attempt_transition_invalid")
+            approval = connection.execute(
+                "SELECT status,manifest_hash,reserved_tokens FROM approvals WHERE approval_id=?",
+                (attempt["approval_id"],),
+            ).fetchone()
+            if (
+                approval is None
+                or approval["status"] != "consumed"
+                or approval["manifest_hash"] != attempt["manifest_hash"]
+                or approval["reserved_tokens"] != attempt["reserved_tokens"]
+                or receipt.approval_id != attempt["approval_id"]
+                or receipt.model_id != attempt["requested_model"]
+                or receipt.effective_model != attempt["effective_model"]
+                or receipt.effort.value != attempt["effort"]
+                or receipt.cli_version != attempt["cli_version"]
+                or receipt.prompt_hash != attempt["expected_prompt_hash"]
+                or receipt.input_tokens + receipt.output_tokens > attempt["reserved_tokens"]
+            ):
+                raise StorageError("cli_attempt_conflict")
+            connection.execute(
+                """INSERT INTO executions(
+                    execution_id,idempotency_key,task_id,decision_id,approval_id,
+                    model_id,effort,status,reserved_tokens,actual_input_tokens,
+                    actual_output_tokens,created_at,completed_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    receipt.execution_id,
+                    attempt_id,
+                    attempt["task_id"],
+                    attempt["decision_id"],
+                    receipt.approval_id,
+                    receipt.model_id,
+                    receipt.effort.value,
+                    receipt.outcome.value,
+                    attempt["reserved_tokens"],
+                    receipt.input_tokens,
+                    receipt.output_tokens,
+                    attempt["created_at"],
+                    completed_at,
+                ),
+            )
+            connection.execute(
+                """INSERT INTO execution_receipts(
+                    execution_id,approval_id,model_id,effort,outcome,input_tokens,
+                    output_tokens,latency_ms,prompt_hash,response_hash,failure_reason,completed_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,NULL,?)""",
+                (
+                    receipt.execution_id,
+                    receipt.approval_id,
+                    receipt.model_id,
+                    receipt.effort.value,
+                    receipt.outcome.value,
+                    receipt.input_tokens,
+                    receipt.output_tokens,
+                    receipt.latency_ms,
+                    receipt.prompt_hash,
+                    receipt.response_hash,
+                    completed_at,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO execution_evidence VALUES (?,?,?,?)",
+                (
+                    receipt.execution_id,
+                    attempt["task_id"],
+                    attempt["decision_id"],
+                    graph_fingerprint,
+                ),
+            )
+            connection.execute(
+                "UPDATE cli_execution_attempts SET status='completed',failure_reason=NULL,"
+                "execution_id=?,updated_at=? WHERE attempt_id=?",
+                (receipt.execution_id, completed_at, attempt_id),
+            )
+            connection.commit()
+            return True
+        except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.IntegrityError as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise StorageError("cli_attempt_conflict") from exc
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
 
     def row_count(self, table: str) -> int:
         if table not in _TABLES:
