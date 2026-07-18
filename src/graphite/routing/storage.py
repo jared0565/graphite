@@ -11,10 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from .contracts import Effort, ExecutionOutcome, RiskTier, TaskCategory
+from .contracts import Effort, ExecutionOutcome, ExecutionReceipt, RiskTier, TaskCategory
 
-SCHEMA_VERSION: Final = "1"
+SCHEMA_VERSION: Final = "3"
 BUSY_TIMEOUT_MS: Final = 2_000
+DEFAULT_RECOVERY_PAGE_SIZE: Final = 50
+MAX_RECOVERY_PAGE_SIZE: Final = 100
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}(?::cloud)?$")
@@ -37,6 +39,9 @@ _TABLES = frozenset(
         "confidence_stats",
         "registry_snapshots",
         "execution_evidence",
+        "execution_attempts",
+        "execution_receipts",
+        "staged_execution_receipts",
         "incident_reviews",
         "blind_comparisons",
     }
@@ -258,6 +263,64 @@ _SCHEMA = (
         decision_id TEXT NOT NULL,
         graph_fingerprint TEXT NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS execution_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        approval_id TEXT NOT NULL UNIQUE REFERENCES approvals(approval_id) ON DELETE RESTRICT,
+        task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
+        decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE RESTRICT,
+        manifest_hash TEXT NOT NULL,
+        graph_fingerprint TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        effort TEXT NOT NULL,
+        reserved_tokens INTEGER NOT NULL,
+        max_input_tokens INTEGER NOT NULL,
+        max_output_tokens INTEGER NOT NULL,
+        expected_prompt_hash TEXT NOT NULL,
+        inventory_digest TEXT NOT NULL CHECK(
+            length(inventory_digest) = 64
+            AND inventory_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        status TEXT NOT NULL CHECK(status IN (
+            'pending', 'completed', 'failed', 'persistence_failed', 'legacy_unrecoverable'
+        )),
+        failure_reason TEXT,
+        execution_id TEXT UNIQUE REFERENCES executions(execution_id) ON DELETE RESTRICT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS staged_execution_receipts (
+        attempt_id TEXT PRIMARY KEY REFERENCES execution_attempts(attempt_id) ON DELETE CASCADE,
+        execution_id TEXT NOT NULL UNIQUE,
+        approval_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        effort TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        latency_ms INTEGER NOT NULL,
+        prompt_hash TEXT NOT NULL,
+        response_hash TEXT NOT NULL,
+        inventory_digest TEXT NOT NULL CHECK(
+            length(inventory_digest) = 64
+            AND inventory_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        failure_reason TEXT,
+        staged_at INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS execution_receipts (
+        execution_id TEXT PRIMARY KEY REFERENCES executions(execution_id) ON DELETE CASCADE,
+        approval_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        effort TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        latency_ms INTEGER NOT NULL,
+        prompt_hash TEXT NOT NULL,
+        response_hash TEXT NOT NULL,
+        failure_reason TEXT,
+        completed_at INTEGER NOT NULL
+    )""",
     """CREATE TABLE IF NOT EXISTS incident_reviews (
         review_id INTEGER PRIMARY KEY AUTOINCREMENT,
         execution_id TEXT NOT NULL REFERENCES executions(execution_id) ON DELETE CASCADE,
@@ -282,7 +345,72 @@ _SCHEMA = (
         refreshed_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL
     )""",
+    """CREATE TRIGGER IF NOT EXISTS execution_attempt_digest_insert_guard
+    BEFORE INSERT ON execution_attempts
+    WHEN NEW.inventory_digest IS NULL
+      OR length(NEW.inventory_digest) != 64
+      OR NEW.inventory_digest GLOB '*[^0-9a-f]*'
+    BEGIN
+        SELECT RAISE(ABORT, 'inventory_digest_invalid');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS execution_attempt_digest_update_guard
+    BEFORE UPDATE ON execution_attempts
+    WHEN OLD.inventory_digest IS NULL
+      OR NEW.inventory_digest IS NULL
+      OR length(NEW.inventory_digest) != 64
+      OR NEW.inventory_digest GLOB '*[^0-9a-f]*'
+    BEGIN
+        SELECT RAISE(ABORT, 'inventory_digest_invalid');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS execution_attempt_digest_delete_guard
+    BEFORE DELETE ON execution_attempts
+    WHEN OLD.inventory_digest IS NULL
+    BEGIN
+        SELECT RAISE(ABORT, 'inventory_digest_invalid');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS staged_receipt_digest_insert_guard
+    BEFORE INSERT ON staged_execution_receipts
+    WHEN NEW.inventory_digest IS NULL
+      OR length(NEW.inventory_digest) != 64
+      OR NEW.inventory_digest GLOB '*[^0-9a-f]*'
+    BEGIN
+        SELECT RAISE(ABORT, 'inventory_digest_invalid');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS staged_receipt_digest_update_guard
+    BEFORE UPDATE ON staged_execution_receipts
+    WHEN OLD.inventory_digest IS NULL
+      OR NEW.inventory_digest IS NULL
+      OR length(NEW.inventory_digest) != 64
+      OR NEW.inventory_digest GLOB '*[^0-9a-f]*'
+    BEGIN
+        SELECT RAISE(ABORT, 'inventory_digest_invalid');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS staged_receipt_digest_delete_guard
+    BEFORE DELETE ON staged_execution_receipts
+    WHEN OLD.inventory_digest IS NULL
+    BEGIN
+        SELECT RAISE(ABORT, 'inventory_digest_invalid');
+    END""",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class RecoverableAttemptPage:
+    """Bounded public recovery enumeration with an opaque validated cursor."""
+
+    attempt_ids: tuple[str, ...]
+    next_cursor: str | None
+    has_more: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempts": [
+                {"attempt_id": attempt_id, "status": "recoverable"}
+                for attempt_id in self.attempt_ids
+            ],
+            "has_more": self.has_more,
+            "next_cursor": self.next_cursor,
+        }
 
 
 class RepositoryStore:
@@ -321,12 +449,19 @@ class RepositoryStore:
             existing_version = connection.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()
-            if existing_version is not None and existing_version[0] != SCHEMA_VERSION:
+            if existing_version is not None and existing_version[0] not in {
+                "1", "2", SCHEMA_VERSION
+            }:
                 raise StorageError("storage_schema_unsupported")
+            if existing_version is not None and existing_version[0] == "1":
+                self._migrate_v1_attempts(connection)
+            if existing_version is not None and existing_version[0] in {"1", "2"}:
+                self._migrate_v2_digest(connection)
             for statement in _SCHEMA[1:]:
                 connection.execute(statement)
             connection.execute(
-                "INSERT OR IGNORE INTO schema_meta(key, value) VALUES('schema_version', ?)",
+                """INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
                 (SCHEMA_VERSION,),
             )
             connection.commit()
@@ -346,6 +481,102 @@ class RepositoryStore:
                 connection.close()
         _validate_database_file(self.path)
         _secure_file(self.path)
+
+    @staticmethod
+    def _migrate_v1_attempts(connection: sqlite3.Connection) -> None:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_attempts'"
+        ).fetchone()
+        if exists is None:
+            return
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(execution_attempts)")
+        }
+        if {"max_input_tokens", "max_output_tokens", "expected_prompt_hash"} <= columns:
+            return
+        connection.execute("ALTER TABLE execution_attempts RENAME TO execution_attempts_v1")
+        connection.execute(
+            """CREATE TABLE execution_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                approval_id TEXT NOT NULL UNIQUE REFERENCES approvals(approval_id) ON DELETE RESTRICT,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
+                decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE RESTRICT,
+                manifest_hash TEXT NOT NULL,
+                graph_fingerprint TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                effort TEXT NOT NULL,
+                reserved_tokens INTEGER NOT NULL,
+                max_input_tokens INTEGER,
+                max_output_tokens INTEGER,
+                expected_prompt_hash TEXT,
+                status TEXT NOT NULL CHECK(status IN (
+                    'pending', 'completed', 'failed', 'persistence_failed', 'legacy_unrecoverable'
+                )),
+                failure_reason TEXT,
+                execution_id TEXT UNIQUE REFERENCES executions(execution_id) ON DELETE RESTRICT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                CHECK(
+                    status IN ('completed', 'failed', 'legacy_unrecoverable')
+                    OR (
+                        max_input_tokens IS NOT NULL AND max_input_tokens > 0
+                        AND max_output_tokens IS NOT NULL AND max_output_tokens > 0
+                        AND expected_prompt_hash IS NOT NULL
+                    )
+                )
+            )"""
+        )
+        connection.execute(
+            """INSERT INTO execution_attempts(
+                attempt_id, approval_id, task_id, decision_id, manifest_hash,
+                graph_fingerprint, model_id, effort, reserved_tokens,
+                max_input_tokens, max_output_tokens, expected_prompt_hash,
+                status, failure_reason, execution_id, created_at, updated_at
+            )
+            SELECT attempt_id, approval_id, task_id, decision_id, manifest_hash,
+                graph_fingerprint, model_id, effort, reserved_tokens,
+                NULL, NULL, NULL,
+                CASE WHEN status IN ('pending', 'persistence_failed')
+                    THEN 'legacy_unrecoverable' ELSE status END,
+                CASE WHEN status IN ('pending', 'persistence_failed')
+                    THEN 'legacy_attempt_bindings_missing' ELSE failure_reason END,
+                execution_id, created_at, updated_at
+            FROM execution_attempts_v1"""
+        )
+        connection.execute("DROP TABLE execution_attempts_v1")
+
+    @staticmethod
+    def _migrate_v2_digest(connection: sqlite3.Connection) -> None:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_attempts'"
+        ).fetchone()
+        if exists is None:
+            return
+        attempt_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(execution_attempts)")
+        }
+        if "inventory_digest" not in attempt_columns:
+            connection.execute("ALTER TABLE execution_attempts ADD COLUMN inventory_digest TEXT")
+        connection.execute(
+            """UPDATE execution_attempts
+            SET status = 'legacy_unrecoverable',
+                failure_reason = 'legacy_attempt_digest_missing'
+            WHERE status IN ('pending', 'persistence_failed')
+              AND inventory_digest IS NULL"""
+        )
+        staged_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='staged_execution_receipts'"
+        ).fetchone()
+        if staged_exists is not None:
+            staged_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(staged_execution_receipts)")
+            }
+            if "inventory_digest" not in staged_columns:
+                connection.execute(
+                    "ALTER TABLE staged_execution_receipts ADD COLUMN inventory_digest TEXT"
+                )
 
     def integrity_check(self) -> str:
         try:
@@ -543,6 +774,527 @@ class RepositoryStore:
                 WHERE ee.execution_id = ?
                   AND e.task_id = ee.task_id AND e.decision_id = ee.decision_id""",
                 (execution_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def create_execution_attempt(
+        self,
+        *,
+        attempt_id: str,
+        approval_id: str,
+        task_id: str,
+        decision_id: str,
+        manifest_hash: str,
+        graph_fingerprint: str,
+        model_id: str,
+        effort: str,
+        reserved_tokens: int,
+        max_input_tokens: int,
+        max_output_tokens: int,
+        expected_prompt_hash: str,
+        inventory_digest: str,
+        created_at: int,
+    ) -> bool:
+        values = (
+            _identifier(attempt_id, "attempt_id_invalid"),
+            _identifier(approval_id, "approval_id_invalid"),
+            _identifier(task_id, "task_id_invalid"),
+            _identifier(decision_id, "decision_id_invalid"),
+            manifest_hash,
+            graph_fingerprint,
+            _identifier(model_id, "model_id_invalid"),
+            Effort(effort).value,
+            _nonnegative_integer(reserved_tokens, "reserved_tokens_invalid"),
+            _nonnegative_integer(max_input_tokens, "max_input_tokens_invalid"),
+            _nonnegative_integer(max_output_tokens, "max_output_tokens_invalid"),
+            expected_prompt_hash,
+            inventory_digest,
+            _nonnegative_integer(created_at, "created_at_invalid"),
+        )
+        if not _HEX_64.fullmatch(manifest_hash):
+            raise ValueError("manifest_hash_invalid")
+        if not _HEX_64.fullmatch(graph_fingerprint):
+            raise ValueError("graph_fingerprint_invalid")
+        if not _HEX_64.fullmatch(expected_prompt_hash):
+            raise ValueError("prompt_hash_invalid")
+        if not isinstance(inventory_digest, str) or not _HEX_64.fullmatch(inventory_digest):
+            raise ValueError("inventory_digest_invalid")
+        if values[9] < 1 or values[10] < 1 or values[9] + values[10] != values[8]:
+            raise ValueError("token_bounds_invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT attempt_id, task_id, decision_id, manifest_hash, "
+                "graph_fingerprint, model_id, effort, reserved_tokens, max_input_tokens, "
+                "max_output_tokens, expected_prompt_hash, inventory_digest "
+                "FROM execution_attempts WHERE approval_id = ?",
+                (values[1],),
+            ).fetchone()
+            if existing is not None:
+                expected = (values[0], *values[2:13])
+                if tuple(existing) != expected:
+                    raise StorageError("execution_attempt_conflict")
+                connection.rollback()
+                return False
+            approval = connection.execute(
+                "SELECT manifest_hash, reserved_tokens, status FROM approvals "
+                "WHERE approval_id = ?",
+                (values[1],),
+            ).fetchone()
+            decision = connection.execute(
+                "SELECT task_id, model_id, effort FROM decisions WHERE decision_id = ?",
+                (values[3],),
+            ).fetchone()
+            if (
+                approval is None
+                or tuple(approval) != (values[4], values[8], "issued")
+                or decision is None
+                or tuple(decision) != (values[2], values[6], values[7])
+            ):
+                raise StorageError("execution_attempt_conflict")
+            connection.execute(
+                """INSERT INTO execution_attempts(
+                    attempt_id, approval_id, task_id, decision_id, manifest_hash,
+                    graph_fingerprint, model_id, effort, reserved_tokens,
+                    max_input_tokens, max_output_tokens, expected_prompt_hash,
+                    inventory_digest, status,
+                    failure_reason, execution_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    'pending', NULL, NULL, ?, ?)""",
+                (*values[:13], values[13], values[13]),
+            )
+            connection.commit()
+            return True
+        except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.IntegrityError as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise StorageError("execution_attempt_conflict") from exc
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def mark_execution_attempt_failed(
+        self,
+        attempt_id: str,
+        reason: str,
+        *,
+        persistence_failed: bool = False,
+        updated_at: int,
+    ) -> bool:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        reason = _identifier(reason, "failure_reason_invalid")
+        updated_at = _nonnegative_integer(updated_at, "updated_at_invalid")
+        status = "persistence_failed" if persistence_failed else "failed"
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    """UPDATE execution_attempts
+                    SET status = ?, failure_reason = ?, updated_at = ?
+                    WHERE attempt_id = ? AND status IN ('pending', 'persistence_failed')""",
+                    (status, reason, updated_at, attempt_id),
+                )
+                if cursor.rowcount == 1:
+                    return True
+                row = connection.execute(
+                    "SELECT status, failure_reason FROM execution_attempts WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()
+                if row is None:
+                    raise StorageError("execution_attempt_missing")
+                if tuple(row) == (status, reason):
+                    return False
+                raise StorageError("execution_attempt_conflict")
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    @staticmethod
+    def _validate_receipt_shape(receipt: ExecutionReceipt) -> None:
+        if not isinstance(receipt, ExecutionReceipt):
+            raise ValueError("execution_receipt_invalid")
+        if (
+            receipt.outcome is not ExecutionOutcome.SUCCEEDED
+            or receipt.input_tokens is None
+            or receipt.output_tokens is None
+            or receipt.response_hash is None
+            or receipt.failure_reason is not None
+        ):
+            raise ValueError("execution_receipt_invalid")
+
+    @staticmethod
+    def _receipt_tuple(receipt: ExecutionReceipt) -> tuple[Any, ...]:
+        return (
+            receipt.approval_id, receipt.model_id, receipt.effort.value,
+            receipt.outcome.value, receipt.input_tokens, receipt.output_tokens,
+            receipt.latency_ms, receipt.prompt_hash, receipt.response_hash, None,
+        )
+
+    @staticmethod
+    def _receipt_from_row(row: sqlite3.Row) -> ExecutionReceipt:
+        return ExecutionReceipt(
+            execution_id=str(row["execution_id"]),
+            approval_id=str(row["approval_id"]),
+            model_id=str(row["model_id"]),
+            effort=Effort(str(row["effort"])),
+            outcome=ExecutionOutcome(str(row["outcome"])),
+            input_tokens=int(row["input_tokens"]),
+            output_tokens=int(row["output_tokens"]),
+            latency_ms=int(row["latency_ms"]),
+            prompt_hash=str(row["prompt_hash"]),
+            response_hash=str(row["response_hash"]),
+            failure_reason=None,
+        )
+
+    @staticmethod
+    def _validate_attempt_binding(attempt: sqlite3.Row, receipt: ExecutionReceipt) -> None:
+        if (
+            attempt["approval_id"] != receipt.approval_id
+            or attempt["model_id"] != receipt.model_id
+            or attempt["effort"] != receipt.effort.value
+            or attempt["max_input_tokens"] is None
+            or attempt["max_output_tokens"] is None
+            or attempt["expected_prompt_hash"] is None
+            or receipt.input_tokens > attempt["max_input_tokens"]
+            or receipt.output_tokens > attempt["max_output_tokens"]
+            or receipt.input_tokens + receipt.output_tokens > attempt["reserved_tokens"]
+            or receipt.prompt_hash != attempt["expected_prompt_hash"]
+        ):
+            raise StorageError("execution_attempt_conflict")
+
+    @staticmethod
+    def _assert_approval_consumed(
+        connection: sqlite3.Connection, attempt: sqlite3.Row
+    ) -> None:
+        approval = connection.execute(
+            "SELECT status, manifest_hash, reserved_tokens FROM approvals WHERE approval_id = ?",
+            (attempt["approval_id"],),
+        ).fetchone()
+        decision = connection.execute(
+            "SELECT task_id, model_id, effort FROM decisions WHERE decision_id = ?",
+            (attempt["decision_id"],),
+        ).fetchone()
+        if approval is None or approval["status"] != "consumed":
+            raise StorageError("approval_not_consumed")
+        if (
+            approval["manifest_hash"] != attempt["manifest_hash"]
+            or approval["reserved_tokens"] != attempt["reserved_tokens"]
+            or decision is None
+            or tuple(decision)
+            != (attempt["task_id"], attempt["model_id"], attempt["effort"])
+        ):
+            raise StorageError("execution_attempt_conflict")
+
+    @staticmethod
+    def _finalize_rows(
+        connection: sqlite3.Connection,
+        attempt: sqlite3.Row,
+        receipt: ExecutionReceipt,
+        completed_at: int,
+    ) -> None:
+        connection.execute(
+            """INSERT INTO executions(
+                execution_id, idempotency_key, task_id, decision_id, approval_id,
+                model_id, effort, status, reserved_tokens, actual_input_tokens,
+                actual_output_tokens, created_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                receipt.execution_id, attempt["attempt_id"], attempt["task_id"],
+                attempt["decision_id"], receipt.approval_id, receipt.model_id,
+                receipt.effort.value, receipt.outcome.value, attempt["reserved_tokens"],
+                receipt.input_tokens, receipt.output_tokens, attempt["created_at"],
+                completed_at,
+            ),
+        )
+        connection.execute(
+            """INSERT INTO execution_receipts(
+                execution_id, approval_id, model_id, effort, outcome, input_tokens,
+                output_tokens, latency_ms, prompt_hash, response_hash, failure_reason,
+                completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+            (
+                receipt.execution_id,
+                *RepositoryStore._receipt_tuple(receipt)[:-1],
+                completed_at,
+            ),
+        )
+        connection.execute(
+            """INSERT INTO execution_evidence(
+                execution_id, task_id, decision_id, graph_fingerprint
+            ) VALUES (?, ?, ?, ?)""",
+            (
+                receipt.execution_id, attempt["task_id"], attempt["decision_id"],
+                attempt["graph_fingerprint"],
+            ),
+        )
+        connection.execute(
+            """UPDATE execution_attempts
+            SET status = 'completed', failure_reason = NULL, execution_id = ?, updated_at = ?
+            WHERE attempt_id = ?""",
+            (receipt.execution_id, completed_at, attempt["attempt_id"]),
+        )
+        connection.execute(
+            "DELETE FROM staged_execution_receipts WHERE attempt_id = ?",
+            (attempt["attempt_id"],),
+        )
+
+    def finalize_execution_attempt(
+        self,
+        *,
+        attempt_id: str,
+        receipt: ExecutionReceipt,
+        inventory_digest: str,
+        completed_at: int,
+    ) -> bool:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        self._validate_receipt_shape(receipt)
+        if not isinstance(inventory_digest, str) or not _HEX_64.fullmatch(inventory_digest):
+            raise ValueError("inventory_digest_invalid")
+        completed_at = _nonnegative_integer(completed_at, "completed_at_invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = connection.execute(
+                "SELECT * FROM execution_attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if attempt is None:
+                raise StorageError("execution_attempt_missing")
+            if attempt["status"] == "legacy_unrecoverable":
+                raise StorageError(str(attempt["failure_reason"]))
+            if attempt["inventory_digest"] != inventory_digest:
+                raise StorageError("execution_attempt_conflict")
+            self._assert_approval_consumed(connection, attempt)
+            if attempt["status"] == "completed":
+                stored = connection.execute(
+                    "SELECT approval_id, model_id, effort, outcome, input_tokens, "
+                    "output_tokens, latency_ms, prompt_hash, response_hash, failure_reason "
+                    "FROM execution_receipts WHERE execution_id = ?",
+                    (receipt.execution_id,),
+                ).fetchone()
+                expected = self._receipt_tuple(receipt)
+                if attempt["execution_id"] != receipt.execution_id or tuple(stored or ()) != expected:
+                    raise StorageError("execution_attempt_conflict")
+                connection.rollback()
+                return False
+            if attempt["status"] not in {"pending", "persistence_failed"}:
+                raise StorageError("execution_attempt_conflict")
+            self._validate_attempt_binding(attempt, receipt)
+            staged = connection.execute(
+                "SELECT * FROM staged_execution_receipts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if (
+                staged is not None
+                and self._receipt_tuple(self._receipt_from_row(staged))
+                != self._receipt_tuple(receipt)
+            ):
+                raise StorageError("execution_attempt_conflict")
+            self._finalize_rows(connection, attempt, receipt, completed_at)
+            connection.commit()
+            return True
+        except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def stage_execution_receipt(
+        self,
+        *,
+        attempt_id: str,
+        receipt: ExecutionReceipt,
+        inventory_digest: str,
+        staged_at: int,
+    ) -> bool:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        self._validate_receipt_shape(receipt)
+        if not isinstance(inventory_digest, str) or not _HEX_64.fullmatch(inventory_digest):
+            raise ValueError("inventory_digest_invalid")
+        staged_at = _nonnegative_integer(staged_at, "staged_at_invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = connection.execute(
+                "SELECT * FROM execution_attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if attempt is None:
+                raise StorageError("execution_attempt_missing")
+            if attempt["status"] == "legacy_unrecoverable":
+                raise StorageError(str(attempt["failure_reason"]))
+            if attempt["inventory_digest"] != inventory_digest:
+                raise StorageError("execution_attempt_conflict")
+            self._assert_approval_consumed(connection, attempt)
+            if attempt["status"] not in {"pending", "persistence_failed"}:
+                raise StorageError("execution_attempt_conflict")
+            self._validate_attempt_binding(attempt, receipt)
+            existing = connection.execute(
+                "SELECT * FROM staged_execution_receipts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["inventory_digest"] != inventory_digest
+                    or self._receipt_tuple(self._receipt_from_row(existing))
+                    != self._receipt_tuple(receipt)
+                ):
+                    raise StorageError("execution_attempt_conflict")
+                connection.rollback()
+                return False
+            connection.execute(
+                """INSERT INTO staged_execution_receipts(
+                    attempt_id, execution_id, approval_id, model_id, effort, outcome,
+                    input_tokens, output_tokens, latency_ms, prompt_hash, response_hash,
+                    inventory_digest, failure_reason, staged_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+                (
+                    attempt_id, receipt.execution_id,
+                    *self._receipt_tuple(receipt)[:-1], inventory_digest, staged_at,
+                ),
+            )
+            connection.execute(
+                """UPDATE execution_attempts SET status = 'persistence_failed',
+                failure_reason = 'execution_persistence_failed', updated_at = ?
+                WHERE attempt_id = ?""",
+                (staged_at, attempt_id),
+            )
+            connection.commit()
+            return True
+        except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def recoverable_attempts(
+        self,
+        *,
+        limit: int = DEFAULT_RECOVERY_PAGE_SIZE,
+        after: str | None = None,
+    ) -> RecoverableAttemptPage:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_RECOVERY_PAGE_SIZE
+        ):
+            raise ValueError("recovery_limit_invalid")
+        if after is not None:
+            after = _identifier(after, "recovery_cursor_invalid")
+        query = """SELECT a.attempt_id FROM execution_attempts a
+            JOIN staged_execution_receipts s ON s.attempt_id = a.attempt_id
+            WHERE a.status = 'persistence_failed'"""
+        parameters: list[Any] = []
+        if after is not None:
+            query += " AND a.attempt_id > ?"
+            parameters.append(after)
+        query += " ORDER BY a.attempt_id LIMIT ?"
+        parameters.append(limit + 1)
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(query, parameters).fetchall()
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+        try:
+            validated = tuple(_identifier(row[0], "storage_corrupt") for row in rows)
+        except ValueError as exc:
+            raise StorageError("storage_corrupt") from exc
+        has_more = len(validated) > limit
+        attempt_ids = validated[:limit]
+        return RecoverableAttemptPage(
+            attempt_ids=attempt_ids,
+            next_cursor=attempt_ids[-1] if has_more else None,
+            has_more=has_more,
+        )
+
+    def reconcile_execution_attempt(
+        self, attempt_id: str, *, completed_at: int
+    ) -> ExecutionReceipt:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        completed_at = _nonnegative_integer(completed_at, "completed_at_invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = connection.execute(
+                "SELECT * FROM execution_attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if attempt is None:
+                raise StorageError("execution_attempt_missing")
+            if attempt["status"] == "legacy_unrecoverable":
+                raise StorageError(str(attempt["failure_reason"]))
+            self._assert_approval_consumed(connection, attempt)
+            if attempt["status"] == "completed":
+                row = connection.execute(
+                    "SELECT * FROM execution_receipts WHERE execution_id = ?",
+                    (attempt["execution_id"],),
+                ).fetchone()
+                evidence = connection.execute(
+                    "SELECT 1 FROM execution_evidence WHERE execution_id = ?",
+                    (attempt["execution_id"],),
+                ).fetchone()
+                if row is None or evidence is None:
+                    raise StorageError("execution_attempt_conflict")
+                receipt = self._receipt_from_row(row)
+                self._validate_attempt_binding(attempt, receipt)
+                connection.rollback()
+                return receipt
+            if attempt["status"] != "persistence_failed":
+                raise StorageError("execution_attempt_conflict")
+            staged = connection.execute(
+                "SELECT * FROM staged_execution_receipts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if staged is None:
+                raise StorageError("execution_attempt_conflict")
+            if staged["inventory_digest"] != attempt["inventory_digest"]:
+                raise StorageError("execution_attempt_conflict")
+            receipt = self._receipt_from_row(staged)
+            self._validate_attempt_binding(attempt, receipt)
+            self._finalize_rows(connection, attempt, receipt, completed_at)
+            connection.commit()
+            return receipt
+        except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def execution_attempt(self, attempt_id: str) -> dict[str, Any] | None:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM execution_attempts WHERE attempt_id = ?",
+                (attempt_id,),
             ).fetchone()
         return None if row is None else dict(row)
 

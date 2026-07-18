@@ -1,3 +1,5 @@
+import hashlib
+import json
 import re
 import shlex
 from collections.abc import Iterator
@@ -6,13 +8,34 @@ from string import punctuation
 from urllib.parse import unquote
 
 import pytest
+from graphite.routing.registry import BUNDLED_PROFILES
 
 
 ROOT = Path(__file__).resolve().parents[1]
 URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 DANGEROUS_URI_SCHEMES = frozenset(("data", "javascript", "vbscript"))
-DOCUMENTS = ("README.md", "CONTRIBUTING.md", "ARCHITECTURE.md", "RELEASING.md")
+CORE_ROUTING_DOCUMENTS = ("README.md", "ARCHITECTURE.md")
+
+
+def discover_routing_evidence_documents(root: Path = ROOT) -> tuple[str, ...]:
+    notes = root / "docs/superpowers/implementation-notes"
+    return tuple(sorted(
+        path.relative_to(root).as_posix()
+        for path in notes.glob("*.md")
+        if "routing" in path.name or "model-pool" in path.name
+    ))
+
+
+def routing_operator_documents() -> tuple[str, ...]:
+    return (*CORE_ROUTING_DOCUMENTS, *discover_routing_evidence_documents())
+DOCUMENTS = (
+    "README.md",
+    "CONTRIBUTING.md",
+    "ARCHITECTURE.md",
+    "RELEASING.md",
+    *discover_routing_evidence_documents(),
+)
 SECRET_VALUE = re.compile(
     r"(?i)\b(?:sk-(?:proj-)?[a-z0-9_-]{12,}|ghp_[a-z0-9]{20,}|"
     r"github_pat_[a-z0-9_]{20,}|xox[baprs]-[a-z0-9-]{12,}|"
@@ -60,6 +83,244 @@ def test_adaptive_routing_boundary_is_documented() -> None:
         assert required in combined
     assert "openrouter is reserved for production in-application inference" in combined
     assert "cannot mutate code" in combined
+
+
+def test_hardened_routing_model_pool_and_evidence_are_documented() -> None:
+    readme = read_document("README.md")
+    architecture = read_document("ARCHITECTURE.md")
+    evidence = read_document(
+        "docs/superpowers/implementation-notes/2026-07-14-router-model-pool-evidence.md"
+    )
+    combined = "\n".join((readme, architecture, evidence)).casefold()
+
+    for model_id in BUNDLED_PROFILES:
+        assert model_id in combined
+    for required in (
+        "30-day minimum retirement runway",
+        "provider-reported usage class",
+        "inventory presence does not authorize a model",
+            "graphite route recoverable",
+            "graphite route reconcile",
+        "legacy_unrecoverable",
+        "read-only history",
+    ):
+        assert required in combined
+
+    active_pool = document_section(readme, "### Active router model pool")
+    assert "glm-5:cloud" not in active_pool.casefold()
+    assert all(
+        "glm-5:cloud" not in code.casefold()
+        for _, code in markdown_code_fragments(active_pool)
+    )
+    removal_history = document_section(evidence, "## Removed and migration history")
+    assert "glm-5:cloud" in removal_history.casefold()
+    before_removal_history = evidence[: evidence.index("## Removed and migration history")]
+    assert "glm-5:cloud" not in "\n".join(
+        (readme, architecture, before_removal_history)
+    ).casefold()
+
+    observed = {
+        "kimi-k2.7-code:cloud": "eda07a6592375dcbde7cf167b6d6b368cdd28e244f9d71559fb59919aca882fa",
+        "minimax-m2.7:cloud": "06daa293c105f0bd71fd19420e4d15cae66cc5f71cb8f55b4f998e96ec8ab67a",
+        "nemotron-3-super:cloud": "be3943c5a818be61a08f3563b971e392bfc12e506e296fb186c870f5c63377a4",
+        "minimax-m3:cloud": "d03a959f45c04ab183e245922ecb46ebccfb9d5e55bdee5e9055271ee70195e3",
+    }
+    for model_id, digest in observed.items():
+        assert model_id in evidence
+        assert digest in evidence
+
+
+def _markdown_table(section: str) -> tuple[tuple[str, ...], list[tuple[str, ...]]]:
+    lines = [line for line in section.splitlines() if line.startswith("|")]
+    assert len(lines) >= 3
+    parsed = [tuple(cell.strip() for cell in line.strip("|").split("|")) for line in lines]
+    assert all(re.fullmatch(r":?-{3,}:?", cell) for cell in parsed[1])
+    return parsed[0], parsed[2:]
+
+
+def test_active_routing_evidence_table_matches_the_approved_snapshot() -> None:
+    evidence = read_document(
+        "docs/superpowers/implementation-notes/2026-07-14-router-model-pool-evidence.md"
+    )
+    section = document_section(evidence, "## Approved profile evidence")
+    header, rows = _markdown_table(section)
+    assert header == (
+        "Model ID",
+        "Digest",
+        "Context",
+        "Roles",
+        "Usage class",
+        "Provider capabilities",
+        "Official Ollama URL",
+        "Accessed",
+        "Status",
+        "Effort",
+    )
+    assert len(rows) == len(BUNDLED_PROFILES)
+    assert {row[0].strip("`") for row in rows} == set(BUNDLED_PROFILES)
+    expected = {
+        "`kimi-k2.7-code:cloud`": (
+            "`eda07a6592375dcbde7cf167b6d6b368cdd28e244f9d71559fb59919aca882fa`",
+            "262144",
+            "primary coding, coding",
+            "high",
+            "vision, thinking, completion, tools",
+            "<https://ollama.com/library/kimi-k2.7-code>",
+        ),
+        "`minimax-m2.7:cloud`": (
+            "`06daa293c105f0bd71fd19420e4d15cae66cc5f71cb8f55b4f998e96ec8ab67a`",
+            "204800",
+            "coding, agentic",
+            "medium",
+            "completion, tools, thinking",
+            "<https://ollama.com/library/minimax-m2.7:cloud>",
+        ),
+        "`nemotron-3-super:cloud`": (
+            "`be3943c5a818be61a08f3563b971e392bfc12e506e296fb186c870f5c63377a4`",
+            "262144",
+            "reasoning, review",
+            "medium",
+            "completion, tools, thinking",
+            "<https://ollama.com/library/nemotron-3-super:cloud>",
+        ),
+        "`minimax-m3:cloud`": (
+            "`d03a959f45c04ab183e245922ecb46ebccfb9d5e55bdee5e9055271ee70195e3`",
+            "524288",
+            "long-context, agentic",
+            "high",
+            "completion, tools, thinking, vision",
+            "<https://ollama.com/library/minimax-m3:cloud>",
+        ),
+    }
+    for row in rows:
+        assert row[1:7] == expected[row[0]]
+        assert row[7:] == ("2026-07-14", "provisional", "`default` only")
+        entry = BUNDLED_PROFILES[row[0].strip("`")]
+        assert int(row[2]) == entry.profile.context_window_tokens
+        role_labels = {"coding_primary": "primary coding", "long_context": "long-context"}
+        assert row[3] == ", ".join(
+            role_labels.get(role.value, role.value.replace("_", " "))
+            for role in entry.roles
+        )
+        assert row[4] == entry.usage_class.value
+        assert row[6] == f"<{entry.evidence_url}>"
+        assert row[7] == entry.evidence_accessed
+        assert entry.profile.provisional is True
+        assert entry.retirement_date is None
+        assert tuple(e.value for e in entry.profile.supported_efforts) == ("default",)
+        assert {effort.value: dict(payload) for effort, payload in entry.effort_payloads.items()} == {"default": {}}
+
+    canonical = [
+        {
+            "model_id": row[0].strip("`"),
+            "digest": row[1].strip("`"),
+            "context": int(row[2]),
+            "provider_capabilities": row[5].split(", "),
+        }
+        for row in sorted(rows, key=lambda item: item[0].strip("`"))
+    ]
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    assert hashlib.sha256(encoded).hexdigest() in evidence
+
+
+def test_routing_docs_state_each_authority_and_recovery_gate() -> None:
+    combined = re.sub(
+        r"\s+",
+        " ",
+        "\n".join(read_document(name) for name in routing_operator_documents()),
+    ).casefold()
+    required = (
+        "30-day minimum retirement runway",
+        "capability and context",
+        "inventory presence does not authorize a model",
+        "exact digest revalidation",
+        "default-only effort",
+        "manual frontier handoff",
+        "single-use approval",
+        "context-bound",
+        "quota-bound",
+        "configured request/repository budget",
+        "actual repository and machine quota reservation occurs when the signed approval is consumed",
+        "not proof that quota remains",
+        "no automatic fallback",
+        "retry",
+        "model switching",
+        "framed, escaped, ephemeral text",
+        "non-tty",
+        "json mode",
+        "ci",
+        "`--yes` cannot execute",
+        "`pending` to `completed`",
+        "graphite route recoverable",
+        "graphite route reconcile",
+        "no provider call",
+        "approval reuse",
+        "reconcilable only while",
+        "storage is unavailable",
+        "legacy_unrecoverable",
+        "read-only history",
+    )
+    for phrase in required:
+        assert phrase in combined, phrase
+
+
+def test_glm5_references_are_confined_to_labelled_history_sections() -> None:
+    documents = routing_operator_documents()
+    found = 0
+    labels = ("removed", "historical", "migration", "superseded")
+    for name in documents:
+        current_heading = ""
+        for line in read_document(name).splitlines():
+            if line.startswith("#"):
+                current_heading = line.casefold()
+            if "glm-5" in line.casefold():
+                found += 1
+                assert any(label in current_heading for label in labels), (name, line)
+    assert found > 0
+
+
+def test_routing_operator_docs_are_secret_path_and_link_safe() -> None:
+    absolute_host_path = re.compile(
+        r"(?i)(?:(?<![a-z])[a-z]:[\\/]|\\\\|/(?:home|users|var|tmp)/)[^\s`]*"
+    )
+    failures: list[str] = []
+    for name in routing_operator_documents():
+        document = read_document(name)
+        if credential_example_linter_has_violation(document):
+            failures.append(f"{name}: credential-like literal")
+        failures.extend(document_link_diagnostics(ROOT / name, document))
+    for name in discover_routing_evidence_documents():
+        if absolute_host_path.search(read_document(name)):
+            failures.append(f"{name}: absolute host path")
+    assert not failures, "Unsafe routing documentation:\n" + "\n".join(failures)
+
+
+def test_routing_evidence_is_not_described_as_authorization_authority() -> None:
+    notes = re.sub(
+        r"\s+",
+        " ",
+        "\n".join(read_document(name) for name in discover_routing_evidence_documents()),
+    ).casefold()
+    assert not re.search(
+        r"evidence (?:note|record)\s+(?:is|serves as|remains)\s+"
+        r"(?:the\s+)?(?:current\s+)?(?:profile\s+)?(?:authorization\s+)?authority",
+        notes,
+    )
+    assert "`routing.registry.bundled_profiles`" in notes
+    assert "authorization authority" in notes
+
+
+def test_routing_evidence_discovery_includes_future_relevant_notes(tmp_path: Path) -> None:
+    notes = tmp_path / "docs/superpowers/implementation-notes"
+    notes.mkdir(parents=True)
+    (notes / "future-routing-audit.md").write_text("# Historical\n", encoding="utf-8")
+    (notes / "future-model-pool.md").write_text("# Removed\n", encoding="utf-8")
+    (notes / "unrelated.md").write_text("# Other\n", encoding="utf-8")
+
+    assert discover_routing_evidence_documents(tmp_path) == (
+        "docs/superpowers/implementation-notes/future-model-pool.md",
+        "docs/superpowers/implementation-notes/future-routing-audit.md",
+    )
 
 
 def document_section(document: str, heading: str) -> str:

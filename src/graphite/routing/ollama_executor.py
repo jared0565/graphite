@@ -8,7 +8,7 @@ import math
 import socket
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Final
 
 from .approval import ApprovalAuthority, ApprovalError, SignedApproval
@@ -56,6 +56,14 @@ class ExecutionResult:
 
     text: str
     receipt: ExecutionReceipt
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalProviderRequest:
+    """Ephemeral canonical request bytes and their receipt-binding hash."""
+
+    body: bytes = field(repr=False, compare=False)
+    prompt_hash: str
 
 
 def _remaining(deadline: float, clock: Callable[[], float]) -> float:
@@ -179,6 +187,29 @@ def _prompt(objective: str, context: ContextBundle) -> str:
     )
 
 
+def canonical_provider_request(
+    *,
+    manifest: ApprovalManifest,
+    context: ContextBundle,
+    objective: str,
+) -> CanonicalProviderRequest:
+    """Build the one canonical provider request used for execution and receipt binding."""
+    payload = {
+        "model": manifest.model_id,
+        "messages": [
+            {"role": "system", "content": SYSTEM_CONTRACT},
+            {"role": "user", "content": _prompt(objective, context)},
+        ],
+        "options": {"num_predict": manifest.max_output_tokens},
+        "stream": False,
+    }
+    payload.update(effort_payload(manifest.model_id, manifest.effort))
+    body = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return CanonicalProviderRequest(body=body, prompt_hash=hashlib.sha256(body).hexdigest())
+
+
 def _usage(value: object, maximum: int) -> int | None:
     if value is None:
         return None
@@ -211,6 +242,8 @@ def execute_ollama(
         authority.verify(signed_approval, current_manifest)
     except ApprovalError as exc:
         raise ExecutorError(exc.code) from exc
+    if current_manifest.inventory_digest != expected_digest:
+        raise ExecutorError("model_identity_changed")
     if context.manifest.manifest_hash != current_manifest.context_manifest_hash:
         raise ExecutorError("context_manifest_changed")
     if cancellation():
@@ -235,26 +268,17 @@ def execute_ollama(
             current_manifest.model_id,
             expected_digest=expected_digest,
         )
-        effort_fragment = effort_payload(current_manifest.model_id, current_manifest.effort)
+        provider_request = canonical_provider_request(
+            manifest=current_manifest,
+            context=context,
+            objective=objective,
+        )
     except RegistryError as exc:
         raise ExecutorError(exc.code) from exc
     except EffortMappingError as exc:
         raise ExecutorError("effort_unsupported") from exc
 
-    prompt = _prompt(objective, context)
-    payload = {
-        "model": current_manifest.model_id,
-        "messages": [
-            {"role": "system", "content": SYSTEM_CONTRACT},
-            {"role": "user", "content": prompt},
-        ],
-        "options": {"num_predict": current_manifest.max_output_tokens},
-        "stream": False,
-    }
-    payload.update(effort_fragment)
-    request_body = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
+    request_body = provider_request.body
     if len(request_body) > min(MAX_REQUEST_BYTES, settings.max_context_bytes + 65_536):
         raise ExecutorError("request_limit")
     if math.ceil(len(request_body) / 4) > current_manifest.max_input_tokens:
@@ -310,7 +334,7 @@ def execute_ollama(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         latency_ms=latency_ms,
-        prompt_hash=hashlib.sha256(request_body).hexdigest(),
+        prompt_hash=provider_request.prompt_hash,
         response_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         failure_reason=None,
     )

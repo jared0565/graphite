@@ -8,9 +8,10 @@ import math
 import os
 import sys
 import time
+import unicodedata
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from .analyze import analyze
 from .cache import Cache
@@ -35,6 +36,7 @@ from .io import atomic_write_json
 from .llm import enrich_report
 from .routing.approval import approval_prompt
 from .routing.service import RoutingService
+from .routing.storage import DEFAULT_RECOVERY_PAGE_SIZE, StorageError
 from .query import _find_node, annotate_communities, query
 from .replacement_audit import audit_replacement, format_replacement_audit
 from .review import (
@@ -969,6 +971,87 @@ def _route_print(payload: dict[str, Any], *, json_mode: bool) -> None:
         print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+_ROUTE_RECOVERY_ERROR_CODES = frozenset({
+    "attempt_id_invalid",
+    "execution_attempt_conflict",
+    "execution_attempt_missing",
+    "legacy_attempt_bindings_missing",
+    "legacy_attempt_digest_missing",
+    "recovery_cursor_invalid",
+    "recovery_limit_invalid",
+    "repository_root_invalid",
+    "storage_corrupt",
+    "storage_locked",
+    "storage_path_invalid",
+    "storage_schema_unsupported",
+    "storage_unavailable",
+})
+
+
+def _route_recovery_error(
+    error: StorageError | ValueError | OSError, *, json_mode: bool
+) -> int:
+    if isinstance(error, StorageError):
+        candidate = error.code
+    elif isinstance(error, FileNotFoundError):
+        candidate = "repository_root_invalid"
+    elif isinstance(error, OSError):
+        candidate = "storage_unavailable"
+    elif isinstance(error, ValueError):
+        candidate = str(error)
+        if candidate not in _ROUTE_RECOVERY_ERROR_CODES:
+            raise error
+    else:
+        raise error
+    code = (
+        candidate
+        if candidate in _ROUTE_RECOVERY_ERROR_CODES
+        else "route_recovery_failed"
+    )
+    if json_mode:
+        print(json.dumps({"error": {"code": code}}, sort_keys=True), file=sys.stderr)
+    else:
+        print(f"[graphite] route recovery error: {code}", file=sys.stderr)
+    return 1
+
+
+_MODEL_OUTPUT_BEGIN = "----- BEGIN GRAPHITE MODEL OUTPUT -----"
+_MODEL_OUTPUT_END = "----- END GRAPHITE MODEL OUTPUT -----"
+
+
+def _escaped_terminal_text(text: str) -> str:
+    characters: list[str] = []
+    for character in text:
+        codepoint = ord(character)
+        category = unicodedata.category(character)
+        if character == "\n":
+            characters.append(character)
+        elif category in {"Cc", "Cf", "Zl", "Zp"} or codepoint == 0x7F:
+            characters.append(
+                f"\\x{codepoint:02x}" if codepoint <= 0xFF else f"\\u{codepoint:04x}"
+            )
+        else:
+            characters.append(character)
+    escaped = "".join(characters)
+    return escaped.replace(_MODEL_OUTPUT_BEGIN, "[escaped model delimiter]").replace(
+        _MODEL_OUTPUT_END, "[escaped model delimiter]"
+    )
+
+
+def _render_model_output(text: str, *, stdout: TextIO) -> None:
+    """Render untrusted provider text without granting terminal control."""
+    safe = _escaped_terminal_text(text)
+    quoted = "\n".join(f"| {line}" for line in safe.split("\n"))
+    framed = f"{_MODEL_OUTPUT_BEGIN}\n{quoted}\n{_MODEL_OUTPUT_END}\n"
+    encoding = getattr(stdout, "encoding", None) or "utf-8"
+    try:
+        framed = framed.encode(encoding, errors="backslashreplace").decode(encoding)
+    except LookupError:
+        framed = framed.encode("utf-8", errors="backslashreplace").decode("utf-8")
+    stdout.write(framed)
+    stdout.flush()
+
+
 def cmd_route_recommend(args: argparse.Namespace) -> int:
     service = RoutingService(args.path)
     recommendation = service.recommend(
@@ -1013,13 +1096,34 @@ def cmd_route_run(args: argparse.Namespace) -> int:
         )
         if not shadow_approved:
             print(json.dumps({"shadow": "declined", "primary": "continuing"}))
-    receipt = service.execute_approved(recommendation)
-    _route_print(receipt, json_mode=args.json)
+    result = service.execute_approved(recommendation)
+    _render_model_output(result.text, stdout=sys.stdout)
+    _route_print(result.to_public_dict(), json_mode=False)
     return 0
 
 
 def cmd_route_status(args: argparse.Namespace) -> int:
     _route_print(RoutingService(args.path).status(), json_mode=args.json)
+    return 0
+
+
+def cmd_route_recoverable(args: argparse.Namespace) -> int:
+    try:
+        page = RoutingService(args.path).recoverable_attempts(
+            limit=args.limit, after=args.after
+        )
+    except (StorageError, ValueError, OSError) as exc:
+        return _route_recovery_error(exc, json_mode=args.json)
+    _route_print(page.to_dict(), json_mode=args.json)
+    return 0
+
+
+def cmd_route_reconcile(args: argparse.Namespace) -> int:
+    try:
+        payload = RoutingService(args.path).reconcile_execution(args.attempt_id)
+    except (StorageError, ValueError, OSError) as exc:
+        return _route_recovery_error(exc, json_mode=args.json)
+    _route_print(payload, json_mode=args.json)
     return 0
 
 
@@ -1101,6 +1205,28 @@ def main(argv: list[str] | None = None) -> int:
     p_route_status.add_argument("path", help="Repository path")
     p_route_status.add_argument("--json", action="store_true")
     p_route_status.set_defaults(func=cmd_route_status)
+
+    p_route_recoverable = route_sub.add_parser(
+        "recoverable", help="List staged execution attempts eligible for reconciliation"
+    )
+    p_route_recoverable.add_argument("path", help="Repository path")
+    p_route_recoverable.add_argument(
+        "--limit", type=int, default=DEFAULT_RECOVERY_PAGE_SIZE,
+        help="Page size from 1 to 100 (default: 50)",
+    )
+    p_route_recoverable.add_argument(
+        "--after", default=None, help="Validated attempt ID cursor from next_cursor"
+    )
+    p_route_recoverable.add_argument("--json", action="store_true")
+    p_route_recoverable.set_defaults(func=cmd_route_recoverable)
+
+    p_route_reconcile = route_sub.add_parser(
+        "reconcile", help="Finalize one staged receipt without another provider call"
+    )
+    p_route_reconcile.add_argument("path", help="Repository path")
+    p_route_reconcile.add_argument("--attempt-id", required=True)
+    p_route_reconcile.add_argument("--json", action="store_true")
+    p_route_reconcile.set_defaults(func=cmd_route_reconcile)
 
     p_route_policy = route_sub.add_parser("policy", help="Inspect or explicitly manage recommendation policy")
     p_route_policy.add_argument("path", help="Repository path")

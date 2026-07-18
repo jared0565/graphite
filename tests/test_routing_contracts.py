@@ -161,6 +161,7 @@ def test_all_public_records_are_json_safe_and_exclude_sensitive_content(tmp_path
         decision_id=decision.decision_id,
         graph_fingerprint="a" * 64,
         context_manifest_hash="b" * 64,
+        inventory_digest="e" * 64,
         model_id=model.model_id,
         effort=Effort.DEFAULT,
         max_input_tokens=8_000,

@@ -18,10 +18,13 @@ EFFORT_PAYLOADS: Final[Mapping[str, Mapping[Effort, Mapping[str, Any]]]] = Mappi
         "kimi-k2.7-code:cloud": MappingProxyType(
             {Effort.DEFAULT: MappingProxyType({})}
         ),
-        "kimi-k2.6:cloud": MappingProxyType(
+        "minimax-m2.7:cloud": MappingProxyType(
             {Effort.DEFAULT: MappingProxyType({})}
         ),
-        "glm-5:cloud": MappingProxyType(
+        "nemotron-3-super:cloud": MappingProxyType(
+            {Effort.DEFAULT: MappingProxyType({})}
+        ),
+        "minimax-m3:cloud": MappingProxyType(
             {Effort.DEFAULT: MappingProxyType({})}
         ),
     }

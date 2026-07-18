@@ -6,7 +6,7 @@ import json
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +17,13 @@ from graphite.graph_io import GraphReadError, load_validated_graph_bundle
 from .approval import ApprovalAuthority
 from .classifier import classify_task
 from .context_builder import ContextBundle, build_routing_context
-from .contracts import ApprovalManifest, Effort, TaskRequest
-from .ollama_executor import execute_ollama
+from .contracts import ApprovalManifest, Effort, ExecutionOutcome, ExecutionReceipt, TaskRequest
+from .ollama_executor import (
+    ExecutionResult,
+    ExecutorError,
+    canonical_provider_request,
+    execute_ollama,
+)
 from .policy import CandidateMetrics, PolicyGates, rank_candidates
 from .registry import (
     BUNDLED_PROFILES,
@@ -28,7 +33,12 @@ from .registry import (
     refresh_model_inventory,
 )
 from .settings import RoutingSettings
-from .storage import RepositoryStore, StorageError
+from .storage import (
+    DEFAULT_RECOVERY_PAGE_SIZE,
+    RecoverableAttemptPage,
+    RepositoryStore,
+    StorageError,
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +68,18 @@ class RoutingRecommendation:
             "policy_version": self.policy_version,
             "execution_authority": "single_use_approval_required",
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedExecution:
+    """Ephemeral provider text paired with its persistence-safe receipt."""
+
+    text: str = field(repr=False, compare=False)
+    receipt: ExecutionReceipt
+
+    def to_public_dict(self) -> dict[str, Any]:
+        """Return the only representation safe for logs, storage, or serialization."""
+        return dict(self.receipt.to_dict())
 
 
 @dataclass(frozen=True)
@@ -175,7 +197,7 @@ class RoutingService:
             (reason,), ("claude_code", "codex"), True, "1",
         )
 
-    def execute_approved(self, recommendation: RoutingRecommendation) -> dict[str, Any]:
+    def execute_approved(self, recommendation: RoutingRecommendation) -> ApprovedExecution:
         if recommendation.manual_handoff or recommendation.model_id is None:
             raise ValueError("manual_handoff_required")
         prepared = self._prepared.pop(recommendation.task_id, None)
@@ -196,12 +218,17 @@ class RoutingService:
             decision_id, prepared.task.task_id, recommendation.model_id,
             recommendation.effort, recommendation.policy_version, "1", now,
         )
+        inventory = next(
+            model for model in prepared.snapshot.models
+            if model.model_id == recommendation.model_id
+        )
         manifest = ApprovalManifest(
             approval_id=approval_id,
             task_id=prepared.task.task_id,
             decision_id=decision_id,
             graph_fingerprint=prepared.graph_fingerprint,
             context_manifest_hash=prepared.context.manifest.manifest_hash,
+            inventory_digest=inventory.digest,
             model_id=recommendation.model_id,
             effort=Effort(recommendation.effort),
             max_input_tokens=prepared.request.max_input_tokens,
@@ -217,36 +244,122 @@ class RoutingService:
             quota_path=self.state_dir / "quota.sqlite3",
         )
         signed = authority.issue(manifest)
-        inventory = next(
-            model for model in prepared.snapshot.models if model.model_id == recommendation.model_id
-        )
-        result = execute_ollama(
-            authority=authority,
-            signed_approval=signed,
-            current_manifest=manifest,
+        provider_request = canonical_provider_request(
+            manifest=manifest,
             context=prepared.context,
             objective=prepared.request.objective,
-            expected_digest=inventory.digest,
-            settings=self.settings,
         )
-        receipt = result.receipt
-        self.store.insert_execution(
-            execution_id=receipt.execution_id,
-            idempotency_key=receipt.execution_id,
+        attempt_id = "attempt-" + secrets.token_hex(12)
+        manifest_hash = hashlib.sha256(
+            json.dumps(
+                manifest.to_dict(), sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        self.store.create_execution_attempt(
+            attempt_id=attempt_id,
+            approval_id=approval_id,
             task_id=prepared.task.task_id,
             decision_id=decision_id,
-            approval_id=approval_id,
-            model_id=receipt.model_id,
-            effort=receipt.effort.value,
-            status=receipt.outcome.value,
+            manifest_hash=manifest_hash,
+            graph_fingerprint=prepared.graph_fingerprint,
+            model_id=recommendation.model_id,
+            effort=recommendation.effort,
             reserved_tokens=manifest.max_input_tokens + manifest.max_output_tokens,
+            max_input_tokens=manifest.max_input_tokens,
+            max_output_tokens=manifest.max_output_tokens,
+            expected_prompt_hash=provider_request.prompt_hash,
+            inventory_digest=manifest.inventory_digest,
             created_at=now,
         )
-        self.store.link_execution_evidence(
-            receipt.execution_id, prepared.task.task_id, decision_id,
-            prepared.graph_fingerprint,
+        try:
+            result = execute_ollama(
+                authority=authority,
+                signed_approval=signed,
+                current_manifest=manifest,
+                context=prepared.context,
+                objective=prepared.request.objective,
+                expected_digest=inventory.digest,
+                settings=self.settings,
+            )
+        except ExecutorError as exc:
+            self._fail_attempt(attempt_id, exc.code)
+            raise
+        except Exception:
+            self._fail_attempt(attempt_id, "executor_failed")
+            raise ExecutorError("executor_failed") from None
+        if not self._receipt_is_valid(result, manifest, provider_request.prompt_hash):
+            self._fail_attempt(attempt_id, "executor_receipt_invalid")
+            raise ExecutorError("executor_receipt_invalid")
+        receipt = result.receipt
+        try:
+            self.store.finalize_execution_attempt(
+                attempt_id=attempt_id,
+                receipt=receipt,
+                inventory_digest=manifest.inventory_digest,
+                completed_at=int(time.time()),
+            )
+        except StorageError as exc:
+            if exc.code == "approval_not_consumed":
+                self._fail_attempt(attempt_id, exc.code)
+                raise StorageError(exc.code) from None
+            try:
+                self.store.stage_execution_receipt(
+                    attempt_id=attempt_id,
+                    receipt=receipt,
+                    inventory_digest=manifest.inventory_digest,
+                    staged_at=int(time.time()),
+                )
+            except (StorageError, OSError, ValueError):
+                try:
+                    self.store.mark_execution_attempt_failed(
+                        attempt_id,
+                        "execution_persistence_failed",
+                        persistence_failed=True,
+                        updated_at=int(time.time()),
+                    )
+                except (StorageError, OSError, ValueError):
+                    pass
+            raise StorageError("execution_persistence_failed") from None
+        return ApprovedExecution(text=result.text, receipt=receipt)
+
+    def _fail_attempt(self, attempt_id: str, reason: str) -> None:
+        try:
+            self.store.mark_execution_attempt_failed(
+                attempt_id, reason, updated_at=int(time.time())
+            )
+        except (StorageError, OSError, ValueError):
+            raise StorageError("execution_persistence_failed") from None
+
+    @staticmethod
+    def _receipt_is_valid(
+        result: object,
+        manifest: ApprovalManifest,
+        expected_prompt_hash: str,
+    ) -> bool:
+        if not isinstance(result, ExecutionResult) or not isinstance(result.text, str):
+            return False
+        receipt = result.receipt
+        try:
+            response_hash = hashlib.sha256(result.text.encode("utf-8")).hexdigest()
+        except UnicodeError:
+            return False
+        return (
+            isinstance(receipt, ExecutionReceipt)
+            and receipt.approval_id == manifest.approval_id
+            and receipt.model_id == manifest.model_id
+            and receipt.effort is manifest.effort
+            and receipt.outcome is ExecutionOutcome.SUCCEEDED
+            and receipt.input_tokens is not None
+            and receipt.output_tokens is not None
+            and receipt.input_tokens <= manifest.max_input_tokens
+            and receipt.output_tokens <= manifest.max_output_tokens
+            and receipt.input_tokens + receipt.output_tokens
+            <= manifest.max_input_tokens + manifest.max_output_tokens
+            and receipt.response_hash is not None
+            and receipt.response_hash == response_hash
+            and receipt.prompt_hash == expected_prompt_hash
+            and receipt.failure_reason is None
         )
-        return receipt.to_dict()
 
     def status(self) -> dict[str, Any]:
         try:
@@ -259,6 +372,21 @@ class RoutingService:
             "authority": "single_use_approval_required",
             "automatic_execution": False,
         }
+
+    def recoverable_attempts(
+        self, *, limit: int = DEFAULT_RECOVERY_PAGE_SIZE, after: str | None = None
+    ) -> RecoverableAttemptPage:
+        """List a bounded page of attempts without provider or approval authority."""
+        self.store.initialize()
+        return self.store.recoverable_attempts(limit=limit, after=after)
+
+    def reconcile_execution(self, attempt_id: str) -> dict[str, Any]:
+        """Finalize one staged receipt without reusing approval or calling a provider."""
+        self.store.initialize()
+        receipt = self.store.reconcile_execution_attempt(
+            attempt_id, completed_at=int(time.time())
+        )
+        return dict(receipt.to_dict())
 
     def policy(
         self,

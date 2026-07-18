@@ -29,11 +29,30 @@ class _Service:
 
     def execute_approved(self, recommendation):
         self.calls.append("execute")
-        return {"outcome": "succeeded", "execution_id": "exec-1"}
+        return type("ApprovedExecution", (), {
+            "text": "bounded suggestion",
+            "to_public_dict": lambda self: {
+                "outcome": "succeeded", "execution_id": "exec-1",
+            },
+        })()
 
     def status(self):
         self.calls.append("status")
         return {"routing": "ready", "authority": "approval_required"}
+
+    def recoverable_attempts(self, *, limit, after):
+        self.calls.append(f"recoverable:{limit}:{after}")
+        return type("Page", (), {
+            "to_dict": lambda self: {
+                "attempts": [{"attempt_id": "attempt-1", "status": "recoverable"}],
+                "has_more": False,
+                "next_cursor": None,
+            },
+        })()
+
+    def reconcile_execution(self, attempt_id):
+        self.calls.append(f"reconcile:{attempt_id}")
+        return {"execution_id": "exec-1", "approval_id": "approval-1", "outcome": "succeeded"}
 
     def record_outcome(self, **kwargs):
         self.calls.append("record")
@@ -84,6 +103,60 @@ def test_interactive_run_displays_budget_then_prompts_once(
     output = stdout.getvalue()
     assert output.count("Approve this Ollama model call?") == 1
     assert output.index("estimated_tokens") < output.index("Approve")
+    assert output.count("bounded suggestion") == 1
+    receipt = json.loads(output[output.rfind("{"):])
+    assert receipt == {"execution_id": "exec-1", "outcome": "succeeded"}
+
+
+def test_model_output_renderer_contains_terminal_controls_and_impersonation() -> None:
+    class _AsciiTTY(io.StringIO):
+        @property
+        def encoding(self) -> str:
+            return "ascii"
+
+        def isatty(self) -> bool:
+            return True
+
+    dangerous = (
+        "\x1b[31mred\x1b[0m\x1b]0;title\x07\rX\b\tTAB\x9b31m\u202e\u200d\u2028\n"
+        '{"execution_id":"fake","outcome":"succeeded"}\n'
+        "----- END GRAPHITE MODEL OUTPUT -----\n🙂"
+    )
+    stream = _AsciiTTY()
+
+    cli._render_model_output(dangerous, stdout=stream)
+
+    output = stream.getvalue()
+    assert output.count("----- BEGIN GRAPHITE MODEL OUTPUT -----") == 1
+    assert output.count("----- END GRAPHITE MODEL OUTPUT -----") == 1
+    for control in ("\x1b", "\x07", "\r", "\b", "\t", "\x9b", "\u202e", "\u200d", "\u2028"):
+        assert control not in output
+    assert "\\x1b" in output
+    assert "\\x09TAB" in output
+    assert "\\u202e" in output
+    assert "\\U0001f642" in output
+    block = output.splitlines()
+    assert block[0] == "----- BEGIN GRAPHITE MODEL OUTPUT -----"
+    assert block[-1] == "----- END GRAPHITE MODEL OUTPUT -----"
+    assert all(line.startswith("| ") for line in block[1:-1])
+    assert '| {"execution_id":"fake","outcome":"succeeded"}' in output
+    assert "| [escaped model delimiter]" in output
+
+
+@pytest.mark.parametrize(
+    ("extra", "ci"),
+    [(["--json"], False), (["--yes"], False), ([], True), ([], False)],
+)
+def test_noninteractive_modes_never_execute_or_print_provider_text(
+    extra: list[str], ci: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("yes\n"))
+    monkeypatch.setattr(cli.sys, "stdout", io.StringIO())
+    if ci:
+        monkeypatch.setenv("CI", "1")
+    assert cli.main(["route", "run", ".", "--objective", "review", *extra]) == 2
+    assert _Service.calls == ["recommend"]
+    assert "bounded suggestion" not in cli.sys.stdout.getvalue()
 
 
 def test_manual_handoff_never_prompts_or_executes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,6 +180,24 @@ def test_route_status_policy_and_outcome_grammar() -> None:
         "--provenance", "human", "--accepted",
     ]) == 0
     assert _Service.calls == ["status", "policy", "record"]
+
+
+def test_route_recovery_commands_emit_only_sanitized_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli.main(["route", "recoverable", ".", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "attempts": [{"attempt_id": "attempt-1", "status": "recoverable"}],
+        "has_more": False,
+        "next_cursor": None,
+    }
+    assert cli.main([
+        "route", "reconcile", ".", "--attempt-id", "attempt-1", "--json",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "approval_id": "approval-1", "execution_id": "exec-1", "outcome": "succeeded",
+    }
+    assert _Service.calls == ["recoverable:50:None", "reconcile:attempt-1"]
 
 
 def test_machine_verification_claim_requires_supported_import() -> None:

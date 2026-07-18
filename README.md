@@ -470,11 +470,36 @@ loopback API. This development router is distinct from optional report enrichmen
 OpenRouter is reserved for production in-application inference. Claude Code and
 Codex are manual handoff channels only; Graphite never launches either CLI.
 
+### Active router model pool
+
+The bundled allowlist is deliberately small. Every active profile is provisional
+and supports only the `default` effort:
+
+| Exact model ID | Approved roles | Provider-reported usage class |
+|---|---|---|
+| `kimi-k2.7-code:cloud` | Primary coding; coding | high |
+| `minimax-m2.7:cloud` | Coding; agentic | medium |
+| `nemotron-3-super:cloud` | Reasoning; review | medium |
+| `minimax-m3:cloud` | Long-context; agentic | high |
+
+The provider-reported usage class is coarse routing metadata, not a USD price or
+measured cost saving. Medium may rank ahead of high only after every hard gate is
+satisfied. The profile allowlist is the authority boundary: inventory presence does
+not authorize a model, and unknown inventory entries and aliases are excluded.
+Exact identifier and digest, required capabilities, context capacity, risk, data
+policy, configured request/repository budget, effort support, registry freshness,
+and the 30-day minimum retirement
+runway are hard gates before ranking. A dated retirement must be strictly more than
+30 days away. While these profiles remain provisional, high-risk work is ineligible
+and returns a manual frontier handoff to the operator.
+
 ```powershell
 graphite route policy . --refresh-models --json
 graphite route recommend . --objective "Review listing search" --target src/search.py
 graphite route run . --objective "Review listing search" --target src/search.py
 graphite route status . --json
+graphite route recoverable . --limit 50 --json
+graphite route reconcile . --attempt-id attempt-identifier --json
 ```
 
 `route recommend` is offline and read-only. It requires a fresh validated graph and
@@ -489,6 +514,38 @@ context-bound, and quota-bound. Model output is untrusted, has no tool authority
 and cannot mutate code. High-risk work retains a permanent approval gate. Shadow
 evaluation is disabled by default, separately consented, independently budgeted,
 and unavailable for high-risk or sensitive categories.
+
+Execution is single-shot. Graphite performs no automatic fallback, retry, model
+switching, model pull, or approval reuse. Successful text is shown only on the
+interactive terminal as framed, escaped, ephemeral text. Only the validated receipt
+and bounded audit metadata are persisted; model text is not. Non-TTY input or
+output, JSON mode, CI, and `--yes` cannot execute.
+
+The recommendation budget gate uses configured request/repository limits; it is not
+proof that quota remains. Actual repository and machine quota reservation occurs
+when the signed approval is consumed immediately before execution. The signature
+binds the exact inventory digest, and runtime independently revalidates that digest.
+
+The durable audit transition is `pending` to `completed`. If the provider call
+succeeds but final persistence fails, the attempt is reconcilable only while its
+fallback staged receipt remains intact and available. Use `graphite route
+recoverable . --limit 50 --json` to list a bounded page of sanitized attempt IDs;
+when `has_more` is true, pass `next_cursor` back with `--after`. Use `graphite route
+reconcile . --attempt-id <id> --json` to finalize one staged receipt. These commands make no
+provider call and cannot issue, consume, or reuse approval. Back up or preserve
+`.graphite/routing` state before repair. If storage is
+unavailable before both finalization and fallback staging complete, Graphite returns
+`execution_persistence_failed`; failed staging, deletion, corruption, or disk loss
+means later reconciliation is unavailable. Expected recovery validation and storage
+failures are rendered as fixed, path-free codes; `--json` emits only an
+`{"error":{"code":"..."}}` object and never includes OS errors or repository data.
+
+Schema-v3 migration intentionally quarantines schema-v1 pending or
+persistence-failed rows missing token/request bindings and schema-v2 rows missing
+the inventory digest as `legacy_unrecoverable`; they cannot be replayed or
+reconciled. Database triggers prevent update, deletion, or reactivation of these
+digestless legacy rows. Legacy completed rows missing those bindings are intentionally preserved
+as read-only history rather than rewritten into new evidence.
 
 Detailed receipts and evidence stay in repository-local `.graphite/routing` storage;
 they contain hashes and metadata, not prompts or model responses. Machine-wide

@@ -6,11 +6,50 @@ from dataclasses import dataclass
 from typing import Final
 
 from .contracts import Effort, RiskTier, TaskCategory, TaskProfile
-from .registry import BUNDLED_PROFILES, RegistrySnapshot, profile_is_eligible
+from .registry import (
+    BUNDLED_PROFILES,
+    ModelRole,
+    RegistrySnapshot,
+    UsageClass,
+    lifecycle_is_eligible,
+    profile_is_eligible,
+)
 
-POLICY_VERSION: Final = "1"
+POLICY_VERSION: Final = "2"
 EVIDENCE_VERSION: Final = "1"
 _Z_95: Final = 1.959963984540054
+
+_ROLE_BONUSES: Final = {
+    TaskCategory.DOCUMENTATION: {
+        ModelRole.CODING_PRIMARY: 100,
+        ModelRole.CODING: 40,
+    },
+    TaskCategory.ISOLATED_CODE: {
+        ModelRole.CODING_PRIMARY: 100,
+        ModelRole.CODING: 40,
+    },
+    TaskCategory.FEATURE: {
+        ModelRole.CODING_PRIMARY: 100,
+        ModelRole.CODING: 40,
+        ModelRole.AGENTIC: 20,
+    },
+    TaskCategory.REFACTOR: {
+        ModelRole.CODING_PRIMARY: 80,
+        ModelRole.CODING: 40,
+        ModelRole.REASONING: 20,
+    },
+    TaskCategory.ARCHITECTURE: {
+        ModelRole.LONG_CONTEXT: 80,
+        ModelRole.REASONING: 40,
+    },
+}
+_USAGE_PENALTIES: Final = {
+    UsageClass.MEDIUM: 0,
+    UsageClass.HIGH: 40,
+}
+_CODE_CAPABILITIES: Final = frozenset({"code"})
+_REFACTOR_CAPABILITIES: Final = frozenset({"code", "reasoning"})
+_ARCHITECTURE_CAPABILITIES: Final = frozenset({"architecture"})
 
 
 @dataclass(frozen=True)
@@ -25,6 +64,17 @@ class CandidateMetrics:
     retry_rate_millis: int
     escalation_rate_millis: int
     quota_scarcity_millis: int
+
+
+@dataclass(frozen=True)
+class _ValidatedCandidateMetrics:
+    reliability: int
+    input_tokens: int
+    output_tokens: int
+    latency: int
+    retry: int
+    escalation: int
+    scarcity: int
 
 
 @dataclass(frozen=True)
@@ -102,6 +152,51 @@ def _bounded_metric(value: object, code: str, maximum: int = 10**9) -> int:
     return int(value)
 
 
+def _validate_candidate_metrics(candidate: CandidateMetrics) -> _ValidatedCandidateMetrics:
+    global_success = _bounded_metric(
+        candidate.global_success_millis,
+        "global_success_invalid",
+        1_000,
+    )
+    repository_success = candidate.repository_success_millis
+    reliability = (
+        global_success
+        if repository_success is None
+        else _bounded_metric(repository_success, "repository_success_invalid", 1_000)
+    )
+    return _ValidatedCandidateMetrics(
+        reliability=reliability,
+        input_tokens=_bounded_metric(
+            candidate.expected_input_tokens,
+            "expected_input_tokens_invalid",
+        ),
+        output_tokens=_bounded_metric(
+            candidate.expected_output_tokens,
+            "expected_output_tokens_invalid",
+        ),
+        latency=_bounded_metric(candidate.expected_latency_ms, "expected_latency_invalid"),
+        retry=_bounded_metric(candidate.retry_rate_millis, "retry_rate_invalid", 1_000),
+        escalation=_bounded_metric(
+            candidate.escalation_rate_millis,
+            "escalation_rate_invalid",
+            1_000,
+        ),
+        scarcity=_bounded_metric(
+            candidate.quota_scarcity_millis,
+            "quota_scarcity_invalid",
+            1_000,
+        ),
+    )
+
+
+def _accepted_capabilities(category: TaskCategory) -> frozenset[str]:
+    if category is TaskCategory.ARCHITECTURE:
+        return _ARCHITECTURE_CAPABILITIES
+    if category is TaskCategory.REFACTOR:
+        return _REFACTOR_CAPABILITIES
+    return _CODE_CAPABILITIES
+
+
 def _candidate_failure(
     task: TaskProfile,
     snapshot: RegistrySnapshot,
@@ -119,8 +214,8 @@ def _candidate_failure(
         return "effort_unsupported"
     if not profile_is_eligible(candidate.model_id, task.risk):
         return "risk_ineligible"
-    if entry.retirement_date is not None and gates.current_date >= entry.retirement_date:
-        return "model_retired"
+    if not lifecycle_is_eligible(entry.retirement_date, gates.current_date):
+        return "model_retiring"
     inventory_model = next(
         (model for model in snapshot.models if model.model_id == candidate.model_id),
         None,
@@ -139,37 +234,33 @@ def _candidate_failure(
         return "budget_exceeded"
     if not gates.task_evaluated and not entry.profile.provisional:
         return "task_not_evaluated"
-    required_capability = {
-        TaskCategory.ARCHITECTURE: "architecture",
-    }.get(task.category, "code")
-    if required_capability not in entry.profile.capabilities:
+    accepted_capabilities = _accepted_capabilities(task.category)
+    if accepted_capabilities.isdisjoint(entry.profile.capabilities):
         return "capability_missing"
     return None
 
 
-def _score(candidate: CandidateMetrics) -> ScoredCandidate:
-    global_success = _bounded_metric(candidate.global_success_millis, "global_success_invalid", 1_000)
-    repository_success = candidate.repository_success_millis
-    if repository_success is not None:
-        reliability = _bounded_metric(repository_success, "repository_success_invalid", 1_000)
-    else:
-        reliability = global_success
-    input_tokens = _bounded_metric(candidate.expected_input_tokens, "expected_input_tokens_invalid")
-    output_tokens = _bounded_metric(candidate.expected_output_tokens, "expected_output_tokens_invalid")
-    latency = _bounded_metric(candidate.expected_latency_ms, "expected_latency_invalid")
-    retry = _bounded_metric(candidate.retry_rate_millis, "retry_rate_invalid", 1_000)
-    escalation = _bounded_metric(candidate.escalation_rate_millis, "escalation_rate_invalid", 1_000)
-    scarcity = _bounded_metric(candidate.quota_scarcity_millis, "quota_scarcity_invalid", 1_000)
-    token_penalty = min(250, (input_tokens + output_tokens) // 100)
-    latency_penalty = min(200, latency // 1_000)
-    retry_penalty = retry // 5
-    escalation_penalty = escalation // 5
-    scarcity_penalty = scarcity // 10
+def _score(
+    candidate: CandidateMetrics,
+    task: TaskProfile,
+    metrics: _ValidatedCandidateMetrics,
+) -> ScoredCandidate:
+    entry = BUNDLED_PROFILES[candidate.model_id]
+    token_penalty = min(250, (metrics.input_tokens + metrics.output_tokens) // 100)
+    latency_penalty = min(200, metrics.latency // 1_000)
+    retry_penalty = metrics.retry // 5
+    escalation_penalty = metrics.escalation // 5
+    scarcity_penalty = metrics.scarcity // 10
+    role_bonuses = _ROLE_BONUSES.get(task.category, {})
+    role_fit_bonus = max((role_bonuses.get(role, 0) for role in entry.roles), default=0)
+    usage_penalty = _USAGE_PENALTIES[entry.usage_class]
     score = max(
         0,
         min(
             1_000,
-            reliability
+            metrics.reliability
+            + role_fit_bonus
+            - usage_penalty
             - token_penalty
             - latency_penalty
             - retry_penalty
@@ -182,7 +273,9 @@ def _score(candidate: CandidateMetrics) -> ScoredCandidate:
         Effort(candidate.effort),
         score,
         (
-            ("reliability", reliability),
+            ("reliability", metrics.reliability),
+            ("role_fit_bonus", role_fit_bonus),
+            ("usage_penalty", usage_penalty),
             ("token_penalty", token_penalty),
             ("latency_penalty", latency_penalty),
             ("retry_penalty", retry_penalty),
@@ -211,14 +304,12 @@ def rank_candidates(
     scored: list[ScoredCandidate] = []
     rejected: list[str] = []
     for candidate in candidates:
-        # Validate every numeric input even when an earlier candidate gate would
-        # otherwise reject it, so malformed evidence never becomes advisory.
-        _score(candidate)
+        metrics = _validate_candidate_metrics(candidate)
         failure = _candidate_failure(task, snapshot, candidate, gates)
         if failure is not None:
             rejected.append(failure)
             continue
-        scored.append(_score(candidate))
+        scored.append(_score(candidate, task, metrics))
     ranked = tuple(
         sorted(scored, key=lambda item: (-item.score, item.model_id, item.effort.value))
     )
