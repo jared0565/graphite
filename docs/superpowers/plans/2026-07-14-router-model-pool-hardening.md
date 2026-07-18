@@ -581,7 +581,7 @@ user direction.
   fixture unit test passed (1 test), and the bounded loopback `/api/tags` refresh
   completed without a provider chat call.
 
-#### Current live-approval preflight (not issued)
+#### Historical offline live-approval preflight (not issued at that stage)
 
 - Task: `task-444452e9f8f89d3fbd0d37ee`; policy version `2`; low risk; data policy
   `source_allowed`.
@@ -604,10 +604,10 @@ user direction.
   timeout: 180 seconds; approval TTL if later issued: 300 seconds.
 - Canonical prompt binding hash:
   `6f048355d18dd5691cfd36de805cd10bec46f1f656e990ab000b4827f8eda360`.
-- A future signed approval must additionally bind a newly allocated approval ID,
-  decision ID, issue/expiry timestamps, and nonce. None was allocated for this
-  preflight. Execution is single-shot with no retry, redirect, model fallback, or
-  model pull.
+- A later signed approval would additionally bind a newly allocated approval ID,
+  decision ID, issue/expiry timestamps, and nonce. None was allocated during this
+  offline preflight stage. Execution was designed to remain single-shot with no
+  retry, redirect, model fallback, or model pull.
 
 #### Live-smoke attempt — 2026-07-18
 
@@ -618,8 +618,10 @@ user direction.
   `bcfed85e53f7301cb0f3a62a920ab21071a2c389020864889ac8e813559c0e20`, which the
   operator explicitly re-approved before execution.
 - The same execution process refreshed inventory and matched the approved model,
-  digest, effort, risk, graph fingerprint, context manifest, prompt hash, file
-  hashes/bytes, 32,768/4,096 token maxima, 36,864-token reservation, zero existing
+  exact digest
+  `eda07a6592375dcbde7cf167b6d6b368cdd28e244f9d71559fb59919aca882fa`, effort,
+  risk, graph fingerprint, context manifest, prompt hash, file hashes/bytes,
+  32,768/4,096 token maxima, 36,864-token reservation, zero existing
   repository/machine reservations, and 180-second timeout.
 - Exactly one approved `kimi-k2.7-code:cloud` `/api/chat` request was sent. It
   failed closed with stable reason `provider_protocol`. No retry, redirect,
