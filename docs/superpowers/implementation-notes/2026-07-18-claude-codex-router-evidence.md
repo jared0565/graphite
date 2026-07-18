@@ -137,3 +137,16 @@ read-only permissions, bounded usage, and pre-save validation while refusing to
 treat free text as authority. Focused tests cover the exact canonical arguments and
 reject missing, wrong, or additional structured fields. No live retry was made as
 part of this correction.
+
+A new exact manifest and explicit approval authorized one live structured refresh
+against graph fingerprint
+`793e9f18e0b27df5706334795a30ff817b82eb68f92f78dc7a6b9fd46022e53e` and candidate
+snapshot digest `d08c66908ee55f5494da4abba21cce02df544214b4db721cbb94c962dea95be2`.
+The bounded CLI process exited without a parseable terminal result after 45.8
+seconds. Effective model and input/output usage are therefore unknown, no snapshot
+was saved, and the existing Codex snapshot remained the only active snapshot at
+that time. A sanitized failed event records those fields as unknown. No source file
+changed, no raw output was persisted, and no retry or fallback occurred. Current
+Claude debug-log metadata contained no diagnostic record for the call, so the exact
+external CLI failure remains unresolved rather than inferred. The structured path
+is offline-tested but has not passed live acceptance.
