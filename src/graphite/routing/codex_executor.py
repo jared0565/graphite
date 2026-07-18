@@ -43,6 +43,10 @@ _TRANSPORT_ERRORS: Final = {
     "process_containment_unavailable": "containment",
     "process_containment_failed": "containment",
 }
+_PREFLIGHT_WARNING_PREFIXES: Final = (
+    "WARNING: failed to clean up stale arg0 temp dirs:",
+    "WARNING: proceeding, even though we could not create PATH aliases:",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,10 +108,18 @@ def preflight_codex(
         transport, argv=(str(resolved), "login", "status"), stdin=b"", **common
     )
     try:
-        status = decode_cli_output(status_result.stdout).strip()
+        streams = (
+            decode_cli_output(status_result.stdout),
+            decode_cli_output(status_result.stderr),
+        )
     except CliProcessError:
         raise AdapterError("auth_required") from None
-    if status != "Logged in using ChatGPT":
+    lines = [line.strip() for stream in streams for line in stream.splitlines() if line.strip()]
+    status_count = lines.count("Logged in using ChatGPT")
+    noise = [line for line in lines if line != "Logged in using ChatGPT"]
+    if status_count != 1 or any(
+        not line.startswith(_PREFLIGHT_WARNING_PREFIXES) for line in noise
+    ):
         raise AdapterError("auth_required")
     if _file_sha256(resolved) != executable_digest:
         raise AdapterError("version")

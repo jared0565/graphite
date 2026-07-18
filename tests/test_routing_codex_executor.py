@@ -58,12 +58,17 @@ def _jsonl(*events: dict[str, object]) -> bytes:
     return ("\n".join(json.dumps(event) for event in events) + "\n").encode()
 
 
-def test_preflight_requires_chatgpt_subscription_and_ignores_stderr(tmp_path: Path) -> None:
+@pytest.mark.parametrize("status_on_stderr", [False, True])
+def test_preflight_accepts_exact_chatgpt_status_from_one_stream(
+    tmp_path: Path, status_on_stderr: bool
+) -> None:
     executable, workspace, credentials = _paths(tmp_path)
+    status = b"Logged in using ChatGPT\n"
+    warning = b"WARNING: failed to clean up stale arg0 temp dirs: redacted\n"
     transport = ScriptedTransport(
         [
             _result(b"codex-cli 0.144.1\n"),
-            _result(b"Logged in using ChatGPT\n", b"discarded temporary path warning"),
+            _result(warning if status_on_stderr else status, status if status_on_stderr else warning),
         ]
     )
     identity = preflight_codex(
@@ -79,6 +84,29 @@ def test_preflight_requires_chatgpt_subscription_and_ignores_stderr(tmp_path: Pa
         (str(executable.resolve()), "login", "status"),
     ]
     assert "warning" not in repr(identity)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [
+        (b"Logged in using ChatGPT\n", b"Logged in using ChatGPT\n"),
+        (b"Logged in using ChatGPT\n", b"unexpected diagnostic\n"),
+    ],
+)
+def test_preflight_rejects_ambiguous_or_unallowlisted_status_output(
+    tmp_path: Path, stdout: bytes, stderr: bytes
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    transport = ScriptedTransport(
+        [_result(b"codex-cli 0.144.1\n"), _result(stdout, stderr)]
+    )
+    with pytest.raises(AdapterError, match="^auth_required$"):
+        preflight_codex(
+            executable=executable,
+            workspace=workspace,
+            credential_home=credentials,
+            transport=transport,
+        )
 
 
 @pytest.mark.parametrize("status", [b"Not logged in\n", b"Logged in using API key\n", b""])
