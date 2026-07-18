@@ -91,11 +91,26 @@ snapshot. No operator database was involved.
 The production boundary now requires reported input/output usage, validates each
 against the approved limits, and persists only through an ordered verify-and-save
 operation. Regression tests prove over-budget input or output leaves the capability
-store empty. This offline correction does not retroactively validate Codex, and no
-automatic retry or substitute model was used.
+store empty. This offline correction did not retroactively validate the failed
+attempt, and no automatic retry or substitute model was used.
+
+After a new exact manifest and separate approval, a fresh `gpt-5.6-sol` high-effort
+read-only verification used the rebuilt synthetic graph fingerprint
+`f494a0da32593b6daff69aeca667c724e5e83345c00a9fb68467c6afd79c6d0f` and candidate
+snapshot digest `cda9c0a8ac530fd8ae6f7d640497b8e92c4fb479b4e4c99bbc3f00df65816292`.
+Local harness preconditions initially stopped before provider execution because of
+an incorrect graph-metadata lookup and then an incorrect credential-home binding;
+neither stop invoked a model. After those local corrections, exactly one provider
+request returned the exact expected response and bound full model slug in 12.792
+seconds. It reported 20,851 input and 8 output tokens against approved maxima of
+65,536 and 4,096, made no edit, and passed the hardened pre-save budget checks.
+Exactly one active snapshot was saved. Machine-verified telemetry and the user's
+subsequent accepted verdict were appended as two sanitized immutable events; cost
+remains `unknown`.
 
 Both isolated edit smokes, the read-only cross-provider high-risk review, and final
-live audit persistence also remain unexecuted. Codex profile verification remains
-open, and the active fixture has no capability snapshots. Any
-diagnostic repeat or subsequent provider call requires a new bounded manifest and
-explicit approval. The offline schema rollback drill remains passed.
+live audit persistence remain unexecuted. Codex profile verification is accepted,
+but the active fixture has no current Claude snapshot and snapshots are short-lived.
+Any diagnostic repeat, profile refresh, edit smoke, review, or subsequent provider
+call requires a new bounded manifest and explicit approval. The offline schema
+rollback drill remains passed.
