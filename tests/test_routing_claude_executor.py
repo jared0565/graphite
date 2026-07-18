@@ -28,6 +28,15 @@ def _result(stdout: bytes, stderr: bytes = b"") -> CliProcessResult:
     )
 
 
+def _stream_result(payload: dict[str, object], *, model: str) -> bytes:
+    return (
+        json.dumps({"type": "assistant", "message": {"model": model}})
+        + "\n"
+        + json.dumps(payload)
+        + "\n"
+    ).encode()
+
+
 class ScriptedTransport:
     def __init__(self, results: list[CliProcessResult]) -> None:
         self.results = results
@@ -140,10 +149,13 @@ def test_execution_has_fixed_safe_argv_and_parses_one_terminal_result(tmp_path: 
         "is_error": False,
         "result": "Implemented and validated.",
         "modelUsage": {"claude-sonnet-4-6": {"inputTokens": 120, "outputTokens": 33}},
+        "usage": {"input_tokens": 120, "output_tokens": 33},
         "session_id": "must-be-discarded",
         "total_cost_usd": 123,
     }
-    transport = ScriptedTransport([_result(json.dumps(payload).encode())])
+    transport = ScriptedTransport(
+        [_result(_stream_result(payload, model="claude-sonnet-4-6"))]
+    )
 
     outcome = execute_claude(
         executable=executable,
@@ -180,7 +192,8 @@ def test_execution_has_fixed_safe_argv_and_parses_one_terminal_result(tmp_path: 
         "high",
         "--no-session-persistence",
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
         "--input-format",
         "text",
         "--print",
@@ -195,15 +208,16 @@ def test_execution_rejects_effective_model_mismatch_without_retry(tmp_path: Path
     transport = ScriptedTransport(
         [
             _result(
-                json.dumps(
+                _stream_result(
                     {
                         "type": "result",
                         "subtype": "success",
                         "is_error": False,
                         "result": "done",
-                        "modelUsage": {"different-model": {"inputTokens": 1, "outputTokens": 1}},
-                    }
-                ).encode()
+                        "usage": {"input_tokens": 1, "output_tokens": 1},
+                    },
+                    model="different-model",
+                )
             )
         ]
     )
@@ -220,6 +234,33 @@ def test_execution_rejects_effective_model_mismatch_without_retry(tmp_path: Path
             transport=transport,
         )
     assert len(transport.calls) == 1
+
+
+def test_execution_accepts_repeated_consistent_assistant_identity(tmp_path: Path) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    terminal = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": "done",
+        "usage": {"input_tokens": 2, "output_tokens": 1},
+    }
+    assistant = json.dumps(
+        {"type": "assistant", "message": {"model": "claude-sonnet-4-6"}}
+    )
+    payload = f"{assistant}\n{assistant}\n{json.dumps(terminal)}\n".encode()
+    outcome = execute_claude(
+        executable=executable,
+        workspace=workspace,
+        credential_home=credentials,
+        prompt=b"task",
+        requested_model="sonnet",
+        expected_effective_model="claude-sonnet-4-6",
+        effort=Effort.HIGH,
+        permission_mode=PermissionMode.READ_ONLY,
+        transport=ScriptedTransport([_result(payload)]),
+    )
+    assert outcome.effective_model == "claude-sonnet-4-6"
 
 
 @pytest.mark.parametrize(

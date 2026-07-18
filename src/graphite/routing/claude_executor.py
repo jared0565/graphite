@@ -24,6 +24,7 @@ EXECUTION_TIMEOUT_SECONDS: Final = 1_800.0
 MAX_EXECUTABLE_BYTES: Final = 512 * 1024 * 1024
 MAX_MESSAGE_LENGTH: Final = 1_048_576
 MAX_TOKEN_COUNT: Final = 10_000_000
+MAX_EVENT_COUNT: Final = 10_000
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*) \(Claude Code\)\r?\n?$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -179,10 +180,26 @@ def _token(value: object) -> int:
 
 def _parse_result(stdout: bytes, expected_model: str) -> tuple[str, str, int, int]:
     try:
-        payload = json.loads(decode_cli_output(stdout))
-    except (json.JSONDecodeError, CliProcessError):
+        lines = decode_cli_output(stdout).splitlines()
+    except CliProcessError:
         raise AdapterError("protocol") from None
-    if not isinstance(payload, dict) or payload.get("type") != "result":
+    if not lines or len(lines) > MAX_EVENT_COUNT or any(not line.strip() for line in lines):
+        raise AdapterError("protocol")
+    events: list[dict[str, object]] = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            raise AdapterError("protocol") from None
+        if not isinstance(event, dict) or event.get("type") not in {
+            "system", "assistant", "user", "result", "rate_limit_event"
+        }:
+            raise AdapterError("protocol")
+        events.append(event)
+    payload = events[-1]
+    if payload.get("type") != "result" or any(
+        event.get("type") == "result" for event in events[:-1]
+    ):
         raise AdapterError("protocol")
     if payload.get("subtype") != "success" or payload.get("is_error") is not False:
         subtype = str(payload.get("subtype", "")).lower()
@@ -192,23 +209,29 @@ def _parse_result(stdout: bytes, expected_model: str) -> tuple[str, str, int, in
             raise AdapterError("quota")
         raise AdapterError("unavailable")
     message = payload.get("result")
-    usage_by_model = payload.get("modelUsage")
     if not isinstance(message, str) or not message or len(message) > MAX_MESSAGE_LENGTH:
         raise AdapterError("protocol")
-    if not isinstance(usage_by_model, dict) or len(usage_by_model) != 1:
+    assistant_models: list[str] = []
+    for event in events[:-1]:
+        if event.get("type") != "assistant":
+            continue
+        assistant = event.get("message")
+        model = assistant.get("model") if isinstance(assistant, dict) else None
+        if not isinstance(model, str) or _IDENTIFIER.fullmatch(model) is None:
+            raise AdapterError("model_identity_unverified")
+        assistant_models.append(model)
+    if not assistant_models:
         raise AdapterError("model_identity_unverified")
-    effective_model, usage = next(iter(usage_by_model.items()))
-    if not isinstance(effective_model, str) or _IDENTIFIER.fullmatch(effective_model) is None:
-        raise AdapterError("model_identity_unverified")
-    if effective_model != expected_model:
+    if any(model != expected_model for model in assistant_models):
         raise AdapterError("model_mismatch")
+    usage = payload.get("usage")
     if not isinstance(usage, dict):
         raise AdapterError("protocol")
     return (
         message,
-        effective_model,
-        _token(usage.get("inputTokens")),
-        _token(usage.get("outputTokens")),
+        expected_model,
+        _token(usage.get("input_tokens")),
+        _token(usage.get("output_tokens")),
     )
 
 
@@ -254,7 +277,8 @@ def execute_claude(
         normalized_effort.value,
         "--no-session-persistence",
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
         "--input-format",
         "text",
         "--print",
