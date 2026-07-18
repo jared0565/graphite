@@ -57,7 +57,7 @@
 
 - [ ] Write failing tests for `ProviderId`, `CliIdentity`, `CapabilityProfile`, and `CapabilitySnapshot`. Require exact bounded identifiers, semantic CLI versions, normalized executable hashes, supported efforts, permission mode, risk ceiling, and a canonical SHA-256 snapshot digest.
 - [ ] Write a failing approval test proving provider, effective model, CLI identity/version, capability digest, repository commit, canonical worktree identity, and permission policy are signature-bound. Mutating any field must yield `approval_manifest_changed`.
-- [ ] Replace `ApprovalManifest.inventory_digest` with `capability_snapshot_digest` and add provider, CLI, commit, worktree, and permission fields. Keep a compatibility decoder for historical records only; it must never issue a new legacy approval.
+- [ ] Add a v4 CLI approval manifest with `capability_snapshot_digest`, provider, CLI, commit, worktree, and permission fields. Preserve the schema-v3 `ApprovalManifest` unchanged until Task 2 performs the atomic storage cutover; after cutover it remains a historical decoder only and can never receive new authority.
 - [ ] Extend `ExecutionReceipt` with provider, effective model, CLI version, changed-file count, changed-byte count, validation outcome, and optional provider-reported usage. Do not add raw text, prompt, paths, or diagnostics.
 - [ ] Run:
 
