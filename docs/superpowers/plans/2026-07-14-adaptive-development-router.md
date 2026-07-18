@@ -939,12 +939,18 @@ Expected: all tests pass; skips must be explained and must not include routing s
 
 Run recommendation, JSON, CI, redirected, declined, expired-approval, unavailable-storage, stale-graph, unsupported-effort, and manual-handoff cases under tests that fail on any unexpected socket, subprocess, or repository write.
 
-- [ ] **Step 5: Run an explicitly approved bounded Ollama smoke test**
+- [x] **Step 5: Run an explicitly approved bounded Ollama smoke test**
 
-Not run during offline acceptance: no separate live provider-call approval and cost
-review was granted for this acceptance run. Local inventory verification previously
-confirmed the exact allowlisted model identities. This optional external-readiness
-item does not weaken or block mandatory offline acceptance.
+Offline acceptance initially left this pending. On 2026-07-18, the operator
+explicitly approved one `kimi-k2.7-code:cloud` call and re-approved the regenerated
+graph fingerprint. Exact digest/context/prompt/quota bindings matched, one request
+was sent, and it failed closed with `provider_protocol`. Approval
+`approval-546a8592a3f8d393368be76b` was consumed; attempt
+`attempt-322586e22ef4e433b8e828ff` was recorded failed; no execution receipt row was
+created. No retry, fallback, pull, source mutation, or Kimi 2.6 call occurred. The
+human verdict is rejected/external-provider failure. This recorded attempt does not
+weaken or block mandatory offline acceptance, but external live readiness remains
+unproven.
 
 Only after the package/model profile and cost/quota display are reviewed, execute one low-risk synthetic benchmark task with the selected Ollama Cloud model. Do not use repository secrets or production code. Record model identity, effort, usage, latency, receipt, and human verdict. If approval is declined or Ollama is unavailable, record the smoke test as an external readiness limitation; do not weaken offline acceptance.
 

@@ -1,7 +1,7 @@
 # Router Model Pool Hardening Design
 
 **Date:** 2026-07-14
-**Status:** Implemented (offline acceptance passed; live smoke pending explicit approval)
+**Status:** Implemented (offline acceptance passed; live smoke attempted with an external provider protocol failure)
 **Scope:** Ollama Cloud development-routing profiles and deterministic selection
 
 ## 1. Problem
@@ -162,11 +162,12 @@ is fresh (133 source files) and validates with 5,506 nodes, 11,918 edges, zero e
 and zero warnings.
 
 The isolated fixture passed its unit test and recommends
-`kimi-k2.7-code:cloud` at `default` effort and low risk. Its current approval
-preflight is recorded in the implementation plan. No provider chat/inference call
-was made. The controlled preflight used only the recommendation/preparation path,
-which has no approval issuance or consumption operation, and artifact inspection
-found no contrary evidence. A later read-only reviewer could not query the routing
-database because of its ACL, so this record does not claim independent database-row
-verification. The original adaptive-router live smoke remains pending explicit
-approval.
+`kimi-k2.7-code:cloud` at `default` effort and low risk. Offline preflight evidence
+is recorded in the implementation plan. On 2026-07-18, the operator explicitly
+approved one bounded live call and separately re-approved the regenerated graph
+fingerprint. The exact preflight matched before execution. The single `/api/chat`
+request then failed closed with `provider_protocol`; Graphite did not retry, switch
+models, pull a model, or use `kimi-k2.6:cloud`. Sanitized local audit state records
+the consumed approval and failed attempt, with no execution receipt row. This is an
+external provider-readiness failure and does not weaken the passed offline
+acceptance.

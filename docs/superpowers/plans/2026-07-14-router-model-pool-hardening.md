@@ -518,7 +518,7 @@ estimated tokens, maximum reserved tokens, timeout, and the fact that Ollama lab
 the model high usage. Do not infer consent from plan approval, `--yes`, CI, JSON, or
 redirected input. Wait for an explicit yes to that one provider call.
 
-- [ ] **Step 6: Execute one approved call and record sanitized evidence**
+- [x] **Step 6: Execute one approved call and record sanitized evidence**
 
 After approval, invoke `RoutingService` in the synthetic fixture and use its
 in-memory recommendation object so the one-time signed approval binds the
@@ -609,13 +609,31 @@ user direction.
   preflight. Execution is single-shot with no retry, redirect, model fallback, or
   model pull.
 
-Live smoke state: **pending explicit approval**. No model inference/provider chat
-call occurred. Approval issuance and consumption were absent because the controlled
-preflight used only the recommendation/preparation path, which has no issuance or
-consumption operation, and artifact inspection found no contrary evidence. A later
-read-only reviewer could not query the routing database because of its ACL, so this
-record does not claim independent database-row verification. The original
-adaptive-router live-smoke item remains unchecked.
+#### Live-smoke attempt — 2026-07-18
+
+- The original fixture's generated routing directory was inaccessible under its
+  Windows ACL. A disposable fixture containing the same three authored files was
+  rebuilt; its source/test byte counts and hashes remained identical. Rebuilding
+  changed only the graph fingerprint to
+  `bcfed85e53f7301cb0f3a62a920ab21071a2c389020864889ac8e813559c0e20`, which the
+  operator explicitly re-approved before execution.
+- The same execution process refreshed inventory and matched the approved model,
+  digest, effort, risk, graph fingerprint, context manifest, prompt hash, file
+  hashes/bytes, 32,768/4,096 token maxima, 36,864-token reservation, zero existing
+  repository/machine reservations, and 180-second timeout.
+- Exactly one approved `kimi-k2.7-code:cloud` `/api/chat` request was sent. It
+  failed closed with stable reason `provider_protocol`. No retry, redirect,
+  fallback, model pull, source mutation, or `kimi-k2.6:cloud` call occurred.
+- Sanitized audit identifiers: approval
+  `approval-546a8592a3f8d393368be76b` (status `consumed`) and attempt
+  `attempt-322586e22ef4e433b8e828ff` (status `failed`). No execution receipt row was
+  created, so provider usage and latency are unavailable. Repository and machine
+  ledgers each conservatively retain the approved 36,864-token reservation.
+- Human verdict: **rejected / external provider failure**. Offline acceptance
+  remains passed; live external readiness is not passed.
+
+Live smoke state: **attempted — external provider failure (`provider_protocol`)**.
+The original adaptive-router live-smoke item records the same attempted state.
 
 ---
 
