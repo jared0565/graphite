@@ -129,13 +129,13 @@
 - Add `tests/test_routing_codex_executor.py`
 - Replace Ollama-specific cases in `tests/test_routing_executor.py`
 
-- [ ] Create deterministic fake CLI scenarios for auth success/failure, version drift, effective-model match/mismatch, valid edit events, quota/rate limits, malformed output, oversized output, timeout, and cancellation.
-- [ ] Claude preflight uses `claude auth status --json` and a separately bounded version check. Execution uses non-interactive structured output, no session persistence, safe mode, no fallback model, an explicit restricted tool set, and an explicit effort/model. Never use `--dangerously-skip-permissions`, `--continue`, `--resume`, background agents, plugins, Chrome, MCP, or implicit settings.
-- [ ] Codex preflight uses `codex login status` and a separately bounded version check. The canonical execution argv places global controls before the subcommand: `codex --strict-config -a never -s workspace-write -C <worktree> -m <model> -c model_reasoning_effort=<effort> exec --json --ephemeral --ignore-user-config --ignore-rules -`. Never use bypass flags, resume, cloud tasks, additional writable directories, or local/Ollama providers.
-- [ ] Use adapter-specific allowlisted event schemas and reject unknown terminal identity, duplicate terminal events, trailing events, inconsistent usage, path-bearing diagnostics, or missing completion identity.
-- [ ] Normalize only stable sanitized failures: auth, quota, unavailable, version, model mismatch, protocol, response limit, timeout, cancelled, and containment.
-- [ ] Prove with tests that neither adapter retries, falls back, changes model/effort, resumes, opens a shell, or receives stripped secrets.
-- [ ] Commit: `feat: execute approved tasks through Claude and Codex CLIs`.
+- [x] Create deterministic fake CLI scenarios for auth success/failure, version drift, effective-model match/mismatch, valid edit events, quota/rate limits, malformed output, oversized output, timeout, and cancellation.
+- [x] Claude preflight uses `claude auth status --json` and a separately bounded version check. Execution uses non-interactive structured output, no session persistence, safe mode, no fallback model, an explicit restricted tool set, and an explicit effort/model. Never use `--dangerously-skip-permissions`, `--continue`, `--resume`, background agents, plugins, Chrome, MCP, or implicit settings.
+- [x] Codex preflight uses `codex login status` and a separately bounded version check. The canonical execution argv places global controls before the subcommand: `codex --strict-config -a never -s workspace-write -C <worktree> -m <model> -c model_reasoning_effort=<effort> exec --json --ephemeral --ignore-user-config --ignore-rules -`. Never use bypass flags, resume, cloud tasks, additional writable directories, or local/Ollama providers.
+- [x] Use adapter-specific allowlisted event schemas and reject unknown terminal identity, duplicate terminal events, trailing events, inconsistent usage, path-bearing diagnostics, or missing completion identity.
+- [x] Normalize only stable sanitized failures: auth, quota, unavailable, version, model mismatch, protocol, response limit, timeout, cancelled, and containment.
+- [x] Prove with tests that neither adapter retries, falls back, changes model/effort, resumes, opens a shell, or receives stripped secrets.
+- [x] Commit: `feat: execute approved tasks through Claude and Codex CLIs`.
 
 ## Task 6: Add isolated worktrees and diff security policy
 
