@@ -93,13 +93,13 @@
 - Add `tests/test_routing_process_runner.py`
 - Add `tests/fake_clis/fake_cli.py`
 
-- [ ] Write failing tests for fixed argv, closed stdin after bounded prompt transfer, no shell, minimal environment, output caps, one monotonic deadline, cancellation, timeout, nonzero exit, malformed UTF-8, and process-tree termination.
-- [ ] Test Windows Job Object containment and POSIX process-group containment behind platform adapters. If native descendant containment cannot be established, return `process_containment_unavailable` before approval consumption.
-- [ ] Define an explicit environment allowlist needed for executable loading, terminal-neutral behavior, locale, subscription-owned CLI home, and OS operation. Strip `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, cloud credentials, registry tokens, proxy overrides not explicitly allowed, and repository-defined environment injection.
-- [ ] Bound stdout and stderr independently. Hash canonical input and validated structured output, but persist neither body.
-- [ ] Ensure cleanup is idempotent, deadline-bounded, and safe after partial startup.
-- [ ] Run process-runner and routing security tests on Windows; keep explicit platform skips only for tests whose equivalent platform contract is covered elsewhere.
-- [ ] Commit: `feat: add bounded CLI process runner`.
+- [x] Write failing tests for fixed argv, closed stdin after bounded prompt transfer, no shell, minimal environment, output caps, one monotonic deadline, cancellation, timeout, nonzero exit, malformed UTF-8, and process-tree termination.
+- [x] Test Windows Job Object containment and POSIX process-group containment behind platform adapters. If native descendant containment cannot be established, return `process_containment_unavailable` before approval consumption.
+- [x] Define an explicit environment allowlist needed for executable loading, terminal-neutral behavior, locale, subscription-owned CLI home, and OS operation. Strip `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, cloud credentials, registry tokens, proxy overrides not explicitly allowed, and repository-defined environment injection.
+- [x] Bound stdout and stderr independently. Hash canonical input and validated structured output, but persist neither body.
+- [x] Ensure cleanup is idempotent, deadline-bounded, and safe after partial startup.
+- [x] Run process-runner and routing security tests on Windows; keep explicit platform skips only for tests whose equivalent platform contract is covered elsewhere.
+- [x] Commit: `feat: add bounded CLI process runner`.
 
 ## Task 4: Implement profile verification and immutable capability snapshots
 

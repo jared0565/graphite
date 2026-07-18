@@ -12,7 +12,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 OUTPUT_LIMIT_BYTES = 32 * 1024
 INPUT_LIMIT_BYTES = 1024 * 1024
@@ -30,6 +30,7 @@ _SAFE_ERROR_CODES = frozenset(
         "invalid_timeout",
         "invalid_environment",
         "input_limit",
+        "cancelled",
     }
 )
 _ESSENTIAL_ENV = (
@@ -234,15 +235,27 @@ def run_bounded_process(
     stdin: bytes | str | None = None,
     timeout_seconds: float,
     max_output_bytes: int = OUTPUT_LIMIT_BYTES,
+    max_input_bytes: int = INPUT_LIMIT_BYTES,
     check: bool = True,
     environment: Mapping[str, str] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> ProbeProcessResult:
     """Run one isolated process tree under a single hard transport deadline.
 
     ``environment=None`` selects the sanitized probe default. An explicit mapping is the
     complete, non-inheriting child environment, including when the mapping is empty.
     """
-    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0 or max_output_bytes <= 0:
+    if (
+        not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+        or isinstance(max_output_bytes, bool)
+        or not isinstance(max_output_bytes, int)
+        or max_output_bytes <= 0
+        or isinstance(max_input_bytes, bool)
+        or not isinstance(max_input_bytes, int)
+        or max_input_bytes <= 0
+        or max_input_bytes > 4 * 1024 * 1024
+    ):
         raise ProbeProcessError("invalid_timeout")
     if isinstance(stdin, str):
         try:
@@ -251,8 +264,17 @@ def run_bounded_process(
             raise ProbeProcessError("input_limit") from None
     else:
         input_data = stdin
-    if input_data is not None and len(input_data) > INPUT_LIMIT_BYTES:
+    if input_data is not None and len(input_data) > max_input_bytes:
         raise ProbeProcessError("input_limit")
+
+    cancellation = cancelled or (lambda: False)
+    try:
+        if cancellation():
+            raise ProbeProcessError("cancelled")
+    except ProbeProcessError:
+        raise
+    except Exception:
+        raise ProbeProcessError("io_failed") from None
 
     started = time.monotonic()
     deadline = started + timeout_seconds
@@ -324,6 +346,13 @@ def run_bounded_process(
         cleanup_reserve = min(_CLEANUP_SECONDS, max(0.05, timeout_seconds * 0.4))
         execution_deadline = deadline - cleanup_reserve
         while failure_code is None:
+            try:
+                if cancellation():
+                    failure_code = "cancelled"
+                    break
+            except Exception:
+                failure_code = "io_failed"
+                break
             if overflow.is_set():
                 failure_code = "output_limit"
                 break
