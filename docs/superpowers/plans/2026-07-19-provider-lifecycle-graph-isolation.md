@@ -112,6 +112,41 @@ the Task 5 eligibility gate.
 - [x] Run probe-runner, process-runner, and routing security tests.
 - [x] Commit: `feat: add bounded non-inference provider probes`.
 
+## Task 3A: Activate the governed cross-provider selection authority
+
+**Priority override:** The operator explicitly requested this bounded authority
+slice before Task 4. It may select only candidates already backed by current
+lifecycle and capability authority; Task 4 remains necessary before newly added
+providers can become eligible.
+
+**Files:**
+- Add `src/graphite/routing/route_pool.py`
+- Add `src/graphite/routing/route_pool_execution.py`
+- Modify `src/graphite/routing/approval.py`
+- Add `tests/test_route_pool.py`
+- Modify `tests/test_routing_approval.py`
+
+- [x] Define immutable ordered candidates and a signed `ApprovedRoutePool` binding
+  lifecycle identity, capability snapshot, exact model/routing identity, effort,
+  permissions, trust policy, risk ceiling, expiry, and aggregate limits.
+- [x] Hard-cap the initial authority at two total attempts and one fallback.
+- [x] Select the preferred candidate only when its live authority is exact and
+  active; availability cannot add, reorder, or replace candidates.
+- [x] Permit the second candidate only after exact sanitized
+  `capacity_unavailable`, zero accepted output, and proven zero side effects.
+- [x] Require explicit cross-provider authority and reject inactive, stale,
+  under-capability, trust-incompatible, risk-ineligible, over-budget, expired,
+  reordered, replayed, and concurrently consumed pools.
+- [x] Reuse the existing HMAC and machine/repository quota authority so the entire
+  pool is one single-use approval and one aggregate reservation.
+- [x] Persist or expose only candidate digests, attempt ordinals, sanitized outcome
+  categories, and aggregate usage; never raw output or diagnostics.
+- [x] Prove deterministic selection across Claude Code, Codex, Ollama, and
+  OpenRouter identities without invoking a provider.
+- [x] Run route-pool, approval, lifecycle, full routing, Ruff, diff, and graph
+  validation.
+- [x] Commit: `feat: activate governed cross-provider selection`.
+
 ## Task 4: Implement Claude, Codex, Ollama, and OpenRouter probe adapters
 
 **Files:**

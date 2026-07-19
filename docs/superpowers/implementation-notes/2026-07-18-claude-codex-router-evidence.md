@@ -211,3 +211,28 @@ files, 136 communities, and zero validation warnings. Its then-current engine
 fingerprint was
 `2ed615565078bac0ef11040b78b254a8b82c9cf972079a02807a09d838484649`;
 the manifest records `llm_mode` as `none` and `llm_status` as `disabled`.
+
+The governed cross-provider selector is now active as a provider-neutral authority
+boundary before adapter rollout. One signed `ApprovedRoutePool` binds one or two
+ordered exact candidates, current lifecycle and capability digests, model and
+routing identity, trust/permission/risk requirements, expiry, and aggregate token,
+duration, and optional cost limits. The existing HMAC and repository/machine quota
+authority consumes the entire pool once; concurrent or replayed consumption fails.
+
+The coordinator invokes the preferred candidate and automatically advances at most
+once only after exact sanitized `capacity_unavailable`, no accepted output, and
+proven zero side effects. It reloads current lifecycle authority before the second
+attempt. Every other failure, stale identity, expired snapshot, under-capability
+candidate, trust/risk/permission mismatch, exhausted budget, unknown side effect,
+or evidence-sink failure stops closed. Tests exercise Claude Code, Codex, Ollama,
+and OpenRouter identities entirely through deterministic fakes. No provider was
+invoked. The existing `route run` single-model persistence path is intentionally
+unchanged; adapter-backed command wiring requires the later audited multi-attempt
+persistence integration rather than weakening its current one-model constraints.
+
+Offline acceptance for this activation passed 151 focused route-pool, approval,
+lifecycle, and documentation tests. The final full routing selection passed 477
+tests with 1 intentional skip and 1,144 deselected. Repository-wide Ruff and
+`git diff --check` passed. All selection and execution behavior used deterministic
+fake runners; no provider, external network, retry outside the approved pool,
+merge, or push occurred.

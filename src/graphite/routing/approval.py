@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, TextIO
 
 from .contracts import ApprovalManifest, CliApprovalManifest
+from .route_pool import ApprovedRoutePool
 from .storage import RepositoryStore, StorageError
 
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -29,7 +30,7 @@ class ApprovalError(RuntimeError):
 
 @dataclass(frozen=True)
 class SignedApproval:
-    manifest: ApprovalManifest | CliApprovalManifest
+    manifest: ApprovalManifest | CliApprovalManifest | ApprovedRoutePool
     signature: str
 
     def to_dict(self) -> dict[str, object]:
@@ -67,7 +68,9 @@ def approval_prompt(
     return answer.strip().casefold() in {"y", "yes"}
 
 
-def _canonical_manifest(manifest: ApprovalManifest | CliApprovalManifest) -> bytes:
+def _canonical_manifest(
+    manifest: ApprovalManifest | CliApprovalManifest | ApprovedRoutePool,
+) -> bytes:
     return json.dumps(
         manifest.to_dict(),
         sort_keys=True,
@@ -247,7 +250,9 @@ class ApprovalAuthority:
         self._quota = _MachineQuotaStore(quota_path, store.root)
         self._now = now or (lambda: int(time.time()))
 
-    def issue(self, manifest: ApprovalManifest | CliApprovalManifest) -> SignedApproval:
+    def issue(
+        self, manifest: ApprovalManifest | CliApprovalManifest | ApprovedRoutePool
+    ) -> SignedApproval:
         payload = _canonical_manifest(manifest)
         manifest_hash = hashlib.sha256(payload).hexdigest()
         nonce_hash = hashlib.sha256(manifest.nonce.encode("utf-8")).hexdigest()
@@ -269,7 +274,7 @@ class ApprovalAuthority:
     def verify(
         self,
         signed: SignedApproval,
-        current_manifest: ApprovalManifest | CliApprovalManifest,
+        current_manifest: ApprovalManifest | CliApprovalManifest | ApprovedRoutePool,
     ) -> None:
         if not isinstance(signed, SignedApproval):
             raise ApprovalError("approval_invalid")
@@ -284,7 +289,7 @@ class ApprovalAuthority:
     def consume(
         self,
         signed: SignedApproval,
-        current_manifest: ApprovalManifest | CliApprovalManifest,
+        current_manifest: ApprovalManifest | CliApprovalManifest | ApprovedRoutePool,
         *,
         repository_quota_tokens: int,
         machine_quota_tokens: int,
