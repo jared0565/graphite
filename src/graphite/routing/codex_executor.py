@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Final
 
 from .claude_executor import AdapterError, _canonical_file, _file_sha256, _identifier
+from .cli_identity import CliIdentityPrimitiveError, parse_semantic_version_output
 from .contracts import CliIdentity, Effort, PermissionMode, ProviderId
 from .process_runner import (
     CliProcessError,
@@ -89,7 +90,7 @@ def preflight_codex(
     transport: Transport = run_cli_process,
 ) -> CliIdentity:
     """Verify executable identity and ChatGPT subscription authentication."""
-    resolved = _canonical_file(executable)
+    resolved = _canonical_file(executable, workspace=workspace)
     executable_digest = _file_sha256(resolved)
     common = {
         "cwd": workspace,
@@ -104,8 +105,9 @@ def preflight_codex(
         version_text = decode_cli_output(version_result.stdout)
     except CliProcessError:
         raise AdapterError("version") from None
-    match = _VERSION.fullmatch(version_text)
-    if match is None:
+    try:
+        version = parse_semantic_version_output(version_text, _VERSION)
+    except CliIdentityPrimitiveError:
         raise AdapterError("version")
     status_result = _invoke(
         transport, argv=(str(resolved), "login", "status"), stdin=b"", **common
@@ -129,7 +131,7 @@ def preflight_codex(
     return CliIdentity(
         ProviderId.CODEX,
         executable_digest,
-        ".".join(match.groups()),
+        version,
         ADAPTER_PROTOCOL_VERSION,
     )
 
@@ -229,7 +231,7 @@ def execute_codex(
     timeout_seconds: float = EXECUTION_TIMEOUT_SECONDS,
 ) -> CodexExecutionResult:
     """Execute exactly one ephemeral, sandboxed Codex task."""
-    resolved = _canonical_file(executable)
+    resolved = _canonical_file(executable, workspace=workspace)
     requested = _identifier(requested_model)
     expected = _identifier(expected_effective_model)
     try:

@@ -162,16 +162,16 @@ providers can become eligible.
 - Add `tests/test_provider_ollama_probe.py`
 - Add `tests/test_provider_openrouter_probe.py`
 
-- [ ] Refactor reusable executable identity and semantic-version parsing out of the CLI executors without weakening their execution-specific structured-output rules.
-- [ ] Claude and Codex adapters must canonicalize approved executables, reject workspace-local files/symlinks/reparse points, hash bytes, obtain bounded version/auth-health results, and test required non-inference flags using deterministic fake CLIs.
-- [ ] Do not invoke CLI prompts or verification requests from a lifecycle probe. A help/capability check that could initialize a session, contact inference, or produce unbounded output is forbidden.
-- [ ] Ollama must accept only canonical loopback endpoints, observe server/API compatibility, and bind configured tags to immutable model digests through non-generation metadata endpoints.
-- [ ] OpenRouter must accept only the approved canonical HTTPS endpoint and approved redirects set to empty, bind the configured model plus routing policy, and use only documented non-inference health/contract metadata.
-- [ ] If OpenRouter offers no safe endpoint for a desired health claim, report that capability as `unknown` or use credential presence only; never substitute an inference call.
-- [ ] Normalize all four adapters into the same lifecycle identity contract and stable failure categories.
-- [ ] Prove every adapter performs one bounded probe sequence, has no retry/fallback/provider switching, and cannot leak raw outputs or credentials.
-- [ ] Run all adapter, security, and existing executor tests.
-- [ ] Commit: `feat: observe provider identities without inference`.
+- [x] Refactor reusable executable identity and semantic-version parsing out of the CLI executors without weakening their execution-specific structured-output rules.
+- [x] Claude and Codex adapters must canonicalize approved executables, reject workspace-local files/symlinks/reparse points, hash bytes, obtain bounded version/auth-health results, and test required non-inference flags using deterministic fake CLIs.
+- [x] Do not invoke CLI prompts or verification requests from a lifecycle probe. A help/capability check that could initialize a session, contact inference, or produce unbounded output is forbidden.
+- [x] Ollama must accept only canonical loopback endpoints, observe server/API compatibility, and bind configured tags to immutable model digests through non-generation metadata endpoints.
+- [x] OpenRouter must accept only the approved canonical HTTPS endpoint and approved redirects set to empty, bind the configured model plus routing policy, and use only documented non-inference health/contract metadata.
+- [x] If OpenRouter offers no safe endpoint for a desired health claim, report that capability as `unknown` or use credential presence only; never substitute an inference call.
+- [x] Normalize all four adapters into the same lifecycle identity contract and stable failure categories.
+- [x] Prove every adapter performs one bounded probe sequence, has no retry/fallback/provider switching, and cannot leak raw outputs or credentials.
+- [x] Run all adapter, security, and existing executor tests.
+- [x] Commit: `feat: observe provider identities without inference`.
 
 ## Task 5: Implement lifecycle coordination, invalidation, and lazy enforcement
 

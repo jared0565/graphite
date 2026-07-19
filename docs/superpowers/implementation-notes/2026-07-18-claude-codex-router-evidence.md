@@ -236,3 +236,28 @@ tests with 1 intentional skip and 1,144 deselected. Repository-wide Ruff and
 `git diff --check` passed. All selection and execution behavior used deterministic
 fake runners; no provider, external network, retry outside the approved pool,
 merge, or push occurred.
+
+## Provider lifecycle adapters
+
+Task 4 added normalized lifecycle observations for Claude Code, Codex, Ollama,
+and OpenRouter without invoking inference. CLI adapters use canonical external
+executables, byte digests, exact semantic versions, bounded local help and auth
+commands, aggregate deadlines, and post-probe digest checks. The executor paths
+now share those identity primitives while retaining their existing strict output
+contracts. Ollama uses only loopback version, tags, and show metadata and binds an
+exact tag to its immutable digest. OpenRouter permits only the canonical HTTPS API
+root, follows no redirects, and binds the configured model and routing-policy
+digests using auth and model metadata endpoints only.
+
+Focused adapter, process-boundary, executor, registry, and routing-security tests
+passed 124 tests. The broader offline routing/provider selection passed 489 tests
+with 1 intentional skip and 1,145 deselected. Repository-wide Ruff and
+`git diff --check` passed before graph acceptance. All adapter tests used
+deterministic fake transports; no provider process, external request, inference,
+retry, fallback, model substitution, merge, or push occurred.
+
+The canonical acceptance rebuild used the feature-branch source and explicit
+`--llm none`. It completed with 6,911 nodes, 15,236 edges, 174 scanned files,
+137 communities, zero build warnings, and fingerprint
+`8d223b44a4679b1d502f2b055c1fcd8714c89c6fa7d450ef8d94ad229eee0482`;
+the freshness check passed with `llm_status=disabled`.

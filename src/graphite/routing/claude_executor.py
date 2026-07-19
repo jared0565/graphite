@@ -1,15 +1,19 @@
 """Hardened adapter for an authenticated Claude Code subscription CLI."""
 from __future__ import annotations
 
-import hashlib
 import json
 import re
-import stat
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
+from .cli_identity import (
+    CliIdentityPrimitiveError,
+    canonical_executable,
+    executable_sha256,
+    parse_semantic_version_output,
+)
 from .contracts import CliIdentity, Effort, PermissionMode, ProviderId
 from .process_runner import (
     CliProcessError,
@@ -22,14 +26,12 @@ from .process_runner import (
 ADAPTER_PROTOCOL_VERSION: Final = "1.0.0"
 PREFLIGHT_TIMEOUT_SECONDS: Final = 15.0
 EXECUTION_TIMEOUT_SECONDS: Final = 1_800.0
-MAX_EXECUTABLE_BYTES: Final = 512 * 1024 * 1024
 MAX_MESSAGE_LENGTH: Final = 1_048_576
 MAX_TOKEN_COUNT: Final = 10_000_000
 PROFILE_VERIFICATION_MARKER: Final = "GRAPHITE_PROFILE_OK"
 MAX_EVENT_COUNT: Final = 10_000
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*) \(Claude Code\)\r?\n?$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
-_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _TRANSPORT_ERRORS: Final = {
     "timeout": "timeout",
     "cancelled": "cancelled",
@@ -72,34 +74,18 @@ class ClaudeExecutionResult:
 Transport = Callable[..., CliProcessResult]
 
 
-def _canonical_file(path: Path) -> Path:
-    if not isinstance(path, Path) or not path.is_absolute():
-        raise AdapterError("executable_invalid")
+def _canonical_file(path: Path, *, workspace: Path | None = None) -> Path:
     try:
-        link_metadata = path.lstat()
-        resolved = path.resolve(strict=True)
-    except OSError:
+        return canonical_executable(path, workspace=workspace)
+    except CliIdentityPrimitiveError:
         raise AdapterError("executable_invalid") from None
-    if (
-        not stat.S_ISREG(link_metadata.st_mode)
-        or stat.S_ISLNK(link_metadata.st_mode)
-        or bool(getattr(link_metadata, "st_file_attributes", 0) & _REPARSE_POINT)
-        or link_metadata.st_size <= 0
-        or link_metadata.st_size > MAX_EXECUTABLE_BYTES
-    ):
-        raise AdapterError("executable_invalid")
-    return resolved
 
 
 def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     try:
-        with path.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
-    except OSError:
+        return executable_sha256(path)
+    except CliIdentityPrimitiveError:
         raise AdapterError("executable_invalid") from None
-    return digest.hexdigest()
 
 
 def _invoke(transport: Transport, **kwargs: object) -> CliProcessResult:
@@ -138,7 +124,7 @@ def preflight_claude(
     transport: Transport = run_cli_process,
 ) -> CliIdentity:
     """Verify executable identity and Claude subscription authentication."""
-    resolved = _canonical_file(executable)
+    resolved = _canonical_file(executable, workspace=workspace)
     executable_digest = _file_sha256(resolved)
     common = _common_call(
         executable=resolved, workspace=workspace, credential_home=credential_home
@@ -150,10 +136,10 @@ def preflight_claude(
         version_text = decode_cli_output(version_result.stdout)
     except CliProcessError:
         raise AdapterError("version") from None
-    match = _VERSION.fullmatch(version_text)
-    if match is None:
+    try:
+        version = parse_semantic_version_output(version_text, _VERSION)
+    except CliIdentityPrimitiveError:
         raise AdapterError("version")
-    version = ".".join(match.groups())
     auth_result = _invoke(
         transport,
         argv=(str(resolved), "auth", "status", "--json"),
@@ -274,7 +260,7 @@ def execute_claude(
     _verification_marker: str | None = None,
 ) -> ClaudeExecutionResult:
     """Execute exactly one noninteractive, non-resumable Claude task."""
-    resolved = _canonical_file(executable)
+    resolved = _canonical_file(executable, workspace=workspace)
     requested = _identifier(requested_model)
     expected = _identifier(expected_effective_model)
     try:
