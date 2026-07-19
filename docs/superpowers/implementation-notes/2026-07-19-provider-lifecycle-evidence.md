@@ -60,12 +60,12 @@ metadata and historical evidence must never be hand-edited to manufacture author
 
 ## Remaining live-readiness gates
 
-Graphite is not production-ready. A current Claude profile must pass a separately
-approved bounded verification. Claude and Codex must each pass separately approved
-edit smokes, followed by a cross-provider high-risk review. Final audit persistence,
-the complete test suite, and the final canonical graph must also pass. No live
-manifest authorizes a call until its complete contents are displayed and explicitly
-approved by the operator.
+Graphite is not production-ready. The current Claude profile has passed its
+separately approved bounded verification. Claude and Codex must each still pass
+separately approved edit smokes, followed by a cross-provider high-risk review.
+Final audit persistence, the complete test suite, and the final canonical graph must
+also pass. No live manifest authorizes a call until its complete contents are
+displayed and explicitly approved by the operator.
 
 ## Final Task 9 verification
 
@@ -162,3 +162,41 @@ observer, lifecycle, process, routing-security, and documentation selection pass
 invoked by this offline correction. The final fresh canonical graph contains 7,472
 nodes, 16,544 edges, 151 communities, and 184 scanned files; its engine fingerprint
 is `19edcaa577a1fb0fe95eafa6aa6536ec21430ed8fe8077f44a6284cd0a3ee27c`.
+
+## Current Claude bounded verification
+
+The operator explicitly approved verification manifest
+`58830ca00ef8e0e816c7a2f180f0ddd8851d8e5ff6cf0d50b1fb7eb2725c0871`.
+Local preflight bound the call to Claude Code `2.1.215`, executable SHA-256
+`f14452d1e199273795f2920c00fd7a7f818178ddf1f3efb4d005a7e3d4ec4eff`,
+lifecycle identity
+`a675534863c4e9a2e2205accf7ca60e0fea45894156fff4c5dbc597287e164c2`,
+fixture commit `01a9603e54f0eb0c878c2c8e9729a82e8dd7c180`, and canonical graph
+fingerprint `f329c348d125c03fb7bc6ecff2592e0f3682b96b4a2430f3355464c6d304ca8c`.
+The manifest allowed exactly one read-only `sonnet` attempt, required effective
+model `claude-sonnet-5`, fixed effort `high`, one turn, no fallback, no resume, no
+substitution, 65,536 maximum input tokens, 4,096 maximum output tokens, and a
+120-second timeout.
+
+The single approved attempt passed the exact structured-response, model-identity,
+read-only, and token-budget checks. Sanitized receipt evidence is:
+
+- effective model: `claude-sonnet-5`;
+- duration: 9,603 milliseconds;
+- usage: 2 input tokens and 521 output tokens;
+- stdout SHA-256:
+  `5ce32e3a2058f0ebf09104398ab6d3a608f9b29a9f38b51b967bc771b1d40613`;
+- stderr SHA-256:
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`;
+- capability snapshot:
+  `15f3fe9a6749925432a223162c107d2a5264e291f9c1cda2adb1d591f513ddcb`;
+- snapshot expiry: `2026-07-19T20:24:30Z`.
+
+The schema-v5 snapshot and lifecycle binding were saved only in a new isolated
+acceptance store. The active schema-v4 fixture database was not opened, migrated,
+or treated as authority. The lifecycle deliberately remained
+`verification_required`; activation was false. The fixture and implementation
+worktrees remained clean, and there was no retry, fallback, model substitution,
+merge, push, or deployment. Earlier harness preflight corrections failed before
+the isolated store was initialized and before any model attempt, so they consumed
+no inference authority and retained no provider output.

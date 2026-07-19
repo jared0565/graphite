@@ -308,7 +308,7 @@ providers can become eligible.
 - [x] Verify lifecycle and routing databases with SQLite integrity and foreign-key checks; repeat the schema-v4 restore drill.
 - [x] Confirm no live provider request, subscription call, external network inference, model substitution, merge, or push occurred; route-pool behavior used deterministic fakes only.
 - [x] Commit final offline corrections and evidence in reviewable bounded commits.
-- [ ] Prepare, but do not execute, a new exact Claude verification manifest and equivalent manifests for any other provider requiring activation.
+- [x] Prepare and execute the separately approved exact Claude verification manifest. The bounded call passed and persisted only an isolated, lifecycle-bound snapshot; activation remained false.
 
 ## Separate live-acceptance gate
 
