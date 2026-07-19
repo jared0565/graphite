@@ -23,7 +23,7 @@ def discover_routing_evidence_documents(root: Path = ROOT) -> tuple[str, ...]:
     return tuple(sorted(
         path.relative_to(root).as_posix()
         for path in notes.glob("*.md")
-        if "routing" in path.name or "model-pool" in path.name
+        if "routing" in path.name or "model-pool" in path.name or "provider-lifecycle" in path.name
     ))
 
 
@@ -72,7 +72,7 @@ def test_adaptive_routing_boundary_is_documented() -> None:
         "detached worktree",
         "single-use approval",
         "no automatic retry",
-        "no automatic retry, fallback",
+        "capacity_unavailable",
         "high-risk",
         "untrusted",
         "incident response",
@@ -234,7 +234,7 @@ def test_cli_router_trust_migration_and_readiness_boundaries_are_documented() ->
         "subscription cost is `unknown`, never zero",
         "cannot change the provider allowlist, permission ceiling, risk ceilings, or autonomy",
         "stop all graphite routing writers",
-        "events-schema-v3.sha256.json",
+        "events-schema-v4.sha256.json",
         "rollback is a database restore, not an in-place downgrade",
         "tested forward fix",
     ):
@@ -256,7 +256,7 @@ def test_routing_docs_state_each_authority_and_recovery_gate() -> None:
         "prompt-hash-bound",
         "commit-bound",
         "token-bound",
-        "no automatic retry, fallback, provider/model switch",
+        "capacity-only route-pool transition",
         "read-only review by the other provider",
         "cherry-pickable commit",
         "it never merges",
@@ -1706,6 +1706,32 @@ def test_overlay_boundary_is_documented_as_non_authoritative_and_isolated() -> N
     assert "query`, `context`, `impact`, validation, routing, watch, and daemon do not read overlays" in readme
     assert "raw provider diagnostics" in combined
     assert "never argv or a repository file" in readme
+
+
+def test_provider_lifecycle_operator_and_v5_recovery_are_documented() -> None:
+    combined = re.sub(
+        r"\s+",
+        " ",
+        f"{read_document('README.md')}\n{read_document('ARCHITECTURE.md')}",
+    ).casefold()
+    for phrase in (
+        "graphite lifecycle list",
+        "graphite lifecycle status",
+        "graphite lifecycle history",
+        "lifecycle policy prepare",
+        "lifecycle verification prepare",
+        "verification_required",
+        "never directly to `active`",
+        "lazy identity check",
+        "cannot activate a provider",
+        "schema-v4 to schema-v5",
+        "events-schema-v4.sqlite3",
+        "pragma foreign_key_check",
+        "tested forward fix",
+        "one-step",
+        "capacity_unavailable",
+    ):
+        assert phrase in combined, phrase
 
 
 def test_release_guide_has_gates_and_version_sources() -> None:

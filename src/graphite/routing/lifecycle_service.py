@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -100,6 +99,85 @@ class VerificationManifest(PublicRecord):
     @property
     def digest(self) -> str:
         return hashlib.sha256(json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def build_verification_manifest(
+    current: CurrentLifecycleObservation,
+    *,
+    requested_model: str,
+    expected_effective_model: str,
+    effort: Effort,
+    max_input_tokens: int,
+    max_output_tokens: int,
+    timeout_seconds: int,
+    expires_at: int,
+    fixture_repository_commit: str,
+    graph_fingerprint: str,
+    prompt_contract_hash: str,
+    response_contract_hash: str,
+    max_cost_microunits: int | None = None,
+) -> VerificationManifest:
+    """Build a bounded manifest from one already-read exact lifecycle observation."""
+    try:
+        normalized_effort = Effort(effort)
+    except (TypeError, ValueError):
+        raise LifecycleServiceError("verification_manifest_invalid") from None
+    values = (max_input_tokens, max_output_tokens, timeout_seconds, expires_at)
+    digests = (graph_fingerprint, prompt_contract_hash, response_contract_hash)
+    models = (requested_model, expected_effective_model)
+    safe_models = all(
+        isinstance(value, str)
+        and 0 < len(value) <= 256
+        and all(
+            character.isascii() and (character.isalnum() or character in "._:-")
+            for character in value
+        )
+        for value in models
+    )
+    commit_valid = (
+        isinstance(fixture_repository_commit, str)
+        and len(fixture_repository_commit) in {40, 64}
+        and all(character in "0123456789abcdef" for character in fixture_repository_commit)
+    )
+    if (
+        not isinstance(current, CurrentLifecycleObservation)
+        or current.identity is None
+        or current.state is not ProviderLifecycleState.VERIFICATION_REQUIRED
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in values
+        )
+        or not safe_models
+        or not commit_valid
+        or any(
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in digests
+        )
+        or max_cost_microunits is not None
+        and (
+            isinstance(max_cost_microunits, bool)
+            or not isinstance(max_cost_microunits, int)
+            or max_cost_microunits <= 0
+        )
+        or expires_at <= current.updated_at
+    ):
+        raise LifecycleServiceError("verification_manifest_invalid")
+    identity = current.identity
+    return VerificationManifest(
+        identity.provider.value, identity.runtime_kind.value, identity.digest,
+        identity.version, identity.runtime_digest, identity.model_identity_digest,
+        identity.routing_policy_digest, identity.policy_version, requested_model,
+        expected_effective_model, normalized_effort.value, "read-only",
+        max_input_tokens, max_output_tokens, timeout_seconds, expires_at,
+        fixture_repository_commit, graph_fingerprint, prompt_contract_hash,
+        response_contract_hash, max_cost_microunits, 1, False, True, True,
+        (
+            "duration_ms", "effective_model", "exit_classification",
+            "input_tokens", "output_tokens", "stderr_sha256", "stdout_sha256",
+        ),
+    )
 
 
 def _event(
@@ -397,26 +475,22 @@ class ProviderLifecycleService:
     ) -> VerificationManifest:
         try:
             current = self.lifecycle_store.current_observation(boundary_digest)
-            normalized_effort = Effort(effort)
         except (LifecycleStorageError, ValueError):
             raise LifecycleServiceError("verification_manifest_invalid") from None
-        values = (max_input_tokens, max_output_tokens, timeout_seconds, expires_at)
-        digests = (graph_fingerprint, prompt_contract_hash, response_contract_hash)
-        if current is None or current.identity is None or current.state is not ProviderLifecycleState.VERIFICATION_REQUIRED or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in values) or not isinstance(requested_model, str) or not requested_model or not isinstance(expected_effective_model, str) or not expected_effective_model or not isinstance(fixture_repository_commit, str) or len(fixture_repository_commit) not in {40, 64} or any(not isinstance(value, str) or len(value) != 64 or any(character not in "0123456789abcdef" for character in value) for value in digests) or max_cost_microunits is not None and (isinstance(max_cost_microunits, bool) or not isinstance(max_cost_microunits, int) or max_cost_microunits <= 0):
+        if current is None:
             raise LifecycleServiceError("verification_manifest_invalid")
-        if not math.isfinite(timeout_seconds) or expires_at <= current.updated_at:
-            raise LifecycleServiceError("verification_manifest_invalid")
-        identity = current.identity
-        return VerificationManifest(
-            identity.provider.value, identity.runtime_kind.value, identity.digest,
-            identity.version, identity.runtime_digest, identity.model_identity_digest,
-            identity.routing_policy_digest, identity.policy_version, requested_model,
-            expected_effective_model, normalized_effort.value, "read-only",
-            max_input_tokens, max_output_tokens, timeout_seconds, expires_at,
-            fixture_repository_commit, graph_fingerprint, prompt_contract_hash,
-            response_contract_hash, max_cost_microunits, 1, False, True, True,
-            (
-                "duration_ms", "effective_model", "exit_classification",
-                "input_tokens", "output_tokens", "stderr_sha256", "stdout_sha256",
-            ),
+        return build_verification_manifest(
+            current,
+            requested_model=requested_model,
+            expected_effective_model=expected_effective_model,
+            effort=effort,
+            max_input_tokens=max_input_tokens,
+            max_output_tokens=max_output_tokens,
+            timeout_seconds=timeout_seconds,
+            expires_at=expires_at,
+            fixture_repository_commit=fixture_repository_commit,
+            graph_fingerprint=graph_fingerprint,
+            prompt_contract_hash=prompt_contract_hash,
+            response_contract_hash=response_contract_hash,
+            max_cost_microunits=max_cost_microunits,
         )

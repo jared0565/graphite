@@ -28,7 +28,8 @@ The implementation stages are:
 5. **Validation and review — `validation.py`, `context.py`, `review.py`.** Bundle validation checks structural types, node and edge identity, referential integrity, metadata counts, and unsafe `source_file` paths. Review validates a supplied bundle before deriving graph impact evidence; its Git discovery also normalizes status records and rejects malformed or unsafe paths. By contrast, `cmd_query`, `cmd_impact`, `cmd_context`, and `GraphiteMCPServer._load` currently read JSON and call `graph_from_json` without `validate_graph_bundle` or a bounded-read helper. Those direct consumers therefore rely on callers to supply an already validated, reasonably sized artifact.
 6. **Export — `export/json.py`, `export/md.py`, `export/html.py`, `io.py`.** Exporters consume only canonical graph, cluster, analysis, and manifest data. JSON serialization provides the data encoding; HTML separately JSON-encodes script data, escapes `<`, `>`, and `&`, HTML-escapes the title, and uses text DOM APIs for runtime labels. Text and JSON outputs use temporary files, `fsync`, and `os.replace` for atomic replacement of each file.
 7. **Operations — `watch.py`, `daemon.py`, `daemon_health.py`, `bootstrap.py`, `init.py`, `windows_task.py`, `windows_startup.py`.** These modules watch for changes, maintain multi-project daemon status, evaluate health, generate integration instructions, and manage platform startup. Watch and daemon canonicalize inherited configuration; daemon child builds use fixed `--llm none` argv and a provider-scrubbed environment.
-8. **Optional overlays — `overlays.py` and `llm.py`.** Provider adapters may consume an already-built, fresh, validated graph only through `graphite overlay build`. The overlay manifest binds the canonical bundle fingerprint, exact lifecycle/model/routing identities, limits, creation time, outcome, and schema. Identity-derived contained paths, restrictive permissions, content-addressed payloads, and manifest-last atomic replacement isolate the output below `graph-out/overlays/`. Overlay staleness is independent of canonical freshness and cannot grant graph or routing authority.
+8. **Provider lifecycle — `routing/lifecycle.py`, `routing/lifecycle_storage.py`, `routing/lifecycle_service.py`, and `routing/lifecycle_operator.py`.** Runtime observations, compatibility decisions, lifecycle authority, and invalidations live in an isolated database. Operator reads use an existing-database, query-only connection and bounded public records. Policy and verification preparation create non-activating content-hashed candidates; neither surface invokes a provider.
+9. **Optional overlays — `overlays.py` and `llm.py`.** Provider adapters may consume an already-built, fresh, validated graph only through `graphite overlay build`. The overlay manifest binds the canonical bundle fingerprint, exact lifecycle/model/routing identities, limits, creation time, outcome, and schema. Identity-derived contained paths, restrictive permissions, content-addressed payloads, and manifest-last atomic replacement isolate the output below `graph-out/overlays/`. Overlay staleness is independent of canonical freshness and cannot grant graph or routing authority.
 
 ## Module map
 
@@ -101,7 +102,9 @@ Model use is disabled by default and requires the explicit overlay command; no v
 
 The active provisional pool comprises `kimi-k2.7-code:cloud` for primary coding at high usage, `minimax-m2.7:cloud` for coding and agentic work at medium usage, `nemotron-3-super:cloud` for reasoning and review at medium usage, and `minimax-m3:cloud` for long-context and agentic work at high usage. All four accept only `default` effort. Provisional profiles are ineligible for high-risk tasks, which produce a manual frontier handoff rather than weakening a gate.
 
-The execution authority binds one signed, short-lived, single-use approval to the exact model and inventory digest, effort, graph/context manifest, input and output limits, and quota reservation. Runtime independently revalidates the signed digest against bounded loopback inventory before approval consumption and the provider POST. The canonical loopback executor makes one request. It never automatically retries, falls back, switches models, pulls a model, reuses an approval, or follows redirects. Non-TTY input or output, JSON mode, CI, and `--yes` are incapable of granting execution authority.
+The execution authority binds one signed, short-lived, single-use approval to the exact model and inventory digest, effort, graph/context manifest, input and output limits, and quota reservation. Runtime independently revalidates the signed digest before approval consumption and the provider process. There is no retry or arbitrary substitution. One automatic cross-provider advance is permitted only when the same immutable approved pool contains exactly two eligible candidates and the first fails as `capacity_unavailable` before output or side effects; the second consumes its own exact authority. Non-TTY input or output, JSON mode, CI, and `--yes` are incapable of granting execution authority.
+
+Lifecycle transitions never grant graph authority. `discovered`, `compatible`, `verification_required`, `active`, `incompatible`, and `unavailable` are persisted separately from graph artifacts. Hash/patch changes require a standard probe, minor/capability changes require an expanded probe, and major changes remain incompatible pending a separately authorized policy promotion. A successful probe reaches only `verification_required`; exact bounded verification is still required before activation. Daemon observation is advisory for scheduling and health, while the lazy identity check immediately before approval consumption is authoritative. One corrupt or unavailable provider boundary fails closed without changing canonical graph behavior or another provider's independent boundary.
 
 Provider text crosses only the interactive display boundary. The CLI escapes terminal controls and delimiter impersonation, frames every line, and keeps the text ephemeral. Persistence contains the validated receipt, hashes, bindings, and bounded audit metadata, never the displayed text. A new attempt is durably recorded as `pending`; successful receipt finalization transactionally creates the execution, receipt, evidence, budget link, and `completed` transition.
 
@@ -183,8 +186,9 @@ Provider output and edits are untrusted. The diff boundary rejects filesystem
 indirection, repository nesting, submodule changes, case collisions, scope or size
 violations, and source/diff drift. High-risk tasks require a separately approved
 read-only review by the other provider. Acceptance produces only a detached commit;
-it never merges. Retry, fallback, provider switching, session reuse, cleanup, and
-merge are never automatic.
+it never merges. Retry, arbitrary provider switching, session reuse, cleanup, and
+merge are never automatic. The only fallback is the pre-authorized, one-step,
+capacity-only route-pool transition described above.
 
 Telemetry has a closed typed schema and excludes source, prompt/response text, diff
 contents, paths, secrets, and raw diagnostics. Subscription cost remains `unknown`.
@@ -193,9 +197,10 @@ candidate. Candidate creation grants no authority. Interactive promotion cannot
 alter provider allowlists, permission ceilings, risk ceilings, or autonomy; rollback
 appends an activation event and retains all prior evidence.
 
-Schema v4 is a forward cutover. Before changing a v3 database, Graphite creates a
-private v3 backup and SHA-256 marker, validates schema and integrity, and quarantines
-live legacy-provider attempts. Rollback requires stopped writers, verified backup
-restore, and the matching old code; v4 is not edited into v3. A partial schema,
+Schema v5 is a forward cutover. Before changing a v4 routing database, Graphite
+creates a private `events-schema-v4.sqlite3` backup and SHA-256 marker, validates
+schema, integrity, and foreign keys, then adds lifecycle bindings without inventing
+authority for historical rows. Rollback requires stopped writers, verified backup
+restore, and the matching v4 code; v5 is not edited into v4. A partial schema,
 missing marker, lock, or failed integrity check leaves routing stopped for verified
 restore or a tested forward fix.

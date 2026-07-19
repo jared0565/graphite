@@ -115,10 +115,76 @@ class _Service:
         })()
 
 
+class _LifecycleOperator:
+    calls: list[str] = []
+
+    def __init__(self, path):
+        self.path = path
+
+    def status(self, boundary_digest):
+        self.calls.append(f"status:{boundary_digest}")
+        return {
+            "schema_version": 1,
+            "storage_integrity": "ok",
+            "observation": {
+                "boundary_digest": boundary_digest,
+                "provider": "claude-code",
+                "runtime_kind": "local-cli",
+                "state": "verification_required",
+                "lifecycle_identity_digest": "a" * 64,
+                "policy_version": "1.0.0",
+                "updated_at": 100,
+            },
+        }
+
+    def list_observations(self, *, limit):
+        self.calls.append(f"list:{limit}")
+        return {"schema_version": 1, "count": 0, "observations": []}
+
+    def history(self, boundary_digest, *, limit):
+        self.calls.append(f"history:{boundary_digest}:{limit}")
+        return {"schema_version": 1, "count": 0, "events": []}
+
+    def inspect_policy(self, boundary_digest):
+        self.calls.append(f"policy-inspect:{boundary_digest}")
+        return {
+            "schema_version": 1,
+            "provider": "claude-code",
+            "runtime_kind": "local-cli",
+            "policy_version": "1.0.0",
+            "automatic_activation": False,
+        }
+
+    def prepare_policy_promotion(self, **kwargs):
+        self.calls.append("policy-prepare")
+        return {
+            "schema_version": 1,
+            "candidate_digest": "c" * 64,
+            "promotion_requires_separate_human_authority": True,
+            "automatic_activation": False,
+        }
+
+    def prepare_verification_manifest(self, **kwargs):
+        self.calls.append("verification-prepare")
+        return {
+            "schema_version": 1,
+            "manifest_digest": "d" * 64,
+            "manifest": {
+                "lifecycle_identity_digest": kwargs["lifecycle_identity_digest"],
+                "max_attempts": 1,
+                "fallback_enabled": False,
+            },
+            "execution_performed": False,
+            "activation_performed": False,
+        }
+
+
 @pytest.fixture(autouse=True)
 def _service(monkeypatch: pytest.MonkeyPatch):
     _Service.calls = []
+    _LifecycleOperator.calls = []
     monkeypatch.setattr(cli, "RoutingService", _Service)
+    monkeypatch.setattr(cli, "LifecycleOperator", _LifecycleOperator)
 
 
 def test_recommend_is_read_only_and_prints_public_json(capsys: pytest.CaptureFixture[str]) -> None:
@@ -296,3 +362,72 @@ def test_machine_verification_claim_requires_supported_import() -> None:
         "--provenance", "machine_verified", "--accepted",
     ]) == 6
     assert "record" not in _Service.calls
+
+
+def test_lifecycle_read_commands_emit_bounded_sanitized_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    boundary = "b" * 64
+    commands = (
+        (["lifecycle", "list", ".", "--limit", "10", "--json"], "list:10"),
+        (["lifecycle", "status", ".", "--boundary-digest", boundary, "--json"], f"status:{boundary}"),
+        (["lifecycle", "history", ".", "--boundary-digest", boundary, "--limit", "9", "--json"], f"history:{boundary}:9"),
+        (["lifecycle", "policy", "inspect", ".", "--boundary-digest", boundary, "--json"], f"policy-inspect:{boundary}"),
+    )
+    for arguments, expected_call in commands:
+        assert cli.main(arguments) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["schema_version"] == 1
+        assert _LifecycleOperator.calls[-1] == expected_call
+        serialized = repr(payload).casefold()
+        assert "credential" not in serialized
+        assert "diagnostic" not in serialized
+
+
+def test_lifecycle_policy_prepare_cannot_activate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli.main([
+        "lifecycle", "policy", "prepare", ".",
+        "--boundary-digest", "b" * 64,
+        "--lifecycle-identity-digest", "a" * 64,
+        "--proposed-policy-version", "2.0.0",
+        "--minimum-version", "0.1.0",
+        "--maximum-version-exclusive", "4.0.0",
+        "--required-capability", "credential_health",
+        "--required-capability", "structured_output",
+        "--prepared-at", "200",
+        "--json",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["automatic_activation"] is False
+    assert payload["promotion_requires_separate_human_authority"] is True
+    assert _LifecycleOperator.calls == ["policy-prepare"]
+
+
+def test_lifecycle_verification_prepare_stops_before_inference(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli.main([
+        "lifecycle", "verification", "prepare", ".",
+        "--boundary-digest", "b" * 64,
+        "--lifecycle-identity-digest", "a" * 64,
+        "--requested-model", "sonnet",
+        "--expected-effective-model", "claude-sonnet-5",
+        "--effort", "high",
+        "--max-input-tokens", "32768",
+        "--max-output-tokens", "4096",
+        "--timeout-seconds", "120",
+        "--expires-at", "500",
+        "--fixture-repository-commit", "1" * 40,
+        "--graph-fingerprint", "2" * 64,
+        "--prompt-contract-hash", "3" * 64,
+        "--response-contract-hash", "4" * 64,
+        "--json",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["execution_performed"] is False
+    assert payload["activation_performed"] is False
+    assert payload["manifest"]["max_attempts"] == 1
+    assert payload["manifest"]["fallback_enabled"] is False
+    assert _LifecycleOperator.calls == ["verification-prepare"]

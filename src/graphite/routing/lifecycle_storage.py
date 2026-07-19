@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import sqlite3
+import stat
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,11 +17,14 @@ from .lifecycle import (
     ProviderLifecycleEvent,
     ProviderLifecycleState,
     ProviderRuntimeIdentity,
+    LifecycleProviderId,
+    RuntimeKind,
 )
 from .storage import (
     BUSY_TIMEOUT_MS,
     _secure_file,
     _secure_repository_directory,
+    _is_reparse_point,
     _selected_root,
     _validate_database_file,
 )
@@ -126,8 +130,12 @@ def _event_from_json(payload: str) -> ProviderLifecycleEvent:
 @dataclass(frozen=True, slots=True)
 class CurrentLifecycleObservation:
     boundary_digest: str
+    provider: LifecycleProviderId
+    runtime_kind: RuntimeKind
     identity: ProviderRuntimeIdentity | None
     state: ProviderLifecycleState
+    policy_version: str
+    observed_at: int
     updated_at: int
 
 
@@ -250,6 +258,61 @@ class LifecycleStore:
             connection.execute("PRAGMA journal_mode = WAL")
             return connection
         except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def _connect_readonly(self) -> sqlite3.Connection:
+        """Open existing lifecycle authority without creating or mutating repository state."""
+        current = self.root
+        try:
+            for part in self.path.parent.relative_to(self.root).parts:
+                current /= part
+                metadata = current.lstat()
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or stat.S_ISLNK(metadata.st_mode)
+                    or _is_reparse_point(metadata)
+                ):
+                    raise LifecycleStorageError("lifecycle_storage_path_invalid")
+            metadata = self.path.lstat()
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or _is_reparse_point(metadata)
+            ):
+                raise LifecycleStorageError("lifecycle_storage_path_invalid")
+        except FileNotFoundError as exc:
+            raise LifecycleStorageError("lifecycle_storage_missing") from exc
+        except LifecycleStorageError:
+            raise
+        except OSError as exc:
+            raise LifecycleStorageError("lifecycle_storage_unavailable") from exc
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                f"{self.path.as_uri()}?mode=ro",
+                uri=True,
+                timeout=self.busy_timeout_ms / 1_000,
+                isolation_level=None,
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA query_only = ON")
+            version = connection.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()
+            if version is None or version[0] != LIFECYCLE_SCHEMA_VERSION:
+                raise LifecycleStorageError("lifecycle_schema_unsupported")
+            self._validate_schema(connection)
+            self._validate_integrity(connection)
+            return connection
+        except LifecycleStorageError:
+            if connection is not None:
+                connection.close()
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None:
+                connection.close()
             raise _translate_database_error(exc) from exc
 
     def initialize(self) -> None:
@@ -483,7 +546,9 @@ class LifecycleStore:
         try:
             with self._connect() as connection:
                 row = connection.execute(
-                    """SELECT identity_json,state,updated_at FROM current_observations
+                    """SELECT boundary_digest,provider,runtime_kind,identity_digest,
+                    identity_json,state,policy_version,observed_at,updated_at
+                    FROM current_observations
                     WHERE boundary_digest=?""",
                     (boundary,),
                 ).fetchone()
@@ -491,13 +556,100 @@ class LifecycleStore:
             raise _translate_database_error(exc) from exc
         if row is None:
             return None
+        return self._observation_from_row(row)
+
+    @staticmethod
+    def _observation_from_row(row: sqlite3.Row) -> CurrentLifecycleObservation:
         try:
-            state = ProviderLifecycleState(row["state"])
-        except ValueError as exc:
+            identity_payload = row["identity_json"]
+            identity = None if identity_payload is None else _identity_from_json(identity_payload)
+            observation = CurrentLifecycleObservation(
+                boundary_digest=_digest(row["boundary_digest"], "lifecycle_storage_corrupt"),
+                provider=LifecycleProviderId(row["provider"]),
+                runtime_kind=RuntimeKind(row["runtime_kind"]),
+                identity=identity,
+                state=ProviderLifecycleState(row["state"]),
+                policy_version=str(row["policy_version"]),
+                observed_at=int(row["observed_at"]),
+                updated_at=int(row["updated_at"]),
+            )
+            if observation.updated_at < observation.observed_at:
+                raise ValueError
+            if identity is None:
+                if (
+                    row["identity_digest"] is not None
+                    or observation.state is not ProviderLifecycleState.UNAVAILABLE
+                ):
+                    raise ValueError
+            elif (
+                row["identity_digest"] != identity.digest
+                or observation.provider is not identity.provider
+                or observation.runtime_kind is not identity.runtime_kind
+                or observation.policy_version != identity.policy_version
+                or observation.observed_at != identity.observed_at
+            ):
+                raise ValueError
+            return observation
+        except (TypeError, ValueError) as exc:
             raise LifecycleStorageError("lifecycle_storage_corrupt") from exc
-        identity_payload = row["identity_json"]
-        identity = None if identity_payload is None else _identity_from_json(identity_payload)
-        return CurrentLifecycleObservation(boundary, identity, state, int(row["updated_at"]))
+
+    def read_current_observation(
+        self, boundary_digest: str
+    ) -> CurrentLifecycleObservation | None:
+        boundary = _digest(boundary_digest, "lifecycle_boundary_invalid")
+        try:
+            with self._connect_readonly() as connection:
+                row = connection.execute(
+                    """SELECT boundary_digest,provider,runtime_kind,identity_digest,
+                    identity_json,state,policy_version,observed_at,updated_at
+                    FROM current_observations
+                    WHERE boundary_digest=?""",
+                    (boundary,),
+                ).fetchone()
+        except LifecycleStorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+        return None if row is None else self._observation_from_row(row)
+
+    def read_observations(
+        self, *, limit: int = MAX_EVENT_PAGE_SIZE
+    ) -> tuple[CurrentLifecycleObservation, ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_EVENT_PAGE_SIZE:
+            raise ValueError("observations_limit_invalid")
+        try:
+            with self._connect_readonly() as connection:
+                rows = connection.execute(
+                    """SELECT boundary_digest,provider,runtime_kind,identity_digest,
+                    identity_json,state,policy_version,observed_at,updated_at
+                    FROM current_observations
+                    ORDER BY updated_at DESC,boundary_digest LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+        except LifecycleStorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+        return tuple(self._observation_from_row(row) for row in rows)
+
+    def read_events(
+        self, boundary_digest: str, *, limit: int = MAX_EVENT_PAGE_SIZE
+    ) -> tuple[ProviderLifecycleEvent, ...]:
+        boundary = _digest(boundary_digest, "lifecycle_boundary_invalid")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_EVENT_PAGE_SIZE:
+            raise ValueError("events_limit_invalid")
+        try:
+            with self._connect_readonly() as connection:
+                rows = connection.execute(
+                    """SELECT payload_json FROM lifecycle_events
+                    WHERE boundary_digest=? ORDER BY occurred_at DESC,event_id DESC LIMIT ?""",
+                    (boundary, limit),
+                ).fetchall()
+        except LifecycleStorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+        return tuple(reversed([_event_from_json(row["payload_json"]) for row in rows]))
 
     def events(
         self, boundary_digest: str, *, limit: int = MAX_EVENT_PAGE_SIZE

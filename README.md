@@ -485,6 +485,43 @@ Profile evidence is explicit and short-lived. A CLI update, executable replaceme
 authentication change, effective-model mismatch, or expired snapshot fails closed.
 Capability evidence helps establish eligibility; it is not authorization authority.
 
+Provider lifecycle state is stored separately from canonical graph artifacts. The
+states are `discovered`, `compatible`, `verification_required`, `active`,
+`incompatible`, and `unavailable`. A changed executable hash or patch version gets
+a bounded standard probe; a minor version or capability change gets an expanded
+probe; a major version leaves the provider `incompatible` until a new compatibility
+policy is separately approved. Passing a probe moves an identity only to
+`verification_required`, never directly to `active`.
+
+The daemon may observe and persist sanitized lifecycle transitions, but it cannot
+activate a provider or add provider facts to the canonical graph. Immediately
+before approval consumption, the lazy execution check re-observes the exact runtime
+identity and is authoritative even when daemon state is stopped or stale. Failure
+or corruption in one provider lifecycle boundary fails that provider closed without
+blocking canonical scan, build, check, query, watch, daemon builds, or another
+independent provider boundary.
+
+Lifecycle operator commands open the existing lifecycle database read-only, enforce
+pages of 1–100 records, and emit the same bounded public fields in compact JSON or
+indented human-readable form. They never create missing state or expose executable
+paths, endpoint query strings, credentials, prompts, or raw diagnostics:
+
+```powershell
+graphite lifecycle list . --limit 50 --json
+graphite lifecycle status . --boundary-digest <64-lowercase-hex> --json
+graphite lifecycle history . --boundary-digest <64-lowercase-hex> --limit 50
+graphite lifecycle policy inspect . --boundary-digest <64-lowercase-hex> --json
+```
+
+`lifecycle policy prepare` creates a content-hashed policy candidate only for the
+exact current incompatible identity. It does not persist, promote, or activate the
+candidate; promotion requires a separate human-authorized operation. `graphite lifecycle verification prepare`
+similarly creates the complete manifest for one exact
+`verification_required` identity and stops before inference. The manifest fixes the
+model, effort, token/time/cost bounds, fixture commit, graph and response-contract
+hashes, one attempt, no fallback, no resume, and no substitution. Display and review
+of either candidate grant no execution authority.
+
 ```powershell
 graphite route recommend . --objective "Review listing search" --target src/search.py
 graphite route run . --objective "Review listing search" --target src/search.py
@@ -517,10 +554,13 @@ other provider. The reviewer receives an ephemeral synthetic diff and cannot edi
 cherry-pickable commit; it never merges the source branch. `route reject` records the
 human verdict. `route cleanup` is a separate destructive authority step.
 
-There is no automatic retry, fallback, provider/model switch, session reuse,
-acceptance, cleanup, cherry-pick, or merge. A failure remains failed until the
-operator starts a new approval flow. Legacy Ollama executions are retained as
-read-only history and cannot be replayed as Claude or Codex attempts.
+There is no automatic retry, arbitrary provider/model switch, session reuse,
+acceptance, cleanup, cherry-pick, or merge. The sole automatic fallback is a bounded
+one-step advance to the other provider when both exact candidates were selected and
+approved in the same immutable route pool and the first returns the allowlisted
+`capacity_unavailable` category before producing output or side effects. Every other
+failure remains failed and requires a new approval flow. Legacy Ollama executions
+are retained as read-only history and cannot be replayed as Claude or Codex attempts.
 
 Telemetry is append-only and restricted to provider/profile identity, category and
 risk, latency, reported token usage, diff size, validation outcome, defect classes,
@@ -531,26 +571,28 @@ evidence, but cannot change the provider allowlist, permission ceiling, risk
 ceilings, or autonomy. Promotion and rollback both require interactive human
 approval and never delete evidence.
 
-### Schema-v3 to schema-v4 migration and rollback
+### Schema-v4 to schema-v5 migration and rollback
 
-Stop all Graphite routing writers before upgrade or rollback. On the first v4 open,
-Graphite creates `backups/events-schema-v3.sqlite3` and a SHA-256 marker beside it,
-verifies the backup is schema v3 and passes SQLite integrity checks, then performs
-the v4 migration. Live legacy Ollama attempts become `legacy_unrecoverable`; legacy
-completed history remains readable. After migration, verify `graphite route status
-. --json` and preserve both backup files.
+Stop all Graphite routing writers before upgrade or rollback. On the first v5 open,
+Graphite creates `backups/events-schema-v4.sqlite3` and
+`backups/events-schema-v4.sha256.json`, verifies the backup is schema v4 and passes
+SQLite integrity and foreign-key checks, then performs the v5 lifecycle-binding
+migration. Historical v4 rows remain readable but do not acquire invented lifecycle
+authority. After migration, run `graphite route status . --json`, SQLite
+`PRAGMA integrity_check`, and `PRAGMA foreign_key_check`, then preserve both backup
+files.
 
 Rollback is a database restore, not an in-place downgrade:
 
 1. Stop every process that can write `.graphite/routing/events.sqlite3`.
-2. Verify the backup SHA-256 against `backups/events-schema-v3.sha256.json` and run
-   SQLite `PRAGMA integrity_check` against the backup.
-3. Preserve the current v4 database for incident analysis, then atomically restore
-   the verified v3 backup as `events.sqlite3`.
-4. Restore the matching v3 application build and confirm the schema version and
+2. Verify the backup SHA-256 against `backups/events-schema-v4.sha256.json` and run
+   SQLite `PRAGMA integrity_check` and `PRAGMA foreign_key_check` against the backup.
+3. Preserve the current v5 database for incident analysis, then atomically restore
+   the verified v4 backup as `events.sqlite3`.
+4. Restore the matching v4 application build and confirm the schema version and
    historical row counts with its read-only status path before allowing writers.
 
-If the v4 database is partially migrated, the backup marker is absent/mismatched,
+If the v5 database is partially migrated, the backup marker is absent/mismatched,
 or integrity fails, keep routing stopped. Restore the verified backup or deploy a
 tested forward fix; do not hand-edit schema metadata or delete evidence.
 

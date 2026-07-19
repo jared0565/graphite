@@ -284,15 +284,15 @@ providers can become eligible.
 - Modify `tests/test_documentation.py`
 - Add `docs/superpowers/implementation-notes/2026-07-19-provider-lifecycle-evidence.md`
 
-- [ ] Add read-only lifecycle status/list/history commands with bounded JSON and human-readable output. Do not expose raw executable paths, endpoint query strings, credentials, or diagnostics.
-- [ ] Add explicit compatibility-policy inspection and promotion preparation. Promotion itself requires a separate human-authorized command and cannot activate a provider.
-- [ ] Add a command that prepares a verification manifest for one exact `verification_required` identity and stops before inference.
-- [ ] Document patch/minor/major behavior, all lifecycle states, daemon responsibilities, lazy enforcement, isolated failures, graph guarantees, overlay semantics, absence of automatic activation, and bounded capacity-only route-pool fallback.
-- [ ] Document schema-v4 to v5 backup, migration, integrity verification, stopped-writer requirement, restore, and forward-fix paths.
-- [ ] Exercise lifecycle and routing rollback fixtures without altering the operator's active routing database.
-- [ ] Record exact tests, schema drill results, graph determinism results, intentional skips, and remaining live-readiness gates in the implementation evidence note.
-- [ ] Run CLI, documentation, migration, recovery, and security tests.
-- [ ] Commit: `docs: record provider lifecycle acceptance evidence`.
+- [x] Add read-only lifecycle status/list/history commands with bounded JSON and human-readable output. Do not expose raw executable paths, endpoint query strings, credentials, or diagnostics.
+- [x] Add explicit compatibility-policy inspection and promotion preparation. Promotion itself requires a separate human-authorized command and cannot activate a provider.
+- [x] Add a command that prepares a verification manifest for one exact `verification_required` identity and stops before inference.
+- [x] Document patch/minor/major behavior, all lifecycle states, daemon responsibilities, lazy enforcement, isolated failures, graph guarantees, overlay semantics, absence of automatic activation, and bounded capacity-only route-pool fallback.
+- [x] Document schema-v4 to v5 backup, migration, integrity verification, stopped-writer requirement, restore, and forward-fix paths.
+- [x] Exercise lifecycle and routing rollback fixtures without altering the operator's active routing database.
+- [x] Record exact tests, schema drill results, graph determinism results, intentional skips, and remaining live-readiness gates in the implementation evidence note.
+- [x] Run CLI, documentation, migration, recovery, and security tests.
+- [x] Commit: `docs: record provider lifecycle acceptance evidence`.
 
 ## Task 10: Complete offline acceptance and prepare live manifests
 

@@ -36,6 +36,8 @@ from .io import atomic_write_json
 from .llm import CANONICAL_ENRICHMENT_MIGRATION_MESSAGE
 from .overlays import OverlayError, OverlayRequest, build_overlay
 from .routing.approval import approval_prompt
+from .routing.contracts import Effort
+from .routing.lifecycle_operator import LifecycleOperator, LifecycleOperatorError
 from .routing.service import RoutingService, RoutingServiceError
 from .routing.storage import DEFAULT_RECOVERY_PAGE_SIZE, StorageError
 from .query import _find_node, annotate_communities, query
@@ -1286,6 +1288,72 @@ def cmd_route_record_outcome(args: argparse.Namespace) -> int:
     return 0
 
 
+def _lifecycle_result(args: argparse.Namespace, operation: str, **kwargs: Any) -> int:
+    try:
+        payload = getattr(LifecycleOperator(args.path), operation)(**kwargs)
+    except (LifecycleOperatorError, ValueError, OSError) as exc:
+        code = getattr(exc, "code", "lifecycle_operator_invalid")
+        _route_print({"error": {"code": code}}, json_mode=args.json)
+        return 1
+    _route_print(payload, json_mode=args.json)
+    return 0
+
+
+def cmd_lifecycle_list(args: argparse.Namespace) -> int:
+    return _lifecycle_result(args, "list_observations", limit=args.limit)
+
+
+def cmd_lifecycle_status(args: argparse.Namespace) -> int:
+    return _lifecycle_result(args, "status", boundary_digest=args.boundary_digest)
+
+
+def cmd_lifecycle_history(args: argparse.Namespace) -> int:
+    return _lifecycle_result(
+        args, "history", boundary_digest=args.boundary_digest, limit=args.limit
+    )
+
+
+def cmd_lifecycle_policy_inspect(args: argparse.Namespace) -> int:
+    return _lifecycle_result(
+        args, "inspect_policy", boundary_digest=args.boundary_digest
+    )
+
+
+def cmd_lifecycle_policy_prepare(args: argparse.Namespace) -> int:
+    return _lifecycle_result(
+        args,
+        "prepare_policy_promotion",
+        boundary_digest=args.boundary_digest,
+        lifecycle_identity_digest=args.lifecycle_identity_digest,
+        proposed_policy_version=args.proposed_policy_version,
+        minimum_version=args.minimum_version,
+        maximum_version_exclusive=args.maximum_version_exclusive,
+        required_capabilities=tuple(args.required_capability),
+        prepared_at=args.prepared_at,
+    )
+
+
+def cmd_lifecycle_verification_prepare(args: argparse.Namespace) -> int:
+    return _lifecycle_result(
+        args,
+        "prepare_verification_manifest",
+        boundary_digest=args.boundary_digest,
+        lifecycle_identity_digest=args.lifecycle_identity_digest,
+        requested_model=args.requested_model,
+        expected_effective_model=args.expected_effective_model,
+        effort=Effort(args.effort),
+        max_input_tokens=args.max_input_tokens,
+        max_output_tokens=args.max_output_tokens,
+        timeout_seconds=args.timeout_seconds,
+        expires_at=args.expires_at,
+        fixture_repository_commit=args.fixture_repository_commit,
+        graph_fingerprint=args.graph_fingerprint,
+        prompt_contract_hash=args.prompt_contract_hash,
+        response_contract_hash=args.response_contract_hash,
+        max_cost_microunits=args.max_cost_microunits,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="graphite", description="Local-first code knowledge graph.")
     parser.add_argument("--output-dir", default=None, help="Output directory (default: graph-out)")
@@ -1305,6 +1373,116 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--llm-max-output-tokens", type=int, default=None, help="Maximum explicit overlay output tokens")
 
     sub = parser.add_subparsers(dest="command")
+
+    p_lifecycle = sub.add_parser(
+        "lifecycle", help="Inspect provider lifecycle authority and prepare bounded candidates"
+    )
+    lifecycle_sub = p_lifecycle.add_subparsers(
+        dest="lifecycle_command", required=True
+    )
+
+    p_lifecycle_list = lifecycle_sub.add_parser(
+        "list", help="List bounded current lifecycle observations"
+    )
+    p_lifecycle_list.add_argument("path", help="Repository path")
+    p_lifecycle_list.add_argument("--limit", type=int, default=50)
+    p_lifecycle_list.add_argument("--json", action="store_true")
+    p_lifecycle_list.set_defaults(func=cmd_lifecycle_list)
+
+    for name, handler in (
+        ("status", cmd_lifecycle_status),
+        ("history", cmd_lifecycle_history),
+    ):
+        lifecycle_read = lifecycle_sub.add_parser(
+            name, help=f"Read lifecycle {name}"
+        )
+        lifecycle_read.add_argument("path", help="Repository path")
+        lifecycle_read.add_argument("--boundary-digest", required=True)
+        if name == "history":
+            lifecycle_read.add_argument("--limit", type=int, default=50)
+        lifecycle_read.add_argument("--json", action="store_true")
+        lifecycle_read.set_defaults(func=handler)
+
+    p_lifecycle_policy = lifecycle_sub.add_parser(
+        "policy", help="Inspect policy binding or prepare a non-activating promotion"
+    )
+    lifecycle_policy_sub = p_lifecycle_policy.add_subparsers(
+        dest="lifecycle_policy_command", required=True
+    )
+    p_lifecycle_policy_inspect = lifecycle_policy_sub.add_parser(
+        "inspect", help="Inspect persisted policy binding"
+    )
+    p_lifecycle_policy_inspect.add_argument("path", help="Repository path")
+    p_lifecycle_policy_inspect.add_argument("--boundary-digest", required=True)
+    p_lifecycle_policy_inspect.add_argument("--json", action="store_true")
+    p_lifecycle_policy_inspect.set_defaults(func=cmd_lifecycle_policy_inspect)
+
+    p_lifecycle_policy_prepare = lifecycle_policy_sub.add_parser(
+        "prepare", help="Prepare a policy promotion candidate without activating it"
+    )
+    p_lifecycle_policy_prepare.add_argument("path", help="Repository path")
+    p_lifecycle_policy_prepare.add_argument("--boundary-digest", required=True)
+    p_lifecycle_policy_prepare.add_argument(
+        "--lifecycle-identity-digest", required=True
+    )
+    p_lifecycle_policy_prepare.add_argument(
+        "--proposed-policy-version", required=True
+    )
+    p_lifecycle_policy_prepare.add_argument("--minimum-version", required=True)
+    p_lifecycle_policy_prepare.add_argument(
+        "--maximum-version-exclusive", required=True
+    )
+    p_lifecycle_policy_prepare.add_argument(
+        "--required-capability", action="append", required=True
+    )
+    p_lifecycle_policy_prepare.add_argument("--prepared-at", type=int, required=True)
+    p_lifecycle_policy_prepare.add_argument("--json", action="store_true")
+    p_lifecycle_policy_prepare.set_defaults(func=cmd_lifecycle_policy_prepare)
+
+    p_lifecycle_verification = lifecycle_sub.add_parser(
+        "verification", help="Prepare an exact verification manifest"
+    )
+    lifecycle_verification_sub = p_lifecycle_verification.add_subparsers(
+        dest="lifecycle_verification_command", required=True
+    )
+    p_lifecycle_verification_prepare = lifecycle_verification_sub.add_parser(
+        "prepare", help="Prepare a manifest without invoking a provider"
+    )
+    p_lifecycle_verification_prepare.add_argument("path", help="Repository path")
+    p_lifecycle_verification_prepare.add_argument("--boundary-digest", required=True)
+    p_lifecycle_verification_prepare.add_argument(
+        "--lifecycle-identity-digest", required=True
+    )
+    p_lifecycle_verification_prepare.add_argument("--requested-model", required=True)
+    p_lifecycle_verification_prepare.add_argument(
+        "--expected-effective-model", required=True
+    )
+    p_lifecycle_verification_prepare.add_argument(
+        "--effort", choices=[value.value for value in Effort], required=True
+    )
+    for option in (
+        "max-input-tokens", "max-output-tokens", "timeout-seconds", "expires-at"
+    ):
+        p_lifecycle_verification_prepare.add_argument(
+            f"--{option}", type=int, required=True
+        )
+    p_lifecycle_verification_prepare.add_argument(
+        "--fixture-repository-commit", required=True
+    )
+    p_lifecycle_verification_prepare.add_argument("--graph-fingerprint", required=True)
+    p_lifecycle_verification_prepare.add_argument(
+        "--prompt-contract-hash", required=True
+    )
+    p_lifecycle_verification_prepare.add_argument(
+        "--response-contract-hash", required=True
+    )
+    p_lifecycle_verification_prepare.add_argument(
+        "--max-cost-microunits", type=int, default=None
+    )
+    p_lifecycle_verification_prepare.add_argument("--json", action="store_true")
+    p_lifecycle_verification_prepare.set_defaults(
+        func=cmd_lifecycle_verification_prepare
+    )
 
     p_route = sub.add_parser("route", help="Recommend or run approval-gated model routing")
     route_sub = p_route.add_subparsers(dest="route_command", required=True)
