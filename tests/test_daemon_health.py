@@ -750,3 +750,62 @@ def test_daemon_status_normalization_whitelists_known_fields_only() -> None:
     assert "unknown_blob" not in normalized
     assert "unknown_blob" not in normalized["projects"][0]
     assert secret not in json.dumps(normalized)
+
+
+def test_daemon_health_exposes_only_aggregate_provider_lifecycle_codes(tmp_path: Path) -> None:
+    payload = _status("2026-06-23T12:00:30+00:00")
+    payload["provider_lifecycle"] = {
+        "status": "degraded",
+        "attempted": 4,
+        "deferred": 0,
+        "succeeded": 0,
+        "failed": 4,
+        "state_counts": {"unavailable": 4},
+        "reason_counts": {"runtime_missing": 4},
+    }
+    _write_status(tmp_path, payload)
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(
+            max_status_age_seconds=120,
+            require_process=False,
+            require_startup=False,
+        ),
+        now=datetime.fromisoformat("2026-06-23T12:01:00+00:00"),
+    )
+
+    assert report["status"] == "warning"
+    assert report["provider_lifecycle"] == payload["provider_lifecycle"]
+    assert [warning["code"] for warning in report["warnings"]] == [
+        "provider_observation_degraded"
+    ]
+
+
+def test_daemon_health_rejects_provider_lifecycle_payload_that_could_leak(tmp_path: Path) -> None:
+    secret = "Bearer SECRET from C:/private/provider.exe?token=value"
+    payload = _status("2026-06-23T12:00:30+00:00")
+    payload["provider_lifecycle"] = {
+        "status": "degraded",
+        "attempted": 1,
+        "deferred": 0,
+        "succeeded": 0,
+        "failed": 1,
+        "state_counts": {"unavailable": 1},
+        "reason_counts": {secret: 1},
+        "raw_diagnostics": secret,
+    }
+    _write_status(tmp_path, payload)
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+        now=datetime.fromisoformat("2026-06-23T12:01:00+00:00"),
+    )
+    serialized = json.dumps(report)
+
+    assert any(
+        issue["code"] == "status_schema_invalid" and issue["field"] == "provider_lifecycle"
+        for issue in report["errors"]
+    )
+    assert secret not in serialized

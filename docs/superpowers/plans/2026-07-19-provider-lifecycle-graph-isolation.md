@@ -217,16 +217,16 @@ providers can become eligible.
 - Modify `tests/test_daemon_health.py`
 - Add `tests/test_provider_observer.py`
 
-- [ ] Add bounded observer options for enabled providers, observation interval, per-provider timeout, maximum observations per cycle, and capped exponential backoff with deterministic jitter disabled in tests.
-- [ ] Schedule observations independently from project scan/build scheduling. Provider delay or failure must not consume the graph build budget or postpone graph freshness work.
-- [ ] Cache identical machine-wide CLI observations within one daemon cycle while keeping project-scoped endpoint/model/routing configuration isolated.
-- [ ] Persist lifecycle transitions through the lifecycle service and expose only aggregate state/reason codes in bounded daemon health output.
-- [ ] Mark matching snapshots and pending approvals stale after drift; prepare notifications/manifests but never verify, activate, retry, or fall back.
-- [ ] Add tests with a stopped daemon, stale daemon, probe timeout, corrupt lifecycle database, all providers absent, and simultaneous independent drift.
-- [ ] Prove daemon logs/status contain no executable paths from provider output, endpoint query data, headers, credentials, bodies, raw diagnostics, prompts, or source.
-- [ ] Prove daemon graph builds produce the same canonical fingerprint with every lifecycle state and failure mode.
-- [ ] Run observer, daemon, daemon-health, routing security, and scheduling tests.
-- [ ] Commit: `feat: observe provider drift in the daemon`.
+- [x] Add bounded observer options for enabled providers, observation interval, per-provider timeout, maximum observations per cycle, and capped exponential backoff with deterministic jitter disabled in tests.
+- [x] Schedule observations independently from project scan/build scheduling. Provider delay or failure must not consume the graph build budget or postpone graph freshness work.
+- [x] Cache identical machine-wide CLI observations within one daemon cycle while keeping project-scoped endpoint/model/routing configuration isolated.
+- [x] Persist lifecycle transitions through the lifecycle service and expose only aggregate state/reason codes in bounded daemon health output.
+- [x] Mark matching snapshots and pending approvals stale after drift; prepare notifications/manifests but never verify, activate, retry, or fall back.
+- [x] Add tests with a stopped daemon, stale daemon, probe timeout, corrupt lifecycle database, all providers absent, and simultaneous independent drift.
+- [x] Prove daemon logs/status contain no executable paths from provider output, endpoint query data, headers, credentials, bodies, raw diagnostics, prompts, or source.
+- [x] Prove daemon graph builds produce the same canonical fingerprint with every lifecycle state and failure mode.
+- [x] Run observer, daemon, daemon-health, routing security, and scheduling tests.
+- [x] Commit: `feat: observe provider drift in the daemon`.
 
 ## Task 7: Make canonical graph operations inference-free by construction
 

@@ -292,3 +292,38 @@ nodes, 15,523 edges, 176 scanned files, 136 communities, zero build warnings,
 and fingerprint
 `c714a6569b185a9938e9b19b5dd25bb1237b07c430275a112714092ccaf04192`.
 The freshness check passed with `llm_status=disabled` and zero LLM tokens.
+
+## Daemon provider observation
+
+Task 6 added a bounded provider-neutral observer with explicit enabled-provider,
+interval, timeout, per-cycle, backoff-cap, and jitter limits. Each due target is
+observed at most once per cycle; failures receive capped exponential backoff and
+never trigger retry, fallback, activation, verification, provider switching, or
+model execution. Exact machine-wide CLI observations may be reused only within
+one cycle, while endpoint, model, routing-policy, lifecycle database, and
+authority state remain repository scoped.
+
+The daemon runs the observer on a separate daemon worker, so a delayed or failed
+provider probe cannot consume the graph build budget or block project scanning or
+canonical graph freshness. Lifecycle changes persist through the lifecycle
+service, which retains the Task 5 provider-scoped snapshot and pending-approval
+invalidation behavior. Daemon status, logs, and health output expose only bounded
+aggregate state and allowlisted reason counts. Raw diagnostics, provider output,
+executable paths, endpoint query data, headers, credentials, bodies, prompts, and
+source are not accepted into that boundary. Provider degradation is a health
+warning and does not degrade canonical graph operation.
+
+Focused observer, daemon, daemon-health, lifecycle, probe, route-pool, and
+routing-security acceptance passed 228 tests, including three real offline daemon
+builds whose canonical manifest engine and file inventories were identical for
+active, unavailable, and lifecycle-persistence-failure states. The broader offline
+routing/provider/daemon selection passed 623 tests with 1 intentional skip and
+1,043 deselected. Repository-wide Ruff and `git diff --check` passed. All
+provider behavior used deterministic fakes; no provider process, external
+request, inference, retry, fallback, activation, merge, or push occurred.
+
+The pre-evidence Task 6 canonical rebuild used the feature-branch source and
+explicit `--llm none`. It completed with 7,144 nodes, 15,785 edges, 178 scanned
+files, 144 communities, zero build warnings, and fingerprint
+`bcb3f7b89932d63cfef7d472f658a79ddb8b94c08e24ca654f7d32f6d27fc525`.
+The freshness check passed with no added, changed, or removed files.

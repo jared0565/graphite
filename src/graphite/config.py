@@ -45,6 +45,12 @@ class Config:
     llm_timeout_seconds: float = 30.0
     llm_max_input_chars: int = 12000
     llm_max_output_tokens: int = 512
+    provider_observer_enabled_providers: tuple[str, ...] = ()
+    provider_observer_interval_seconds: float = 300.0
+    provider_observer_timeout_seconds: float = 15.0
+    provider_observer_max_per_cycle: int = 4
+    provider_observer_backoff_cap_seconds: float = 3_600.0
+    provider_observer_jitter_ratio: float = 0.1
     seed: int = 42
     verbose: bool = False
 
@@ -57,6 +63,29 @@ class Config:
         from .routing.settings import RoutingSettings
 
         return RoutingSettings.from_env(overrides)
+
+    def provider_observer_options(self):
+        """Build validated non-inference daemon observer limits."""
+        from .provider_observer import ProviderObserverOptions
+        from .routing.lifecycle import LifecycleProviderId
+
+        try:
+            providers = tuple(
+                LifecycleProviderId(value)
+                for value in self.provider_observer_enabled_providers
+            )
+        except ValueError:
+            raise ValueError("observer_enabled_providers_invalid") from None
+        options = ProviderObserverOptions(
+            enabled_providers=providers,
+            interval_seconds=self.provider_observer_interval_seconds,
+            timeout_seconds=self.provider_observer_timeout_seconds,
+            max_observations_per_cycle=self.provider_observer_max_per_cycle,
+            backoff_cap_seconds=self.provider_observer_backoff_cap_seconds,
+            jitter_ratio=self.provider_observer_jitter_ratio,
+        )
+        options.validate()
+        return options
 
     @classmethod
     def from_env(cls, overrides: dict[str, str] | None = None) -> "Config":
@@ -88,6 +117,10 @@ class Config:
         def _bool(key: str, default: bool) -> bool:
             return env.get(key, str(default).lower()).lower() in ("1", "true", "yes", "on")
 
+        def _csv(key: str) -> tuple[str, ...]:
+            raw = env.get(key, "")
+            return tuple(part.strip().casefold() for part in raw.split(",") if part.strip())
+
         return cls(
             output_dir=_path("graphite_output_dir", Path("graph-out")),
             cache_dir=_path("graphite_cache_dir", Path(".cache/graphite")),
@@ -108,6 +141,24 @@ class Config:
             llm_max_input_chars=_int("graphite_llm_max_input_chars", 12000),
             llm_max_output_tokens=_bounded_int(
                 "graphite_llm_max_output_tokens", 512, 1, 4096
+            ),
+            provider_observer_enabled_providers=_csv(
+                "graphite_provider_observer_enabled_providers"
+            ),
+            provider_observer_interval_seconds=_float(
+                "graphite_provider_observer_interval", 300.0
+            ),
+            provider_observer_timeout_seconds=_float(
+                "graphite_provider_observer_timeout", 15.0
+            ),
+            provider_observer_max_per_cycle=_int(
+                "graphite_provider_observer_max_per_cycle", 4
+            ),
+            provider_observer_backoff_cap_seconds=_float(
+                "graphite_provider_observer_backoff_cap", 3_600.0
+            ),
+            provider_observer_jitter_ratio=_float(
+                "graphite_provider_observer_jitter_ratio", 0.1
             ),
             seed=_int("graphite_seed", 42),
             verbose=_bool("graphite_verbose", False),
