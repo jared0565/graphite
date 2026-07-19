@@ -242,15 +242,15 @@ providers can become eligible.
 - Modify `tests/test_llm.py`
 - Add `tests/test_graph_provider_isolation.py`
 
-- [ ] Write failing tests proving `scan`, `build`, `check`, `validate`, `query`, `context`, `impact`, watch builds, and daemon builds cannot instantiate an LLM client or read provider credentials.
-- [ ] Remove `enrich_report` from the canonical `_build` path. Canonical `analysis`, manifests, reports, and fingerprints must contain only deterministic local analysis.
-- [ ] Make canonical commands force an internal no-inference configuration. Ambient `GRAPHITE_LLM*` variables, inherited daemon config, project config, and CLI aliases cannot enable enrichment.
-- [ ] Reject non-`none` `--llm` values on canonical commands with a stable migration message directing users to the explicit overlay command. Preserve `--llm none` temporarily for compatibility.
-- [ ] Hard-code daemon child build commands to the canonical path and remove API keys and provider configuration from their environment and argv.
-- [ ] Remove watch/daemon warnings that imply enrichment remains possible; replace them with tests and documentation of the enforced boundary.
-- [ ] Build identical fixture graphs under healthy, unavailable, incompatible, drifted, and absent provider states. Compare graph nodes, edges, communities, manifest inputs, validation, context, impact, and fingerprint.
-- [ ] Run CLI, build, check, validate, query, context, impact, watch, daemon, LLM, and isolation tests.
-- [ ] Commit: `fix: isolate canonical graphs from AI providers`.
+- [x] Write failing tests proving `scan`, `build`, `check`, `validate`, `query`, `context`, `impact`, watch builds, and daemon builds cannot instantiate an LLM client or read provider credentials.
+- [x] Remove `enrich_report` from the canonical `_build` path. Canonical `analysis`, manifests, reports, and fingerprints must contain only deterministic local analysis.
+- [x] Make canonical commands force an internal no-inference configuration. Ambient `GRAPHITE_LLM*` variables, inherited daemon config, project config, and CLI aliases cannot enable enrichment.
+- [x] Reject non-`none` `--llm` values on canonical commands with a stable migration message directing users to the explicit overlay command. Preserve `--llm none` temporarily for compatibility.
+- [x] Hard-code daemon child build commands to the canonical path and remove API keys and provider configuration from their environment and argv.
+- [x] Remove watch/daemon warnings that imply enrichment remains possible; replace them with tests and documentation of the enforced boundary.
+- [x] Build identical fixture graphs under healthy, unavailable, incompatible, drifted, and absent provider states. Compare graph nodes, edges, communities, manifest inputs, validation, context, impact, and fingerprint.
+- [x] Run CLI, build, check, validate, query, context, impact, watch, daemon, LLM, and isolation tests.
+- [x] Commit: `fix: isolate canonical graphs from AI providers`.
 
 ## Task 8: Move optional enrichment into non-authoritative overlays
 

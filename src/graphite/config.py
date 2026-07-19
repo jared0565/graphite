@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -87,12 +87,44 @@ class Config:
         options.validate()
         return options
 
+    def canonical_graph(self) -> "Config":
+        """Return configuration that cannot carry provider authority into a graph operation."""
+        return replace(
+            self,
+            llm_mode="none",
+            llm_provider="none",
+            llm_model=None,
+            llm_base_url=None,
+            llm_api_key=None,
+            llm_timeout_seconds=30.0,
+            llm_max_input_chars=12_000,
+            llm_max_output_tokens=512,
+        )
+
     @classmethod
-    def from_env(cls, overrides: dict[str, str] | None = None) -> "Config":
+    def from_env(
+        cls,
+        overrides: dict[str, str] | None = None,
+        *,
+        include_llm: bool = True,
+    ) -> "Config":
         """Build config from environment variables and CLI overrides."""
-        env = {k.lower(): v for k, v in os.environ.items() if k.upper().startswith("GRAPHITE_")}
+        if not isinstance(include_llm, bool):
+            raise ValueError("include_llm_invalid")
+        env: dict[str, str] = {}
+        for key in os.environ:
+            normalized = key.upper()
+            if not normalized.startswith("GRAPHITE_"):
+                continue
+            if not include_llm and normalized.startswith("GRAPHITE_LLM"):
+                continue
+            env[key.lower()] = os.environ[key]
         if overrides:
-            env.update({k.lower(): v for k, v in overrides.items()})
+            env.update({
+                key.lower(): value
+                for key, value in overrides.items()
+                if include_llm or not key.upper().startswith("GRAPHITE_LLM")
+            })
 
         def _path(key: str, default: Path) -> Path:
             return Path(env[key]) if key in env else default
@@ -121,7 +153,7 @@ class Config:
             raw = env.get(key, "")
             return tuple(part.strip().casefold() for part in raw.split(",") if part.strip())
 
-        return cls(
+        config = cls(
             output_dir=_path("graphite_output_dir", Path("graph-out")),
             cache_dir=_path("graphite_cache_dir", Path(".cache/graphite")),
             cache_version=env.get("graphite_cache_version", "v5"),
@@ -163,3 +195,4 @@ class Config:
             seed=_int("graphite_seed", 42),
             verbose=_bool("graphite_verbose", False),
         )
+        return config if include_llm else config.canonical_graph()

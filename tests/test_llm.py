@@ -55,6 +55,28 @@ def test_llm_disabled_does_not_call_provider(monkeypatch) -> None:
     assert result == {"enabled": False, "mode": "none", "tokens": 0}
 
 
+def test_canonical_graph_config_removes_all_provider_settings() -> None:
+    canonical = Config(
+        llm_mode="cloud",
+        llm_provider="openrouter",
+        llm_model="vendor/model",
+        llm_base_url="https://provider.invalid/v1",
+        llm_api_key="secret",
+        llm_timeout_seconds=1,
+        llm_max_input_chars=99,
+        llm_max_output_tokens=77,
+    ).canonical_graph()
+
+    assert canonical.llm_mode == "none"
+    assert canonical.llm_provider == "none"
+    assert canonical.llm_model is None
+    assert canonical.llm_base_url is None
+    assert canonical.llm_api_key is None
+    assert canonical.llm_timeout_seconds == 30
+    assert canonical.llm_max_input_chars == 12_000
+    assert canonical.llm_max_output_tokens == 512
+
+
 def test_openai_compatible_provider_is_selected_by_base_url(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 

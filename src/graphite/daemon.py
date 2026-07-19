@@ -31,6 +31,20 @@ PROJECT_MARKERS: tuple[str, ...] = (
 )
 
 MAX_DAEMON_STATUS_BYTES = 4 * 1024 * 1024
+_PROVIDER_ENV_PREFIXES = (
+    "GRAPHITE_LLM",
+    "GRAPHITE_PROVIDER_",
+    "GRAPHITE_ROUTE_",
+    "ANTHROPIC_",
+    "CLAUDE_",
+    "CODEX_",
+    "GROQ_",
+    "LMSTUDIO_",
+    "OLLAMA_",
+    "OPENAI_",
+    "OPENROUTER_",
+    "VLLM_",
+)
 
 
 class DaemonStatusTooLargeError(OSError):
@@ -243,7 +257,7 @@ def discover_projects(base: Path, *, max_depth: int = 6, max_projects: int = 128
 
 
 def daemon_config_for_project(cfg: Config, root: Path, options: DaemonOptions) -> Config:
-    data = cfg.to_dict()
+    data = cfg.canonical_graph().to_dict()
     if not Path(data["output_dir"]).is_absolute():
         data["output_dir"] = root / data["output_dir"]
     if not Path(data["cache_dir"]).is_absolute():
@@ -255,6 +269,7 @@ def daemon_config_for_project(cfg: Config, root: Path, options: DaemonOptions) -
 
 
 def _build_command(cfg: Config, root: Path) -> tuple[list[str], dict[str, str]]:
+    cfg = cfg.canonical_graph()
     cmd = [
         sys.executable,
         "-B",
@@ -273,28 +288,16 @@ def _build_command(cfg: Config, root: Path) -> tuple[list[str], dict[str, str]]:
     ]
     if not cfg.typescript_symbol_references:
         cmd.append("--no-typescript-symbol-references")
-    cmd.extend([
-        "--llm",
-        cfg.llm_mode,
-        "--llm-provider",
-        cfg.llm_provider,
-        "--llm-timeout",
-        str(cfg.llm_timeout_seconds),
-        "--llm-max-input-chars",
-        str(cfg.llm_max_input_chars),
-    ])
-    if cfg.llm_model:
-        cmd.extend(["--llm-model", cfg.llm_model])
-    if cfg.llm_base_url:
-        cmd.extend(["--llm-base-url", cfg.llm_base_url])
-    cmd.extend(["build", str(root)])
+    cmd.extend(["--llm", "none", "build", str(root)])
 
-    env = os.environ.copy()
+    env: dict[str, str] = {}
+    for key in os.environ:
+        if key.upper().startswith(_PROVIDER_ENV_PREFIXES):
+            continue
+        env[key] = os.environ[key]
     src_root = str(Path(__file__).resolve().parents[1])
     existing_pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = src_root if not existing_pythonpath else f"{src_root}{os.pathsep}{existing_pythonpath}"
-    if cfg.llm_api_key:
-        env["GRAPHITE_LLM_API_KEY"] = cfg.llm_api_key
     return cmd, env
 
 

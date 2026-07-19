@@ -57,6 +57,7 @@ class WatchOptions:
 
 def snapshot(root: Path, cfg: Config) -> Snapshot:
     """Return a stable content-hash snapshot for files Graphite would ingest."""
+    cfg = cfg.canonical_graph()
     return {entry.rel_path: entry.content_hash for entry in collect_files(root, cfg)}
 
 
@@ -109,6 +110,7 @@ def watch_loop(
     previous snapshot unchanged so the same change can be retried on the next cycle.
     """
     options.validate()
+    cfg = cfg.canonical_graph()
     root = root.resolve()
     if not root.exists():
         raise FileNotFoundError(root)

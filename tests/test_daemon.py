@@ -90,6 +90,36 @@ def test_daemon_respects_max_builds_per_cycle(tmp_path: Path) -> None:
     assert status["pending_projects"] == 1
 
 
+def test_daemon_forces_canonical_project_config(tmp_path: Path) -> None:
+    project = tmp_path / "app"
+    _write(project / "package.json", "{}\n")
+    observed: list[Config] = []
+
+    def fake_build(_root: Path, cfg: Config, _timeout: float) -> BuildResult:
+        observed.append(cfg)
+        return BuildResult(True, 0, 0.01)
+
+    run_daemon(
+        tmp_path,
+        Config(
+            llm_mode="cloud",
+            llm_provider="openrouter",
+            llm_model="vendor/model",
+            llm_base_url="https://provider.invalid/v1",
+            llm_api_key="must-not-propagate",
+        ),
+        DaemonOptions(once=True, debounce_seconds=0, state_dir=tmp_path / "state"),
+        build_project=fake_build,
+    )
+
+    assert len(observed) == 1
+    assert observed[0].llm_mode == "none"
+    assert observed[0].llm_provider == "none"
+    assert observed[0].llm_model is None
+    assert observed[0].llm_base_url is None
+    assert observed[0].llm_api_key is None
+
+
 def test_provider_observation_cannot_delay_or_consume_graph_build_budget(tmp_path: Path) -> None:
     project = tmp_path / "app"
     _write(project / "package.json", "{}\n")

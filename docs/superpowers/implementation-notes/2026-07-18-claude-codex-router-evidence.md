@@ -327,3 +327,37 @@ explicit `--llm none`. It completed with 7,144 nodes, 15,785 edges, 178 scanned
 files, 144 communities, zero build warnings, and fingerprint
 `bcb3f7b89932d63cfef7d472f658a79ddb8b94c08e24ca654f7d32f6d27fc525`.
 The freshness check passed with no added, changed, or removed files.
+
+## Canonical graph provider isolation
+
+Task 7 made canonical graph operations inference-free by construction. Scan,
+build/report, check, validate, query, context, impact, watch, and daemon paths
+force a canonical no-inference configuration. Ambient and inherited provider
+configuration cannot enable enrichment. Non-`none` legacy LLM flags fail before
+graph work with a stable migration message, while `--llm none` remains a
+compatibility no-op. Canonical manifests, analysis, and Markdown reports no
+longer contain enrichment status, token counts, or provider metadata.
+
+Daemon child builds now use fixed canonical arguments and receive an environment
+with provider and credential variables removed. Credential-trap tests prove the
+canonical environment loader and daemon environment builder filter sensitive
+keys before accessing their values. Watch, onboarding, audit, and deterministic
+review paths also canonicalize configuration; only the explicit doctor path may
+load provider configuration for its separately requested diagnostics.
+
+Deterministic fixture acceptance built and queried the same repository under
+healthy, unavailable, incompatible, drifted, and absent provider states. All
+five states produced identical canonical artifact digests and identical check,
+validate, stats, context, and impact results, while a provider factory trap
+proved no client was instantiated. Focused isolation, watch, daemon, LLM,
+onboarding, documentation, and doctor acceptance passed 349 tests. The complete
+offline repository suite passed 1,646 tests with 44 intentional skips. Ruff and
+`git diff --check` passed. No provider process, external request, inference,
+retry, fallback, merge, push, or deployment occurred.
+
+The pre-evidence Task 7 canonical rebuild used explicit `--llm none` and
+completed with 7,195 nodes, 15,889 edges, 179 scanned files, 153 communities,
+zero build warnings, and engine fingerprint
+`b29f49ae2c9e1197d0803c7cd1f79c376c2acebe39b4d19dbcb1e35dcea6122d`.
+The freshness check passed, and the canonical manifest and analysis contained
+no LLM or provider keys.

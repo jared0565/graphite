@@ -47,7 +47,7 @@ During active multi-file development, keep the graph current with:
 python -m graphite watch . --impact
 ```
 
-Graphite is a centrally installed Python package (importable from any repository), runs locally by default, and should not use LLM or network calls unless explicitly configured. `python -m graphite` works in every shell; a bare `graphite` command is equivalent where the console script is on PATH.
+Graphite is a centrally installed Python package (importable from any repository). Canonical graph commands run locally, never read provider credentials, and never use LLM or network inference; model output belongs only in an explicit non-authoritative overlay. `python -m graphite` works in every shell; a bare `graphite` command is equivalent where the console script is on PATH.
 
 For TypeScript, Graphite uses the local TypeScript compiler resolver automatically when available. If a project has a broken TypeScript setup, fall back with `python -m graphite --typescript-resolver disabled build .`.
 """
@@ -176,4 +176,3 @@ def _default_daemon_base(project_root: Path) -> Path:
         if parent.as_posix().lower().rstrip("/") == "f:/projects":
             return parent
     return resolved
-

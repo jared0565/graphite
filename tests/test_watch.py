@@ -133,5 +133,27 @@ def test_watch_cli_once_builds_graph_and_exits(tmp_path: Path, monkeypatch, caps
     captured = capsys.readouterr().out
     assert "watch once complete" in captured
     graph = json.loads((out / "graph.json").read_text(encoding="utf-8"))
-    assert graph["metadata"]["llm_status"] == "disabled"
-    assert graph["metadata"]["llm_tokens"] == 0
+    assert not any(key.startswith("llm_") for key in graph["metadata"])
+
+
+def test_watch_forces_canonical_config_despite_ambient_llm_settings(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _write(tmp_path / "src" / "app.ts", "export const app = 1;\n")
+    observed: list[Config] = []
+    monkeypatch.setenv("GRAPHITE_LLM", "cloud")
+    monkeypatch.setenv("GRAPHITE_LLM_API_KEY", "must-not-be-read")
+    monkeypatch.setattr(
+        "graphite.cli._build_project",
+        lambda _root, cfg: observed.append(cfg),
+    )
+
+    result = main(
+        ["watch", str(tmp_path), "--once", "--interval", "0.01", "--debounce", "0"]
+    )
+
+    assert result == 0
+    assert len(observed) == 1
+    assert observed[0].llm_mode == "none"
+    assert observed[0].llm_provider == "none"
+    assert observed[0].llm_api_key is None

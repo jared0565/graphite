@@ -4,9 +4,9 @@ Local-first, deterministic knowledge graph extraction for codebases. A safer, fa
 
 ## Principles
 
-- **Zero-LLM by default** — structural extraction only; no API keys, no tokens, no cost.
-- **Local-first** — runs entirely on your machine unless optional LLM enrichment is explicitly enabled.
-- **Model-agnostic enrichment** — optional summaries use native Ollama or any OpenAI-compatible HTTP endpoint.
+- **Inference-free canonical graph** — structural extraction never reads provider credentials or invokes a model.
+- **Local-first** — canonical scan, build, report, check, query, context, impact, watch, and daemon operations stay local.
+- **Isolated enrichment** — model output belongs only in explicit, non-authoritative overlays and never changes canonical artifacts.
 - **Deterministic graph** — same commit produces the same structural graph.
 - **Safe output** — no absolute paths or system metadata leak into artifacts.
 - **Incremental** — content-addressed cache means only changed files are re-parsed.
@@ -25,7 +25,7 @@ Local-first, deterministic knowledge graph extraction for codebases. A safer, fa
 pip install -e F:/Projects/graphite
 ```
 
-No model SDK is required for optional LLM enrichment; Graphite uses standard-library HTTP adapters.
+No model SDK or provider credential is required for canonical graph operation.
 
 ## System readiness and optional integrations
 
@@ -104,7 +104,7 @@ The angle-bracket value is a placeholder, not a literal path or a repository-loc
 
 The validator target in that command is `validate-packages.cjs typescript`; preserve that package spelling exactly.
 
-Local Ollama activation needs no API key: set `GRAPHITE_LLM=local`, `GRAPHITE_LLM_PROVIDER=ollama`, and an explicit `GRAPHITE_LLM_MODEL`; leave `GRAPHITE_LLM_API_KEY` unset. For a cloud provider, use a newly rotated, session-scoped `GRAPHITE_LLM_API_KEY` and explicitly set the provider, model, and HTTPS base URL. Never place the value in a command example, repository file, persistent parent-process configuration, shell history, or log. If a credential may have been exposed, revoke it in the provider dashboard, remove it from parent secret configuration, rotate it, and restart the parent and all affected processes so they cannot retain the old environment.
+Canonical commands ignore ambient `GRAPHITE_LLM*` settings and never read `GRAPHITE_LLM_API_KEY`. Optional doctor probing remains a separate, explicit network action. For the explicit doctor probe, local Ollama needs no API key; a cloud probe requires a newly rotated, session-scoped value. Never place a credential in a repository file, persistent parent-process configuration, shell history, or log. If a credential may have been exposed, revoke it in the provider dashboard, remove it from parent secret configuration, rotate it, and restart the parent and all affected processes so they cannot retain the old environment.
 
 `--include-llm` is an explicit network action and uses synthetic content only. It sends one bounded constant probe with no repository data, follows no redirects or retries, and reports neither response text, raw error text, nor secrets. The normal enrichment setting `GRAPHITE_LLM_MAX_OUTPUT_TOKENS` defaults to 512 and is clamped to 1–4096. The doctor probe overrides it with a fixed 16-token cap. Keep the LLM probe disabled unless network access to the configured endpoint is approved.
 
@@ -356,11 +356,11 @@ graphite watch . --impact
 Behavior:
 
 - Builds once on startup unless `--no-initial-build` is set.
-- Polls locally with no network calls by default.
+- Polls locally and rebuilds canonical graphs without model inference.
 - Debounces file changes before rebuilding, so save bursts do not cause repeated builds.
 - Uses content hashes, not timestamps, to avoid unnecessary rebuilds.
 - With `--impact`, prints impacted files and likely tests from the previous graph before rebuilding.
-- Does not enable LLM enrichment unless `GRAPHITE_LLM` or `--llm` is explicitly set.
+- Ignores ambient provider configuration. Legacy non-`none` `--llm` and provider flags are rejected.
 
 Useful controls:
 
@@ -426,50 +426,20 @@ graphite daemon-uninstall-startup-windows F:\Projects
 
 The fallback writes a hidden VBS launcher in the current user's Startup folder and an idempotent PowerShell launcher in `F:\Projects\.graphite-daemon`.
 
-## Optional LLM enrichment
+## Canonical graph and enrichment isolation
 
-LLM enrichment is off by default. When enabled, its prompt does not intentionally include source-file contents, but it transmits graph metadata, filenames, identifiers, labels, and analysis summaries to the configured provider. Use `--llm auto` when you want Graphite to decide whether the graph is complex/risky enough to justify the extra LLM call.
+`scan`, `build`, `report`, `check`, `validate`, `query`, `context`, `impact`, `watch`, and `daemon` are canonical operations. They force an internal no-inference configuration, ignore ambient `GRAPHITE_LLM*` values, exclude provider data from graph artifacts, and reject legacy non-`none` `--llm` or provider flags. `--llm none` remains a temporary compatibility no-op.
 
-```bash
-# Native Ollama, local only
-GRAPHITE_LLM=local GRAPHITE_LLM_PROVIDER=ollama GRAPHITE_LLM_MODEL=qwen2.5-coder graphite report .
-
-# OpenAI-compatible local server, such as LM Studio
-GRAPHITE_LLM=local GRAPHITE_LLM_PROVIDER=lmstudio GRAPHITE_LLM_MODEL=local-model graphite report .
-
-
-# OpenRouter model routing
-GRAPHITE_LLM=cloud GRAPHITE_LLM_PROVIDER=openrouter GRAPHITE_LLM_MODEL=~openai/gpt-latest GRAPHITE_LLM_API_KEY=... graphite report .
-GRAPHITE_LLM=cloud GRAPHITE_LLM_PROVIDER=openrouter GRAPHITE_LLM_MODEL=~anthropic/claude-sonnet-latest GRAPHITE_LLM_API_KEY=... graphite report .
-# Generic OpenAI-compatible endpoint
-GRAPHITE_LLM=cloud GRAPHITE_LLM_PROVIDER=openai-compatible GRAPHITE_LLM_BASE_URL=https://example.com/v1 GRAPHITE_LLM_MODEL=my-model GRAPHITE_LLM_API_KEY=... graphite report .
-```
-
-Equivalent CLI flags are available:
-
-```bash
-graphite --llm auto --llm-provider openrouter report .
-graphite --llm local --llm-provider ollama --llm-model qwen2.5-coder report .
-graphite --llm cloud --llm-provider openai-compatible --llm-base-url https://example.com/v1 --llm-model my-model report .
-graphite --llm cloud --llm-provider openrouter report .
-graphite --llm cloud --llm-provider openrouter --llm-model "~openai/gpt-latest" report .
-```
-
-Supported provider adapters:
-
-- `ollama` — native `http://localhost:11434/api/chat`.
-- `openai-compatible` — any `/v1/chat/completions` compatible endpoint.
-- Aliases with sensible base URLs: `openai`, `openrouter`, `groq`, `lmstudio`, `vllm`.
-- `openrouter` uses `https://openrouter.ai/api/v1` and defaults to `moonshotai/kimi-k2.7-code`; use `--llm-model` for any OpenRouter model slug, including latest aliases such as `~openai/gpt-latest`.
+Model enrichment is moving to the explicit `graphite overlay build` boundary. Overlay output is non-authoritative, fingerprint-bound, independently stale, and stored beneath `graph-out/overlays/`; it cannot change canonical nodes, edges, communities, validation, freshness, context, impact, or fingerprints. Until the overlay command is present, do not send graph data to a model through Graphite.
 
 ## Adaptive development routing
 
 Graphite's governed development router invokes only locally installed Claude Code
 and Codex CLIs that are already authenticated through a Claude subscription or a
 ChatGPT subscription. It does not accept or use Anthropic/OpenAI API keys. Ollama is
-not a development-routing provider. The optional Ollama/OpenAI-compatible report
-enrichment described above remains separate, and OpenRouter is reserved for
-production in-application inference.
+not a development-routing provider. Future Ollama/OpenAI-compatible enrichment is
+restricted to the separate overlay boundary, and OpenRouter remains separate from
+governed development routing.
 
 Authenticated Claude Code and Codex subscription CLIs are the only governed
 development execution providers.
@@ -571,7 +541,8 @@ Incident response follows the same containment rule: stop routing, preserve the
 database and worktree evidence, revoke an affected subscription session when
 credential exposure is suspected, and resume only after explicit review.
 
-Relevant environment variables:
+Provider environment variables are reserved for explicit doctor probes and the
+overlay boundary. Canonical commands do not read them:
 
 - `GRAPHITE_LLM`: `none`, `auto`, `local`, or `cloud`.
 - `GRAPHITE_LLM_PROVIDER`: `ollama`, `openai-compatible`, `openai`, `openrouter`, `groq`, `lmstudio`, or `vllm`.
@@ -581,7 +552,7 @@ Relevant environment variables:
 - `GRAPHITE_LLM_TIMEOUT`: request timeout seconds.
 - `GRAPHITE_LLM_MAX_INPUT_CHARS`: prompt input budget.
 
-Auto mode currently runs only when graph signals pass conservative thresholds, such as larger node/edge counts, many communities, god nodes, surprising connections, or highly linked files. It records the decision and reason in `graph-out/.graphite_manifest.json` and `GRAPH_REPORT.md`.
+These settings never appear in canonical manifests or reports.
 
 ## Output
 

@@ -33,7 +33,7 @@ from .graph_io import GraphReadError, load_validated_graph_bundle
 from .ingest import collect_files
 from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
-from .llm import enrich_report
+from .llm import CANONICAL_ENRICHMENT_MIGRATION_MESSAGE
 from .routing.approval import approval_prompt
 from .routing.service import RoutingService, RoutingServiceError
 from .routing.storage import DEFAULT_RECOVERY_PAGE_SIZE, StorageError
@@ -76,11 +76,33 @@ _TEST_SUFFIXES = (
 
 # Review graph reads are bounded to prevent untrusted artifacts exhausting memory.
 _MAX_REVIEW_GRAPH_BYTES = 128 * 1024 * 1024
+_CANONICAL_COMMANDS = frozenset(
+    {
+        "scan",
+        "build",
+        "report",
+        "check",
+        "validate",
+        "query",
+        "impact",
+        "context",
+        "watch",
+        "daemon",
+    }
+)
+_LEGACY_LLM_ARGUMENTS = (
+    "llm_provider",
+    "llm_model",
+    "llm_base_url",
+    "llm_api_key",
+    "llm_timeout",
+    "llm_max_input_chars",
+)
 
 
-def _config_from_args(args: argparse.Namespace) -> Config:
+def _config_from_args(args: argparse.Namespace, *, canonical: bool = False) -> Config:
     """Build config from defaults + CLI args + env."""
-    base = Config.from_env()
+    base = Config.from_env(include_llm=not canonical)
     kwargs: dict[str, Any] = {**base.to_dict()}
     if getattr(args, "output_dir", None) is not None:
         kwargs["output_dir"] = Path(args.output_dir)
@@ -92,21 +114,26 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         kwargs["verbose"] = True
     if getattr(args, "no_typescript_symbol_references", False):
         kwargs["typescript_symbol_references"] = False
-    for arg_name, cfg_name in (
+    configurable = (
         ("typescript_resolver", "typescript_resolver"),
         ("typescript_resolver_timeout", "typescript_resolver_timeout_seconds"),
-        ("llm", "llm_mode"),
-        ("llm_provider", "llm_provider"),
-        ("llm_model", "llm_model"),
-        ("llm_base_url", "llm_base_url"),
-        ("llm_api_key", "llm_api_key"),
-        ("llm_timeout", "llm_timeout_seconds"),
-        ("llm_max_input_chars", "llm_max_input_chars"),
-    ):
+    )
+    if not canonical:
+        configurable += (
+            ("llm", "llm_mode"),
+            ("llm_provider", "llm_provider"),
+            ("llm_model", "llm_model"),
+            ("llm_base_url", "llm_base_url"),
+            ("llm_api_key", "llm_api_key"),
+            ("llm_timeout", "llm_timeout_seconds"),
+            ("llm_max_input_chars", "llm_max_input_chars"),
+        )
+    for arg_name, cfg_name in configurable:
         value = getattr(args, arg_name, None)
         if value is not None:
             kwargs[cfg_name] = value
-    return Config(**kwargs)
+    cfg = Config(**kwargs)
+    return cfg.canonical_graph() if canonical else cfg
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
@@ -114,6 +141,7 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def _scan(args: argparse.Namespace, cfg: Config) -> tuple[dict[str, Any], list[Any]]:
+    cfg = cfg.canonical_graph()
     root = Path(args.path).resolve()
     if not root.exists():
         print(f"[graphite] path not found: {root}", file=sys.stderr)
@@ -141,6 +169,7 @@ def _build(
     manifest: dict[str, Any],
     entries: list[Any],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    cfg = cfg.canonical_graph()
     cache = Cache(cfg.cache_dir, cfg.cache_version)
     start = time.time()
     extraction = extract_all(entries, cfg, cache)
@@ -163,12 +192,6 @@ def _build(
     annotate_communities(g, clusters["node_to_community"])
     graph_data = graph_to_json(g)
     analysis = analyze(g)
-    llm = enrich_report(graph_data, clusters, analysis, cfg)
-    analysis["llm"] = llm
-    if cfg.verbose and llm.get("enabled"):
-        status = llm.get("status", "unknown")
-        provider = llm.get("provider", cfg.llm_provider)
-        print(f"[graphite] llm enrichment {status} via {provider}")
 
     return graph_data, clusters, analysis
 
@@ -180,20 +203,12 @@ def _report(
     clusters: dict[str, Any],
     analysis: dict[str, Any],
 ) -> None:
+    cfg = cfg.canonical_graph()
     out = cfg.output_dir
     out.mkdir(parents=True, exist_ok=True)
 
-    llm = analysis.get("llm", {})
     public_manifest = {
         **manifest,
-        "llm_mode": cfg.llm_mode,
-        "llm_provider": llm.get("provider") or cfg.llm_provider,
-        "llm_model": llm.get("model") or cfg.llm_model,
-        "llm_status": llm.get("status", "disabled" if not llm.get("enabled") else "unknown"),
-        "llm_effective_mode": llm.get("effective_mode"),
-        "llm_reason": llm.get("reason"),
-        "llm_auto": llm.get("auto"),
-        "llm_tokens": llm.get("tokens", 0),
         "typescript_resolver": cfg.typescript_resolver,
     }
 
@@ -217,6 +232,7 @@ def _report(
 
 
 def _build_project(path: Path, cfg: Config) -> None:
+    cfg = cfg.canonical_graph()
     args = argparse.Namespace(path=str(path))
     manifest, entries = _scan(args, cfg)
     graph_data, clusters, analysis = _build(args, cfg, manifest, entries)
@@ -319,7 +335,7 @@ def _print_watch_impact(root: Path, cfg: Config, change: WatchChange, depth: int
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
-    cfg = _config_from_args(args)
+    cfg = _config_from_args(args, canonical=True)
     manifest, _ = _scan(args, cfg)
     _write_json(cfg.output_dir / ".graphite_manifest.json", manifest)
     print(f"[graphite] manifest written: {cfg.output_dir / '.graphite_manifest.json'}")
@@ -327,7 +343,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
-    cfg = _config_from_args(args)
+    cfg = _config_from_args(args, canonical=True)
     _build_project(Path(args.path).resolve(), cfg)
     return 0
 
@@ -337,7 +353,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    cfg = _config_from_args(args)
+    cfg = _config_from_args(args, canonical=True)
     status = check_graph_freshness(Path(args.path).resolve(), cfg)
     if args.json:
         print(json.dumps(status, ensure_ascii=False, indent=2))
@@ -370,8 +386,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return int(report["exit_code"])
 
 
-def _project_scoped_config(args: argparse.Namespace, root: Path) -> Config:
-    cfg = _config_from_args(args)
+def _project_scoped_config(
+    args: argparse.Namespace, root: Path, *, canonical: bool = False
+) -> Config:
+    cfg = _config_from_args(args, canonical=canonical)
     data = cfg.to_dict()
     if not Path(data["output_dir"]).is_absolute():
         data["output_dir"] = root / data["output_dir"]
@@ -439,7 +457,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
     result = bootstrap_project(root, daemon_base=daemon_base).to_dict()
-    cfg = _project_scoped_config(args, root)
+    cfg = _project_scoped_config(args, root, canonical=True)
     activation = _activate_typescript_for_onboarding(args, root, cfg)
     build: dict[str, Any] = {"requested": not args.no_build, "ok": None}
     validation: dict[str, Any] = {"requested": not args.no_validate, "ok": None}
@@ -502,7 +520,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     platforms = resolve_platform_selection(requested, interactive=interactive)
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
     result = init_project(root, platforms=platforms, daemon_base=daemon_base).to_dict()
-    cfg = _project_scoped_config(args, root)
+    cfg = _project_scoped_config(args, root, canonical=True)
     activation = _activate_typescript_for_onboarding(args, root, cfg)
     build: dict[str, Any] = {"requested": not args.no_build, "ok": None}
     validation: dict[str, Any] = {"requested": not args.no_validate, "ok": None}
@@ -556,7 +574,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_audit_replacement(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
-    cfg = _project_scoped_config(args, root)
+    cfg = _project_scoped_config(args, root, canonical=True)
     report = audit_replacement(root, daemon_base=daemon_base, cfg=cfg)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -693,7 +711,7 @@ def cmd_review_changes(args: argparse.Namespace) -> int:
         changes = discover_git_changes(root, timeout_seconds=args.git_timeout)
         discovery = "git"
 
-    cfg = _project_scoped_config(args, root)
+    cfg = _project_scoped_config(args, root, canonical=True)
     custom_graph = args.graph_json is not None
     graph_path = _resolve_review_graph_path(root, cfg, args.graph_json)
     graph_bundle, graph_error = _load_review_graph(graph_path, root)
@@ -727,7 +745,7 @@ def cmd_context(args: argparse.Namespace) -> int:
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
-    cfg = _config_from_args(args)
+    cfg = _config_from_args(args, canonical=True)
     root = Path(args.path).resolve()
     options = WatchOptions(
         interval_seconds=args.interval,
@@ -759,8 +777,6 @@ def cmd_watch(args: argparse.Namespace) -> int:
         f"[graphite] watching {root} "
         f"(interval={options.interval_seconds}s, debounce={options.debounce_seconds}s)"
     )
-    if cfg.llm_mode != "none":
-        print("[graphite] warning: LLM enrichment is enabled for watch rebuilds")
     processed = watch_loop(root, cfg, on_change, options, on_error=on_error)
     if args.once:
         print(f"[graphite] watch once complete ({processed} rebuilds)")
@@ -768,7 +784,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
-    cfg = _config_from_args(args)
+    cfg = _config_from_args(args, canonical=True)
     base = Path(args.base_path).resolve()
     options = DaemonOptions(
         scan_interval_seconds=args.scan_interval,
@@ -784,8 +800,6 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         max_cycles=args.max_cycles,
         state_dir=Path(args.state_dir).resolve() if args.state_dir else None,
     )
-    if cfg.llm_mode != "none":
-        print("[graphite] warning: LLM enrichment is enabled for daemon rebuilds")
     status = run_daemon(base, cfg, options)
     if args.json:
         print(json.dumps(status, ensure_ascii=False, indent=2))
@@ -1230,13 +1244,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--typescript-resolver", choices=["auto", "compiler", "heuristic", "disabled"], default=None, help="TypeScript resolver mode (default: auto)")
     parser.add_argument("--typescript-resolver-timeout", type=float, default=None, help="TypeScript compiler resolver timeout in seconds")
     parser.add_argument("--no-typescript-symbol-references", action="store_true", help="Disable TypeScript compiler symbol-reference edges")
-    parser.add_argument("--llm", choices=["none", "auto", "local", "cloud"], default=None, help="Optional LLM enrichment mode")
-    parser.add_argument("--llm-provider", default=None, help="LLM provider: ollama, openai, openai-compatible, lmstudio, vllm, openrouter, groq")
-    parser.add_argument("--llm-model", default=None, help="LLM model name")
-    parser.add_argument("--llm-base-url", default=None, help="LLM provider base URL")
-    parser.add_argument("--llm-api-key", default=None, help="LLM API key; prefer GRAPHITE_LLM_API_KEY for shells/history")
-    parser.add_argument("--llm-timeout", type=float, default=None, help="LLM request timeout in seconds")
-    parser.add_argument("--llm-max-input-chars", type=int, default=None, help="Maximum graph-summary prompt characters")
+    parser.add_argument("--llm", choices=["none", "auto", "local", "cloud"], default=None, help="Optional integration mode; canonical graph commands accept only none")
+    parser.add_argument("--llm-provider", default=None, help="Provider for explicit doctor/overlay operations; rejected by canonical commands")
+    parser.add_argument("--llm-model", default=None, help="Model for explicit doctor/overlay operations")
+    parser.add_argument("--llm-base-url", default=None, help="Provider base URL for explicit doctor/overlay operations")
+    parser.add_argument("--llm-api-key", default=None, help="Provider key for explicit doctor/overlay operations; prefer a session-scoped environment value")
+    parser.add_argument("--llm-timeout", type=float, default=None, help="Provider timeout for explicit doctor/overlay operations")
+    parser.add_argument("--llm-max-input-chars", type=int, default=None, help="Maximum explicit overlay input characters")
 
     sub = parser.add_subparsers(dest="command")
 
@@ -1573,6 +1587,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.command == "doctor" and args.include_llm and not args.deep:
         p_doctor.error("--include-llm requires --deep")
+    if args.command in _CANONICAL_COMMANDS and (
+        getattr(args, "llm", None) not in (None, "none")
+        or any(getattr(args, name, None) is not None for name in _LEGACY_LLM_ARGUMENTS)
+    ):
+        print(CANONICAL_ENRICHMENT_MIGRATION_MESSAGE, file=sys.stderr)
+        return 2
 
     try:
         return int(args.func(args) or 0)

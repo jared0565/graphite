@@ -25,8 +25,10 @@ def test_init_project_creates_shared_graphite_and_platform_files(tmp_path: Path)
     assert first["graphite_doc"]["changed"] is True
     assert second["graphite_doc"]["changed"] is False
     graphite_doc = (tmp_path / "GRAPHITE.md").read_text(encoding="utf-8")
-    assert "## Optional LLM Enrichment" in graphite_doc
-    assert "GRAPHITE_LLM_API_KEY" in graphite_doc
+    assert "## Canonical Graph Isolation" in graphite_doc
+    assert "do not read" in graphite_doc
+    assert "provider credentials" in graphite_doc
+    assert "GRAPHITE_LLM_API_KEY" not in graphite_doc
     assert "Follow `GRAPHITE.md`" in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "Follow `GRAPHITE.md`" in (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
     assert "Follow `GRAPHITE.md`" in (tmp_path / ".github" / "copilot-instructions.md").read_text(encoding="utf-8")
@@ -92,8 +94,8 @@ def test_init_cli_json_no_build(tmp_path: Path, capsys) -> None:
     assert payload["build"]["requested"] is False
     assert payload["validation"]["requested"] is False
     graphite_doc = (tmp_path / "GRAPHITE.md").read_text(encoding="utf-8")
-    assert "## Optional LLM Enrichment" in graphite_doc
-    assert "GRAPHITE_LLM_API_KEY" in graphite_doc
+    assert "## Canonical Graph Isolation" in graphite_doc
+    assert "GRAPHITE_LLM_API_KEY" not in graphite_doc
     assert (tmp_path / "AGENTS.md").exists()
     assert (tmp_path / "CLAUDE.md").exists()
 
