@@ -15,14 +15,15 @@ from .probe_runner import ProviderProbeError, run_process_probe
 from .process_runner import CliProcessError, CliProcessResult, decode_cli_output
 
 _VERSION: Final = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*) \(Claude Code\)\r?\n?$")
-_FLAGS: Final = frozenset(
+# Claude documents that --help is intentionally incomplete. Runtime-only controls
+# such as --allowedTools and --max-turns are enforced by the verification argv and
+# its fail-closed process result rather than inferred from help text.
+_HELP_DISCOVERABLE_FLAGS: Final = frozenset(
     {
-        "--allowedTools",
         "--disable-slash-commands",
         "--effort",
         "--input-format",
         "--json-schema",
-        "--max-turns",
         "--model",
         "--no-chrome",
         "--no-session-persistence",
@@ -36,7 +37,7 @@ _FLAGS: Final = frozenset(
 )
 _FLAG_PATTERNS: Final = tuple(
     re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(flag)}(?![A-Za-z0-9_-])")
-    for flag in sorted(_FLAGS)
+    for flag in sorted(_HELP_DISCOVERABLE_FLAGS)
 )
 ProcessProbe = Callable[..., CliProcessResult]
 

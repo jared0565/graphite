@@ -141,3 +141,24 @@ checks passed. The final canonical rebuild is fresh with 7,471 nodes, 16,540 edg
 157 communities, 184 scanned files, and engine fingerprint
 `905d374a45fbe33e5f5439ead76f818f895549451751cac476e5fd3e106ebf10`.
 No provider command was invoked by the correction itself.
+
+The separately approved follow-up observation still failed as
+`probe_capability_missing`, proving punctuation was not the complete cause. It again
+stopped before authentication completion, identity construction, persistence,
+verification, inference, retry, or fallback. Anthropic's current
+[Claude Code CLI reference](https://code.claude.com/docs/en/cli-usage) explicitly
+states that `claude --help` does not list every flag and separately documents both
+`--allowedTools` and `--max-turns` as supported. Their omission therefore cannot be
+used as negative runtime-capability evidence.
+
+The lifecycle probe now gates only the help-discoverable safety and structured-output
+surface. The verification executor still supplies `--allowedTools` and
+`--max-turns 1`; an installed CLI that rejects either fails closed during the exact
+verification call and cannot create authority. Tests cover incomplete help, exact
+boundary matching, lookalike rejection, and the immutable verification argv. The
+focused probe/executor selection passed 30 tests; the broader probe, executor,
+observer, lifecycle, process, routing-security, and documentation selection passed
+197 tests. Repository-wide Ruff and diff checks passed. No provider command was
+invoked by this offline correction. The final fresh canonical graph contains 7,472
+nodes, 16,544 edges, 151 communities, and 184 scanned files; its engine fingerprint
+is `19edcaa577a1fb0fe95eafa6aa6536ec21430ed8fe8077f44a6284cd0a3ee27c`.

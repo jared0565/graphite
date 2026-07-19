@@ -107,12 +107,41 @@ def test_claude_observation_accepts_exact_flags_with_help_punctuation(
     assert len(probe.calls) == 3
 
 
+def test_claude_observation_allows_supported_runtime_controls_omitted_from_help(
+    tmp_path: Path,
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    probe = ScriptedProbe([
+        b"2.1.214 (Claude Code)\n",
+        b"--disable-slash-commands --effort --input-format --json-schema --model "
+        b"--no-chrome --no-session-persistence --output-format --permission-mode "
+        b"--print --safe-mode --strict-mcp-config --verbose\n",
+        b'{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}',
+    ])
+
+    identity = observe_claude(
+        executable=executable,
+        workspace=workspace,
+        credential_home=credentials,
+        observed_at=100,
+        policy_version="1.0.0",
+        transport=probe,
+    )
+
+    assert identity.capabilities == ("credential_health", "structured_output", "version")
+    assert len(probe.calls) == 3
+
+
 @pytest.mark.parametrize(
-    "lookalike",
-    [b"prefix--allowedTools", b"--allowedToolsExtra", b"--max-turns-extra"],
+    ("required_flag", "lookalike"),
+    [
+        (b"--json-schema", b"prefix--json-schema"),
+        (b"--json-schema", b"--json-schema-extra"),
+        (b"--permission-mode", b"--permission-mode-extra"),
+    ],
 )
 def test_claude_observation_rejects_flag_lookalikes(
-    tmp_path: Path, lookalike: bytes
+    tmp_path: Path, required_flag: bytes, lookalike: bytes
 ) -> None:
     executable, workspace, credentials = _paths(tmp_path)
     valid = (
@@ -120,10 +149,7 @@ def test_claude_observation_rejects_flag_lookalikes(
         b"--max-turns --model --no-chrome --no-session-persistence --output-format "
         b"--permission-mode --print --safe-mode --strict-mcp-config --verbose"
     )
-    if b"allowedTools" in lookalike:
-        help_output = valid.replace(b"--allowedTools", lookalike)
-    else:
-        help_output = valid.replace(b"--max-turns", lookalike)
+    help_output = valid.replace(required_flag, lookalike)
     probe = ScriptedProbe([b"2.1.214 (Claude Code)\n", help_output])
 
     with pytest.raises(ProviderProbeError, match="^probe_capability_missing$"):
