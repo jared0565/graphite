@@ -226,3 +226,48 @@ telemetry, policy, service, and lifecycle-service regression passed 145 tests wi
 one intentional skip. Touched-file Ruff and `git diff --check` passed. All new
 verification used deterministic callbacks and isolated test databases; no provider
 or network inference call occurred.
+
+## First combined live-acceptance attempt and Codex probe compatibility
+
+The operator approved exact aggregate bundle
+`497224b328ac9fd82c30ce36c7b19b623040808ef97ba0ee78b461bfbb7511ba`.
+It allowed five ordered attempts with stop-on-failure: Claude verification, Codex
+verification, isolated Claude and Codex edit smokes, and a read-only Claude review
+of the Codex high-risk diff. It prohibited retries, fallback, resume, substitution,
+merge, push, deployment, and persistence of raw provider output or repository
+content.
+
+The first Claude verification passed in 10,577 milliseconds using effective model
+`claude-sonnet-5`, 2 input tokens, and 451 output tokens. The isolated store saved
+read-only snapshot
+`d44ec2d79bd753a15049517a3892d5ad6c8026601728e59e935620da5a437acb`,
+one lifecycle binding, and two sanitized telemetry events. The batch then stopped
+before a Codex model call because the fixed local Codex metadata probe returned
+`probe_capability_missing`. Total model attempts were one. Neither edit smoke nor
+the cross-provider review started, and all three live worktrees remained clean.
+
+The stopped batch's routing and lifecycle databases both passed SQLite integrity
+checks. They were removed from active authority and placed in a dedicated
+recoverable quarantine. Their SHA-256 digests are
+`7a4be6012b36147e285e4e081fea28e90869d03a0ecc88abac787cff74d56988`
+and `9ec9a2ebd7d510be2196417654eee87c3077fb67fa728cc75d545bfb1bcb7010`.
+They must never be reactivated or treated as complete acceptance evidence.
+
+The installed Codex `0.144.6` help renders short options with punctuation, such as
+`-a,`. The probe's whitespace-token comparison therefore rejected five exact short
+flags even though their required options were present. Capability matching now uses
+boundary-safe exact-flag patterns. Punctuated flags pass, while longer lookalike
+tokens remain rejected. A fixed non-inference probe against the installed CLI now
+passes with the unchanged lifecycle identity
+`2e00cae0b551e10906838bed0a7ca7ce9eba77759286f7da93323dc2b1f928a5`.
+
+The focused Codex probe tests passed 4 tests. The broader routing and provider
+selection passed 573 tests with one skip and 1,171 deselected. The complete offline
+suite passed 1,701 tests with 44 skips. Repository-wide Ruff and diff checks passed.
+No Codex inference, retry, fallback, edit, review, merge, push, or deployment
+occurred. The fresh canonical graph contains 7,489 nodes, 16,635 edges, 157
+communities, and 184 scanned files. Its canonical fingerprint is
+`230718d9c0d37bd94a2bdd231b4e318f6afcafbb74312fdfc69ed86765c3d8b7`
+and its engine fingerprint is
+`deccdf36f0856d0f44dd4ccfc0c39c830cd92898098fb37c82c9cdd93e216142`.
+A new complete live-acceptance bundle remains required.

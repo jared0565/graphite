@@ -18,6 +18,14 @@ _GLOBAL_FLAGS: Final = frozenset({"--strict-config", "-a", "-s", "-C", "-m", "-c
 _EXEC_FLAGS: Final = frozenset(
     {"--json", "--ephemeral", "--ignore-user-config", "--ignore-rules"}
 )
+_GLOBAL_FLAG_PATTERNS: Final = tuple(
+    re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(flag)}(?![A-Za-z0-9_-])")
+    for flag in sorted(_GLOBAL_FLAGS)
+)
+_EXEC_FLAG_PATTERNS: Final = tuple(
+    re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(flag)}(?![A-Za-z0-9_-])")
+    for flag in sorted(_EXEC_FLAGS)
+)
 _WARNING_PREFIXES: Final = ("WARNING: failed to clean up stale arg0 temp dirs:", "WARNING: proceeding, even though we could not create PATH aliases:")
 ProcessProbe = Callable[..., CliProcessResult]
 
@@ -63,10 +71,12 @@ def observe_codex(
     except CliIdentityPrimitiveError:
         raise ProviderProbeError("probe_version_invalid") from None
     help_stdout, help_stderr = _streams(call("--help"), "probe_capability_missing")
-    global_tokens = set((help_stdout + "\n" + help_stderr).split())
+    global_help = help_stdout + "\n" + help_stderr
     exec_stdout, exec_stderr = _streams(call("exec", "--help"), "probe_capability_missing")
-    exec_tokens = set((exec_stdout + "\n" + exec_stderr).split())
-    if not _GLOBAL_FLAGS.issubset(global_tokens) or not _EXEC_FLAGS.issubset(exec_tokens):
+    exec_help = exec_stdout + "\n" + exec_stderr
+    if not all(pattern.search(global_help) for pattern in _GLOBAL_FLAG_PATTERNS) or not all(
+        pattern.search(exec_help) for pattern in _EXEC_FLAG_PATTERNS
+    ):
         raise ProviderProbeError("probe_capability_missing")
     stdout, stderr = _streams(call("login", "status"), "probe_auth_unhealthy")
     lines = [line.strip() for stream in (stdout, stderr) for line in stream.splitlines() if line.strip()]

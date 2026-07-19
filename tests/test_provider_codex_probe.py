@@ -49,6 +49,61 @@ def test_codex_observation_uses_only_fixed_metadata_commands(tmp_path: Path) -> 
     assert len(probe.calls) == 4
 
 
+def test_codex_observation_accepts_punctuated_help_flags(tmp_path: Path) -> None:
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"codex-runtime")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    probe = ScriptedProbe([
+        _result(b"codex-cli 0.144.6\n"),
+        _result(
+            b"--strict-config\n"
+            b"-a, --ask-for-approval\n-s, --sandbox\n-C, --cd\n"
+            b"-m, --model\n-c, --config\n"
+        ),
+        _result(b"--json --ephemeral --ignore-user-config --ignore-rules\n"),
+        _result(b"Logged in using ChatGPT\n"),
+    ])
+
+    identity = observe_codex(
+        executable=executable,
+        workspace=workspace,
+        credential_home=None,
+        observed_at=200,
+        policy_version="1.0.0",
+        transport=probe,
+    )
+
+    assert identity.version == "0.144.6"
+    assert len(probe.calls) == 4
+
+
+def test_codex_observation_rejects_flag_substrings(tmp_path: Path) -> None:
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"codex-runtime")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    probe = ScriptedProbe([
+        _result(b"codex-cli 0.144.6\n"),
+        _result(
+            b"--strict-config-extra -a-extra -s-extra -C-extra -m-extra -c-extra\n"
+        ),
+        _result(b"--json --ephemeral --ignore-user-config --ignore-rules\n"),
+    ])
+
+    with pytest.raises(ProviderProbeError, match="^probe_capability_missing$"):
+        observe_codex(
+            executable=executable,
+            workspace=workspace,
+            credential_home=None,
+            observed_at=200,
+            policy_version="1.0.0",
+            transport=probe,
+        )
+
+    assert len(probe.calls) == 3
+
+
 def test_codex_observation_stops_on_unhealthy_auth_without_leaking(tmp_path: Path) -> None:
     executable = tmp_path / "codex.exe"
     executable.write_bytes(b"codex-runtime")
