@@ -54,6 +54,7 @@ def test_canonical_config_does_not_read_llm_environment_values(monkeypatch) -> N
         ["--llm-model", "vendor/model"],
         ["--llm-base-url", "https://example.invalid/v1"],
         ["--llm-api-key", "must-not-enter-canonical-config"],
+        ["--llm-max-output-tokens", "64"],
     ],
 )
 def test_canonical_commands_reject_legacy_enrichment_options(

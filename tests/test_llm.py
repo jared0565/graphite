@@ -370,7 +370,8 @@ def test_unsupported_provider_is_non_fatal() -> None:
 
     assert result["status"] == "error"
     assert result["tokens"] == 0
-    assert "unsupported" in result["error"]
+    assert result["error_category"] == "configuration"
+    assert "error" not in result
 
 
 def test_prompt_is_bounded_and_uses_graph_metadata_only() -> None:

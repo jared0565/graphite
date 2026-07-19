@@ -263,16 +263,16 @@ providers can become eligible.
 - Modify `tests/test_llm.py`
 - Modify `tests/test_documentation.py`
 
-- [ ] Define an overlay manifest binding canonical graph fingerprint, provider lifecycle identity digest, model identity digest, routing policy digest, limits, creation time, outcome category, and overlay schema version.
-- [ ] Add an explicit `graphite enrich` or `graphite overlay build` command. It must require an existing fresh canonical graph and write only beneath `graph-out/overlays/<provider>/<identity-digest>/`.
-- [ ] Canonicalize and contain overlay paths; reject traversal, symlinks, reparse points, digest collisions, writes outside the output root, and replacement of canonical artifacts.
-- [ ] Write overlay files atomically with restrictive permissions. A failed enrichment leaves the last valid overlay intact or records a separate sanitized failure marker.
-- [ ] Mark overlays stale when the canonical fingerprint or provider/model identity changes. Overlay staleness must not make the canonical graph stale.
-- [ ] Keep overlay reads opt-in and non-authoritative. `query`, `context`, `impact`, validation, and routing authority must ignore overlays unless a future separately designed feature explicitly requests display-only data.
-- [ ] Prove Ollama and OpenRouter enrichment failures, deletion, drift, missing credentials, and incompatible versions cannot alter canonical artifacts or exit status.
-- [ ] Do not perform any live enrichment during implementation. Use fake local providers and deterministic fixtures only.
-- [ ] Run overlay, LLM, path-security, documentation, and graph-isolation tests.
-- [ ] Commit: `feat: write AI enrichment as isolated overlays`.
+- [x] Define an overlay manifest binding canonical graph fingerprint, provider lifecycle identity digest, model identity digest, routing policy digest, limits, creation time, outcome category, and overlay schema version.
+- [x] Add an explicit `graphite enrich` or `graphite overlay build` command. It must require an existing fresh canonical graph and write only beneath `graph-out/overlays/<provider>/<identity-digest>/`.
+- [x] Canonicalize and contain overlay paths; reject traversal, symlinks, reparse points, digest collisions, writes outside the output root, and replacement of canonical artifacts.
+- [x] Write overlay files atomically with restrictive permissions. A failed enrichment leaves the last valid overlay intact or records a separate sanitized failure marker.
+- [x] Mark overlays stale when the canonical fingerprint or provider/model identity changes. Overlay staleness must not make the canonical graph stale.
+- [x] Keep overlay reads opt-in and non-authoritative. `query`, `context`, `impact`, validation, and routing authority must ignore overlays unless a future separately designed feature explicitly requests display-only data.
+- [x] Prove Ollama and OpenRouter enrichment failures, deletion, drift, missing credentials, and incompatible versions cannot alter canonical artifacts or exit status.
+- [x] Do not perform any live enrichment during implementation. Use fake local providers and deterministic fixtures only.
+- [x] Run overlay, LLM, path-security, documentation, and graph-isolation tests.
+- [x] Commit: `feat: write AI enrichment as isolated overlays`.
 
 ## Task 9: Add operator commands, migration guidance, and recovery evidence
 

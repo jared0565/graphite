@@ -344,6 +344,14 @@ def enrich_report(
             "tokens": completion.total_tokens or completion.input_tokens + completion.output_tokens,
         }
     except Exception as exc:  # Overlay failures remain isolated from canonical graphs.
+        if isinstance(exc, LLMConfigurationError):
+            category: ProviderErrorCategory = "configuration"
+        elif isinstance(exc, LLMProviderError):
+            category = exc.category
+        elif isinstance(exc, TimeoutError):
+            category = "timeout"
+        else:
+            category = "provider_error"
         return {
             "enabled": True,
             "status": "error",
@@ -353,7 +361,7 @@ def enrich_report(
             "model": cfg.llm_model or _default_model(cfg.llm_provider),
             "auto": auto_decision,
             "tokens": 0,
-            "error": _sanitize_error(exc, cfg),
+            "error_category": category,
         }
 
 
@@ -452,10 +460,3 @@ def _default_model(provider: str) -> str:
     if normalized == "groq":
         return "llama-3.1-8b-instant"
     return "gpt-4o-mini"
-
-
-def _sanitize_error(exc: Exception, cfg: Config) -> str:
-    message = str(exc)
-    if cfg.llm_api_key:
-        message = message.replace(cfg.llm_api_key, "[redacted]")
-    return message[:500]

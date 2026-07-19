@@ -430,7 +430,24 @@ The fallback writes a hidden VBS launcher in the current user's Startup folder a
 
 `scan`, `build`, `report`, `check`, `validate`, `query`, `context`, `impact`, `watch`, and `daemon` are canonical operations. They force an internal no-inference configuration, ignore ambient `GRAPHITE_LLM*` values, exclude provider data from graph artifacts, and reject legacy non-`none` `--llm` or provider flags. `--llm none` remains a temporary compatibility no-op.
 
-Model enrichment is moving to the explicit `graphite overlay build` boundary. Overlay output is non-authoritative, fingerprint-bound, independently stale, and stored beneath `graph-out/overlays/`; it cannot change canonical nodes, edges, communities, validation, freshness, context, impact, or fingerprints. Until the overlay command is present, do not send graph data to a model through Graphite.
+Model enrichment uses the explicit `graphite overlay build` boundary. The command requires an existing fresh canonical graph plus exact current provider-lifecycle and model identity SHA-256 digests. OpenRouter additionally requires its routing-policy digest. Only lifecycle-governed Ollama and OpenRouter overlays are accepted; Ollama is restricted to loopback HTTP and OpenRouter to its canonical HTTPS API root.
+
+Global provider options precede the subcommand. These examples deliberately omit credentials; provide an OpenRouter credential only through an approved session-scoped secret environment, never argv or a repository file:
+
+```powershell
+graphite --llm local --llm-provider ollama --llm-model qwen2.5-coder:7b overlay build . `
+  --provider-identity-digest <64-lowercase-hex-lifecycle-digest> `
+  --model-identity-digest <64-lowercase-hex-model-digest>
+
+graphite --llm cloud --llm-provider openrouter --llm-model <exact-provider-model-id> overlay build . `
+  --provider-identity-digest <64-lowercase-hex-lifecycle-digest> `
+  --model-identity-digest <64-lowercase-hex-model-digest> `
+  --routing-policy-digest <64-lowercase-hex-routing-policy-digest>
+```
+
+The overlay manifest binds the canonical bundle fingerprint, lifecycle/model/routing identities, input/output/time limits, creation time, outcome, and schema version. Successful payloads are content-addressed and the manifest is replaced last, so interruption cannot replace the last valid overlay with a partial result. A failed call writes only a separate allowlisted failure category; raw diagnostics, prompts, credentials, endpoints, and paths are excluded.
+
+Overlay files are non-authoritative, independently stale, and stored only beneath `graph-out/overlays/<provider>/<identity-digest>/`. Identity-derived paths reject traversal, symlinks, reparse points, collisions, and output-root escape. Restrictive file permissions are applied. Changing the canonical graph or provider/model/routing identity makes the overlay stale without changing canonical freshness or exit status. `query`, `context`, `impact`, validation, routing, watch, and daemon do not read overlays. Deleting the overlay tree removes annotations without changing canonical artifacts.
 
 ## Adaptive development routing
 
@@ -551,6 +568,7 @@ overlay boundary. Canonical commands do not read them:
 - `GRAPHITE_LLM_API_KEY`: provider API key; do not commit this.
 - `GRAPHITE_LLM_TIMEOUT`: request timeout seconds.
 - `GRAPHITE_LLM_MAX_INPUT_CHARS`: prompt input budget.
+- `GRAPHITE_LLM_MAX_OUTPUT_TOKENS`: overlay output-token budget, clamped to 1–4096.
 
 These settings never appear in canonical manifests or reports.
 

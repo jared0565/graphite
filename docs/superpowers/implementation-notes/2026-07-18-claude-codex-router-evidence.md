@@ -361,3 +361,47 @@ zero build warnings, and engine fingerprint
 `b29f49ae2c9e1197d0803c7cd1f79c376c2acebe39b4d19dbcb1e35dcea6122d`.
 The freshness check passed, and the canonical manifest and analysis contained
 no LLM or provider keys.
+
+## Non-authoritative enrichment overlays
+
+Task 8 added the explicit `graphite overlay build` boundary for lifecycle-bound
+Ollama and OpenRouter annotations. Each schema-v1 manifest binds the validated
+canonical bundle fingerprint, provider lifecycle identity digest, model identity
+digest, optional OpenRouter routing-policy digest, bounded input/output/time
+limits, creation time, sanitized outcome, content-addressed payload, and derived
+overlay identity. The command requires a fresh canonical graph and rejects
+credentials in argv; OpenRouter credentials may enter only through the explicit
+session environment.
+
+Overlay paths are derived exclusively from validated provider and digest fields
+under `graph-out/overlays/<provider>/<identity-digest>/`. Containment rejects
+traversal, output-root escape, symlinks, Windows reparse points, non-directory
+components, identity collisions, payload digest collisions, and replacement via
+hostile final paths. Directories and files receive restrictive POSIX modes or a
+protected current-user Windows DACL. Payloads are written content-addressed and
+the manifest is atomically replaced last. A provider failure preserves the last
+valid manifest/payload and writes only a separate allowlisted failure-category
+marker; raw diagnostics, prompts, credentials, endpoints, and paths have no
+persistence field.
+
+Success publication rechecks canonical freshness and fingerprint after the fake
+provider returns. Canonical or provider/model/routing identity changes make an
+overlay independently stale. Opt-in manifest reads validate identity, schema,
+payload name, digest, and payload presence. Canonical query, context, impact,
+validation, routing, watch, and daemon paths remain unaware of overlay storage;
+failure, deletion, drift, missing credentials, and incompatible identity cannot
+alter their artifacts or status.
+
+The hardened overlay suite passed 20 tests. Focused overlay, LLM, graph-isolation,
+documentation, doctor, and routing CLI acceptance passed 372 tests. The complete
+offline repository suite passed 1,668 tests with 44 intentional skips. Ruff and
+`git diff --check` passed. Every provider result used deterministic injected
+fakes; no provider process, external request, inference, retry, fallback, merge,
+push, or deployment occurred.
+
+The pre-evidence Task 8 canonical rebuild used explicit `--llm none` and
+completed with 7,353 nodes, 16,284 edges, 181 scanned files, 145 communities,
+zero build warnings, and engine fingerprint
+`9631290baa2f09efe737f934ef0e0836a16cd9921b5b5eba0d1d410e017a48fc`.
+The freshness check passed, and canonical manifest/analysis artifacts contained
+no LLM, provider, or overlay keys.

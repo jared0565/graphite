@@ -34,6 +34,7 @@ from .ingest import collect_files
 from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
 from .llm import CANONICAL_ENRICHMENT_MIGRATION_MESSAGE
+from .overlays import OverlayError, OverlayRequest, build_overlay
 from .routing.approval import approval_prompt
 from .routing.service import RoutingService, RoutingServiceError
 from .routing.storage import DEFAULT_RECOVERY_PAGE_SIZE, StorageError
@@ -97,6 +98,7 @@ _LEGACY_LLM_ARGUMENTS = (
     "llm_api_key",
     "llm_timeout",
     "llm_max_input_chars",
+    "llm_max_output_tokens",
 )
 
 
@@ -127,6 +129,7 @@ def _config_from_args(args: argparse.Namespace, *, canonical: bool = False) -> C
             ("llm_api_key", "llm_api_key"),
             ("llm_timeout", "llm_timeout_seconds"),
             ("llm_max_input_chars", "llm_max_input_chars"),
+            ("llm_max_output_tokens", "llm_max_output_tokens"),
         )
     for arg_name, cfg_name in configurable:
         value = getattr(args, arg_name, None)
@@ -384,6 +387,54 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print(format_doctor_text(report), end="")
     return int(report["exit_code"])
+
+
+def _print_overlay_result(payload: dict[str, Any], *, json_mode: bool) -> None:
+    if json_mode:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    outcome = payload.get("outcome_category", "failed")
+    provider = payload.get("provider", "unknown")
+    identity = payload.get("overlay_identity_digest", "unknown")
+    print(f"[graphite] overlay {outcome}: provider={provider} identity={identity}")
+    if payload.get("failure_category"):
+        print(f"  - failure_category: {payload['failure_category']}")
+
+
+def _overlay_error(code: str, *, json_mode: bool) -> None:
+    if json_mode:
+        print(json.dumps({"error": code}, sort_keys=True))
+    else:
+        print(f"[graphite] overlay error: {code}", file=sys.stderr)
+
+
+def cmd_overlay_build(args: argparse.Namespace) -> int:
+    """Run one explicit non-authoritative enrichment operation."""
+    if args.llm_api_key is not None:
+        _overlay_error("overlay_credential_argv_forbidden", json_mode=args.json)
+        return 2
+    root = Path(args.path).resolve()
+    cfg = _project_scoped_config(args, root)
+    try:
+        request = OverlayRequest(
+            repository_root=root,
+            output_dir=cfg.output_dir,
+            provider=cfg.llm_provider.strip().casefold().replace("_", "-"),
+            provider_lifecycle_identity_digest=args.provider_identity_digest,
+            model_identity_digest=args.model_identity_digest,
+            routing_policy_digest=args.routing_policy_digest,
+            created_at=int(time.time()),
+        )
+        payload = build_overlay(request, cfg)
+    except ValueError:
+        _overlay_error("overlay_request_invalid", json_mode=args.json)
+        return 2
+    except OverlayError as exc:
+        code = str(exc)
+        _overlay_error(code, json_mode=args.json)
+        return 3 if code.startswith("canonical_") else 2
+    _print_overlay_result(payload, json_mode=args.json)
+    return 0 if payload.get("outcome_category") == "succeeded" else 4
 
 
 def _project_scoped_config(
@@ -1251,6 +1302,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--llm-api-key", default=None, help="Provider key for explicit doctor/overlay operations; prefer a session-scoped environment value")
     parser.add_argument("--llm-timeout", type=float, default=None, help="Provider timeout for explicit doctor/overlay operations")
     parser.add_argument("--llm-max-input-chars", type=int, default=None, help="Maximum explicit overlay input characters")
+    parser.add_argument("--llm-max-output-tokens", type=int, default=None, help="Maximum explicit overlay output tokens")
 
     sub = parser.add_subparsers(dest="command")
 
@@ -1354,6 +1406,36 @@ def main(argv: list[str] | None = None) -> int:
     p_route_policy.add_argument("--rollback", default=None)
     p_route_policy.add_argument("--json", action="store_true")
     p_route_policy.set_defaults(func=cmd_route_policy)
+
+    p_overlay = sub.add_parser(
+        "overlay",
+        help="Manage explicit non-authoritative model overlays",
+    )
+    overlay_sub = p_overlay.add_subparsers(dest="overlay_command", required=True)
+    p_overlay_build = overlay_sub.add_parser(
+        "build",
+        help="Build one identity-bound overlay from a fresh canonical graph",
+    )
+    p_overlay_build.add_argument("path", help="Repository path")
+    p_overlay_build.add_argument(
+        "--provider-identity-digest",
+        required=True,
+        help="Exact current provider lifecycle identity SHA-256",
+    )
+    p_overlay_build.add_argument(
+        "--model-identity-digest",
+        required=True,
+        help="Exact current model identity SHA-256",
+    )
+    p_overlay_build.add_argument(
+        "--routing-policy-digest",
+        default=None,
+        help="Exact OpenRouter routing-policy SHA-256",
+    )
+    p_overlay_build.add_argument(
+        "--json", action="store_true", help="Emit sanitized machine-readable output"
+    )
+    p_overlay_build.set_defaults(func=cmd_overlay_build)
 
     p_scan = sub.add_parser("scan", help="Scan files and write manifest")
     p_scan.add_argument("path", help="Repository path")

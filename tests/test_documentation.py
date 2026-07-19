@@ -1680,6 +1680,34 @@ def test_architecture_guide_has_pipeline_and_boundaries() -> None:
     assert "model provider" in architecture_lower
 
 
+def test_overlay_boundary_is_documented_as_non_authoritative_and_isolated() -> None:
+    readme = read_document("README.md")
+    architecture = read_document("ARCHITECTURE.md")
+    combined = f"{readme}\n{architecture}".casefold()
+
+    required = (
+        "graphite overlay build",
+        "provider-lifecycle",
+        "model identity",
+        "routing-policy digest",
+        "canonical bundle fingerprint",
+        "content-addressed",
+        "manifest-last",
+        "failure category",
+        "non-authoritative",
+        "independently stale",
+        "reparse",
+        "restrictive",
+        "canonical readers never load",
+    )
+    for phrase in required:
+        assert phrase in combined
+
+    assert "query`, `context`, `impact`, validation, routing, watch, and daemon do not read overlays" in readme
+    assert "raw provider diagnostics" in combined
+    assert "never argv or a repository file" in readme
+
+
 def test_release_guide_has_gates_and_version_sources() -> None:
     releasing = read_document("RELEASING.md")
     lines = set(releasing.splitlines())
