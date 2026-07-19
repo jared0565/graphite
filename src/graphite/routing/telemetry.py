@@ -100,6 +100,7 @@ class CliTelemetryRecord:
     human_verdict: HumanVerdict | None
     provenance: EvidenceProvenance
     observed_at: int
+    diff_sha256: str | None = None
     cost_status: str = "unknown"
 
     def __post_init__(self) -> None:
@@ -138,6 +139,11 @@ class CliTelemetryRecord:
             object.__setattr__(self, "human_verdict", HumanVerdict(self.human_verdict))
         if self.cost_status != "unknown":
             raise ValueError("telemetry_cost_status_invalid")
+        if self.diff_sha256 is not None and (
+            not isinstance(self.diff_sha256, str)
+            or _HEX_64.fullmatch(self.diff_sha256) is None
+        ):
+            raise ValueError("telemetry_diff_hash_invalid")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -160,6 +166,7 @@ class CliTelemetryRecord:
             "human_verdict": None if self.human_verdict is None else self.human_verdict.value,
             "provenance": self.provenance.value,
             "observed_at": self.observed_at,
+            "diff_sha256": self.diff_sha256,
         }
 
 

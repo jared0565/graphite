@@ -200,3 +200,29 @@ worktrees remained clean, and there was no retry, fallback, model substitution,
 merge, push, or deployment. Earlier harness preflight corrections failed before
 the isolated store was initialized and before any model attempt, so they consumed
 no inference authority and retained no provider output.
+
+## Edit-smoke authority promotion correction
+
+The post-verification audit found that no-edit verification correctly creates a
+read-only capability snapshot, while normal routed changes require an exact
+workspace-write snapshot. There was no fail-closed boundary that could promote the
+verified identity after a separately approved edit smoke. Persisting write
+authority before the smoke would bypass the intended acceptance gate; leaving the
+snapshot read-only would make the provider permanently ineligible for edits.
+
+Graphite now exposes a separate edit-smoke verification boundary. It requires an
+unexpired read-only snapshot already bound to the exact lifecycle identity and
+refuses to invoke its verifier without explicit approval. One sanitized result must
+match the effective model, input/output reservations, non-empty bounded diff, and
+deterministic validation outcome. Only a passing result creates a new
+workspace-write snapshot. The promoted snapshot, lifecycle binding, and append-only
+telemetry event commit in one SQLite transaction; any audit or binding failure
+rolls back all three. Telemetry retains only identity, usage, duration, diff SHA-256,
+changed counts, validation, provenance, and unknown cost—not source, prompt,
+response, diff content, credentials, paths, or provider diagnostics.
+
+Focused profile tests passed 20 tests. The wider profile, routing storage,
+telemetry, policy, service, and lifecycle-service regression passed 145 tests with
+one intentional skip. Touched-file Ruff and `git diff --check` passed. All new
+verification used deterministic callbacks and isolated test databases; no provider
+or network inference call occurred.

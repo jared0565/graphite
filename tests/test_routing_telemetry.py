@@ -193,6 +193,7 @@ def _cli_record(**changes: object) -> CliTelemetryRecord:
         "human_verdict": HumanVerdict.ACCEPTED,
         "provenance": "machine_verified",
         "observed_at": 1_000,
+        "diff_sha256": "d" * 64,
     }
     values.update(changes)
     return CliTelemetryRecord(**values)
@@ -206,6 +207,7 @@ def test_cli_telemetry_schema_is_allowlisted_append_only_and_cost_unknown(tmp_pa
     assert store.row_count("cli_telemetry_events") == 1
     public = record.to_dict()
     assert public["cost_status"] == "unknown"
+    assert public["diff_sha256"] == "d" * 64
     forbidden = {"source", "prompt", "response", "diff", "path", "diagnostics", "secret"}
     assert forbidden.isdisjoint(public)
     raw = store.path.read_bytes()
@@ -218,6 +220,8 @@ def test_cli_telemetry_schema_is_allowlisted_append_only_and_cost_unknown(tmp_pa
         _cli_record(requested_model="../../src/private.py")
     with pytest.raises(ValueError, match="telemetry_cost_status_invalid"):
         _cli_record(cost_status="0-usd")
+    with pytest.raises(ValueError, match="telemetry_diff_hash_invalid"):
+        _cli_record(diff_sha256="not-a-digest")
 
 
 def test_cli_telemetry_recency_weighting_is_deterministic() -> None:

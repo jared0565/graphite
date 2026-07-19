@@ -1,7 +1,7 @@
 """Requested CLI profiles and verified, short-lived capability snapshots."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from types import MappingProxyType
 from collections.abc import Callable
@@ -12,10 +12,12 @@ from .contracts import (
     CapabilityProfile,
     CapabilitySnapshot,
     CliIdentity,
+    EvidenceProvenance,
     Effort,
     PermissionMode,
     ProviderId,
     RiskTier,
+    TaskCategory,
 )
 from .storage import RepositoryStore, StorageError
 
@@ -92,6 +94,46 @@ class VerificationEvidence:
         for value in (self.input_tokens, self.output_tokens):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ProfileError("profile_verification_usage_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class EditSmokeEvidence:
+    """Sanitized evidence from one approved, isolated edit smoke."""
+
+    effective_model: str
+    input_tokens: int
+    output_tokens: int
+    duration_ms: int
+    diff_sha256: str
+    changed_file_count: int
+    changed_byte_count: int
+    validation_outcome: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.effective_model, str)
+            or not self.effective_model
+            or len(self.effective_model) > 128
+            or any(character.isspace() for character in self.effective_model)
+            or not isinstance(self.diff_sha256, str)
+            or len(self.diff_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.diff_sha256)
+            or not isinstance(self.validation_outcome, str)
+        ):
+            raise ProfileError("profile_edit_smoke_evidence_invalid")
+        for value, maximum in (
+            (self.input_tokens, MAX_VERIFICATION_INPUT_TOKENS),
+            (self.output_tokens, MAX_VERIFICATION_OUTPUT_TOKENS),
+            (self.duration_ms, 86_400_000),
+            (self.changed_file_count, 100_000),
+            (self.changed_byte_count, 10**12),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= maximum
+            ):
+                raise ProfileError("profile_edit_smoke_evidence_invalid")
 
 
 _CLAUDE_EFFORTS = (Effort.LOW, Effort.MEDIUM, Effort.HIGH, Effort.XHIGH, Effort.MAX)
@@ -275,6 +317,142 @@ def verify_and_save_approved_profile(
         except (StorageError, ValueError):
             raise ProfileError("profile_lifecycle_binding_failed") from None
     return snapshot
+
+
+def verify_and_save_approved_edit_profile(
+    store: RepositoryStore,
+    *,
+    verified_snapshot: CapabilitySnapshot,
+    verified_at: int,
+    ttl_seconds: int,
+    approval_granted: bool,
+    max_input_tokens: int,
+    max_output_tokens: int,
+    max_changed_files: int,
+    max_changed_bytes: int,
+    lifecycle_identity_digest: str,
+    verifier: Callable[[CapabilitySnapshot], EditSmokeEvidence],
+) -> CapabilitySnapshot:
+    """Promote write authority only after one approved, validated edit smoke."""
+    if approval_granted is not True:
+        raise ProfileError("profile_edit_smoke_approval_required")
+    if (
+        not isinstance(store, RepositoryStore)
+        or not isinstance(verified_snapshot, CapabilitySnapshot)
+        or verified_snapshot.profile.permission_mode is not PermissionMode.READ_ONLY
+    ):
+        raise ProfileError("profile_edit_smoke_source_invalid")
+    if (
+        isinstance(verified_at, bool)
+        or not isinstance(verified_at, int)
+        or verified_at < verified_snapshot.verified_at
+        or isinstance(ttl_seconds, bool)
+        or not isinstance(ttl_seconds, int)
+        or not MIN_SNAPSHOT_TTL_SECONDS <= ttl_seconds <= MAX_SNAPSHOT_TTL_SECONDS
+    ):
+        raise ProfileError("profile_time_invalid")
+    if verified_snapshot.expires_at <= verified_at:
+        raise ProfileError("profile_edit_smoke_source_expired")
+    for value, maximum in (
+        (max_input_tokens, MAX_VERIFICATION_INPUT_TOKENS),
+        (max_output_tokens, MAX_VERIFICATION_OUTPUT_TOKENS),
+        (max_changed_files, 64),
+        (max_changed_bytes, 16 * 1024 * 1024),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 1 <= value <= maximum
+        ):
+            raise ProfileError("profile_edit_smoke_budget_invalid")
+    try:
+        source_binding = store.lifecycle_identity_binding(
+            authority_kind="capability_snapshot",
+            authority_id=verified_snapshot.digest,
+        )
+    except (StorageError, ValueError):
+        raise ProfileError("profile_edit_smoke_source_unbound") from None
+    if source_binding != lifecycle_identity_digest:
+        raise ProfileError("profile_edit_smoke_source_unbound")
+    try:
+        evidence = verifier(verified_snapshot)
+    except ProfileError:
+        raise
+    except Exception:
+        raise ProfileError("profile_edit_smoke_failed") from None
+    if not isinstance(evidence, EditSmokeEvidence):
+        raise ProfileError("profile_edit_smoke_evidence_invalid")
+    if evidence.effective_model != verified_snapshot.profile.effective_model:
+        raise ProfileError("profile_edit_smoke_model_mismatch")
+    if (
+        evidence.input_tokens > max_input_tokens
+        or evidence.output_tokens > max_output_tokens
+        or evidence.input_tokens + evidence.output_tokens
+        > max_input_tokens + max_output_tokens
+    ):
+        raise ProfileError("profile_edit_smoke_budget_exceeded")
+    if evidence.changed_file_count < 1 or evidence.changed_byte_count < 1:
+        raise ProfileError("profile_edit_smoke_diff_invalid")
+    if (
+        evidence.changed_file_count > max_changed_files
+        or evidence.changed_byte_count > max_changed_bytes
+    ):
+        raise ProfileError("profile_edit_smoke_diff_exceeded")
+    if evidence.validation_outcome != "passed":
+        raise ProfileError("profile_edit_smoke_validation_failed")
+    try:
+        promoted_profile = replace(
+            verified_snapshot.profile,
+            permission_mode=PermissionMode.WORKSPACE_WRITE,
+        )
+        promoted = CapabilitySnapshot(
+            verified_snapshot.schema_version,
+            verified_at,
+            verified_at + ttl_seconds,
+            verified_snapshot.identity,
+            promoted_profile,
+        )
+        telemetry = {
+            "provider": promoted.profile.provider.value,
+            "requested_model": promoted.profile.requested_model,
+            "effective_model": promoted.profile.effective_model,
+            "effort": promoted.profile.supported_efforts[0].value,
+            "capability_snapshot_digest": promoted.digest,
+            "category": TaskCategory.ISOLATED_CODE.value,
+            "risk": RiskTier.LOW.value,
+            "latency_ms": evidence.duration_ms,
+            "input_tokens": evidence.input_tokens,
+            "output_tokens": evidence.output_tokens,
+            "cost_status": "unknown",
+            "changed_file_count": evidence.changed_file_count,
+            "changed_byte_count": evidence.changed_byte_count,
+            "validation_outcome": evidence.validation_outcome,
+            "diff_sha256": evidence.diff_sha256,
+            "review_defect_classes": [],
+            "rework_count": 0,
+            "human_verdict": None,
+            "provenance": EvidenceProvenance.MACHINE_VERIFIED.value,
+            "observed_at": verified_at,
+        }
+        store.promote_bound_capability_snapshot_record(
+            source_snapshot_digest=verified_snapshot.digest,
+            snapshot=promoted,
+            lifecycle_identity_digest=lifecycle_identity_digest,
+            bound_at=verified_at,
+            telemetry_payload=telemetry,
+        )
+    except ProfileError:
+        raise
+    except StorageError as exc:
+        code = (
+            "profile_edit_smoke_source_unbound"
+            if exc.args == ("capability_promotion_source_invalid",)
+            else "profile_edit_smoke_persistence_failed"
+        )
+        raise ProfileError(code) from None
+    except (TypeError, ValueError):
+        raise ProfileError("profile_edit_smoke_persistence_failed") from None
+    return promoted
 
 
 def _snapshot_from_dict(value: object) -> CapabilitySnapshot:

@@ -20,6 +20,7 @@ from .contracts import (
     Effort,
     ExecutionOutcome,
     ExecutionReceipt,
+    PermissionMode,
     ProviderId,
     RiskTier,
     TaskCategory,
@@ -50,6 +51,7 @@ _CLI_TELEMETRY_KEYS: Final = frozenset(
         "input_tokens", "output_tokens", "cost_status", "changed_file_count",
         "changed_byte_count", "validation_outcome", "review_defect_classes",
         "rework_count", "human_verdict", "provenance", "observed_at",
+        "diff_sha256",
     }
 )
 _CLI_POLICY_KEYS: Final = frozenset(
@@ -2478,8 +2480,10 @@ class RepositoryStore:
             if connection is not None:
                 connection.close()
 
-    def record_cli_telemetry(self, payload: dict[str, Any]) -> bool:
-        """Persist one immutable, allowlisted telemetry event."""
+    @staticmethod
+    def _cli_telemetry_values(
+        payload: dict[str, Any],
+    ) -> tuple[str, str, int]:
         if not isinstance(payload, dict) or set(payload) != _CLI_TELEMETRY_KEYS:
             raise ValueError("cli_telemetry_payload_invalid")
         try:
@@ -2498,6 +2502,13 @@ class RepositoryStore:
             or payload["cost_status"] != "unknown"
             or payload["validation_outcome"] not in {"passed", "failed", "blocked", "not_run"}
             or payload["human_verdict"] not in {None, "accepted", "rejected", "rework"}
+            or (
+                payload["diff_sha256"] is not None
+                and (
+                    not isinstance(payload["diff_sha256"], str)
+                    or _HEX_64.fullmatch(payload["diff_sha256"]) is None
+                )
+            )
         ):
             raise ValueError("cli_telemetry_payload_invalid")
         defects = payload["review_defect_classes"]
@@ -2536,6 +2547,11 @@ class RepositoryStore:
             raise ValueError("cli_telemetry_payload_invalid")
         observed_at = _nonnegative_integer(payload["observed_at"], "observed_at_invalid")
         event_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return event_hash, canonical, observed_at
+
+    def record_cli_telemetry(self, payload: dict[str, Any]) -> bool:
+        """Persist one immutable, allowlisted telemetry event."""
+        event_hash, canonical, observed_at = self._cli_telemetry_values(payload)
         try:
             with self._connect() as connection:
                 cursor = connection.execute(
@@ -2555,6 +2571,155 @@ class RepositoryStore:
             raise
         except sqlite3.Error as exc:
             raise _translate_database_error(exc) from exc
+
+    def promote_bound_capability_snapshot_record(
+        self,
+        *,
+        source_snapshot_digest: str,
+        snapshot: CapabilitySnapshot,
+        lifecycle_identity_digest: str,
+        bound_at: int,
+        telemetry_payload: dict[str, Any],
+    ) -> bool:
+        """Atomically persist one validated edit-smoke promotion and its audit event."""
+        if not _HEX_64.fullmatch(source_snapshot_digest):
+            raise ValueError("source_snapshot_digest_invalid")
+        if not isinstance(snapshot, CapabilitySnapshot) or (
+            snapshot.profile.permission_mode is not PermissionMode.WORKSPACE_WRITE
+        ):
+            raise ValueError("capability_snapshot_invalid")
+        if not _HEX_64.fullmatch(lifecycle_identity_digest):
+            raise ValueError("lifecycle_identity_digest_invalid")
+        bound_at = _nonnegative_integer(bound_at, "bound_at_invalid")
+        event_hash, canonical, observed_at = self._cli_telemetry_values(
+            telemetry_payload
+        )
+        if (
+            telemetry_payload["capability_snapshot_digest"] != snapshot.digest
+            or observed_at != bound_at
+        ):
+            raise ValueError("cli_telemetry_payload_invalid")
+        payload_json = json.dumps(
+            snapshot.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        if (
+            len(snapshot.profile.supported_efforts) != 1
+            or len(payload_json.encode("utf-8")) > 64 * 1024
+        ):
+            raise ValueError("capability_snapshot_invalid")
+        values = (
+            snapshot.digest,
+            snapshot.profile.provider.value,
+            snapshot.profile.requested_model,
+            snapshot.profile.effective_model,
+            snapshot.profile.supported_efforts[0].value,
+            snapshot.identity.executable_sha256,
+            snapshot.identity.cli_version,
+            snapshot.identity.adapter_protocol_version,
+            snapshot.profile.permission_mode.value,
+            payload_json,
+            snapshot.verified_at,
+            snapshot.expires_at,
+        )
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            source = connection.execute(
+                "SELECT provider,requested_model,effective_model,effort,"
+                "executable_sha256,cli_version,adapter_protocol_version,"
+                "permission_mode,expires_at FROM capability_snapshots "
+                "WHERE capability_snapshot_digest=?",
+                (source_snapshot_digest,),
+            ).fetchone()
+            binding = connection.execute(
+                "SELECT lifecycle_identity_digest FROM lifecycle_snapshot_bindings "
+                "WHERE capability_snapshot_digest=?",
+                (source_snapshot_digest,),
+            ).fetchone()
+            expected_source = (
+                snapshot.profile.provider.value,
+                snapshot.profile.requested_model,
+                snapshot.profile.effective_model,
+                snapshot.profile.supported_efforts[0].value,
+                snapshot.identity.executable_sha256,
+                snapshot.identity.cli_version,
+                snapshot.identity.adapter_protocol_version,
+            )
+            if (
+                source is None
+                or tuple(source[:7]) != expected_source
+                or source[7] != PermissionMode.READ_ONLY.value
+                or int(source[8]) <= bound_at
+                or binding is None
+                or binding[0] != lifecycle_identity_digest
+            ):
+                raise StorageError("capability_promotion_source_invalid")
+            existing = connection.execute(
+                "SELECT capability_snapshot_digest,provider,requested_model,"
+                "effective_model,effort,executable_sha256,cli_version,"
+                "adapter_protocol_version,permission_mode,payload_json,verified_at,"
+                "expires_at FROM capability_snapshots "
+                "WHERE capability_snapshot_digest=?",
+                (snapshot.digest,),
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing) != values:
+                    raise StorageError("storage_corrupt")
+                existing_binding = connection.execute(
+                    "SELECT lifecycle_identity_digest,bound_at "
+                    "FROM lifecycle_snapshot_bindings "
+                    "WHERE capability_snapshot_digest=?",
+                    (snapshot.digest,),
+                ).fetchone()
+                existing_event = connection.execute(
+                    "SELECT payload_json,observed_at FROM cli_telemetry_events "
+                    "WHERE event_hash=?",
+                    (event_hash,),
+                ).fetchone()
+                if tuple(existing_binding or ()) != (
+                    lifecycle_identity_digest,
+                    bound_at,
+                ) or tuple(existing_event or ()) != (canonical, observed_at):
+                    raise StorageError("capability_promotion_conflict")
+                connection.rollback()
+                return False
+            connection.execute(
+                """INSERT INTO capability_snapshots(
+                    capability_snapshot_digest,provider,requested_model,effective_model,
+                    effort,executable_sha256,cli_version,adapter_protocol_version,
+                    permission_mode,payload_json,verified_at,expires_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                values,
+            )
+            self._save_lifecycle_binding(
+                connection,
+                table="lifecycle_snapshot_bindings",
+                key_column="capability_snapshot_digest",
+                key_value=snapshot.digest,
+                lifecycle_identity_digest=lifecycle_identity_digest,
+                bound_at=bound_at,
+            )
+            connection.execute(
+                "INSERT INTO cli_telemetry_events VALUES (?,?,?)",
+                (event_hash, canonical, observed_at),
+            )
+            connection.commit()
+            return True
+        except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
 
     def cli_telemetry_records(self, *, limit: int = 1000) -> tuple[dict[str, Any], ...]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
