@@ -550,3 +550,23 @@ bindings, and seven telemetry events. The lifecycle store remains unchanged and
 integrity-clean. The edit worktree is clean. The next attempt must use a separately
 approved installed model and must still require a non-empty exact diff before any
 write authority is granted.
+
+## Codex Spark verification passed; edit exceeded budget
+
+The operator approved Spark bundle
+`d4a76ce81f0c83d353ecab849ce7e4f23f9d89ef4f1ac4db6429cfc1c2422500`.
+The read-only `gpt-5.3-codex-spark` verification passed in 9,507 milliseconds
+using 15,143 input and 175 output tokens, creating snapshot
+`fbe724da951184f9069c35eb1090c0be66638eb1933a7b643ee9d292518958d1`.
+
+Its edit smoke was stopped as `edit_budget_exceeded`: 263,655 input tokens and
+5,342 output tokens exceeded the approved 196,608 / 4,096 limits. Sanitized
+receipt hashes were stdout
+`1125f80f6833fd7b5e67e8f4f99e75e865f173a7f6540683ce27e983a6bf8b70` and stderr
+`9747cb5f7dbdf3d7c02661756fe9edf322dc16a8aabf4843f9a4576e8ff01643`, with a
+36,110-millisecond duration. No write promotion, validation, or Claude review
+ran; no retry, fallback, resume, substitution, merge, push, or deployment occurred.
+
+The routing store remains integrity-clean with five snapshots, five bindings, and
+nine telemetry events. The lifecycle store and worktree remain clean. The budget
+was not weakened to accommodate the provider response.
