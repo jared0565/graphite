@@ -34,6 +34,10 @@ _FLAGS: Final = frozenset(
         "--verbose",
     }
 )
+_FLAG_PATTERNS: Final = tuple(
+    re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(flag)}(?![A-Za-z0-9_-])")
+    for flag in sorted(_FLAGS)
+)
 ProcessProbe = Callable[..., CliProcessResult]
 
 
@@ -77,8 +81,8 @@ def observe_claude(
         version = parse_semantic_version_output(_text(call("--version"), "probe_version_invalid"), _VERSION)
     except CliIdentityPrimitiveError:
         raise ProviderProbeError("probe_version_invalid") from None
-    help_tokens = set(_text(call("--help"), "probe_capability_missing").split())
-    if not _FLAGS.issubset(help_tokens):
+    help_text = _text(call("--help"), "probe_capability_missing")
+    if not all(pattern.search(help_text) is not None for pattern in _FLAG_PATTERNS):
         raise ProviderProbeError("probe_capability_missing")
     try:
         auth = json.loads(_text(call("auth", "status", "--json"), "probe_auth_unhealthy"))

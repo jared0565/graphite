@@ -116,3 +116,28 @@ lifecycle identity would violate the exact-identity contract. Preparing a curren
 manifest therefore stops at the live gate until an explicitly approved bounded
 provider observation establishes the installed identity; observation itself must
 not perform inference or activation.
+
+## Post-acceptance Claude help-format correction
+
+A separately approved non-inference Claude lifecycle observation failed closed as
+`probe_capability_missing`. It stopped during fixed metadata validation before
+identity construction, persistence, verification, activation, retry, or fallback.
+A second separately approved single-command diagnostic hashed the bounded help
+output and compared only the fixed expected option names. It exited zero in 0.588
+seconds with stdout SHA-256
+`fcd5b45507c7c602d54d85a300eab288a8a3c6770c6def696ca19a3100725de4`.
+The existing whitespace-token parser reported only `--allowedTools` and
+`--max-turns` missing. Raw help, authentication data, paths, and provider diagnostics
+were not retained or printed.
+
+Offline reproduction proved that exact options enclosed by brackets or followed by
+commas or `=` values are false negatives under whitespace splitting. The parser now
+uses precompiled case-sensitive exact option-boundary patterns. Tests accept safe
+punctuation while rejecting prefixed names and longer lookalikes such as
+`--allowedToolsExtra` and `--max-turns-extra`. Focused Claude probe tests passed 6
+tests; the broader Claude/Codex probe, observer, lifecycle storage/service, routing
+security, and documentation selection passed 155 tests. Touched-file Ruff and diff
+checks passed. The final canonical rebuild is fresh with 7,471 nodes, 16,540 edges,
+157 communities, 184 scanned files, and engine fingerprint
+`905d374a45fbe33e5f5439ead76f818f895549451751cac476e5fd3e106ebf10`.
+No provider command was invoked by the correction itself.

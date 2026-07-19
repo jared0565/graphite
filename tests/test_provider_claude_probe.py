@@ -76,3 +76,64 @@ def test_claude_observation_rejects_workspace_local_and_missing_flags(tmp_path: 
     with pytest.raises(ProviderProbeError, match="^probe_capability_missing$"):
         observe_claude(executable=executable, workspace=workspace, credential_home=credentials, observed_at=1, policy_version="1.0.0", transport=probe)
     assert len(probe.calls) == 2
+
+
+def test_claude_observation_accepts_exact_flags_with_help_punctuation(
+    tmp_path: Path,
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    help_output = (
+        b"[--allowedTools <tools>], --disable-slash-commands --effort --input-format "
+        b"--json-schema [--max-turns=<count>] --model --no-chrome "
+        b"--no-session-persistence --output-format --permission-mode --print "
+        b"--safe-mode --strict-mcp-config --verbose\n"
+    )
+    probe = ScriptedProbe([
+        b"2.1.214 (Claude Code)\n",
+        help_output,
+        b'{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}',
+    ])
+
+    identity = observe_claude(
+        executable=executable,
+        workspace=workspace,
+        credential_home=credentials,
+        observed_at=100,
+        policy_version="1.0.0",
+        transport=probe,
+    )
+
+    assert identity.version == "2.1.214"
+    assert len(probe.calls) == 3
+
+
+@pytest.mark.parametrize(
+    "lookalike",
+    [b"prefix--allowedTools", b"--allowedToolsExtra", b"--max-turns-extra"],
+)
+def test_claude_observation_rejects_flag_lookalikes(
+    tmp_path: Path, lookalike: bytes
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    valid = (
+        b"--allowedTools --disable-slash-commands --effort --input-format --json-schema "
+        b"--max-turns --model --no-chrome --no-session-persistence --output-format "
+        b"--permission-mode --print --safe-mode --strict-mcp-config --verbose"
+    )
+    if b"allowedTools" in lookalike:
+        help_output = valid.replace(b"--allowedTools", lookalike)
+    else:
+        help_output = valid.replace(b"--max-turns", lookalike)
+    probe = ScriptedProbe([b"2.1.214 (Claude Code)\n", help_output])
+
+    with pytest.raises(ProviderProbeError, match="^probe_capability_missing$"):
+        observe_claude(
+            executable=executable,
+            workspace=workspace,
+            credential_home=credentials,
+            observed_at=100,
+            policy_version="1.0.0",
+            transport=probe,
+        )
+
+    assert len(probe.calls) == 2
