@@ -101,16 +101,16 @@ the Task 5 eligibility gate.
 - Add `tests/test_provider_probe_runner.py`
 - Modify `tests/test_routing_process_runner.py`
 
-- [ ] Write failing process-probe tests for fixed argv, no shell, minimal environment, canonical executable containment, timeout, cancellation, output caps, malformed UTF-8, nonzero exit, and process-tree cleanup.
-- [ ] Reuse the existing sanitized `CliProcessFailureDiagnostics` contract. Persist only exit classification/code, duration, stdout/stderr SHA-256, and an allowlisted failure category.
-- [ ] Recognize `capacity_unavailable` through provider-specific, bounded classifiers without persisting or returning the matched raw diagnostic. Unknown or ambiguous diagnostics remain non-fallback failures.
-- [ ] Add a bounded HTTP probe client with explicit schemes, host allowlists, port policy, DNS/address validation, response-size caps, content-type validation, deadlines, and no automatic redirects.
-- [ ] Reject loopback/private/link-local destinations for OpenRouter and reject non-loopback destinations for Ollama. Revalidate the connected address to reduce DNS-rebinding risk.
-- [ ] Ensure credential injection occurs only inside the request boundary. Normalized observations and exceptions must never expose header values or raw response bodies.
-- [ ] Define an allowlisted endpoint-purpose enum. Tests must prove lifecycle probes cannot address known generation, chat, completion, embedding, response, or tool endpoints.
-- [ ] Add deterministic fake process and local HTTP fixtures for success, timeout, malformed data, oversized bodies, redirects, auth failure, rate limits, and unavailable services.
-- [ ] Run probe-runner, process-runner, and routing security tests.
-- [ ] Commit: `feat: add bounded non-inference provider probes`.
+- [x] Write failing process-probe tests for fixed argv, no shell, minimal environment, canonical executable containment, timeout, cancellation, output caps, malformed UTF-8, nonzero exit, and process-tree cleanup.
+- [x] Reuse the existing sanitized `CliProcessFailureDiagnostics` contract. Persist only exit classification/code, duration, stdout/stderr SHA-256, and an allowlisted failure category.
+- [x] Recognize `capacity_unavailable` through provider-specific, bounded classifiers without persisting or returning the matched raw diagnostic. Unknown or ambiguous diagnostics remain non-fallback failures.
+- [x] Add a bounded HTTP probe client with explicit schemes, host allowlists, port policy, DNS/address validation, response-size caps, content-type validation, deadlines, and no automatic redirects.
+- [x] Reject loopback/private/link-local destinations for OpenRouter and reject non-loopback destinations for Ollama. Revalidate the connected address to reduce DNS-rebinding risk.
+- [x] Ensure credential injection occurs only inside the request boundary. Normalized observations and exceptions must never expose header values or raw response bodies.
+- [x] Define an allowlisted endpoint-purpose enum. Tests must prove lifecycle probes cannot address known generation, chat, completion, embedding, response, or tool endpoints.
+- [x] Add deterministic fake process and local HTTP fixtures for success, timeout, malformed data, oversized bodies, redirects, auth failure, rate limits, and unavailable services.
+- [x] Run probe-runner, process-runner, and routing security tests.
+- [x] Commit: `feat: add bounded non-inference provider probes`.
 
 ## Task 4: Implement Claude, Codex, Ollama, and OpenRouter probe adapters
 

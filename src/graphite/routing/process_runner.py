@@ -51,7 +51,17 @@ _ERROR_MAP: Final = {
     "invalid_environment": "environment_invalid",
 }
 _EXIT_CLASSIFICATIONS: Final = frozenset({"nonzero_exit", "signal_exit"})
-_FAILURE_CATEGORIES: Final = frozenset({"provider_process_failure"})
+_FAILURE_CATEGORIES: Final = frozenset(
+    {"provider_process_failure", "capacity_unavailable"}
+)
+_CAPACITY_DIAGNOSTICS: Final = {
+    ProviderId.CLAUDE_CODE: (
+        b"selected model is at capacity. please try a different model.",
+    ),
+    ProviderId.CODEX: (
+        b"selected model is at capacity. please try a different model.",
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +278,10 @@ def run_cli_process(
 ) -> CliProcessResult:
     """Run exactly one fixed CLI command inside the shared contained transport."""
     command, workspace = _validate_argv(argv, cwd)
+    try:
+        normalized_provider = ProviderId(provider)
+    except (TypeError, ValueError) as exc:
+        raise CliProcessError("provider_invalid") from exc
     if (
         not isinstance(stdin, bytes)
         or not math.isfinite(timeout_seconds)
@@ -290,7 +304,7 @@ def run_cli_process(
         raise CliProcessError("cancelled") from None
     require_process_containment()
     environment = build_cli_environment(
-        provider=provider,
+        provider=normalized_provider,
         executable=Path(command[0]),
         workspace=workspace,
         credential_home=credential_home,
@@ -340,7 +354,11 @@ def run_cli_process(
                 duration_seconds=float(result.duration_seconds),
                 stdout_sha256=stdout_sha256,
                 stderr_sha256=stderr_sha256,
-                failure_category="provider_process_failure",
+                failure_category=_classify_nonzero_failure(
+                    normalized_provider,
+                    result.stdout,
+                    result.stderr,
+                ),
             ),
         )
     return CliProcessResult(
@@ -365,3 +383,16 @@ def decode_cli_output(value: bytes) -> str:
     if "\x00" in decoded:
         raise CliProcessError("provider_protocol")
     return decoded
+
+
+def _classify_nonzero_failure(
+    provider: ProviderId,
+    stdout: bytes,
+    stderr: bytes,
+) -> str:
+    """Return an allowlisted category without decoding or retaining diagnostics."""
+    patterns = _CAPACITY_DIAGNOSTICS[provider]
+    for output in (stdout, stderr):
+        if any(line.strip() in patterns for line in output.lower().splitlines()):
+            return "capacity_unavailable"
+    return "provider_process_failure"

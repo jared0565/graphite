@@ -177,3 +177,37 @@ build; its manifest records `llm_mode` as `none` and `llm_status` as `disabled`,
 the resulting fresh graph contains 6,233 nodes, 13,683 edges, and 152 files. No
 current Claude snapshot was created; production readiness remains blocked on a new
 separately approved bounded verification and the remaining live acceptance gates.
+
+The provider-lifecycle design now supports an immutable, ordered
+`ApprovedRoutePool` spanning Claude Code, Codex, Ollama, and OpenRouter. Runtime
+availability cannot add, reorder, or authorize candidates. The initial policy
+allows one fallback only after an exact sanitized `capacity_unavailable` result,
+before accepted output or any tool, edit, or external side effect, within one
+aggregate approval and budget. Cross-provider selection and every exact candidate
+must be explicitly authorized; verification calls remain single-route.
+
+The prerequisite non-inference probe boundary is implemented without contacting a
+provider. CLI nonzero exits retain only the existing hashed diagnostics and now
+classify capacity only when a complete provider-allowlisted diagnostic line matches;
+ambiguous or embedded capacity text remains `provider_process_failure`. The HTTP
+boundary uses fixed non-inference purposes, scheme/host/port policy, bounded DNS
+workers, public-address enforcement for OpenRouter, loopback-only enforcement for
+Ollama, address-pinned connections with peer revalidation before credential
+injection, one deadline, response/header caps, JSON content validation, and no
+redirects. Exceptions suppress raw endpoint, body, header, credential, and resolver
+details.
+
+Offline verification passed 37 focused process/probe tests, 50
+Claude/Codex/service compatibility tests, 67 documentation tests, and the full
+routing selection after the final cases with 448 passed, 1 skipped, and 1,144
+deselected. Repository-wide Ruff and `git diff --check` passed.
+All HTTP activity used deterministic fakes or a local loopback metadata fixture;
+no Claude, Codex, Ollama inference, OpenRouter inference, credentialed external
+request, retry, or live fallback occurred.
+
+An explicit pre-commit `--llm none` rebuild after the implementation and before
+the final evidence edits was fresh with 6,599 nodes, 14,559 edges, 162 scanned
+files, 136 communities, and zero validation warnings. Its then-current engine
+fingerprint was
+`2ed615565078bac0ef11040b78b254a8b82c9cf972079a02807a09d838484649`;
+the manifest records `llm_mode` as `none` and `llm_status` as `disabled`.

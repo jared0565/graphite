@@ -224,6 +224,106 @@ def test_nonzero_result_preserves_only_allowlisted_hashed_diagnostics(
     }
 
 
+@pytest.mark.parametrize(
+    ("provider", "diagnostic"),
+    [
+        (
+            ProviderId.CLAUDE_CODE,
+            b"Selected model is at capacity. Please try a different model.",
+        ),
+        (
+            ProviderId.CODEX,
+            b"Selected model is at capacity. Please try a different model.",
+        ),
+    ],
+)
+def test_exact_allowlisted_capacity_diagnostic_is_sanitized(
+    tmp_path: Path,
+    provider: ProviderId,
+    diagnostic: bytes,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    credentials = _credential_home(tmp_path)
+
+    def runner(argv: list[str], **kwargs: object) -> ProbeProcessResult:
+        return ProbeProcessResult(1, b"", diagnostic, 0.25)
+
+    with pytest.raises(CliProcessError, match="^process_nonzero$") as caught:
+        run_cli_process(
+            argv=(sys.executable, str(FAKE_CLI), "echo"),
+            cwd=workspace,
+            stdin=b"private prompt",
+            provider=provider,
+            credential_home=credentials,
+            timeout_seconds=5,
+            runner=runner,
+            source_environment={},
+        )
+
+    assert caught.value.diagnostics is not None
+    assert caught.value.diagnostics.failure_category == "capacity_unavailable"
+    assert diagnostic.decode("ascii") not in repr(caught.value.diagnostics)
+
+
+def test_ambiguous_capacity_text_does_not_authorize_fallback(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    credentials = _credential_home(tmp_path)
+
+    def runner(argv: list[str], **kwargs: object) -> ProbeProcessResult:
+        return ProbeProcessResult(
+            1,
+            b"",
+            b"Capacity warning: perhaps select another model later.",
+            0.25,
+        )
+
+    with pytest.raises(CliProcessError) as caught:
+        run_cli_process(
+            argv=(sys.executable, str(FAKE_CLI), "echo"),
+            cwd=workspace,
+            stdin=b"",
+            provider=ProviderId.CLAUDE_CODE,
+            credential_home=credentials,
+            timeout_seconds=5,
+            runner=runner,
+            source_environment={},
+        )
+
+    assert caught.value.diagnostics is not None
+    assert caught.value.diagnostics.failure_category == "provider_process_failure"
+
+
+def test_capacity_phrase_embedded_in_other_diagnostic_fails_closed(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    credentials = _credential_home(tmp_path)
+
+    def runner(argv: list[str], **kwargs: object) -> ProbeProcessResult:
+        return ProbeProcessResult(
+            1,
+            b"",
+            b"Not verified: selected model is at capacity. please try a different model.",
+            0.25,
+        )
+
+    with pytest.raises(CliProcessError) as caught:
+        run_cli_process(
+            argv=(sys.executable, str(FAKE_CLI), "echo"),
+            cwd=workspace,
+            stdin=b"",
+            provider=ProviderId.CLAUDE_CODE,
+            credential_home=credentials,
+            timeout_seconds=5,
+            runner=runner,
+            source_environment={},
+        )
+
+    assert caught.value.diagnostics is not None
+    assert caught.value.diagnostics.failure_category == "provider_process_failure"
+
+
 def test_cancellation_and_invalid_utf8_fail_closed(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
