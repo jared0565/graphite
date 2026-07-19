@@ -271,3 +271,42 @@ communities, and 184 scanned files. Its canonical fingerprint is
 and its engine fingerprint is
 `deccdf36f0856d0f44dd4ccfc0c39c830cd92898098fb37c82c9cdd93e216142`.
 A new complete live-acceptance bundle remains required.
+
+## Second combined attempt and deterministic validation environment
+
+The operator approved replacement bundle
+`f50b231c2c9909dc3f971efbbd55e91057b18f14c89ba81e3bf9bbbf5c5d43ba`.
+The duplicate approval message authorized the same single execution, not a second
+run. Claude verification passed in 8,436 milliseconds using 2 input and 467 output
+tokens, creating read-only snapshot
+`c28f5494ef8618aaf338268c749ba6a30e73ef99ff42255f93f764bf883226d3`.
+Codex verification passed in 8,110 milliseconds using 20,843 input and 8 output
+tokens, creating read-only snapshot
+`8628387d59806bf2445e3dfb8df758261ebd016a5f63e161fd04a23385300220`.
+Both exact model and budget contracts passed and each snapshot received one machine
+and one accepted-human telemetry event.
+
+The one approved Claude edit call then produced the exact expected two-file diff
+and exact response marker. Diff policy and `git diff --check` passed, but the local
+test subprocess failed before test execution because the harness's reduced
+environment could not discover the user-installed pytest. Adding only `APPDATA`
+restored pytest discovery but exposed an ambient third-party plugin startup failure.
+The batch therefore stopped as `validation_failed` after three total model attempts.
+No write snapshot was promoted. The Codex edit and Claude review did not run, and
+there was no retry, fallback, resume, substitution, merge, push, or deployment.
+
+The partial databases passed integrity and foreign-key checks and contained exactly
+two read-only snapshots, two lifecycle bindings, four sanitized telemetry events,
+two current observations, and six lifecycle events. They were removed from active
+authority and placed in a dedicated recoverable quarantine. Their SHA-256 digests
+are `4ec986da6c7cf2531a7f18f33f59f48c2b247ea893c3ddacb2ed76084eab5ec1`
+and `1572cd173e05eab3728c3891080e122cac741be2b2934f5ff675e84487f18bda`.
+The failed edit worktree remains preserved and must not be reused as fresh evidence.
+
+The acceptance harness now allowlists `APPDATA` solely for Python user-site module
+discovery and sets `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`. This prevents unrelated
+ambient plugins from entering validation while retaining a reduced environment.
+Diff and test failures now have separate allowlisted failure codes. Both expected
+Claude and Codex target edits pass the corrected deterministic validation contract,
+and three new detached worktrees were created for the next attempt. These harness
+checks invoked no provider or network inference.
