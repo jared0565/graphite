@@ -204,7 +204,12 @@ def _failure_code(event: dict[str, object]) -> str:
     return "unavailable"
 
 
-def _parse_jsonl(stdout: bytes, expected_model: str) -> tuple[str, str, int, int]:
+def _parse_jsonl(
+    stdout: bytes,
+    expected_model: str,
+    *,
+    final_message_only: bool = False,
+) -> tuple[str, str, int, int]:
     try:
         text = decode_cli_output(stdout)
     except CliProcessError:
@@ -259,7 +264,7 @@ def _parse_jsonl(stdout: bytes, expected_model: str) -> tuple[str, str, int, int
     usage = completion.get("usage")
     if not isinstance(usage, dict):
         raise AdapterError("protocol")
-    message = "\n".join(messages)
+    message = messages[-1] if final_message_only else "\n".join(messages)
     if not message:
         raise AdapterError("protocol")
     if message.strip().lower() == _CAPACITY_MESSAGE:
@@ -349,7 +354,9 @@ def execute_codex(
         if current is None or current[1] != schema[1]:
             raise AdapterError("response_contract_changed")
     message, effective_model, input_tokens, output_tokens = _parse_jsonl(
-        result.stdout, expected
+        result.stdout,
+        expected,
+        final_message_only=schema is not None,
     )
     return CodexExecutionResult(
         effective_model,

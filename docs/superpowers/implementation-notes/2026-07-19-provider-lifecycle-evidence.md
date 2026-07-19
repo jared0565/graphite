@@ -399,3 +399,50 @@ Ruff and diff checks passed. The fresh canonical graph contains 7,506 nodes,
 `355af395f3576e50524f897db6df9b44c9ab0c68c2619de01a54dab28383f142`
 and its engine fingerprint is
 `b5cebb0d2458ddd4d1df439aff0bf6daea794985061da312395059e65f7284c3`.
+
+## Targeted Codex schema edit and terminal-message correction
+
+The operator approved the single-call schema edit manifest
+`7bab2e7e20af90586f10cd173a494f464be151b6a07f6f85ca971a83d6ee06b9`.
+Exactly one Codex attempt ran; there was no retry, fallback, resume, provider or
+model substitution, merge, push, or deployment. The process exited successfully,
+but the adapter rejected the combined agent-message stream as
+`unexpected_terminal_response`. The call also exceeded its approved input
+reservation, so it is invalid independently of the response failure.
+
+Sanitized receipt evidence is:
+
+- effective model: `gpt-5.6-sol`;
+- duration: 35,522 milliseconds;
+- usage: 126,807 input tokens and 987 output tokens;
+- stdout SHA-256:
+  `69d7b732c9d5ee631b8cb2bdf033346442b5bb643f7dbd15b893f7ef2c7a4a6f`;
+- stderr SHA-256:
+  `b194bfb598bd517d88ddc38e787c70f02f8e7c4f22d584b60de394ebd520f316`;
+- terminal-message byte count: 59;
+- terminal-message SHA-256:
+  `1dfd4367b5feaa485b939168c7875ad25223e25301c59f45ccba7dafb1e313a8`.
+
+The worktree remained unchanged. Its empty diff retained SHA-256
+`2dc0166a04a1f3ab3c1598e8043761b04df70aa5be6a522709518218b73c0b15`,
+and deterministic local validation passed only against that unchanged baseline.
+No write snapshot was promoted, and the retained partial store was unchanged.
+
+Codex JSONL may contain intermediate agent messages before the schema-bound final
+message. The adapter now selects only the last agent message when an external
+output schema is active. Unschemaed calls retain their prior concatenated-message
+behavior. A deterministic regression test proves that an intermediate progress
+message cannot contaminate the terminal structured result.
+
+Focused adapter, process, and route-pool tests passed 73 tests. A first complete
+suite run encountered a cold 20-second real-MCP doctor-probe timeout; the same two
+real-server isolation checks then passed together, and a clean-base complete rerun
+passed 1,708 tests with 44 skips. Repository-wide Ruff and diff checks passed.
+
+The next live attempt will not repeat this failed `gpt-5.6-sol` edit contract.
+OpenAI documents `gpt-5.3-codex` as its agentic coding model optimized for Codex,
+whereas `gpt-5.6-sol` is the general flagship model. Any switch requires a new,
+separately approved bounded verification and edit manifest:
+
+- https://developers.openai.com/api/docs/models/gpt-5.3-codex
+- https://developers.openai.com/api/docs/models/gpt-5.6-sol

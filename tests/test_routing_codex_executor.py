@@ -331,6 +331,13 @@ def test_execution_binds_external_output_schema_by_digest(tmp_path: Path) -> Non
                         "type": "item.completed",
                         "item": {
                             "type": "agent_message",
+                            "text": "Intermediate progress must not be terminal.",
+                        },
+                    },
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "agent_message",
                             "text": '{"result":"GRAPHITE_EDIT_OK"}',
                         },
                     },
