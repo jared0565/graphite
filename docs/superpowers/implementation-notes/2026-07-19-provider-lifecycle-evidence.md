@@ -528,3 +528,25 @@ This is a model-selection failure, not an authentication or Graphite JSONL parse
 failure. The next manifest must select an installed slug and bind it to a fresh
 verification snapshot. `gpt-5.6-sol` is the selected candidate because it is
 installed, supports high reasoning, and has prior bounded read-only evidence.
+
+## Installed Codex 5.6 verification passed; edit smoke made no change
+
+The operator approved installed-model bundle
+`78ebdfc48d46533e1bfa0a459be9e990c99f742c91bf553b752d115401bee8b8`.
+Codex `gpt-5.6-sol` verification passed in 8,646 milliseconds using 20,876 input
+and 18 output tokens. It created read-only snapshot
+`d0abf24d1cc07a3ebbaf72a9448523d619a690c7d346be089f3c6cfcf8707460` and two
+sanitized telemetry events.
+
+The following schema-bound Codex edit process returned a successful structured
+response but produced no filesystem changes. The bounded diff was empty with
+SHA-256 `2dc01697677c6dfe69b7f6af1b4b7cb8e5ee8681d44f47886b9675be8035a997`,
+so the batch stopped as `edit_diff_mismatch` after two total attempts. No write
+snapshot was promoted, no validation or Claude review ran, and there was no retry,
+fallback, resume, substitution, merge, push, or deployment.
+
+The routing store remains integrity-clean with four snapshots, four lifecycle
+bindings, and seven telemetry events. The lifecycle store remains unchanged and
+integrity-clean. The edit worktree is clean. The next attempt must use a separately
+approved installed model and must still require a non-empty exact diff before any
+write authority is granted.
