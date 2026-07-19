@@ -48,19 +48,21 @@
 
 **Files:**
 - Add `src/graphite/routing/lifecycle.py`
-- Modify `src/graphite/routing/contracts.py`
 - Add `tests/test_provider_lifecycle.py`
-- Modify `tests/test_routing_contracts.py`
 
-- [ ] Write failing tests for `ProviderRuntimeIdentity`, `ProviderCompatibilityPolicy`, `ProviderLifecycleState`, `ProviderLifecycleEvent`, and stable reason codes. Bound all strings, collections, timestamps, and digest fields.
-- [ ] Define runtime kinds for local CLI, local HTTP runtime, and remote HTTP service. Support only the approved provider/runtime combinations: Claude/CLI, Codex/CLI, Ollama/local HTTP, and OpenRouter/remote HTTPS.
-- [ ] Canonically digest provider, runtime kind, normalized semantic version, executable or endpoint identity digest, configured model identity, provider-routing policy digest, required capabilities, and policy version. Exclude observation time and all raw diagnostics from the identity digest.
-- [ ] Implement explicit valid transitions among `discovered`, `compatible`, `verification_required`, `active`, `incompatible`, and `unavailable`. Reject direct discovery/probe transitions to `active`.
-- [ ] Classify unchanged, hash-only, patch, minor, major, capability, endpoint, model-digest, routing-policy, credential-health, and missing-runtime changes deterministically.
-- [ ] Require patch and hash-only changes to pass standard probes, minor changes to pass expanded probes, and major or required-capability changes to remain `incompatible` pending policy promotion.
-- [ ] Add serialization tests proving public records cannot contain paths, prompts, source, response bodies, credentials, auth payloads, or raw diagnostics.
-- [ ] Run focused lifecycle and contract tests, Ruff, and `git diff --check`.
-- [ ] Commit: `feat: add provider lifecycle authority contracts`.
+Security refinement: lifecycle uses a distinct four-provider identifier so the
+existing Claude/Codex governed-execution enum cannot silently accept HTTP
+providers through legacy CLI fallback branches.
+
+- [x] Write failing tests for `ProviderRuntimeIdentity`, `ProviderCompatibilityPolicy`, `ProviderLifecycleState`, `ProviderLifecycleEvent`, and stable reason codes. Bound all strings, collections, timestamps, and digest fields.
+- [x] Define runtime kinds for local CLI, local HTTP runtime, and remote HTTP service. Support only the approved provider/runtime combinations: Claude/CLI, Codex/CLI, Ollama/local HTTP, and OpenRouter/remote HTTPS.
+- [x] Canonically digest provider, runtime kind, normalized semantic version, executable or endpoint identity digest, configured model identity, provider-routing policy digest, required capabilities, and policy version. Exclude observation time and all raw diagnostics from the identity digest.
+- [x] Implement explicit valid transitions among `discovered`, `compatible`, `verification_required`, `active`, `incompatible`, and `unavailable`. Reject direct discovery/probe transitions to `active`.
+- [x] Classify unchanged, hash-only, patch, minor, major, capability, endpoint, model-digest, routing-policy, credential-health, and missing-runtime changes deterministically.
+- [x] Require patch and hash-only changes to pass standard probes, minor changes to pass expanded probes, and major or required-capability changes to remain `incompatible` pending policy promotion.
+- [x] Add serialization tests proving public records cannot contain paths, prompts, source, response bodies, credentials, auth payloads, or raw diagnostics.
+- [x] Run focused lifecycle and contract tests, full offline routing tests, Ruff, and `git diff --check`.
+- [x] Commit: `feat: add provider lifecycle authority contracts`.
 
 ## Task 2: Add isolated lifecycle persistence and schema-v5 routing bindings
 
