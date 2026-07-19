@@ -310,3 +310,51 @@ Diff and test failures now have separate allowlisted failure codes. Both expecte
 Claude and Codex target edits pass the corrected deterministic validation contract,
 and three new detached worktrees were created for the next attempt. These harness
 checks invoked no provider or network inference.
+
+## Third combined attempt and terminal capacity classification
+
+The operator approved bundle
+`c28eccd1ed54638962d59f441210cba9db3b3708c59968367e31f6df786666e3`
+against three new detached worktrees. Claude verification passed in 9,373
+milliseconds with 2 input and 536 output tokens, creating read-only snapshot
+`cb9b835fac0eb54bbaaf13896cc149e3955b1fb22eed0200e0ca5b2479125793`.
+Codex verification passed in 8,528 milliseconds with 20,843 input and 8 output
+tokens, creating read-only snapshot
+`9f56bbb94197fe5383280741b4042476e03aa7dfddc1a347add48260be7f5e04`.
+
+The Claude edit smoke passed the exact response, model, budget, diff-policy, and
+deterministic test contracts. It ran for 10,561 milliseconds using 6 input and 647
+output tokens. Its two-file, 862-byte diff matched
+`b31c6cc3c237f6d4fc0d7107fcbb0e96a61592a0bfd3aea79c3ace9db3b7a91d`,
+and atomic promotion created workspace-write snapshot
+`e2ab30294971118a9ddcfd48bbb98e4de8d44edd0448527930e0fbe1df7b8728`.
+
+The single Codex edit call then returned a successful process with a terminal agent
+message that did not satisfy the exact response contract and made no filesystem
+changes. The batch stopped as `codex_edit_response_invalid` after four total model
+attempts. The message body was neither retained nor inspected, so this event cannot
+be claimed as proven capacity evidence. The Claude review did not run, and there
+was no retry, fallback, resume, substitution, merge, push, or deployment.
+
+The partial databases passed integrity and foreign-key checks and contained exactly
+three snapshots, three lifecycle bindings, five sanitized telemetry events, two
+current observations, and six lifecycle events. They were removed from active
+authority and quarantined with SHA-256 digests
+`9b0e39ce3d612dee1e1c297b25505010459a5df7199560356057dc9f51ebf1cd`
+and `97e3d6c324a4772017c355096b95a6459c823206554a938e52fb300d718a4a75`.
+The successful Claude write snapshot is therefore evidence of that attempt only and
+must not be reactivated from quarantine.
+
+Codex's adapter previously classified the exact allowlisted capacity notice only
+when the process exited nonzero. The same exact notice delivered as the sole
+successful terminal agent message would instead look like ordinary output and
+prevent governed capacity routing. The adapter now maps only that complete,
+case-insensitive message to `capacity_unavailable`; embedded or extended lookalikes
+remain ordinary untrusted output. Focused adapter, process-runner, and route-pool
+tests passed 68 tests. The complete offline suite passed 1,703 tests with 44 skips,
+and repository-wide Ruff and diff checks passed. The fresh canonical graph contains
+7,492 nodes, 16,650 edges, 146 communities, and 184 scanned files. Its canonical
+fingerprint is
+`f6fd73d49d0d258a26abe10b14c3dd70648bae75d4f64ce7ffac6b5058eb0dcc`
+and its engine fingerprint is
+`28f72d3d745783df4f67d9fc222dbf1f657d7dd3fc23702c29db02950453b224`.

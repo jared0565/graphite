@@ -234,6 +234,90 @@ def test_execution_binds_full_requested_slug_when_terminal_omits_model(
     assert (outcome.input_tokens, outcome.output_tokens) == (3, 1)
 
 
+def test_execution_classifies_exact_terminal_capacity_message(
+    tmp_path: Path,
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    transport = ScriptedTransport(
+        [
+            _result(
+                _jsonl(
+                    {"type": "thread.started", "thread_id": "discard-me"},
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "agent_message",
+                            "text": (
+                                "Selected model is at capacity. "
+                                "Please try a different model."
+                            ),
+                        },
+                    },
+                    {
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 3, "output_tokens": 8},
+                    },
+                )
+            )
+        ]
+    )
+
+    with pytest.raises(AdapterError, match="^capacity_unavailable$"):
+        execute_codex(
+            executable=executable,
+            workspace=workspace,
+            credential_home=credentials,
+            prompt=b"edit",
+            requested_model="gpt-5.6-sol",
+            expected_effective_model="gpt-5.6-sol",
+            effort=Effort.HIGH,
+            permission_mode=PermissionMode.WORKSPACE_WRITE,
+            transport=transport,
+        )
+
+    assert len(transport.calls) == 1
+
+
+def test_execution_does_not_classify_embedded_capacity_text(
+    tmp_path: Path,
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    message = (
+        "Not verified: selected model is at capacity. "
+        "Please try a different model."
+    )
+    transport = ScriptedTransport(
+        [
+            _result(
+                _jsonl(
+                    {
+                        "type": "item.completed",
+                        "item": {"type": "agent_message", "text": message},
+                    },
+                    {
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 3, "output_tokens": 9},
+                    },
+                )
+            )
+        ]
+    )
+
+    outcome = execute_codex(
+        executable=executable,
+        workspace=workspace,
+        credential_home=credentials,
+        prompt=b"edit",
+        requested_model="gpt-5.6-sol",
+        expected_effective_model="gpt-5.6-sol",
+        effort=Effort.HIGH,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        transport=transport,
+    )
+
+    assert outcome.message == message
+
+
 @pytest.mark.parametrize(
     ("events", "code"),
     [

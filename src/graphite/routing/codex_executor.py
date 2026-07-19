@@ -48,6 +48,7 @@ _PREFLIGHT_WARNING_PREFIXES: Final = (
     "WARNING: failed to clean up stale arg0 temp dirs:",
     "WARNING: proceeding, even though we could not create PATH aliases:",
 )
+_CAPACITY_MESSAGE: Final = "selected model is at capacity. please try a different model."
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +210,8 @@ def _parse_jsonl(stdout: bytes, expected_model: str) -> tuple[str, str, int, int
     message = "\n".join(messages)
     if not message:
         raise AdapterError("protocol")
+    if message.strip().lower() == _CAPACITY_MESSAGE:
+        raise AdapterError("capacity_unavailable")
     return (
         message,
         effective_model,
