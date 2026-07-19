@@ -300,14 +300,14 @@ providers can become eligible.
 - Update `docs/superpowers/implementation-notes/2026-07-19-provider-lifecycle-evidence.md`
 - Update implementation files only for defects found by offline acceptance
 
-- [ ] Run focused lifecycle, probe, adapter, daemon, routing, overlay, LLM, graph-isolation, recovery, and documentation tests with unique writable base-temp directories.
-- [ ] Run the complete offline suite and record exact pass/skip counts.
-- [ ] Run Ruff over `src` and `tests`, `git diff --check`, staged-diff review, secret-pattern review, and repository status review.
-- [ ] Run a clean canonical rebuild with no inference configuration and verify `check`, validation, context, impact, and query statistics.
-- [ ] Compare canonical artifacts across fake provider states and record the stable fingerprint or exact semantically excluded fields.
-- [ ] Verify lifecycle and routing databases with SQLite integrity and foreign-key checks; repeat the schema-v4 restore drill.
-- [ ] Confirm no live provider request, subscription call, external network inference, model substitution, merge, or push occurred; route-pool behavior used deterministic fakes only.
-- [ ] Commit final offline corrections and evidence in reviewable bounded commits.
+- [x] Run focused lifecycle, probe, adapter, daemon, routing, overlay, LLM, graph-isolation, recovery, and documentation tests with unique writable base-temp directories.
+- [x] Run the complete offline suite and record exact pass/skip counts.
+- [x] Run Ruff over `src` and `tests`, `git diff --check`, staged-diff review, secret-pattern review, and repository status review.
+- [x] Run a clean canonical rebuild with no inference configuration and verify `check`, validation, context, impact, and query statistics.
+- [x] Compare canonical artifacts across fake provider states and record the stable fingerprint or exact semantically excluded fields.
+- [x] Verify lifecycle and routing databases with SQLite integrity and foreign-key checks; repeat the schema-v4 restore drill.
+- [x] Confirm no live provider request, subscription call, external network inference, model substitution, merge, or push occurred; route-pool behavior used deterministic fakes only.
+- [x] Commit final offline corrections and evidence in reviewable bounded commits.
 - [ ] Prepare, but do not execute, a new exact Claude verification manifest and equivalent manifests for any other provider requiring activation.
 
 ## Separate live-acceptance gate

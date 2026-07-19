@@ -78,3 +78,41 @@ approved by the operator.
 - Freshness: passed with no added, changed, or removed source files.
 - Engine fingerprint:
   `725e821e0a28071f85e53984f0ffc3ea6f7c77337f9c76935dde70cb11679adb`.
+
+## Task 10 offline acceptance
+
+The complete offline suite passed 1,683 tests with 44 intentional skips in
+441.96 seconds. Repository-wide Ruff over `src` and `tests` passed. Unstaged and
+staged diff checks passed; the post-Task-9 tree was clean before this evidence
+update. The secret-pattern review found only a deliberately hostile redaction test
+value and a non-secret task identifier in a historical plan. No credential material
+was found in implementation or operator evidence.
+
+The provider-state isolation selection passed 41 tests and proves byte-equivalent
+canonical artifacts and unchanged read results across fake active, unavailable,
+drifted, corrupt-persistence, and overlay-failure states. The dedicated v4-to-v5
+backup/restore selection passed 2 tests with 31 unrelated routing-storage tests
+deselected. The clean canonical graph validates with zero errors and warnings;
+`check`, `context`, `impact`, and query statistics all succeeded with the Task 9
+counts and engine fingerprint recorded above.
+
+The disposable active fixture database was opened in SQLite read-only mode. It is
+schema v4, reports `integrity_check=ok`, and has zero foreign-key violations. Its
+quarantined over-budget database was not opened, restored, copied, or treated as
+authority. Lifecycle schema-v1 backup/integrity behavior and routing v4 restore
+were verified only in isolated test databases; no operator database was migrated or
+altered.
+
+No provider executable, subscription request, external network inference, retry,
+fallback, or model substitution occurred. No merge, push, or deployment occurred.
+Route-pool capacity behavior used deterministic fakes only. The feature branch is
+still unpushed. The main worktree currently points at `edbd7e5`; this branch did not
+modify it.
+
+Exact live verification manifests cannot yet be truthfully issued from the new
+operator boundary because the disposable fixture has no provider-lifecycle database
+and the last accepted observations predate the restart. Fabricating a current
+lifecycle identity would violate the exact-identity contract. Preparing a current
+manifest therefore stops at the live gate until an explicitly approved bounded
+provider observation establishes the installed identity; observation itself must
+not perform inference or activation.
