@@ -358,3 +358,44 @@ fingerprint is
 `f6fd73d49d0d258a26abe10b14c3dd70648bae75d4f64ce7ffac6b5058eb0dcc`
 and its engine fingerprint is
 `28f72d3d745783df4f67d9fc222dbf1f657d7dd3fc23702c29db02950453b224`.
+
+## Fourth combined attempt and schema-bound Codex output
+
+The operator approved bundle
+`823c614a4246859f40a0c230f5fdedc61c40aaf6f07369ca5aebf58182395c45`.
+Claude verification passed in 10,228 milliseconds with 2 input and 637 output
+tokens, creating read-only snapshot
+`6e0f21679e261cefa9ae102c2ce7d31f23aec32cdf46fc7b0c49bda1dd6c547d`.
+Codex verification passed in 8,043 milliseconds with 20,843 input and 8 output
+tokens, creating read-only snapshot
+`648e18d2b84d87e67a86a09d0bfa4f148ec15ccaef2df5d903b75493f7c82fc0`.
+
+The Claude edit smoke again passed all contracts. It ran for 16,852 milliseconds
+using 12 input and 766 output tokens. Its two-file, 862-byte diff matched
+`b31c6cc3c237f6d4fc0d7107fcbb0e96a61592a0bfd3aea79c3ace9db3b7a91d`,
+and promotion created workspace-write snapshot
+`d7f276c1dbb1650e35499e5f401c49c923c7931e34c4ef0e1955cd064f97ec09`.
+
+The Codex edit again returned a successful process with an unexpected terminal
+message and no filesystem changes. Because it was not the exact allowlisted
+capacity notice, fallback remained unauthorized. The batch stopped after four
+model attempts, the review did not run, and there was no retry, resume,
+substitution, merge, push, or deployment. The isolated partial store passed
+integrity and foreign-key checks and contains exactly three snapshots, three
+lifecycle bindings, and five sanitized telemetry events. It is retained only as
+the explicitly bound source for a separately approved single-call Codex smoke; it
+is not complete production authority.
+
+Installed Codex `0.144.6` exposes `exec --output-schema`. The adapter now supports
+an optional external JSON output schema bound by exact SHA-256. It rejects relative,
+workspace-local, symlinked/reparse, empty, oversized, malformed, non-object, and
+digest-mismatched schemas before provider invocation, and fails closed if the
+schema changes across execution. Calls without a schema retain their exact prior
+argv. This permits the remaining edit smoke to use a structured terminal marker
+instead of free text. Focused adapter, process, and route-pool tests passed 73
+tests; the complete offline suite passed 1,708 tests with 44 skips. Repository-wide
+Ruff and diff checks passed. The fresh canonical graph contains 7,506 nodes,
+16,694 edges, 153 communities, and 184 scanned files. Its canonical fingerprint is
+`355af395f3576e50524f897db6df9b44c9ab0c68c2619de01a54dab28383f142`
+and its engine fingerprint is
+`b5cebb0d2458ddd4d1df439aff0bf6daea794985061da312395059e65f7284c3`.

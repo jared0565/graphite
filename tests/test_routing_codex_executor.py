@@ -318,6 +318,135 @@ def test_execution_does_not_classify_embedded_capacity_text(
     assert outcome.message == message
 
 
+def test_execution_binds_external_output_schema_by_digest(tmp_path: Path) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    schema = tmp_path / "output-schema.json"
+    schema_body = b'{"properties":{"result":{"type":"string"}},"type":"object"}'
+    schema.write_bytes(schema_body)
+    transport = ScriptedTransport(
+        [
+            _result(
+                _jsonl(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "agent_message",
+                            "text": '{"result":"GRAPHITE_EDIT_OK"}',
+                        },
+                    },
+                    {
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 4, "output_tokens": 7},
+                    },
+                )
+            )
+        ]
+    )
+
+    outcome = execute_codex(
+        executable=executable,
+        workspace=workspace,
+        credential_home=credentials,
+        prompt=b"edit",
+        requested_model="gpt-5.6-sol",
+        expected_effective_model="gpt-5.6-sol",
+        effort=Effort.HIGH,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        output_schema_path=schema,
+        output_schema_sha256=hashlib.sha256(schema_body).hexdigest(),
+        transport=transport,
+    )
+
+    assert outcome.message == '{"result":"GRAPHITE_EDIT_OK"}'
+    argv = transport.calls[0]["argv"]
+    assert argv[-3:] == ("--output-schema", str(schema.resolve()), "-")
+
+
+@pytest.mark.parametrize("case", ["inside_workspace", "digest_mismatch", "non_object"])
+def test_execution_rejects_unbound_output_schema_before_transport(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    schema = (
+        workspace / "schema.json"
+        if case == "inside_workspace"
+        else tmp_path / "schema.json"
+    )
+    body = b"[]" if case == "non_object" else b'{"type":"object"}'
+    schema.write_bytes(body)
+    expected = (
+        "0" * 64
+        if case == "digest_mismatch"
+        else hashlib.sha256(body).hexdigest()
+    )
+    transport = ScriptedTransport([])
+
+    with pytest.raises(
+        AdapterError,
+        match=(
+            "^response_contract_mismatch$"
+            if case == "digest_mismatch"
+            else "^response_contract_invalid$"
+        ),
+    ):
+        execute_codex(
+            executable=executable,
+            workspace=workspace,
+            credential_home=credentials,
+            prompt=b"edit",
+            requested_model="gpt-5.6-sol",
+            expected_effective_model="gpt-5.6-sol",
+            effort=Effort.HIGH,
+            permission_mode=PermissionMode.WORKSPACE_WRITE,
+            output_schema_path=schema,
+            output_schema_sha256=expected,
+            transport=transport,
+        )
+
+    assert not transport.calls
+
+
+def test_execution_rejects_output_schema_drift_after_transport(
+    tmp_path: Path,
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    schema = tmp_path / "schema.json"
+    body = b'{"type":"object"}'
+    schema.write_bytes(body)
+    result = _result(
+        _jsonl(
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": '{"result":"ok"}'},
+            },
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": 2, "output_tokens": 3},
+            },
+        )
+    )
+
+    def transport(**_kwargs: object) -> CliProcessResult:
+        schema.write_bytes(b'{"type":"string"}')
+        return result
+
+    with pytest.raises(AdapterError, match="^response_contract_changed$"):
+        execute_codex(
+            executable=executable,
+            workspace=workspace,
+            credential_home=credentials,
+            prompt=b"edit",
+            requested_model="gpt-5.6-sol",
+            expected_effective_model="gpt-5.6-sol",
+            effort=Effort.HIGH,
+            permission_mode=PermissionMode.WORKSPACE_WRITE,
+            output_schema_path=schema,
+            output_schema_sha256=hashlib.sha256(body).hexdigest(),
+            transport=transport,
+        )
+
+
 @pytest.mark.parametrize(
     ("events", "code"),
     [

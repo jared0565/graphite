@@ -1,8 +1,10 @@
 """Hardened adapter for an authenticated Codex ChatGPT subscription CLI."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import stat
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +26,7 @@ EXECUTION_TIMEOUT_SECONDS: Final = 1_800.0
 MAX_EVENT_COUNT: Final = 10_000
 MAX_MESSAGE_LENGTH: Final = 1_048_576
 MAX_TOKEN_COUNT: Final = 10_000_000
+MAX_OUTPUT_SCHEMA_BYTES: Final = 65_536
 _VERSION = re.compile(r"^codex-cli (0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\r?\n?$")
 _ALLOWED_EVENTS: Final = frozenset(
     {
@@ -49,6 +52,8 @@ _PREFLIGHT_WARNING_PREFIXES: Final = (
     "WARNING: proceeding, even though we could not create PATH aliases:",
 )
 _CAPACITY_MESSAGE: Final = "selected model is at capacity. please try a different model."
+_SHA256: Final = re.compile(r"^[0-9a-f]{64}$")
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +69,53 @@ class CodexExecutionResult:
 
 
 Transport = Callable[..., CliProcessResult]
+
+
+def _is_reparse(metadata: object) -> bool:
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return bool(attributes & _REPARSE_POINT)
+
+
+def _output_schema(
+    path: Path | None,
+    expected_sha256: str | None,
+    *,
+    workspace: Path,
+) -> tuple[Path, str] | None:
+    if path is None and expected_sha256 is None:
+        return None
+    if (
+        not isinstance(path, Path)
+        or not path.is_absolute()
+        or not isinstance(expected_sha256, str)
+        or _SHA256.fullmatch(expected_sha256) is None
+    ):
+        raise AdapterError("request_invalid")
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+        resolved_metadata = resolved.stat()
+        workspace_root = workspace.resolve(strict=True)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or _is_reparse(metadata)
+            or not stat.S_ISREG(resolved_metadata.st_mode)
+            or _is_reparse(resolved_metadata)
+            or not 0 < metadata.st_size <= MAX_OUTPUT_SCHEMA_BYTES
+            or resolved.is_relative_to(workspace_root)
+        ):
+            raise OSError
+        body = resolved.read_bytes()
+        parsed = json.loads(body.decode("utf-8"))
+    except (OSError, RuntimeError, UnicodeDecodeError, json.JSONDecodeError):
+        raise AdapterError("response_contract_invalid") from None
+    if not isinstance(parsed, dict):
+        raise AdapterError("response_contract_invalid")
+    digest = hashlib.sha256(body).hexdigest()
+    if digest != expected_sha256:
+        raise AdapterError("response_contract_mismatch")
+    return resolved, digest
 
 
 def _invoke(transport: Transport, **kwargs: object) -> CliProcessResult:
@@ -230,6 +282,8 @@ def execute_codex(
     expected_effective_model: str,
     effort: Effort,
     permission_mode: PermissionMode,
+    output_schema_path: Path | None = None,
+    output_schema_sha256: str | None = None,
     transport: Transport = run_cli_process,
     timeout_seconds: float = EXECUTION_TIMEOUT_SECONDS,
 ) -> CodexExecutionResult:
@@ -244,8 +298,13 @@ def execute_codex(
         raise AdapterError("request_invalid") from None
     if normalized_effort in {Effort.DEFAULT, Effort.MAX}:
         raise AdapterError("request_invalid")
+    schema = _output_schema(
+        output_schema_path,
+        output_schema_sha256,
+        workspace=workspace,
+    )
     sandbox = "workspace-write" if permission is PermissionMode.WORKSPACE_WRITE else "read-only"
-    argv = (
+    argv_prefix = (
         str(resolved),
         "--strict-config",
         "-a",
@@ -263,6 +322,10 @@ def execute_codex(
         "--ephemeral",
         "--ignore-user-config",
         "--ignore-rules",
+    )
+    argv = (
+        *argv_prefix,
+        *(("--output-schema", str(schema[0])) if schema is not None else ()),
         "-",
     )
     result = _invoke(
@@ -274,6 +337,17 @@ def execute_codex(
         credential_home=credential_home,
         timeout_seconds=timeout_seconds,
     )
+    if schema is not None:
+        try:
+            current = _output_schema(
+                schema[0],
+                schema[1],
+                workspace=workspace,
+            )
+        except AdapterError:
+            raise AdapterError("response_contract_changed") from None
+        if current is None or current[1] != schema[1]:
+            raise AdapterError("response_contract_changed")
     message, effective_model, input_tokens, output_tokens = _parse_jsonl(
         result.stdout, expected
     )
