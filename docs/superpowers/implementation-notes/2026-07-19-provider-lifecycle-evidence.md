@@ -483,3 +483,34 @@ The disposable bundle omitted `provider_process_failure` from its declared
 failure-category allowlist even though the production adapter correctly emitted
 that sanitized category. This manifest inconsistency did not expose data or permit
 continued execution, but it must be corrected in any replacement manifest.
+
+## Corrected Codex 5.3 replacement stopped at verification
+
+The operator approved replacement bundle
+`421e1fce5dace5d517552c7f360c0b1b9d5e0adbf0b0a861eac8331b25c8b08f`, bound to
+implementation commit `0ecb52d3bd9abf4d43a1b204df81d3e841b67364`. The manifest
+corrected the prior allowlist omission and passed deterministic no-inference
+preflight. Its first ordered action again stopped at the Codex 5.3 verification
+process, before a parseable terminal result.
+
+The sanitized receipt is:
+
+- failure category: `provider_process_failure`;
+- exit classification: `nonzero_exit`;
+- exit code: `1`;
+- duration: 6,917 milliseconds;
+- stdout SHA-256:
+  `58251f7b5adea403e7afd22c1c3968fd518bcae7145a1fa1dbb389f298797747`;
+- stderr SHA-256:
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+Effective model and token usage are unknown. Raw stdout, prompts, responses,
+provider diagnostics, credentials, paths, and repository content were not retained
+or inspected. The edit and Claude review did not run. There was no retry, fallback,
+resume, substitution, merge, push, or deployment.
+
+The routing and lifecycle stores remained unchanged at their approved SHA-256
+digests, `11dd6d905e8fdbbd237b2bb381b1ff00c0cee1782f2a6927e801ce485e8b5c3f` and
+`d7bd02146e98c9b79e102d75c400f046189a6424d30a225126f109489a258d1b`. Integrity and
+foreign-key checks remained clean, with three snapshots, three bindings, and five
+telemetry events. Both fresh task worktrees remained clean.
