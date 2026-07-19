@@ -671,7 +671,12 @@ class ProviderLifecycleEvent(PublicRecord):
         if current_state is not ProviderLifecycleState.UNAVAILABLE and current_digest is None:
             raise ValueError("lifecycle_identity_invalid")
         if previous_state is current_state:
-            if reason is not LifecycleReasonCode.IDENTITY_UNCHANGED:
+            identity_unchanged = previous_digest == current_digest
+            if identity_unchanged is not (
+                reason is LifecycleReasonCode.IDENTITY_UNCHANGED
+            ):
+                raise ValueError("lifecycle_transition_invalid")
+            if not identity_unchanged and reason not in set(_CHANGE_REASONS.values()):
                 raise ValueError("lifecycle_transition_invalid")
         elif current_state not in _VALID_TRANSITIONS[previous_state]:
             raise ValueError("lifecycle_transition_invalid")

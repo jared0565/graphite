@@ -3144,6 +3144,8 @@ class RepositoryStore:
                 raise StorageError("approval_missing")
             if row["nonce_hash"] != nonce_hash or row["manifest_hash"] != manifest_hash:
                 raise StorageError("approval_manifest_changed")
+            if row["status"] == "invalidated":
+                raise StorageError("approval_lifecycle_stale")
             if row["status"] != "issued":
                 raise StorageError("approval_reused")
             if now >= int(row["expires_at"]):
@@ -3188,6 +3190,86 @@ class RepositoryStore:
                 (approval_id,),
             ).fetchone()
         return None if row is None else str(row[0])
+
+    def lifecycle_authority_targets(
+        self, lifecycle_identity_digest: str
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        if not _HEX_64.fullmatch(lifecycle_identity_digest):
+            raise ValueError("lifecycle_identity_digest_invalid")
+        try:
+            with self._connect() as connection:
+                snapshots = tuple(
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT capability_snapshot_digest FROM lifecycle_snapshot_bindings "
+                        "WHERE lifecycle_identity_digest=? ORDER BY capability_snapshot_digest",
+                        (lifecycle_identity_digest,),
+                    ).fetchall()
+                )
+                approvals = tuple(
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT binding.approval_id FROM lifecycle_approval_bindings AS binding "
+                        "JOIN approvals AS approval ON approval.approval_id=binding.approval_id "
+                        "WHERE binding.lifecycle_identity_digest=? AND approval.status='issued' "
+                        "ORDER BY binding.approval_id",
+                        (lifecycle_identity_digest,),
+                    ).fetchall()
+                )
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+        return snapshots, approvals
+
+    def lifecycle_approval_binding_details(
+        self, approval_id: str
+    ) -> tuple[str, str] | None:
+        approval_id = _identifier(approval_id, "approval_id_invalid")
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT capability_snapshot_digest,lifecycle_identity_digest "
+                    "FROM lifecycle_approval_bindings WHERE approval_id=?",
+                    (approval_id,),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+        return None if row is None else (str(row[0]), str(row[1]))
+
+    def invalidate_lifecycle_approvals(
+        self, lifecycle_identity_digest: str
+    ) -> tuple[str, ...]:
+        if not _HEX_64.fullmatch(lifecycle_identity_digest):
+            raise ValueError("lifecycle_identity_digest_invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            approval_ids = tuple(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT binding.approval_id FROM lifecycle_approval_bindings AS binding "
+                    "JOIN approvals AS approval ON approval.approval_id=binding.approval_id "
+                    "WHERE binding.lifecycle_identity_digest=? AND approval.status='issued' "
+                    "ORDER BY binding.approval_id",
+                    (lifecycle_identity_digest,),
+                ).fetchall()
+            )
+            if approval_ids:
+                placeholders = ",".join("?" for _ in approval_ids)
+                connection.execute(
+                    f"UPDATE approvals SET status='invalidated' WHERE status='issued' "
+                    f"AND approval_id IN ({placeholders})",
+                    approval_ids,
+                )
+            connection.commit()
+            return approval_ids
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
 
     def reserved_token_total(self) -> int:
         with self._connect() as connection:

@@ -251,8 +251,25 @@ class ApprovalAuthority:
         self._now = now or (lambda: int(time.time()))
 
     def issue(
-        self, manifest: ApprovalManifest | CliApprovalManifest | ApprovedRoutePool
+        self,
+        manifest: ApprovalManifest | CliApprovalManifest | ApprovedRoutePool,
+        *,
+        lifecycle_identity_digest: str | None = None,
+        capability_snapshot_digest: str | None = None,
+        bound_at: int | None = None,
     ) -> SignedApproval:
+        lifecycle_values = (
+            lifecycle_identity_digest,
+            capability_snapshot_digest,
+            bound_at,
+        )
+        if any(value is not None for value in lifecycle_values) and (
+            not isinstance(manifest, CliApprovalManifest)
+            or lifecycle_identity_digest is None
+            or capability_snapshot_digest != manifest.capability_snapshot_digest
+            or bound_at is None
+        ):
+            raise ApprovalError("approval_lifecycle_binding_invalid")
         payload = _canonical_manifest(manifest)
         manifest_hash = hashlib.sha256(payload).hexdigest()
         nonce_hash = hashlib.sha256(manifest.nonce.encode("utf-8")).hexdigest()
@@ -269,6 +286,20 @@ class ApprovalAuthority:
             )
         except StorageError as exc:
             raise ApprovalError(exc.code) from exc
+        if any(value is not None for value in lifecycle_values):
+            assert isinstance(manifest, CliApprovalManifest)
+            assert lifecycle_identity_digest is not None
+            assert capability_snapshot_digest is not None
+            assert bound_at is not None
+            try:
+                self.store.save_lifecycle_approval_binding(
+                    approval_id=manifest.approval_id,
+                    capability_snapshot_digest=capability_snapshot_digest,
+                    lifecycle_identity_digest=lifecycle_identity_digest,
+                    bound_at=bound_at,
+                )
+            except (StorageError, ValueError):
+                raise ApprovalError("approval_lifecycle_binding_invalid") from None
         return SignedApproval(manifest, signature)
 
     def verify(
@@ -293,8 +324,19 @@ class ApprovalAuthority:
         *,
         repository_quota_tokens: int,
         machine_quota_tokens: int,
+        lifecycle_identity_digest: str | None = None,
+        capability_snapshot_digest: str | None = None,
     ) -> None:
         self.verify(signed, current_manifest)
+        if lifecycle_identity_digest is not None or capability_snapshot_digest is not None:
+            try:
+                binding = self.store.lifecycle_approval_binding_details(
+                    current_manifest.approval_id
+                )
+            except (StorageError, ValueError):
+                raise ApprovalError("approval_lifecycle_stale") from None
+            if not isinstance(current_manifest, CliApprovalManifest) or lifecycle_identity_digest is None or capability_snapshot_digest != current_manifest.capability_snapshot_digest or binding != (capability_snapshot_digest, lifecycle_identity_digest):
+                raise ApprovalError("approval_lifecycle_stale")
         now = self._now()
         if now >= current_manifest.expires_at:
             raise ApprovalError("approval_expired")

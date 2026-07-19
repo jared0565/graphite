@@ -28,7 +28,11 @@ from graphite.routing.contracts import (
     RiskTier,
 )
 from graphite.routing.profiles import save_capability_snapshot
+from graphite.routing.lifecycle import LifecycleProviderId, ProviderCompatibilityPolicy, ProviderRuntimeIdentity, RuntimeKind
+from graphite.routing.lifecycle_service import ProviderLifecycleService
+from graphite.routing.lifecycle_storage import LifecycleStore
 from graphite.routing.service import RoutingService, RoutingServiceError
+from graphite.routing.storage import RepositoryStore
 
 SOURCE_TEXT = "def listing_summary(items):\n    return ', '.join(items)\n"
 
@@ -97,6 +101,7 @@ def _service(
     monkeypatch: pytest.MonkeyPatch,
     *,
     validator=lambda _worktree: True,
+    lifecycle: bool = False,
 ) -> tuple[RoutingService, Path, dict[str, object]]:
     root = tmp_path / "repo"
     target = root / "src" / "listing_summary.py"
@@ -127,6 +132,60 @@ def _service(
     captured: dict[str, object] = {}
     snapshot = _snapshot(int(service_module.time.time()) - 10)
     captured["snapshot"] = snapshot
+    lifecycle_coordinator = None
+    lifecycle_boundaries = None
+    runtime_identity_loader = None
+    routing_store = RepositoryStore(root)
+    routing_store.initialize()
+    save_capability_snapshot(routing_store, snapshot)
+    if lifecycle:
+        runtime_identity = ProviderRuntimeIdentity(
+            LifecycleProviderId.CODEX,
+            RuntimeKind.LOCAL_CLI,
+            "0.144.1",
+            "a" * 64,
+            None,
+            None,
+            ("credential_health", "structured_output", "version"),
+            "1.0.0",
+            int(service_module.time.time()) - 9,
+        )
+        captured["runtime_identity"] = runtime_identity
+        boundary = "9" * 64
+        lifecycle_store = LifecycleStore(root)
+        lifecycle_store.initialize()
+        lifecycle_coordinator = ProviderLifecycleService(lifecycle_store, routing_store)
+        lifecycle_coordinator.observe(
+            boundary_digest=boundary,
+            identity=runtime_identity,
+            policy=ProviderCompatibilityPolicy(
+                LifecycleProviderId.CODEX,
+                RuntimeKind.LOCAL_CLI,
+                "1.0.0",
+                "0.100.0",
+                "1.0.0",
+                ("credential_health", "structured_output"),
+            ),
+        )
+        routing_store.save_lifecycle_snapshot_binding(
+            capability_snapshot_digest=snapshot.digest,
+            lifecycle_identity_digest=runtime_identity.digest,
+            bound_at=runtime_identity.observed_at,
+        )
+        lifecycle_coordinator.activate(
+            boundary_digest=boundary,
+            lifecycle_identity_digest=runtime_identity.digest,
+            capability_snapshot_digest=snapshot.digest,
+            activated_at=runtime_identity.observed_at + 1,
+        )
+        lifecycle_boundaries = {ProviderId.CODEX: boundary}
+
+        def load_runtime_identity(_provider: ProviderId) -> ProviderRuntimeIdentity:
+            value = captured["runtime_identity"]
+            assert isinstance(value, ProviderRuntimeIdentity)
+            return value
+
+        runtime_identity_loader = load_runtime_identity
     service_ref: dict[str, RoutingService] = {}
 
     def execute(**kwargs: object) -> FakeResult:
@@ -152,10 +211,12 @@ def _service(
         credential_homes={ProviderId.CODEX: credentials},
         executors={ProviderId.CODEX: execute},
         validator=validator,
+        lifecycle_service=lifecycle_coordinator,
+        lifecycle_boundaries=lifecycle_boundaries,
+        runtime_identity_loader=runtime_identity_loader,
     )
     service_ref["service"] = service
     service.store.initialize()
-    save_capability_snapshot(service.store, snapshot)
     return service, root, captured
 
 
@@ -218,6 +279,46 @@ def test_run_requires_authority_before_provider_process(
     with pytest.raises(RoutingServiceError, match="^approval_required$"):
         service.run_approved(prepared, approval_granted=False)
     assert "prompt" not in captured
+
+
+def test_lifecycle_enabled_run_rechecks_exact_runtime_before_consumption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _root, captured = _service(tmp_path, monkeypatch, lifecycle=True)
+    prepared = service.prepare(_recommend(service))
+    runtime_identity = captured["runtime_identity"]
+    captured["runtime_identity"] = ProviderRuntimeIdentity(
+        runtime_identity.provider,
+        runtime_identity.runtime_kind,
+        runtime_identity.version,
+        "f" * 64,
+        runtime_identity.model_identity_digest,
+        runtime_identity.routing_policy_digest,
+        runtime_identity.capabilities,
+        runtime_identity.policy_version,
+        runtime_identity.observed_at + 2,
+    )
+
+    with pytest.raises(RoutingServiceError, match="^lifecycle_identity_changed$"):
+        service.run_approved(prepared, approval_granted=True)
+    assert "prompt" not in captured
+
+
+def test_lifecycle_enabled_run_binds_approval_and_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _root, captured = _service(tmp_path, monkeypatch, lifecycle=True)
+    prepared = service.prepare(_recommend(service))
+    result = service.run_approved(prepared, approval_granted=True)
+    runtime_identity = captured["runtime_identity"]
+    assert isinstance(runtime_identity, ProviderRuntimeIdentity)
+    assert service.store.lifecycle_approval_binding_details(
+        prepared.manifest.approval_id
+    ) == (prepared.manifest.capability_snapshot_digest, runtime_identity.digest)
+    assert service.store.lifecycle_identity_binding(
+        authority_kind="attempt", authority_id=prepared.attempt_id
+    ) == runtime_identity.digest
+    assert result.receipt.validation_outcome == "passed"
 
 
 def test_accept_creates_commit_without_moving_source_head(

@@ -189,22 +189,22 @@ providers can become eligible.
 - Modify `tests/test_routing_approval.py`
 - Modify `tests/test_routing_service.py`
 
-- [ ] Write failing tests for first discovery, unchanged identity, every drift class, isolated provider failure, snapshot invalidation, pending-approval invalidation, and explicit verification activation.
-- [ ] Coordinate adapter observations, compatibility policy, lifecycle storage, and sanitized event persistence in one transaction boundary where authority changes.
-- [ ] A successful compatible drift probe must end at `verification_required`; activation requires a matching accepted capability snapshot created by the existing separately approved verification flow.
-- [ ] Bind newly issued capability snapshots and approvals to the exact lifecycle identity digest. Reject stale snapshots before recommendation and reject stale approvals before consumption.
-- [ ] Perform a final live identity observation immediately before approval consumption. If the daemon is stopped or stale, the lazy check is authoritative and bounded.
-- [ ] Prevent time-of-check/time-of-use drift by comparing provider, runtime kind, executable/endpoint digest, version, model digest, routing policy, required capabilities, and lifecycle policy version.
-- [ ] Ensure invalidation is provider- and identity-scoped. Claude drift cannot disable Codex, Ollama, OpenRouter, or canonical graph operation.
-- [ ] Prepare complete but unexecuted verification manifests for `verification_required` identities. Manifest preparation must not contact a model.
-- [ ] Define immutable ordered route candidates binding provider, runtime kind, lifecycle identity digest, capability snapshot digest, exact model identity, routing policy, effort, trust policy, permissions, and risk ceiling.
-- [ ] Bind each approved route pool to required capabilities, allowed fallback reasons, one aggregate token/cost/time budget, expiry, and a hard initial cap of two total attempts.
-- [ ] Select the preferred eligible candidate first. Advance exactly once only after sanitized `capacity_unavailable`, zero accepted output, and proven absence of tool, edit, or external side effects.
-- [ ] Require explicit cross-provider authority and reject stale, inactive, under-capability, trust-incompatible, risk-ineligible, over-budget, dynamically inserted, reordered, replayed, or concurrently consumed candidates.
-- [ ] Bind OpenRouter candidates to requested model plus approved upstream-routing policy and Ollama candidates to immutable model digest. Never accept provider-selected substitution outside the pool.
-- [ ] Persist sanitized attempt and selection evidence without raw output, diagnostics, prompts, source, credentials, endpoints, or paths.
-- [ ] Run lifecycle service, profiles, approval, policy, routing service, shadow, and security tests.
-- [ ] Commit: `feat: enforce provider lifecycle at execution time`.
+- [x] Write failing tests for first discovery, unchanged identity, every drift class, isolated provider failure, snapshot invalidation, pending-approval invalidation, and explicit verification activation.
+- [x] Coordinate adapter observations, compatibility policy, lifecycle storage, and sanitized event persistence in one transaction boundary where authority changes.
+- [x] A successful compatible drift probe must end at `verification_required`; activation requires a matching accepted capability snapshot created by the existing separately approved verification flow.
+- [x] Bind newly issued capability snapshots and approvals to the exact lifecycle identity digest. Reject stale snapshots before recommendation and reject stale approvals before consumption.
+- [x] Perform a final live identity observation immediately before approval consumption. If the daemon is stopped or stale, the lazy check is authoritative and bounded.
+- [x] Prevent time-of-check/time-of-use drift by comparing provider, runtime kind, executable/endpoint digest, version, model digest, routing policy, required capabilities, and lifecycle policy version.
+- [x] Ensure invalidation is provider- and identity-scoped. Claude drift cannot disable Codex, Ollama, OpenRouter, or canonical graph operation.
+- [x] Prepare complete but unexecuted verification manifests for `verification_required` identities. Manifest preparation must not contact a model.
+- [x] Define immutable ordered route candidates binding provider, runtime kind, lifecycle identity digest, capability snapshot digest, exact model identity, routing policy, effort, trust policy, permissions, and risk ceiling.
+- [x] Bind each approved route pool to required capabilities, allowed fallback reasons, one aggregate token/cost/time budget, expiry, and a hard initial cap of two total attempts.
+- [x] Select the preferred eligible candidate first. Advance exactly once only after sanitized `capacity_unavailable`, zero accepted output, and proven absence of tool, edit, or external side effects.
+- [x] Require explicit cross-provider authority and reject stale, inactive, under-capability, trust-incompatible, risk-ineligible, over-budget, dynamically inserted, reordered, replayed, or concurrently consumed candidates.
+- [x] Bind OpenRouter candidates to requested model plus approved upstream-routing policy and Ollama candidates to immutable model digest. Never accept provider-selected substitution outside the pool.
+- [x] Persist sanitized attempt and selection evidence without raw output, diagnostics, prompts, source, credentials, endpoints, or paths.
+- [x] Run lifecycle service, profiles, approval, policy, routing service, shadow, and security tests.
+- [x] Commit: `feat: enforce provider lifecycle at execution time`.
 
 ## Task 6: Add daemon observation without graph authority
 

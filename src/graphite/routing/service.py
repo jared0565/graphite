@@ -43,6 +43,8 @@ from .policy import (
 )
 from .process_runner import CliProcessError, run_cli_process
 from .profiles import load_verified_capability_snapshots
+from .lifecycle import ProviderRuntimeIdentity
+from .lifecycle_service import LifecycleServiceError, ProviderLifecycleService
 from .prompt import CanonicalPrompt, canonical_cli_prompt
 from .settings import RoutingSettings
 from .storage import (
@@ -76,6 +78,7 @@ class AdapterResult(Protocol):
 
 
 IdentityLoader = Callable[[ProviderId], CliIdentity]
+RuntimeIdentityLoader = Callable[[ProviderId], ProviderRuntimeIdentity]
 Executor = Callable[..., AdapterResult]
 Validator = Callable[[TaskWorktree], bool]
 
@@ -134,6 +137,7 @@ class PreparedExecution:
     manifest: CliApprovalManifest
     prompt: CanonicalPrompt = field(repr=False, compare=False)
     graph_fingerprint: str
+    lifecycle_identity_digest: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -174,6 +178,7 @@ class _RecommendationState:
     graph_fingerprint: str
     snapshot: CapabilitySnapshot
     recommendation: RoutingRecommendation
+    lifecycle_identity_digest: str | None = None
 
 
 def _machine_state_dir() -> Path:
@@ -228,6 +233,9 @@ class RoutingService:
         executors: Mapping[ProviderId, Executor] | None = None,
         validator: Validator | None = None,
         validation_commands: tuple[tuple[str, ...], ...] = (),
+        lifecycle_service: ProviderLifecycleService | None = None,
+        lifecycle_boundaries: Mapping[ProviderId, str] | None = None,
+        runtime_identity_loader: RuntimeIdentityLoader | None = None,
     ) -> None:
         try:
             self.root = Path(path).resolve(strict=True)
@@ -256,6 +264,13 @@ class RoutingService:
             raise RoutingServiceError("validation_command_invalid")
         self._validation_commands = validation_commands
         self._validator = validator or self._validate
+        self._lifecycle_service = lifecycle_service
+        self._lifecycle_boundaries = dict(lifecycle_boundaries or {})
+        self._runtime_identity_loader = runtime_identity_loader
+        if (lifecycle_service is None) is not (runtime_identity_loader is None) or (
+            lifecycle_service is not None and not self._lifecycle_boundaries
+        ):
+            raise RoutingServiceError("lifecycle_configuration_invalid")
         self._recommendations: dict[str, _RecommendationState] = {}
         self._prepared: dict[str, PreparedExecution] = {}
         self._snapshots: dict[str, CapabilitySnapshot] = {}
@@ -306,7 +321,22 @@ class RoutingService:
             task = classify_task(request, graph)
             context = build_routing_context(request, graph, self.settings)
             now = int(time.time())
-            snapshots = load_verified_capability_snapshots(self.store, now=now)
+            active_lifecycle_digests: frozenset[str] | None = None
+            if self._lifecycle_service is not None:
+                active: set[str] = set()
+                for boundary in self._lifecycle_boundaries.values():
+                    try:
+                        active.add(
+                            self._lifecycle_service.active_identity_digest(boundary)
+                        )
+                    except LifecycleServiceError:
+                        continue
+                active_lifecycle_digests = frozenset(active)
+            snapshots = load_verified_capability_snapshots(
+                self.store,
+                now=now,
+                active_lifecycle_identity_digests=active_lifecycle_digests,
+            )
         except (GraphReadError, StorageError, OSError, ValueError) as exc:
             return self._handoff(
                 "unclassified", "unknown", getattr(exc, "code", "routing_evidence_blocked")
@@ -373,6 +403,11 @@ class RoutingService:
             policy_version=ranked.policy_version,
         )
         if snapshot is not None:
+            lifecycle_digest = None
+            if self._lifecycle_service is not None:
+                lifecycle_digest = self.store.lifecycle_identity_binding(
+                    authority_kind="capability_snapshot", authority_id=snapshot.digest
+                )
             state = _RecommendationState(
                 request,
                 task,
@@ -380,6 +415,7 @@ class RoutingService:
                 self._graph_fingerprint(bundle),
                 snapshot,
                 recommendation,
+                lifecycle_digest,
             )
             self._recommendations[task.task_id] = state
             self._snapshots[snapshot.digest] = snapshot
@@ -499,6 +535,7 @@ class RoutingService:
             manifest,
             prompt,
             state.graph_fingerprint,
+            state.lifecycle_identity_digest,
         )
         self._prepared[attempt_id] = prepared
         return prepared
@@ -573,6 +610,21 @@ class RoutingService:
             raise RoutingServiceError("cli_preflight_failed") from None
         if current_identity != snapshot.identity:
             raise RoutingServiceError("cli_identity_changed")
+        live_runtime_identity: ProviderRuntimeIdentity | None = None
+        if self._lifecycle_service is not None:
+            boundary = self._lifecycle_boundaries.get(manifest.provider)
+            if boundary is None or prepared.lifecycle_identity_digest is None or self._runtime_identity_loader is None:
+                raise RoutingServiceError("lifecycle_authority_missing")
+            try:
+                live_runtime_identity = self._runtime_identity_loader(manifest.provider)
+                self._lifecycle_service.require_snapshot_authority(
+                    boundary_digest=boundary,
+                    lifecycle_identity_digest=prepared.lifecycle_identity_digest,
+                    capability_snapshot_digest=manifest.capability_snapshot_digest,
+                    live_identity=live_runtime_identity,
+                )
+            except (LifecycleServiceError, ValueError):
+                raise RoutingServiceError("lifecycle_identity_changed") from None
         self._prepared.pop(prepared.attempt_id, None)
         now = int(time.time())
         authority = ApprovalAuthority(
@@ -580,7 +632,15 @@ class RoutingService:
             key_path=self.state_dir / "approval.key",
             quota_path=self.state_dir / "quota.sqlite3",
         )
-        signed = authority.issue(manifest)
+        if prepared.lifecycle_identity_digest is None:
+            signed = authority.issue(manifest)
+        else:
+            signed = authority.issue(
+                manifest,
+                lifecycle_identity_digest=prepared.lifecycle_identity_digest,
+                capability_snapshot_digest=manifest.capability_snapshot_digest,
+                bound_at=now,
+            )
         manifest_hash = self._manifest_hash(manifest)
         self.store.create_cli_execution_attempt_record(
             attempt_id=prepared.attempt_id,
@@ -600,12 +660,37 @@ class RoutingService:
             reserved_tokens=manifest.max_input_tokens + manifest.max_output_tokens,
             created_at=now,
         )
+        if prepared.lifecycle_identity_digest is not None:
+            try:
+                self.store.save_lifecycle_attempt_binding(
+                    attempt_id=prepared.attempt_id,
+                    lifecycle_identity_digest=prepared.lifecycle_identity_digest,
+                    bound_at=now,
+                )
+            except (StorageError, ValueError):
+                self._fail(prepared, "lifecycle_binding_failed", quarantine=True)
+                raise RoutingServiceError("lifecycle_binding_failed") from None
         try:
+            if self._lifecycle_service is not None:
+                assert live_runtime_identity is not None
+                self._lifecycle_service.require_execution_authority(
+                    boundary_digest=self._lifecycle_boundaries[manifest.provider],
+                    lifecycle_identity_digest=prepared.lifecycle_identity_digest,
+                    capability_snapshot_digest=manifest.capability_snapshot_digest,
+                    approval_id=manifest.approval_id,
+                    live_identity=live_runtime_identity,
+                )
             authority.consume(
                 signed,
                 manifest,
                 repository_quota_tokens=self.settings.repository_quota_tokens,
                 machine_quota_tokens=self.settings.machine_quota_tokens,
+                lifecycle_identity_digest=prepared.lifecycle_identity_digest,
+                capability_snapshot_digest=(
+                    manifest.capability_snapshot_digest
+                    if prepared.lifecycle_identity_digest is not None
+                    else None
+                ),
             )
             executor = self._executors[manifest.provider]
             result = executor(

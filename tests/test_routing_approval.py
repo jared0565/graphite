@@ -15,11 +15,14 @@ from graphite.routing.approval import (
 )
 from graphite.routing.contracts import (
     ApprovalManifest,
+    CliIdentity,
     CliApprovalManifest,
     Effort,
     PermissionMode,
     ProviderId,
+    RiskTier,
 )
+from graphite.routing.profiles import BUNDLED_REQUESTED_PROFILES, create_capability_snapshot, save_capability_snapshot
 from graphite.routing.storage import RepositoryStore
 
 
@@ -181,6 +184,33 @@ def test_cli_approval_is_bound_to_provider_cli_model_worktree_and_permissions(
     ):
         with pytest.raises(ApprovalError, match="approval_manifest_changed"):
             authority.verify(signed, changed)
+
+
+def test_cli_approval_issue_and_consume_require_exact_lifecycle_binding(tmp_path: Path) -> None:
+    authority, store = _authority(tmp_path)
+    snapshot = create_capability_snapshot(
+        requested=BUNDLED_REQUESTED_PROFILES["claude-code/sonnet"],
+        identity=CliIdentity(ProviderId.CLAUDE_CODE, "a" * 64, "2.1.208", "1.0.0"),
+        effective_model="claude-sonnet-5",
+        effort=Effort.HIGH,
+        capabilities=("code",),
+        context_window_tokens=200_000,
+        risk_ceiling=RiskTier.MEDIUM,
+        permission_mode=PermissionMode.READ_ONLY,
+        verified_at=100,
+        ttl_seconds=3_600,
+    )
+    save_capability_snapshot(store, snapshot)
+    lifecycle_digest = "f" * 64
+    store.save_lifecycle_snapshot_binding(capability_snapshot_digest=snapshot.digest, lifecycle_identity_digest=lifecycle_digest, bound_at=100)
+    manifest = _cli_manifest(capability_snapshot_digest=snapshot.digest)
+    signed = authority.issue(manifest, lifecycle_identity_digest=lifecycle_digest, capability_snapshot_digest=snapshot.digest, bound_at=101)
+
+    with pytest.raises(ApprovalError, match="^approval_lifecycle_stale$"):
+        authority.consume(signed, manifest, repository_quota_tokens=20_000, machine_quota_tokens=30_000, lifecycle_identity_digest="e" * 64, capability_snapshot_digest=snapshot.digest)
+    assert store.approval_status(manifest.approval_id) == "issued"
+    authority.consume(signed, manifest, repository_quota_tokens=20_000, machine_quota_tokens=30_000, lifecycle_identity_digest=lifecycle_digest, capability_snapshot_digest=snapshot.digest)
+    assert store.approval_status(manifest.approval_id) == "consumed"
 
 
 @pytest.mark.parametrize("digest", (None, "", "A" * 64, "a" * 63, "g" * 64))

@@ -261,3 +261,34 @@ The canonical acceptance rebuild used the feature-branch source and explicit
 137 communities, zero build warnings, and fingerprint
 `8d223b44a4679b1d502f2b055c1fcd8714c89c6fa7d450ef8d94ad229eee0482`;
 the freshness check passed with `llm_status=disabled`.
+
+## Lifecycle execution authority
+
+Task 5 added the provider-neutral lifecycle coordinator. Compatible discovery and
+drift stop at `verification_required`; only a separately accepted, exact,
+lifecycle-bound capability snapshot can activate an identity. Identity or health
+changes atomically change the lifecycle authority first, making old snapshots and
+approvals ineligible, then append provider-scoped invalidation evidence and mark
+matching pending approvals invalidated. A failure in the secondary evidence step
+therefore remains fail-closed rather than restoring authority.
+
+Lifecycle-enabled CLI routing filters recommendations to active bound snapshots,
+performs an injected bounded live runtime observation before approval consumption,
+and binds the approval and attempt to the same lifecycle digest. Route-pool
+authority loaders can derive the same exact active binding for Claude Code, Codex,
+Ollama, and OpenRouter. Verification-manifest preparation is local and contains
+only hashes, bounds, exact identity/model policy, one-attempt/no-fallback rules,
+and allowlisted evidence fields; it does not invoke a provider.
+
+Focused lifecycle, profile, approval, policy, service, shadow, route-pool, and
+security acceptance passed 202 tests. The broader offline routing/provider
+selection passed 504 tests with 1 intentional skip and 1,145 deselected. Ruff and
+diff checks passed. All observations and executions used deterministic fakes; no
+provider process, external request, inference, retry, fallback, merge, or push
+occurred.
+
+The Task 5 canonical rebuild used explicit `--llm none` and completed with 7,017
+nodes, 15,523 edges, 176 scanned files, 136 communities, zero build warnings,
+and fingerprint
+`c714a6569b185a9938e9b19b5dd25bb1237b07c430275a112714092ccaf04192`.
+The freshness check passed with `llm_status=disabled` and zero LLM tokens.

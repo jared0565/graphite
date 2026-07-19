@@ -394,10 +394,10 @@ class LifecycleStore:
                     raise LifecycleStorageError("lifecycle_identity_mismatch")
                 if event.policy_version != identity.policy_version:
                     raise LifecycleStorageError("lifecycle_policy_mismatch")
-                if event.occurred_at != identity.observed_at:
+                if event.occurred_at < identity.observed_at:
                     raise LifecycleStorageError("lifecycle_observation_time_mismatch")
             current = connection.execute(
-                """SELECT provider,runtime_kind,identity_digest,state
+                """SELECT provider,runtime_kind,identity_digest,state,updated_at
                 FROM current_observations WHERE boundary_digest=?""",
                 (boundary,),
             ).fetchone()
@@ -410,6 +410,8 @@ class LifecycleStore:
                 or current["identity_digest"] != event.previous_identity_digest
                 or current["state"] != event.previous_state.value
             ):
+                raise LifecycleStorageError("lifecycle_transition_stale")
+            elif event.occurred_at < int(current["updated_at"]):
                 raise LifecycleStorageError("lifecycle_transition_stale")
             connection.execute(
                 """INSERT INTO lifecycle_events(

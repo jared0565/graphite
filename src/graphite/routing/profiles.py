@@ -250,6 +250,7 @@ def verify_and_save_approved_profile(
     max_input_tokens: int,
     max_output_tokens: int,
     verifier: Callable[[RequestedProfile, Effort], VerificationEvidence],
+    lifecycle_identity_digest: str | None = None,
 ) -> CapabilitySnapshot:
     """Persist authority only after identity, evidence, and usage validation pass."""
     snapshot = verify_approved_profile(
@@ -264,6 +265,15 @@ def verify_and_save_approved_profile(
         verifier=verifier,
     )
     save_capability_snapshot(store, snapshot)
+    if lifecycle_identity_digest is not None:
+        try:
+            store.save_lifecycle_snapshot_binding(
+                capability_snapshot_digest=snapshot.digest,
+                lifecycle_identity_digest=lifecycle_identity_digest,
+                bound_at=verified_at,
+            )
+        except (StorageError, ValueError):
+            raise ProfileError("profile_lifecycle_binding_failed") from None
     return snapshot
 
 
@@ -304,6 +314,7 @@ def load_verified_capability_snapshots(
     store: RepositoryStore,
     *,
     now: int,
+    active_lifecycle_identity_digests: frozenset[str] | None = None,
 ) -> tuple[CapabilitySnapshot, ...]:
     if isinstance(now, bool) or not isinstance(now, int) or now < 0:
         raise ProfileError("profile_time_invalid")
@@ -315,6 +326,15 @@ def load_verified_capability_snapshots(
             raise
         if snapshot.digest != row["digest"]:
             raise StorageError("storage_corrupt")
-        if snapshot.expires_at > now:
+        lifecycle_eligible = True
+        if active_lifecycle_identity_digests is not None:
+            try:
+                binding = store.lifecycle_identity_binding(
+                    authority_kind="capability_snapshot", authority_id=snapshot.digest
+                )
+            except (StorageError, ValueError):
+                raise ProfileError("profile_lifecycle_binding_failed") from None
+            lifecycle_eligible = binding in active_lifecycle_identity_digests
+        if snapshot.expires_at > now and lifecycle_eligible:
             snapshots.append(snapshot)
     return tuple(sorted(snapshots, key=lambda item: item.digest))

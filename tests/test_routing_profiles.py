@@ -207,6 +207,43 @@ def test_verify_and_save_persists_only_validated_authority(tmp_path: Path) -> No
     assert load_verified_capability_snapshots(store, now=1_700_000_001) == (snapshot,)
 
 
+def test_lifecycle_bound_snapshot_is_eligible_only_for_exact_active_identity(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    lifecycle_digest = "d" * 64
+
+    snapshot = verify_and_save_approved_profile(
+        store,
+        requested=BUNDLED_REQUESTED_PROFILES["claude-code/sonnet"],
+        identity=_identity(),
+        effort=Effort.HIGH,
+        verified_at=1_700_000_000,
+        ttl_seconds=3_600,
+        approval_granted=True,
+        max_input_tokens=32_768,
+        max_output_tokens=4_096,
+        verifier=lambda *_: VerificationEvidence(
+            "claude-sonnet-5", ("code", "reasoning"), 200_000,
+            RiskTier.MEDIUM, 1_024, 256,
+        ),
+        lifecycle_identity_digest=lifecycle_digest,
+    )
+
+    assert store.lifecycle_identity_binding(
+        authority_kind="capability_snapshot", authority_id=snapshot.digest
+    ) == lifecycle_digest
+    assert load_verified_capability_snapshots(
+        store, now=1_700_000_001,
+        active_lifecycle_identity_digests=frozenset({lifecycle_digest}),
+    ) == (snapshot,)
+    assert load_verified_capability_snapshots(
+        store, now=1_700_000_001,
+        active_lifecycle_identity_digests=frozenset({"e" * 64}),
+    ) == ()
+
+
 def test_snapshot_persistence_is_canonical_bounded_and_expiry_aware(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
