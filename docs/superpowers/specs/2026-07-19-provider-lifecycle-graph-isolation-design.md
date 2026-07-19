@@ -20,7 +20,8 @@ or unavailable. Model inference remains an explicit, separately approved action.
 
 - Automatically trusting an updated executable, endpoint, or model digest
 - Automatically invoking inference after provider drift
-- Automatic retries, fallbacks, provider switching, or model substitution
+- Unbounded retries or any fallback, provider switch, or model substitution not
+  explicitly bound by an approved route pool
 - Treating compatibility probes as capability verification
 - Making the graph daemon a credential broker or inference orchestrator
 - Allowing enrichment output to change canonical graph authority
@@ -42,6 +43,11 @@ The core contracts are:
   `verification_required`, `active`, `incompatible`, or `unavailable`.
 - `ProviderLifecycleEvent`: append-only sanitized evidence for one state transition,
   including old and new identity digests and a stable reason code.
+- `ApprovedRouteCandidate`: one exact provider/runtime/model/profile authority,
+  bound to lifecycle identity, capability snapshot, routing policy, effort,
+  required capabilities, trust policy, and risk ceiling.
+- `ApprovedRoutePool`: an ordered, immutable set of route candidates plus an
+  allowlisted fallback reason set, aggregate budget, deadline, and attempt cap.
 
 The registry determines compatibility state. Capability snapshots remain a
 separate authority proving that one exact provider/model/profile passed a bounded,
@@ -119,6 +125,37 @@ drift.
 8. Every routed execution rechecks the live identity against the lifecycle record,
    snapshot, and approval before authority is consumed.
 
+### 6.1 Governed automatic route selection
+
+Capacity handling is provider-neutral. An execution approval may bind an ordered
+`ApprovedRoutePool` containing Claude Code, Codex, Ollama, OpenRouter, or future
+adapters. Availability is discovered at runtime, but candidates are never added to
+an approved pool dynamically.
+
+The first candidate is the preferred route. The execution service may advance to
+the next candidate only when all of the following are true:
+
+- The failed attempt produced the allowlisted `capacity_unavailable` category.
+- No model output was accepted and no tool, edit, or other externally visible side
+  effect occurred.
+- The next candidate is `active`, its live lifecycle identity matches, and its
+  capability snapshot and routing-policy bindings remain valid.
+- Its capabilities, context, structured-output contract, permission ceiling,
+  data-handling/trust policy, and task risk eligibility satisfy the manifest.
+- The aggregate token, cost, duration, and attempt limits still permit selection.
+- Cross-provider selection is explicitly enabled by the approval. High-risk or
+  edit execution remains fail-closed unless its manifest explicitly permits the
+  exact alternate route and the pre-side-effect condition can be proven.
+
+The initial rollout permits at most two total attempts: the preferred route and
+one fallback. A capacity failure after partial output or any uncertain side effect
+stops safely. Timeout, authentication, policy, malformed output, safety, budget,
+and unknown failures never authorize fallback.
+
+OpenRouter candidates bind both the requested model and the approved upstream
+routing policy. Ollama candidates bind an immutable model digest rather than a
+mutable tag. No provider may silently choose an unbound substitute.
+
 The daemon improves detection latency but is not an authority dependency. Lazy
 execution-time checks enforce the same identity rules if the daemon is stopped,
 stale, or unavailable.
@@ -146,6 +183,11 @@ The daemon must not:
 
 Probe timeouts and temporary failures use bounded scheduling backoff. They do not
 affect graph scheduling or trigger another provider.
+
+The daemon restriction does not prevent the separately invoked governed execution
+service from consuming an already approved route pool. The daemon may report
+sanitized availability but cannot create, expand, reorder, approve, or execute a
+pool.
 
 ## 8. Canonical graph isolation
 
@@ -222,6 +264,11 @@ tested rollback fixture, and stopped writers during destructive schema transitio
 - Endpoint probes are allowlisted, HTTPS-only where applicable, redirect-restricted,
   response-size bounded, and deadline bounded.
 - Every execution performs a final identity comparison before consuming approval.
+- Capacity fallback records only the failed candidate identity digest, sanitized
+  failure category, selected candidate identity digest, attempt ordinal, and
+  aggregate budget usage. Raw provider diagnostics remain forbidden.
+- A route pool is consumed as one authority unit. Concurrent consumers, replay,
+  dynamic candidate insertion, and attempts beyond the manifest cap fail closed.
 
 No claim of perfect security is made. The design prioritizes prevention,
 containment, detection, explicit recovery, and auditable human authority.
@@ -240,6 +287,11 @@ Deterministic tests cover:
   unavailable providers.
 - Sanitized persistence, migration, integrity enforcement, and rollback.
 - Proof that lifecycle probes cannot reach inference endpoints.
+- Ordered route-pool selection across all provider kinds, including stale,
+  incompatible, unavailable, under-capability, trust-policy, risk, and budget
+  rejection cases.
+- Capacity-only fallback with one deterministic fake attempt, plus proof that
+  partial output, side effects, non-capacity failures, or exhausted limits stop.
 - Proof that graph, context, impact, freshness, and validation outputs are
   byte-for-byte or semantically identical with providers healthy, incompatible,
   unavailable, or absent.
@@ -253,11 +305,13 @@ networks.
 1. Add lifecycle contracts, compatibility policies, persistence, and migration.
 2. Add Claude, Codex, Ollama, and OpenRouter non-inference probe adapters.
 3. Add daemon monitoring and lazy execution-time enforcement.
-4. Split enrichment into an explicit non-authoritative overlay pipeline.
-5. Migrate existing snapshot evidence without granting authority.
-6. Run focused tests, full offline tests, schema rollback, graph determinism
+4. Add governed provider-neutral route pools and capacity-only automatic selection.
+5. Split enrichment into an explicit non-authoritative overlay pipeline.
+6. Migrate existing snapshot evidence without granting authority.
+7. Run focused tests, full offline tests, schema rollback, graph determinism
    comparison, Ruff, security checks, and a zero-LLM graph rebuild.
-7. Prepare new live verification manifests and stop for separate approvals.
+8. Prepare new live verification and route-pool manifests and stop for separate
+   approvals.
 
 ## 13. Acceptance criteria
 
@@ -275,3 +329,7 @@ networks.
   provider diagnostics.
 - Migration and rollback tests pass without granting legacy records new authority.
 - No live provider request occurs without a complete manifest and explicit approval.
+- Approved route pools can select across providers only for sanitized capacity
+  failures, within one aggregate budget and before any accepted output or side
+  effect.
+- No runtime availability change can add, reorder, or authorize a route candidate.

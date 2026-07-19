@@ -1,6 +1,6 @@
 # Provider Lifecycle and Canonical Graph Isolation Implementation Plan
 
-> **Implementation rule:** Execute tasks in order with red-green-refactor discipline. All ordinary tests use fake executables or local fake HTTP servers. Do not invoke Claude, Codex, Ollama inference, OpenRouter inference, another model, retry, fallback, or network inference during Tasks 1-10.
+> **Implementation rule:** Execute tasks in order with red-green-refactor discipline. All ordinary tests use fake executables or local fake HTTP servers. Do not invoke live Claude, Codex, Ollama inference, OpenRouter inference, another model, fallback, or network inference during Tasks 1-10. Deterministic fake attempts are required to test the approved route-pool state machine.
 
 **Goal:** Make AI runtime updates an isolated lifecycle event rather than a Graphite outage, while preserving exact identity authority for governed execution and making canonical graph operations deterministic and provider-independent.
 
@@ -22,6 +22,9 @@
 - Canonical graph operations must behave identically when providers are healthy, changed, missing, incompatible, unauthenticated, or unavailable.
 - Every Graphite rebuild used for acceptance must explicitly use `--llm none` until canonical isolation is implemented and tested; afterward canonical commands must reject or ignore any attempt to enable enrichment.
 - Live verification remains a separate authority-gated phase after this plan. Display a complete manifest and obtain explicit approval for each exact call.
+- Runtime alternatives must be an immutable ordered `ApprovedRoutePool`; discovery may mark a candidate unavailable but may never add, reorder, or authorize one.
+- Automatic selection is initially limited to one fallback after an allowlisted `capacity_unavailable` result, before accepted output or any tool, edit, or external side effect, and within one aggregate budget.
+- Cross-provider selection requires explicit manifest authority. Every candidate must have a current active lifecycle identity, verified capability snapshot, exact model/routing binding, compatible trust policy, and sufficient task capabilities.
 
 ## File responsibility map
 
@@ -100,6 +103,7 @@ the Task 5 eligibility gate.
 
 - [ ] Write failing process-probe tests for fixed argv, no shell, minimal environment, canonical executable containment, timeout, cancellation, output caps, malformed UTF-8, nonzero exit, and process-tree cleanup.
 - [ ] Reuse the existing sanitized `CliProcessFailureDiagnostics` contract. Persist only exit classification/code, duration, stdout/stderr SHA-256, and an allowlisted failure category.
+- [ ] Recognize `capacity_unavailable` through provider-specific, bounded classifiers without persisting or returning the matched raw diagnostic. Unknown or ambiguous diagnostics remain non-fallback failures.
 - [ ] Add a bounded HTTP probe client with explicit schemes, host allowlists, port policy, DNS/address validation, response-size caps, content-type validation, deadlines, and no automatic redirects.
 - [ ] Reject loopback/private/link-local destinations for OpenRouter and reject non-loopback destinations for Ollama. Revalidate the connected address to reduce DNS-rebinding risk.
 - [ ] Ensure credential injection occurs only inside the request boundary. Normalized observations and exceptions must never expose header values or raw response bodies.
@@ -143,7 +147,9 @@ the Task 5 eligibility gate.
 - Modify `src/graphite/routing/policy.py`
 - Modify `src/graphite/routing/service.py`
 - Modify `src/graphite/routing/shadow.py`
+- Add `src/graphite/routing/route_pool.py`
 - Add `tests/test_provider_lifecycle_service.py`
+- Add `tests/test_route_pool.py`
 - Modify `tests/test_routing_profiles.py`
 - Modify `tests/test_routing_approval.py`
 - Modify `tests/test_routing_service.py`
@@ -156,6 +162,12 @@ the Task 5 eligibility gate.
 - [ ] Prevent time-of-check/time-of-use drift by comparing provider, runtime kind, executable/endpoint digest, version, model digest, routing policy, required capabilities, and lifecycle policy version.
 - [ ] Ensure invalidation is provider- and identity-scoped. Claude drift cannot disable Codex, Ollama, OpenRouter, or canonical graph operation.
 - [ ] Prepare complete but unexecuted verification manifests for `verification_required` identities. Manifest preparation must not contact a model.
+- [ ] Define immutable ordered route candidates binding provider, runtime kind, lifecycle identity digest, capability snapshot digest, exact model identity, routing policy, effort, trust policy, permissions, and risk ceiling.
+- [ ] Bind each approved route pool to required capabilities, allowed fallback reasons, one aggregate token/cost/time budget, expiry, and a hard initial cap of two total attempts.
+- [ ] Select the preferred eligible candidate first. Advance exactly once only after sanitized `capacity_unavailable`, zero accepted output, and proven absence of tool, edit, or external side effects.
+- [ ] Require explicit cross-provider authority and reject stale, inactive, under-capability, trust-incompatible, risk-ineligible, over-budget, dynamically inserted, reordered, replayed, or concurrently consumed candidates.
+- [ ] Bind OpenRouter candidates to requested model plus approved upstream-routing policy and Ollama candidates to immutable model digest. Never accept provider-selected substitution outside the pool.
+- [ ] Persist sanitized attempt and selection evidence without raw output, diagnostics, prompts, source, credentials, endpoints, or paths.
 - [ ] Run lifecycle service, profiles, approval, policy, routing service, shadow, and security tests.
 - [ ] Commit: `feat: enforce provider lifecycle at execution time`.
 
@@ -240,7 +252,7 @@ the Task 5 eligibility gate.
 - [ ] Add read-only lifecycle status/list/history commands with bounded JSON and human-readable output. Do not expose raw executable paths, endpoint query strings, credentials, or diagnostics.
 - [ ] Add explicit compatibility-policy inspection and promotion preparation. Promotion itself requires a separate human-authorized command and cannot activate a provider.
 - [ ] Add a command that prepares a verification manifest for one exact `verification_required` identity and stops before inference.
-- [ ] Document patch/minor/major behavior, all lifecycle states, daemon responsibilities, lazy enforcement, isolated failures, graph guarantees, overlay semantics, and the absence of automatic activation/fallback.
+- [ ] Document patch/minor/major behavior, all lifecycle states, daemon responsibilities, lazy enforcement, isolated failures, graph guarantees, overlay semantics, absence of automatic activation, and bounded capacity-only route-pool fallback.
 - [ ] Document schema-v4 to v5 backup, migration, integrity verification, stopped-writer requirement, restore, and forward-fix paths.
 - [ ] Exercise lifecycle and routing rollback fixtures without altering the operator's active routing database.
 - [ ] Record exact tests, schema drill results, graph determinism results, intentional skips, and remaining live-readiness gates in the implementation evidence note.
@@ -259,7 +271,7 @@ the Task 5 eligibility gate.
 - [ ] Run a clean canonical rebuild with no inference configuration and verify `check`, validation, context, impact, and query statistics.
 - [ ] Compare canonical artifacts across fake provider states and record the stable fingerprint or exact semantically excluded fields.
 - [ ] Verify lifecycle and routing databases with SQLite integrity and foreign-key checks; repeat the schema-v4 restore drill.
-- [ ] Confirm no provider request, subscription call, external network inference, retry, fallback, model substitution, merge, or push occurred.
+- [ ] Confirm no live provider request, subscription call, external network inference, model substitution, merge, or push occurred; route-pool behavior used deterministic fakes only.
 - [ ] Commit final offline corrections and evidence in reviewable bounded commits.
 - [ ] Prepare, but do not execute, a new exact Claude verification manifest and equivalent manifests for any other provider requiring activation.
 
@@ -276,10 +288,13 @@ Stop after Task 10. For each proposed live action, display and obtain explicit a
 - fixture repository commit and canonical graph fingerprint;
 - prompt/response contract hashes without prompt or response bodies;
 - maximum input/output usage, cost reservation if applicable, and timeout;
-- no-retry, no-fallback, no-resume, and no-model-substitution declarations;
+- immutable ordered route candidates and whether cross-provider selection is enabled;
+- allowlisted fallback reasons, maximum attempts, pre-side-effect requirement, and
+  aggregate token/output/cost/time budgets;
+- no-resume and no-substitution-outside-the-approved-pool declarations;
 - exact sanitized evidence fields that may be persisted.
 
-Each provider verification, edit smoke, and cross-provider review requires separate approval. A failed call records sanitized failed-closed evidence and stops. It never authorizes a retry or fallback.
+Each provider verification, edit smoke, and cross-provider review requires separate approval. Verification calls remain exact single-route calls. A governed execution may use one explicitly approved fallback only for `capacity_unavailable`, before accepted output or side effects, and within its aggregate manifest; every other failure records sanitized failed-closed evidence and stops.
 
 ## Final branch gate
 
