@@ -39,7 +39,10 @@ class SourceIndex:
 
     root: Path
     rel_paths: frozenset[str]
-    path_aliases: tuple[tuple[str, tuple[str, ...]], ...]
+    # (scope dir rel path, pattern, target globs) per tsconfig.json found in
+    # the scan — an alias only applies to files under its tsconfig's directory,
+    # ordered longest scope first so the nearest tsconfig wins.
+    path_aliases: tuple[tuple[str, str, tuple[str, ...]], ...]
     typescript: TypeScriptCompilerIndex
     # (package name, package dir rel path, entry file rel path) per workspace
     # package.json found in the scan — lets bare imports like "@repo/utils"
@@ -63,7 +66,7 @@ class SourceIndex:
         return cls(
             root=root,
             rel_paths=frozenset(rel_paths),
-            path_aliases=_load_tsconfig_aliases(root),
+            path_aliases=_load_tsconfig_aliases(root, frozenset(rel_paths)),
             typescript=ts_index,
             workspace_packages=_load_workspace_packages(root, frozenset(rel_paths)),
         )
@@ -84,7 +87,9 @@ class SourceIndex:
             base = PurePosixPath(rel_path).parent.joinpath(source_lit)
             candidates.extend(_candidate_paths(base))
         else:
-            for pattern, targets in self.path_aliases:
+            for scope, pattern, targets in self.path_aliases:
+                if scope and not rel_path.startswith(scope + "/"):
+                    continue
                 matched = _match_alias(pattern, source_lit)
                 if matched is None:
                     continue
@@ -248,28 +253,52 @@ def _package_entry(
     return None
 
 
-def _load_tsconfig_aliases(root: Path) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    path = root / "tsconfig.json"
-    if not path.exists():
-        return ()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ()
-    compiler = data.get("compilerOptions", {}) if isinstance(data, dict) else {}
-    base_url = compiler.get("baseUrl", ".")
-    paths = compiler.get("paths", {})
-    if not isinstance(paths, dict):
-        return ()
-    aliases: list[tuple[str, tuple[str, ...]]] = []
-    for pattern, targets in sorted(paths.items()):
-        if isinstance(pattern, str) and isinstance(targets, list):
+def _load_tsconfig_aliases(
+    root: Path, rel_paths: frozenset[str]
+) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+    """Path aliases from every scanned tsconfig.json, scoped to its directory.
+
+    Monorepo packages declare their own aliases (a Remix app maps ``~/*`` to
+    ``./app/*`` in apps/web/tsconfig.json), so reading only the root tsconfig
+    left every aliased import in a workspace package unresolved. Targets are
+    joined as ``<tsconfig dir>/<baseUrl>/<target>``. The root tsconfig.json is
+    also read straight from disk in case json files were excluded from the
+    scan. ``extends`` chains are not followed.
+    """
+    configs = {rel for rel in rel_paths if PurePosixPath(rel).name == "tsconfig.json"}
+    if (root / "tsconfig.json").exists():
+        configs.add("tsconfig.json")
+    aliases: list[tuple[str, str, tuple[str, ...]]] = []
+    for rel in sorted(configs):
+        try:
+            data = json.loads((root / rel).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        compiler = data.get("compilerOptions", {}) if isinstance(data, dict) else {}
+        if not isinstance(compiler, dict):
+            continue
+        base_url = compiler.get("baseUrl", ".")
+        if not isinstance(base_url, str):
+            base_url = "."
+        paths = compiler.get("paths", {})
+        if not isinstance(paths, dict):
+            continue
+        scope = PurePosixPath(rel).parent.as_posix()
+        if scope == ".":
+            scope = ""
+        for pattern, targets in sorted(paths.items()):
+            if not (isinstance(pattern, str) and isinstance(targets, list)):
+                continue
             normalized_targets = []
             for target in targets:
                 if isinstance(target, str):
-                    normalized_targets.append(PurePosixPath(base_url).joinpath(target).as_posix())
+                    joined = PurePosixPath(scope).joinpath(base_url, target)
+                    normalized_targets.append(posixpath.normpath(joined.as_posix()))
             if normalized_targets:
-                aliases.append((pattern, tuple(normalized_targets)))
+                aliases.append((scope, pattern, tuple(normalized_targets)))
+    # Longest scope first: candidates from the nearest tsconfig are tried
+    # before the root's, so the nearest match wins.
+    aliases.sort(key=lambda item: (-len(item[0]), item[0], item[1]))
     return tuple(aliases)
 
 

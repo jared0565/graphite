@@ -137,6 +137,96 @@ def test_heuristic_prefers_ts_source_over_js_twin_for_js_extension_import(tmp_pa
     assert resolved.rel_path == "src/util.ts"
 
 
+def test_heuristic_resolves_alias_from_package_level_tsconfig(tmp_path: Path) -> None:
+    """Monorepo packages declare aliases in their OWN tsconfig.json (e.g. a
+    Remix app maps ``~/*`` to ``./app/*`` in apps/web/tsconfig.json). Regression
+    for ``_load_tsconfig_aliases`` only ever reading the repo-root tsconfig, so
+    every ``~/``-aliased import in a workspace package produced no edge.
+    """
+    _write(
+        tmp_path / "apps" / "web" / "tsconfig.json",
+        json.dumps({"compilerOptions": {"baseUrl": ".", "paths": {"~/*": ["./app/*"]}}}),
+    )
+    _write(tmp_path / "apps" / "web" / "app" / "lib" / "useModal.ts", "export const useModal = 1;\n")
+    _write(
+        tmp_path / "apps" / "web" / "app" / "components" / "review.ts",
+        "import { useModal } from '~/lib/useModal';\nconsole.log(useModal);\n",
+    )
+
+    cfg = Config(workers=1, typescript_resolver="disabled", cache_dir=tmp_path / ".cache" / "graphite")
+    entries = collect_files(tmp_path, cfg)
+    source_index = SourceIndex.from_entries(entries, cfg)
+
+    assert source_index.typescript.available is False
+    resolved = source_index.resolve_ts_import_detail(
+        "apps/web/app/components/review.ts", "~/lib/useModal"
+    )
+    assert resolved is not None
+    assert resolved.rel_path == "apps/web/app/lib/useModal.ts"
+    assert resolved.confidence == "EXACT_IMPORT"
+
+    result = extract_all(entries, cfg)
+    imports = {(e["source"], e["target"], e["relation"], e.get("confidence")) for e in result.edges if e["relation"] == "imports"}
+    assert (
+        "apps_web_app_components_review",
+        "apps_web_app_lib_usemodal",
+        "imports",
+        "EXACT_IMPORT",
+    ) in imports
+
+
+def test_package_level_alias_is_scoped_to_its_directory(tmp_path: Path) -> None:
+    """An alias declared in apps/web/tsconfig.json must not apply to files in
+    OTHER packages: a ``~/`` import from apps/worker has no alias and must stay
+    unresolved rather than pointing into apps/web.
+    """
+    _write(
+        tmp_path / "apps" / "web" / "tsconfig.json",
+        json.dumps({"compilerOptions": {"baseUrl": ".", "paths": {"~/*": ["./app/*"]}}}),
+    )
+    _write(tmp_path / "apps" / "web" / "app" / "lib" / "useModal.ts", "export const useModal = 1;\n")
+    _write(
+        tmp_path / "apps" / "worker" / "src" / "app.ts",
+        "import { useModal } from '~/lib/useModal';\nconsole.log(useModal);\n",
+    )
+
+    cfg = Config(workers=1, typescript_resolver="disabled", cache_dir=tmp_path / ".cache" / "graphite")
+    entries = collect_files(tmp_path, cfg)
+    source_index = SourceIndex.from_entries(entries, cfg)
+
+    assert source_index.typescript.available is False
+    assert source_index.resolve_ts_import_detail("apps/worker/src/app.ts", "~/lib/useModal") is None
+
+
+def test_nearest_tsconfig_alias_wins_over_root(tmp_path: Path) -> None:
+    """When the root and a package tsconfig both define the same pattern, a
+    file inside the package resolves through its own (nearest) tsconfig.
+    """
+    _write(
+        tmp_path / "tsconfig.json",
+        json.dumps({"compilerOptions": {"baseUrl": ".", "paths": {"~/*": ["./rootlib/*"]}}}),
+    )
+    _write(
+        tmp_path / "apps" / "web" / "tsconfig.json",
+        json.dumps({"compilerOptions": {"baseUrl": ".", "paths": {"~/*": ["./app/*"]}}}),
+    )
+    _write(tmp_path / "rootlib" / "thing.ts", "export const thing = 'root';\n")
+    _write(tmp_path / "apps" / "web" / "app" / "thing.ts", "export const thing = 'web';\n")
+    _write(
+        tmp_path / "apps" / "web" / "app" / "page.ts",
+        "import { thing } from '~/thing';\nconsole.log(thing);\n",
+    )
+
+    cfg = Config(workers=1, typescript_resolver="disabled", cache_dir=tmp_path / ".cache" / "graphite")
+    entries = collect_files(tmp_path, cfg)
+    source_index = SourceIndex.from_entries(entries, cfg)
+
+    assert source_index.typescript.available is False
+    resolved = source_index.resolve_ts_import_detail("apps/web/app/page.ts", "~/thing")
+    assert resolved is not None
+    assert resolved.rel_path == "apps/web/app/thing.ts"
+
+
 def test_typescript_compiler_adds_file_level_symbol_reference_edges(tmp_path: Path) -> None:
     _write(
         tmp_path / "tsconfig.json",
