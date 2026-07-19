@@ -660,7 +660,13 @@ class ProviderLifecycleEvent(PublicRecord):
             code="current_identity_digest_invalid",
             optional=True,
         )
-        if (previous_state is None) is not (previous_digest is None):
+        if previous_state is None and previous_digest is not None:
+            raise ValueError("lifecycle_identity_invalid")
+        if (
+            previous_state is not None
+            and previous_state is not ProviderLifecycleState.UNAVAILABLE
+            and previous_digest is None
+        ):
             raise ValueError("lifecycle_identity_invalid")
         if current_state is not ProviderLifecycleState.UNAVAILABLE and current_digest is None:
             raise ValueError("lifecycle_identity_invalid")

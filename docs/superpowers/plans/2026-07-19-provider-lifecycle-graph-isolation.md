@@ -73,18 +73,22 @@ providers through legacy CLI fallback branches.
 - Add `tests/fixtures/routing_schema_v4_lifecycle_migration.sql`
 - Add `tests/test_provider_lifecycle_storage.py`
 - Modify `tests/test_routing_storage.py`
-- Modify `tests/test_routing_cli_recovery.py`
 
-- [ ] Keep lifecycle observations/events in a dedicated lifecycle database under the repository routing state directory. Do not place them in canonical graph artifacts or daemon status JSON.
-- [ ] Write failing tests for fresh creation, idempotent reopen, integrity failure, malformed digests, invalid transitions, concurrent-writer refusal, immutable events, bounded retention, and atomic current-observation replacement.
-- [ ] Store one current observation per provider/runtime/configuration boundary plus append-only transition evidence containing only old/new identity digests, state, reason code, policy version, and timestamps.
-- [ ] Add explicit invalidation evidence linking a lifecycle identity change to affected capability snapshot digests and unconsumed approval IDs without copying their payloads.
-- [ ] Advance the routing authority database from schema v4 to v5. Bind new capability snapshots and approvals to a lifecycle identity digest; retain v4 records as historical evidence without granting authority.
-- [ ] Require a verified pre-migration backup marker, stopped writers for destructive transitions, SQLite integrity and foreign-key checks, restrictive permissions, and a tested restore path.
-- [ ] Fail closed for provider execution when lifecycle authority is corrupt or missing, while leaving canonical graph commands independent and operational.
-- [ ] Add recovery codes for lifecycle backup failure, migration busy, unsupported schema, integrity failure, and rollback required.
-- [ ] Run lifecycle storage, routing migration, recovery, and trigger tests with an explicit writable `--basetemp`.
-- [ ] Commit: `feat: persist isolated provider lifecycle authority`.
+Schema-v5 refinement: immutable normalized binding tables connect snapshots,
+approvals, and attempts to lifecycle identity without rewriting historical v4
+rows. An absent binding remains explicit historical/non-authoritative state for
+the Task 5 eligibility gate.
+
+- [x] Keep lifecycle observations/events in a dedicated lifecycle database under the repository routing state directory. Do not place them in canonical graph artifacts or daemon status JSON.
+- [x] Write failing tests for fresh creation, idempotent reopen, integrity failure, malformed digests, invalid transitions, concurrent-writer refusal, immutable events, bounded reads, and atomic current-observation replacement.
+- [x] Store one current observation per provider/runtime/configuration boundary plus append-only transition evidence containing only old/new identity digests, state, reason code, policy version, and timestamps.
+- [x] Add explicit invalidation evidence linking a lifecycle identity change to affected capability snapshot digests and unconsumed approval IDs without copying their payloads.
+- [x] Advance the routing authority database from schema v4 to v5. Bind new capability snapshots, approvals, and attempts to a lifecycle identity digest; retain v4 records as historical evidence without granting authority.
+- [x] Require a verified pre-migration backup marker, stopped writers for migration, SQLite integrity and foreign-key checks, restrictive permissions, and tested v4 restore.
+- [x] Expose missing lifecycle bindings as explicit non-authoritative state for Task 5 fail-closed eligibility while keeping canonical graph storage independent.
+- [x] Add recovery codes for lifecycle backup failure, migration busy, unsupported schema, integrity failure, and rollback required.
+- [x] Run lifecycle storage, routing migration, recovery, trigger, fixture, and full offline routing tests with explicit writable `--basetemp` directories.
+- [x] Commit: `feat: persist isolated provider lifecycle authority`.
 
 ## Task 3: Build the bounded non-inference probe boundary
 

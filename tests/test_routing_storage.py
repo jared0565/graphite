@@ -144,7 +144,7 @@ def test_schema_migration_is_idempotent_and_enables_safety_pragmas(tmp_path: Pat
         "execution_attempts",
         "execution_receipts",
     } <= tables
-    assert version == "4"
+    assert version == "5"
     assert attempt_columns["max_input_tokens"] == 1
     assert attempt_columns["max_output_tokens"] == 1
     assert attempt_columns["expected_prompt_hash"] == 1
@@ -158,9 +158,12 @@ def test_schema_migration_is_idempotent_and_enables_safety_pragmas(tmp_path: Pat
 
 
 def _downgrade_fixture_to_v3(store: RepositoryStore) -> None:
-    """Turn a fresh v4 test database into a representative committed v3 database."""
+    """Turn a fresh v5 test database into a representative committed v3 database."""
     with sqlite3.connect(store.path) as connection:
         for table in (
+            "lifecycle_attempt_bindings",
+            "lifecycle_approval_bindings",
+            "lifecycle_snapshot_bindings",
             "cli_policy_events",
             "cli_policy_versions",
             "cli_telemetry_events",
@@ -174,6 +177,18 @@ def _downgrade_fixture_to_v3(store: RepositoryStore) -> None:
         connection.execute(
             "UPDATE schema_meta SET value='3' WHERE key='schema_version'"
         )
+
+
+def _downgrade_fixture_to_v4(store: RepositoryStore) -> None:
+    """Turn a fresh v5 test database into a representative committed v4 database."""
+    with sqlite3.connect(store.path) as connection:
+        for table in (
+            "lifecycle_attempt_bindings",
+            "lifecycle_approval_bindings",
+            "lifecycle_snapshot_bindings",
+        ):
+            connection.execute(f"DROP TABLE IF EXISTS {table}")
+        connection.execute("UPDATE schema_meta SET value='4' WHERE key='schema_version'")
 
 
 def test_schema_v3_compatibility_fixture_reconstructs_digest_contract(
@@ -203,7 +218,7 @@ def test_schema_v3_compatibility_fixture_reconstructs_digest_contract(
     assert "inventory_digest" in staged_columns
 
 
-def test_v3_to_v4_creates_verified_backup_and_quarantines_live_ollama_attempts(
+def test_v3_to_v5_creates_verified_backup_and_quarantines_live_ollama_attempts(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "project"
@@ -263,7 +278,7 @@ def test_v3_to_v4_creates_verified_backup_and_quarantines_live_ollama_attempts(
     with sqlite3.connect(store.path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("4",)
+        ).fetchone() == ("5",)
         assert connection.execute(
             "SELECT status,failure_reason FROM execution_attempts "
             "WHERE attempt_id='attempt-legacy'"
@@ -304,8 +319,8 @@ def test_v3_v4_rollback_drill_restores_verified_backup_for_old_reader(
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
     # All connections above are closed: this is the fixture's stop-writers boundary.
-    preserved_v4 = store.path.with_name("events-schema-v4-preserved.sqlite3")
-    shutil.copy2(store.path, preserved_v4)
+    preserved_v5 = store.path.with_name("events-schema-v5-preserved.sqlite3")
+    shutil.copy2(store.path, preserved_v5)
     restore_stage = store.path.with_name("events-restore-stage.sqlite3")
     shutil.copy2(backup, restore_stage)
     live_path = store.path
@@ -327,10 +342,10 @@ def test_v3_v4_rollback_drill_restores_verified_backup_for_old_reader(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='cli_execution_attempts'"
         ).fetchone() is None
-    with sqlite3.connect(preserved_v4) as v4_reader:
-        assert v4_reader.execute(
+    with sqlite3.connect(preserved_v5) as v5_reader:
+        assert v5_reader.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("4",)
+        ).fetchone() == ("5",)
 
 
 def test_v3_migration_fails_closed_while_another_writer_holds_lock(tmp_path: Path) -> None:
@@ -400,6 +415,242 @@ def test_v3_migration_requires_external_backup_digest_marker(
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone() == ("3",)
+
+
+def test_v4_to_v5_creates_verified_backup_and_leaves_history_unbound(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    _downgrade_fixture_to_v4(store)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "INSERT INTO capability_snapshots VALUES "
+            "(?,'claude-code','sonnet','claude-sonnet-5','high',?,'2.1.215',"
+            "'1.0.0','workspace-write','{}',1,99)",
+            ("4" * 64, "5" * 64),
+        )
+
+    store.initialize()
+
+    assert store.schema_v4_backup_path.is_file()
+    marker = json.loads(store.schema_v4_backup_marker_path.read_text(encoding="utf-8"))
+    assert marker == {
+        "backup_sha256": hashlib.sha256(store.schema_v4_backup_path.read_bytes()).hexdigest(),
+        "schema_version": "4",
+    }
+    with sqlite3.connect(store.schema_v4_backup_path) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone() == ("4",)
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='lifecycle_snapshot_bindings'"
+        ).fetchone() is None
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone() == ("5",)
+    assert store.lifecycle_identity_binding(
+        authority_kind="capability_snapshot", authority_id="4" * 64
+    ) is None
+
+
+def test_committed_v4_fixture_migrates_to_v5_without_granting_authority(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    path = root / ".graphite" / "routing" / "events.sqlite3"
+    path.parent.mkdir(parents=True)
+    fixtures = Path(__file__).parent / "fixtures"
+    with sqlite3.connect(path) as connection:
+        for name in (
+            "routing_schema_v2_ca77600.sql",
+            "routing_schema_v3_94eb333.sql",
+            "routing_schema_v4_lifecycle_migration.sql",
+        ):
+            connection.executescript((fixtures / name).read_text(encoding="utf-8"))
+
+    store = RepositoryStore(root)
+    store.initialize()
+
+    assert store.integrity_check() == "ok"
+    assert store.row_count("lifecycle_snapshot_bindings") == 0
+    assert store.row_count("lifecycle_approval_bindings") == 0
+    assert store.row_count("lifecycle_attempt_bindings") == 0
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone() == ("5",)
+
+
+def test_v4_v5_rollback_drill_restores_verified_v4_backup(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    _downgrade_fixture_to_v4(store)
+    store.record_task("task-history", "documentation", "low", "a" * 64, 1)
+
+    store.initialize()
+    backup = store.schema_v4_backup_path
+    marker = json.loads(store.schema_v4_backup_marker_path.read_text(encoding="utf-8"))
+    assert marker["backup_sha256"] == hashlib.sha256(backup.read_bytes()).hexdigest()
+    restore_stage = store.path.with_name("events-v4-restore-stage.sqlite3")
+    shutil.copy2(backup, restore_stage)
+    live_path = store.path
+    del store
+    gc.collect()
+    live_path.unlink()
+    os.replace(restore_stage, live_path)
+
+    with sqlite3.connect(live_path) as reader:
+        assert reader.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert reader.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone() == ("4",)
+        assert reader.execute(
+            "SELECT category,risk FROM tasks WHERE task_id='task-history'"
+        ).fetchone() == ("documentation", "low")
+        assert reader.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='lifecycle_snapshot_bindings'"
+        ).fetchone() is None
+
+
+def test_v4_migration_refuses_concurrent_writer(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root, busy_timeout_ms=100)
+    store.initialize()
+    _downgrade_fixture_to_v4(store)
+    blocker = sqlite3.connect(store.path, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(StorageError, match="^storage_locked$"):
+            store.initialize()
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert not store.schema_v4_backup_path.exists()
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone() == ("4",)
+
+
+def test_partial_v4_lifecycle_cutover_requires_rollback(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    _downgrade_fixture_to_v4(store)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "CREATE TABLE lifecycle_snapshot_bindings("
+            "capability_snapshot_digest TEXT PRIMARY KEY)"
+        )
+
+    with pytest.raises(StorageError, match="^storage_rollback_required$"):
+        store.initialize()
+
+    assert not store.schema_v4_backup_path.exists()
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone() == ("4",)
+
+
+def test_lifecycle_authority_bindings_are_exact_immutable_and_ordered(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "INSERT INTO tasks VALUES ('task-cli','isolated_code','low',?,1)",
+            ("1" * 64,),
+        )
+        connection.execute(
+            "INSERT INTO decisions VALUES "
+            "('decision-cli','task-cli','sonnet','high','1','1',1)"
+        )
+        connection.execute(
+            "INSERT INTO approvals VALUES "
+            "('approval-cli','task-cli','decision-cli',?,?,'issued',99,10)",
+            ("2" * 64, "3" * 64),
+        )
+        connection.execute(
+            "INSERT INTO capability_snapshots VALUES "
+            "(?,'claude-code','sonnet','claude-sonnet-5','high',?,'2.1.215',"
+            "'1.0.0','workspace-write','{}',1,99)",
+            ("4" * 64, "5" * 64),
+        )
+        connection.execute(
+            "INSERT INTO task_worktrees VALUES "
+            "('worktree-cli','task-cli',?,?, 'prepared',1,1)",
+            ("6" * 40, "7" * 64),
+        )
+        connection.execute(
+            """INSERT INTO cli_execution_attempts(
+                attempt_id,approval_id,task_id,decision_id,worktree_id,provider,
+                requested_model,effective_model,effort,cli_version,executable_sha256,
+                capability_snapshot_digest,manifest_hash,expected_prompt_hash,
+                reserved_tokens,status,failure_reason,execution_id,created_at,updated_at
+            ) VALUES (
+                'attempt-cli','approval-cli','task-cli','decision-cli','worktree-cli',
+                'claude-code','sonnet','claude-sonnet-5','high','2.1.215',?,?,?, ?,
+                10,'pending',NULL,NULL,1,1
+            )""",
+            ("5" * 64, "4" * 64, "3" * 64, "8" * 64),
+        )
+
+    assert store.save_lifecycle_snapshot_binding(
+        capability_snapshot_digest="4" * 64,
+        lifecycle_identity_digest="9" * 64,
+        bound_at=2,
+    ) is True
+    assert store.save_lifecycle_snapshot_binding(
+        capability_snapshot_digest="4" * 64,
+        lifecycle_identity_digest="9" * 64,
+        bound_at=2,
+    ) is False
+    assert store.save_lifecycle_approval_binding(
+        approval_id="approval-cli",
+        capability_snapshot_digest="4" * 64,
+        lifecycle_identity_digest="9" * 64,
+        bound_at=3,
+    ) is True
+    assert store.save_lifecycle_attempt_binding(
+        attempt_id="attempt-cli", lifecycle_identity_digest="9" * 64, bound_at=4
+    ) is True
+    assert store.lifecycle_identity_binding(
+        authority_kind="capability_snapshot", authority_id="4" * 64
+    ) == "9" * 64
+    assert store.lifecycle_identity_binding(
+        authority_kind="approval", authority_id="approval-cli"
+    ) == "9" * 64
+    assert store.lifecycle_identity_binding(
+        authority_kind="attempt", authority_id="attempt-cli"
+    ) == "9" * 64
+    with pytest.raises(StorageError, match="^lifecycle_binding_changed$"):
+        store.save_lifecycle_snapshot_binding(
+            capability_snapshot_digest="4" * 64,
+            lifecycle_identity_digest="a" * 64,
+            bound_at=2,
+        )
+    with sqlite3.connect(store.path) as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="lifecycle_approval_binding_immutable"):
+            connection.execute(
+                "UPDATE lifecycle_approval_bindings SET lifecycle_identity_digest=?",
+                ("a" * 64,),
+            )
 
 
 def test_v4_cli_authority_identity_is_constrained_and_immutable(tmp_path: Path) -> None:
@@ -481,7 +732,7 @@ def test_v4_cli_authority_identity_is_constrained_and_immutable(tmp_path: Path) 
             )
 
 
-def test_partial_v4_schema_requires_rollback_or_forward_repair(tmp_path: Path) -> None:
+def test_partial_v5_schema_requires_rollback_or_forward_repair(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
     store = RepositoryStore(root)
@@ -496,7 +747,7 @@ def test_partial_v4_schema_requires_rollback_or_forward_repair(tmp_path: Path) -
     with sqlite3.connect(store.path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("4",)
+        ).fetchone() == ("5",)
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_links'"
         ).fetchone() is None
@@ -783,7 +1034,7 @@ def test_v1_database_migrates_to_v2_without_losing_rows(tmp_path: Path) -> None:
         }
         foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
-    assert version == "4"
+    assert version == "5"
     assert after == before
     expected_attempt_fields = []
     for legacy in before_attempts:
@@ -962,7 +1213,7 @@ def test_v2_digestless_recovery_is_quarantined_without_fabrication(tmp_path: Pat
     with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("4",)
+        ).fetchone() == ("5",)
         rows = connection.execute(
             "SELECT attempt_id,status,failure_reason,inventory_digest "
             "FROM execution_attempts ORDER BY attempt_id"

@@ -25,7 +25,7 @@ from .contracts import (
     TaskCategory,
 )
 
-SCHEMA_VERSION: Final = "4"
+SCHEMA_VERSION: Final = "5"
 BUSY_TIMEOUT_MS: Final = 2_000
 DEFAULT_RECOVERY_PAGE_SIZE: Final = 50
 MAX_RECOVERY_PAGE_SIZE: Final = 100
@@ -85,6 +85,9 @@ _TABLES = frozenset(
         "cli_telemetry_events",
         "cli_policy_versions",
         "cli_policy_events",
+        "lifecycle_snapshot_bindings",
+        "lifecycle_approval_bindings",
+        "lifecycle_attempt_bindings",
     }
 )
 
@@ -145,6 +148,15 @@ def _semantic_version(value: object, code: str) -> str:
 
 def _translate_database_error(exc: sqlite3.Error) -> StorageError:
     message = str(exc).casefold()
+    for code in (
+        "lifecycle_snapshot_binding_missing",
+        "lifecycle_approval_binding_missing",
+        "lifecycle_snapshot_binding_immutable",
+        "lifecycle_approval_binding_immutable",
+        "lifecycle_attempt_binding_immutable",
+    ):
+        if code in message:
+            return StorageError(code)
     if "locked" in message or "busy" in message:
         return StorageError("storage_locked")
     if "database disk image is malformed" in message or "not a database" in message:
@@ -512,6 +524,81 @@ _SCHEMA = (
         actor TEXT NOT NULL CHECK(actor = 'human'),
         created_at INTEGER NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS lifecycle_snapshot_bindings (
+        capability_snapshot_digest TEXT PRIMARY KEY
+            REFERENCES capability_snapshots(capability_snapshot_digest) ON DELETE RESTRICT,
+        lifecycle_identity_digest TEXT NOT NULL CHECK(
+            length(lifecycle_identity_digest) = 64
+            AND lifecycle_identity_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        bound_at INTEGER NOT NULL CHECK(bound_at >= 0)
+    )""",
+    """CREATE TABLE IF NOT EXISTS lifecycle_approval_bindings (
+        approval_id TEXT PRIMARY KEY REFERENCES approvals(approval_id) ON DELETE RESTRICT,
+        capability_snapshot_digest TEXT NOT NULL
+            REFERENCES capability_snapshots(capability_snapshot_digest) ON DELETE RESTRICT,
+        lifecycle_identity_digest TEXT NOT NULL CHECK(
+            length(lifecycle_identity_digest) = 64
+            AND lifecycle_identity_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        bound_at INTEGER NOT NULL CHECK(bound_at >= 0)
+    )""",
+    """CREATE TABLE IF NOT EXISTS lifecycle_attempt_bindings (
+        attempt_id TEXT PRIMARY KEY
+            REFERENCES cli_execution_attempts(attempt_id) ON DELETE RESTRICT,
+        lifecycle_identity_digest TEXT NOT NULL CHECK(
+            length(lifecycle_identity_digest) = 64
+            AND lifecycle_identity_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        bound_at INTEGER NOT NULL CHECK(bound_at >= 0)
+    )""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_snapshot_binding_update_guard
+    BEFORE UPDATE ON lifecycle_snapshot_bindings BEGIN
+        SELECT RAISE(ABORT, 'lifecycle_snapshot_binding_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_snapshot_binding_delete_guard
+    BEFORE DELETE ON lifecycle_snapshot_bindings BEGIN
+        SELECT RAISE(ABORT, 'lifecycle_snapshot_binding_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_approval_binding_update_guard
+    BEFORE UPDATE ON lifecycle_approval_bindings BEGIN
+        SELECT RAISE(ABORT, 'lifecycle_approval_binding_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_approval_binding_insert_guard
+    BEFORE INSERT ON lifecycle_approval_bindings
+    WHEN NOT EXISTS (
+        SELECT 1 FROM lifecycle_snapshot_bindings AS binding
+        WHERE binding.capability_snapshot_digest = NEW.capability_snapshot_digest
+          AND binding.lifecycle_identity_digest = NEW.lifecycle_identity_digest
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'lifecycle_snapshot_binding_missing');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_approval_binding_delete_guard
+    BEFORE DELETE ON lifecycle_approval_bindings BEGIN
+        SELECT RAISE(ABORT, 'lifecycle_approval_binding_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_attempt_binding_update_guard
+    BEFORE UPDATE ON lifecycle_attempt_bindings BEGIN
+        SELECT RAISE(ABORT, 'lifecycle_attempt_binding_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_attempt_binding_insert_guard
+    BEFORE INSERT ON lifecycle_attempt_bindings
+    WHEN NOT EXISTS (
+        SELECT 1
+        FROM cli_execution_attempts AS attempt
+        JOIN lifecycle_approval_bindings AS binding
+          ON binding.approval_id = attempt.approval_id
+        WHERE attempt.attempt_id = NEW.attempt_id
+          AND binding.lifecycle_identity_digest = NEW.lifecycle_identity_digest
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'lifecycle_approval_binding_missing');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_attempt_binding_delete_guard
+    BEFORE DELETE ON lifecycle_attempt_bindings BEGIN
+        SELECT RAISE(ABORT, 'lifecycle_attempt_binding_immutable');
+    END""",
     """CREATE TRIGGER IF NOT EXISTS cli_attempt_identity_update_guard
     BEFORE UPDATE OF approval_id, task_id, decision_id, worktree_id, provider,
         requested_model, effective_model, effort, cli_version, executable_sha256,
@@ -707,6 +794,14 @@ class RepositoryStore:
     def schema_v3_backup_marker_path(self) -> Path:
         return self.path.parent / "backups" / "events-schema-v3.sha256.json"
 
+    @property
+    def schema_v4_backup_path(self) -> Path:
+        return self.path.parent / "backups" / "events-schema-v4.sqlite3"
+
+    @property
+    def schema_v4_backup_marker_path(self) -> Path:
+        return self.path.parent / "backups" / "events-schema-v4.sha256.json"
+
     def _connect(self) -> sqlite3.Connection:
         try:
             connection = sqlite3.connect(
@@ -734,11 +829,11 @@ class RepositoryStore:
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()
             if existing_version is not None and existing_version[0] not in {
-                "1", "2", "3", SCHEMA_VERSION
+                "1", "2", "3", "4", SCHEMA_VERSION
             }:
                 raise StorageError("storage_schema_unsupported")
             if existing_version is not None and existing_version[0] == SCHEMA_VERSION:
-                self._validate_v4_schema(connection)
+                self._validate_v5_schema(connection)
             if existing_version is not None and existing_version[0] == "1":
                 self._migrate_v1_attempts(connection)
             if existing_version is not None and existing_version[0] in {"1", "2"}:
@@ -746,6 +841,9 @@ class RepositoryStore:
             if existing_version is not None and existing_version[0] == "3":
                 self._create_schema_v3_backup()
                 self._migrate_v3_cli_cutover(connection)
+            if existing_version is not None and existing_version[0] == "4":
+                self._validate_v4_schema(connection)
+                self._create_schema_v4_backup()
             for statement in _SCHEMA[1:]:
                 connection.execute(statement)
             connection.execute(
@@ -813,8 +911,22 @@ class RepositoryStore:
                 pass
 
     def _create_schema_v3_backup(self) -> None:
-        backup = self.schema_v3_backup_path
-        marker = self.schema_v3_backup_marker_path
+        self._create_schema_backup(
+            source_version="3",
+            backup=self.schema_v3_backup_path,
+            marker=self.schema_v3_backup_marker_path,
+        )
+
+    def _create_schema_v4_backup(self) -> None:
+        self._create_schema_backup(
+            source_version="4",
+            backup=self.schema_v4_backup_path,
+            marker=self.schema_v4_backup_marker_path,
+        )
+
+    def _create_schema_backup(
+        self, *, source_version: str, backup: Path, marker: Path
+    ) -> None:
         _secure_repository_directory(self.root, backup.parent)
         temporary = backup.with_name(f".{backup.name}.{secrets.token_hex(8)}.tmp")
         try:
@@ -828,7 +940,7 @@ class RepositoryStore:
                     version = destination.execute(
                         "SELECT value FROM schema_meta WHERE key='schema_version'"
                     ).fetchone()
-                    if integrity != ("ok",) or version != ("3",):
+                    if integrity != ("ok",) or version != (source_version,):
                         raise StorageError("storage_backup_failed")
             _secure_file(temporary)
             os.replace(temporary, backup)
@@ -836,7 +948,7 @@ class RepositoryStore:
             evidence = json.dumps(
                 {
                     "backup_sha256": self._file_sha256(backup),
-                    "schema_version": "3",
+                    "schema_version": source_version,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -880,6 +992,60 @@ class RepositoryStore:
 
     @staticmethod
     def _validate_v4_schema(connection: sqlite3.Connection) -> None:
+        required_tables = {
+            "capability_snapshots",
+            "task_worktrees",
+            "cli_execution_attempts",
+            "validation_results",
+            "review_links",
+        }
+        existing_tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if not required_tables <= existing_tables:
+            raise StorageError("storage_rollback_required")
+        cli_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(cli_execution_attempts)")
+        }
+        if not {
+            "provider",
+            "effective_model",
+            "capability_snapshot_digest",
+            "worktree_id",
+            "status",
+        } <= cli_columns:
+            raise StorageError("storage_rollback_required")
+        lifecycle_tables = {
+            "lifecycle_snapshot_bindings",
+            "lifecycle_approval_bindings",
+            "lifecycle_attempt_bindings",
+        }
+        if lifecycle_tables & existing_tables:
+            raise StorageError("storage_rollback_required")
+
+    @staticmethod
+    def _validate_v5_schema(connection: sqlite3.Connection) -> None:
+        RepositoryStore._validate_v4_core_schema(connection)
+        required_tables = {
+            "lifecycle_snapshot_bindings",
+            "lifecycle_approval_bindings",
+            "lifecycle_attempt_bindings",
+        }
+        existing_tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if not required_tables <= existing_tables:
+            raise StorageError("storage_rollback_required")
+
+    @staticmethod
+    def _validate_v4_core_schema(connection: sqlite3.Connection) -> None:
         required_tables = {
             "capability_snapshots",
             "task_worktrees",
@@ -2673,6 +2839,151 @@ class RepositoryStore:
                 raise StorageError("storage_corrupt") from exc
             result.append({"digest": str(row["capability_snapshot_digest"]), "payload": payload})
         return tuple(result)
+
+    @staticmethod
+    def _save_lifecycle_binding(
+        connection: sqlite3.Connection,
+        *,
+        table: str,
+        key_column: str,
+        key_value: str,
+        lifecycle_identity_digest: str,
+        bound_at: int,
+        capability_snapshot_digest: str | None = None,
+    ) -> bool:
+        columns = [key_column]
+        values: list[object] = [key_value]
+        if capability_snapshot_digest is not None:
+            columns.append("capability_snapshot_digest")
+            values.append(capability_snapshot_digest)
+        columns.extend(("lifecycle_identity_digest", "bound_at"))
+        values.extend((lifecycle_identity_digest, bound_at))
+        existing = connection.execute(
+            f"SELECT {','.join(columns[1:])} FROM {table} WHERE {key_column}=?",
+            (key_value,),
+        ).fetchone()
+        if existing is not None:
+            if tuple(existing) != tuple(values[1:]):
+                raise StorageError("lifecycle_binding_changed")
+            return False
+        placeholders = ",".join("?" for _ in columns)
+        connection.execute(
+            f"INSERT INTO {table}({','.join(columns)}) VALUES({placeholders})",
+            tuple(values),
+        )
+        return True
+
+    def save_lifecycle_snapshot_binding(
+        self,
+        *,
+        capability_snapshot_digest: str,
+        lifecycle_identity_digest: str,
+        bound_at: int,
+    ) -> bool:
+        if not _HEX_64.fullmatch(capability_snapshot_digest):
+            raise ValueError("capability_snapshot_digest_invalid")
+        if not _HEX_64.fullmatch(lifecycle_identity_digest):
+            raise ValueError("lifecycle_identity_digest_invalid")
+        bound_at = _nonnegative_integer(bound_at, "bound_at_invalid")
+        try:
+            with self._connect() as connection:
+                return self._save_lifecycle_binding(
+                    connection,
+                    table="lifecycle_snapshot_bindings",
+                    key_column="capability_snapshot_digest",
+                    key_value=capability_snapshot_digest,
+                    lifecycle_identity_digest=lifecycle_identity_digest,
+                    bound_at=bound_at,
+                )
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def save_lifecycle_approval_binding(
+        self,
+        *,
+        approval_id: str,
+        capability_snapshot_digest: str,
+        lifecycle_identity_digest: str,
+        bound_at: int,
+    ) -> bool:
+        approval_id = _identifier(approval_id, "approval_id_invalid")
+        if not _HEX_64.fullmatch(capability_snapshot_digest):
+            raise ValueError("capability_snapshot_digest_invalid")
+        if not _HEX_64.fullmatch(lifecycle_identity_digest):
+            raise ValueError("lifecycle_identity_digest_invalid")
+        bound_at = _nonnegative_integer(bound_at, "bound_at_invalid")
+        try:
+            with self._connect() as connection:
+                return self._save_lifecycle_binding(
+                    connection,
+                    table="lifecycle_approval_bindings",
+                    key_column="approval_id",
+                    key_value=approval_id,
+                    capability_snapshot_digest=capability_snapshot_digest,
+                    lifecycle_identity_digest=lifecycle_identity_digest,
+                    bound_at=bound_at,
+                )
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def save_lifecycle_attempt_binding(
+        self,
+        *,
+        attempt_id: str,
+        lifecycle_identity_digest: str,
+        bound_at: int,
+    ) -> bool:
+        attempt_id = _identifier(attempt_id, "attempt_id_invalid")
+        if not _HEX_64.fullmatch(lifecycle_identity_digest):
+            raise ValueError("lifecycle_identity_digest_invalid")
+        bound_at = _nonnegative_integer(bound_at, "bound_at_invalid")
+        try:
+            with self._connect() as connection:
+                return self._save_lifecycle_binding(
+                    connection,
+                    table="lifecycle_attempt_bindings",
+                    key_column="attempt_id",
+                    key_value=attempt_id,
+                    lifecycle_identity_digest=lifecycle_identity_digest,
+                    bound_at=bound_at,
+                )
+        except StorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+
+    def lifecycle_identity_binding(self, *, authority_kind: str, authority_id: str) -> str | None:
+        tables = {
+            "capability_snapshot": (
+                "lifecycle_snapshot_bindings",
+                "capability_snapshot_digest",
+            ),
+            "approval": ("lifecycle_approval_bindings", "approval_id"),
+            "attempt": ("lifecycle_attempt_bindings", "attempt_id"),
+        }
+        try:
+            table, key_column = tables[authority_kind]
+        except (KeyError, TypeError) as exc:
+            raise ValueError("authority_kind_invalid") from exc
+        if authority_kind == "capability_snapshot":
+            authority_id = _identifier(authority_id, "authority_id_invalid")
+            if not _HEX_64.fullmatch(authority_id):
+                raise ValueError("authority_id_invalid")
+        else:
+            authority_id = _identifier(authority_id, "authority_id_invalid")
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    f"SELECT lifecycle_identity_digest FROM {table} WHERE {key_column}=?",
+                    (authority_id,),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise _translate_database_error(exc) from exc
+        return None if row is None else str(row[0])
 
     def save_registry_snapshot(self, payload: dict[str, Any]) -> None:
         if not isinstance(payload, dict) or set(payload) != {
