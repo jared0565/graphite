@@ -446,3 +446,40 @@ separately approved bounded verification and edit manifest:
 
 - https://developers.openai.com/api/docs/models/gpt-5.3-codex
 - https://developers.openai.com/api/docs/models/gpt-5.6-sol
+
+## Codex 5.3 acceptance bundle stopped at verification
+
+The operator approved the three-call bundle
+`4564c83c41d9d4cb5157bd36034d1c8c45f38e36b339b7958c5a921c9c14afe1`.
+Its ordered actions were a schema-bound `gpt-5.3-codex` read-only verification,
+a schema-bound bounded edit smoke, and a Claude read-only cross-provider review.
+The bundle allowed at most one attempt per action and required an immediate stop
+on failure.
+
+The first Codex process exited nonzero before a parseable terminal result. The
+sanitized receipt is:
+
+- failure category: `provider_process_failure`;
+- exit classification: `nonzero_exit`;
+- exit code: `1`;
+- duration: 7,238 milliseconds;
+- stdout SHA-256:
+  `fadc54b53c55e73612d75874e892a5af1b0064156470356444dd5a20294b7558`;
+- stderr SHA-256:
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+The effective model and token usage are unknown. Raw stdout, prompts, responses,
+provider diagnostics, credentials, paths, and repository content were not retained
+or inspected. The edit and Claude review did not run, and there was no retry,
+fallback, resume, substitution, merge, push, or deployment.
+
+Both authority-store SHA-256 values remained unchanged at
+`11dd6d905e8fdbbd237b2bb381b1ff00c0cee1782f2a6927e801ce485e8b5c3f`
+and `d7bd02146e98c9b79e102d75c400f046189a6424d30a225126f109489a258d1b`.
+Both fresh task worktrees remained clean. No capability snapshot, lifecycle
+binding, or telemetry record was persisted.
+
+The disposable bundle omitted `provider_process_failure` from its declared
+failure-category allowlist even though the production adapter correctly emitted
+that sanitized category. This manifest inconsistency did not expose data or permit
+continued execution, but it must be corrected in any replacement manifest.
