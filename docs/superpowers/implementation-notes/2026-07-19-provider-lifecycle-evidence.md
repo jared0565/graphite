@@ -514,3 +514,17 @@ digests, `11dd6d905e8fdbbd237b2bb381b1ff00c0cee1782f2a6927e801ce485e8b5c3f` and
 `d7bd02146e98c9b79e102d75c400f046189a6424d30a225126f109489a258d1b`. Integrity and
 foreign-key checks remained clean, with three snapshots, three bindings, and five
 telemetry events. Both fresh task worktrees remained clean.
+
+## Codex model availability diagnosis
+
+The two bounded `gpt-5.3-codex` verification attempts failed before JSONL parsing
+because that model slug is not present in the installed Codex 0.144.6 model cache.
+The cache lists `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`,
+`gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`; it does not list
+`gpt-5.3-codex`. A read-only `codex login status` check independently reports
+`Logged in using ChatGPT`.
+
+This is a model-selection failure, not an authentication or Graphite JSONL parser
+failure. The next manifest must select an installed slug and bind it to a fresh
+verification snapshot. `gpt-5.6-sol` is the selected candidate because it is
+installed, supports high reasoning, and has prior bounded read-only evidence.
