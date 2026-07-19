@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from graphite.probe_process import ProbeProcessResult
 from graphite.routing.claude_executor import (
     AdapterError,
     PROFILE_VERIFICATION_MARKER,
@@ -14,8 +15,7 @@ from graphite.routing.claude_executor import (
     preflight_claude,
 )
 from graphite.routing.contracts import Effort, PermissionMode, ProviderId
-from graphite.routing.process_runner import CliProcessResult
-from graphite.routing.process_runner import CliProcessError
+from graphite.routing.process_runner import CliProcessError, CliProcessResult, run_cli_process
 
 
 def _result(stdout: bytes, stderr: bytes = b"") -> CliProcessResult:
@@ -345,6 +345,55 @@ def test_profile_verification_rejects_nonexact_structured_output(
             transport=transport,
         )
     assert len(transport.calls) == 1
+
+
+def test_profile_verification_preserves_sanitized_nonzero_process_diagnostics(
+    tmp_path: Path,
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    stdout = b'PRIVATE partial stream {"type":"assistant"}'
+    stderr = b"PRIVATE provider failure details"
+    calls = 0
+
+    def runner(argv: list[str], **kwargs: object) -> ProbeProcessResult:
+        nonlocal calls
+        calls += 1
+        assert kwargs["check"] is False
+        return ProbeProcessResult(7, stdout, stderr, 45.8)
+
+    def transport(**kwargs: object) -> CliProcessResult:
+        return run_cli_process(
+            **kwargs,
+            runner=runner,
+            source_environment={},
+        )
+
+    with pytest.raises(AdapterError, match="^unavailable$") as caught:
+        execute_claude_profile_verification(
+            executable=executable,
+            workspace=workspace,
+            credential_home=credentials,
+            prompt=b"PRIVATE exact verification prompt",
+            requested_model="sonnet",
+            expected_effective_model="claude-sonnet-5",
+            effort=Effort.HIGH,
+            permission_mode=PermissionMode.READ_ONLY,
+            transport=transport,
+        )
+
+    assert calls == 1
+    diagnostics = caught.value.process_diagnostics
+    assert diagnostics is not None
+    assert diagnostics.to_dict() == {
+        "exit_classification": "nonzero_exit",
+        "exit_code": 7,
+        "duration_seconds": 45.8,
+        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+        "failure_category": "provider_process_failure",
+    }
+    serialized = repr(diagnostics.to_dict()) + repr(caught.value) + str(caught.value)
+    assert "PRIVATE" not in serialized
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,7 @@ from typing import Final
 from .contracts import CliIdentity, Effort, PermissionMode, ProviderId
 from .process_runner import (
     CliProcessError,
+    CliProcessFailureDiagnostics,
     CliProcessResult,
     decode_cli_output,
     run_cli_process,
@@ -41,8 +42,18 @@ _TRANSPORT_ERRORS: Final = {
 class AdapterError(RuntimeError):
     """Stable adapter failure that contains no provider diagnostics."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        process_diagnostics: CliProcessFailureDiagnostics | None = None,
+    ) -> None:
         self.code = code
+        self.process_diagnostics = (
+            process_diagnostics
+            if isinstance(process_diagnostics, CliProcessFailureDiagnostics)
+            else None
+        )
         super().__init__(code)
 
 
@@ -95,7 +106,10 @@ def _invoke(transport: Transport, **kwargs: object) -> CliProcessResult:
     try:
         result = transport(**kwargs)
     except CliProcessError as exc:
-        raise AdapterError(_TRANSPORT_ERRORS.get(exc.code, "unavailable")) from None
+        raise AdapterError(
+            _TRANSPORT_ERRORS.get(exc.code, "unavailable"),
+            process_diagnostics=exc.diagnostics,
+        ) from None
     except AdapterError:
         raise
     except Exception:

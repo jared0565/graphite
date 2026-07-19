@@ -1,8 +1,8 @@
 """Provider-neutral, bounded subprocess policy for authenticated development CLIs."""
 from __future__ import annotations
 
-import math
 import hashlib
+import math
 import os
 import select
 import stat
@@ -50,13 +50,70 @@ _ERROR_MAP: Final = {
     "invalid_timeout": "request_invalid",
     "invalid_environment": "environment_invalid",
 }
+_EXIT_CLASSIFICATIONS: Final = frozenset({"nonzero_exit", "signal_exit"})
+_FAILURE_CATEGORIES: Final = frozenset({"provider_process_failure"})
+
+
+@dataclass(frozen=True, slots=True)
+class CliProcessFailureDiagnostics:
+    """Allowlisted nonzero-exit evidence that cannot contain provider output."""
+
+    exit_classification: str
+    exit_code: int
+    duration_seconds: float
+    stdout_sha256: str
+    stderr_sha256: str
+    failure_category: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.exit_classification, str)
+            or self.exit_classification not in _EXIT_CLASSIFICATIONS
+            or isinstance(self.exit_code, bool)
+            or not isinstance(self.exit_code, int)
+            or self.exit_code == 0
+            or not -(2**31) <= self.exit_code <= 2**32 - 1
+            or isinstance(self.duration_seconds, bool)
+            or not isinstance(self.duration_seconds, (int, float))
+            or not math.isfinite(self.duration_seconds)
+            or self.duration_seconds < 0
+            or not isinstance(self.stdout_sha256, str)
+            or len(self.stdout_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.stdout_sha256)
+            or not isinstance(self.stderr_sha256, str)
+            or len(self.stderr_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.stderr_sha256)
+            or not isinstance(self.failure_category, str)
+            or self.failure_category not in _FAILURE_CATEGORIES
+        ):
+            raise ValueError("process_failure_diagnostics_invalid")
+
+    def to_dict(self) -> dict[str, int | float | str]:
+        return {
+            "exit_classification": self.exit_classification,
+            "exit_code": self.exit_code,
+            "duration_seconds": self.duration_seconds,
+            "stdout_sha256": self.stdout_sha256,
+            "stderr_sha256": self.stderr_sha256,
+            "failure_category": self.failure_category,
+        }
 
 
 class CliProcessError(RuntimeError):
     """Stable, path-free CLI transport failure."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        diagnostics: CliProcessFailureDiagnostics | None = None,
+    ) -> None:
         self.code = code
+        self.diagnostics = (
+            diagnostics
+            if isinstance(diagnostics, CliProcessFailureDiagnostics)
+            else None
+        )
         super().__init__(code)
 
 
@@ -247,7 +304,7 @@ def run_cli_process(
             timeout_seconds=timeout_seconds,
             max_output_bytes=max_output_bytes,
             max_input_bytes=max_input_bytes,
-            check=True,
+            check=False,
             environment=environment,
             cancelled=cancellation,
         )
@@ -255,16 +312,45 @@ def run_cli_process(
         raise CliProcessError(_ERROR_MAP.get(exc.code, "process_failed")) from None
     except Exception:
         raise CliProcessError("process_failed") from None
-    if not isinstance(result, ProbeProcessResult) or result.returncode != 0:
+    if (
+        not isinstance(result, ProbeProcessResult)
+        or isinstance(result.returncode, bool)
+        or not isinstance(result.returncode, int)
+        or not isinstance(result.stdout, bytes)
+        or not isinstance(result.stderr, bytes)
+        or len(result.stdout) > max_output_bytes
+        or len(result.stderr) > max_output_bytes
+        or isinstance(result.duration_seconds, bool)
+        or not isinstance(result.duration_seconds, (int, float))
+        or not math.isfinite(result.duration_seconds)
+        or result.duration_seconds < 0
+    ):
         raise CliProcessError("process_failed")
+    stdout_sha256 = hashlib.sha256(result.stdout).hexdigest()
+    stderr_sha256 = hashlib.sha256(result.stderr).hexdigest()
+    if result.returncode != 0:
+        classification = (
+            "signal_exit" if os.name != "nt" and result.returncode < 0 else "nonzero_exit"
+        )
+        raise CliProcessError(
+            "process_nonzero",
+            diagnostics=CliProcessFailureDiagnostics(
+                exit_classification=classification,
+                exit_code=result.returncode,
+                duration_seconds=float(result.duration_seconds),
+                stdout_sha256=stdout_sha256,
+                stderr_sha256=stderr_sha256,
+                failure_category="provider_process_failure",
+            ),
+        )
     return CliProcessResult(
         returncode=result.returncode,
         stdout=result.stdout,
         stderr=result.stderr,
         duration_seconds=result.duration_seconds,
         input_sha256=hashlib.sha256(stdin).hexdigest(),
-        stdout_sha256=hashlib.sha256(result.stdout).hexdigest(),
-        stderr_sha256=hashlib.sha256(result.stderr).hexdigest(),
+        stdout_sha256=stdout_sha256,
+        stderr_sha256=stderr_sha256,
     )
 
 

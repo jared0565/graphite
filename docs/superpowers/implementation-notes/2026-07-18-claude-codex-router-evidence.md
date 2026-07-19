@@ -150,3 +150,30 @@ changed, no raw output was persisted, and no retry or fallback occurred. Current
 Claude debug-log metadata contained no diagnostic record for the call, so the exact
 external CLI failure remains unresolved rather than inferred. The structured path
 is offline-tested but has not passed live acceptance.
+
+The bounded CLI transport now handles a completed nonzero provider process without
+asking the lower-level runner to discard its bounded streams first. It validates
+the returned transport record, hashes stdout and stderr, and propagates only an
+immutable allowlisted diagnostic record: exit classification, numeric exit code,
+duration, stdout SHA-256, stderr SHA-256, and the fixed
+`provider_process_failure` category. Raw stdout, stderr, prompts, credentials,
+paths, and provider diagnostic text are not attached to either the transport or
+adapter exception. Deterministic fake-process coverage proves that a nonzero Claude
+structured-verification exit is invoked once, is normalized to `unavailable`, and
+retains exactly those sanitized fields through the adapter boundary.
+
+Offline acceptance after this hardening passed 56 focused process/Claude/Codex
+adapter tests and the full routing selection with 371 passed, 1 skipped, and 1,144
+deselected. A final focused adapter/documentation selection passed 123 tests.
+Repository-wide Ruff and `git diff --check` passed. No Claude, Codex, credentialed
+provider, network inference, retry, or fallback was invoked by this correction.
+
+The first final graph-refresh command mistakenly inherited the repository's local
+automatic enrichment configuration and reported one local Ollama enrichment. That
+local model invocation was not authorized, is not acceptance evidence, and did not
+use Claude, Codex, provider credentials, or network inference. The mistake was
+reported immediately. The graph was then replaced by an explicit `--llm none`
+build; its manifest records `llm_mode` as `none` and `llm_status` as `disabled`, and
+the resulting fresh graph contains 6,233 nodes, 13,683 edges, and 152 files. No
+current Claude snapshot was created; production readiness remains blocked on a new
+separately approved bounded verification and the remaining live acceptance gates.

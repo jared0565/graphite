@@ -68,7 +68,10 @@ def _invoke(transport: Transport, **kwargs: object) -> CliProcessResult:
     try:
         result = transport(**kwargs)
     except CliProcessError as exc:
-        raise AdapterError(_TRANSPORT_ERRORS.get(exc.code, "unavailable")) from None
+        raise AdapterError(
+            _TRANSPORT_ERRORS.get(exc.code, "unavailable"),
+            process_diagnostics=exc.diagnostics,
+        ) from None
     except AdapterError:
         raise
     except Exception:

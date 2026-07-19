@@ -115,7 +115,7 @@ def test_run_cli_process_uses_fixed_argv_exact_environment_and_bounded_stdin(
 
     assert observed["argv"] == [sys.executable, str(FAKE_CLI), "echo"]
     assert observed["stdin"] == b"approved request"
-    assert observed["check"] is True
+    assert observed["check"] is False
     assert observed["max_input_bytes"] == 1_024
     assert observed["max_output_bytes"] == 2_048
     assert isinstance(observed["environment"], dict)
@@ -175,6 +175,53 @@ def test_process_failures_are_stable_and_never_reflect_diagnostics(
             source_environment={},
         )
     assert "PRIVATE" not in str(caught.value)
+
+
+def test_nonzero_result_preserves_only_allowlisted_hashed_diagnostics(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    credentials = _credential_home(tmp_path)
+    stdout = b'PRIVATE structured provider output {"type":"result"}'
+    stderr = b"PRIVATE provider diagnostic with a path and credential metadata"
+
+    def runner(argv: list[str], **kwargs: object) -> ProbeProcessResult:
+        assert kwargs["check"] is False
+        return ProbeProcessResult(23, stdout, stderr, 45.8)
+
+    with pytest.raises(CliProcessError, match="^process_nonzero$") as caught:
+        run_cli_process(
+            argv=(sys.executable, str(FAKE_CLI), "echo"),
+            cwd=workspace,
+            stdin=b"PRIVATE approved prompt",
+            provider=ProviderId.CLAUDE_CODE,
+            credential_home=credentials,
+            timeout_seconds=60,
+            runner=runner,
+            source_environment={},
+        )
+
+    diagnostics = caught.value.diagnostics
+    assert diagnostics is not None
+    assert diagnostics.to_dict() == {
+        "exit_classification": "nonzero_exit",
+        "exit_code": 23,
+        "duration_seconds": 45.8,
+        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+        "failure_category": "provider_process_failure",
+    }
+    serialized = repr(diagnostics.to_dict()) + repr(caught.value) + str(caught.value)
+    assert "PRIVATE" not in serialized
+    assert set(diagnostics.to_dict()) == {
+        "exit_classification",
+        "exit_code",
+        "duration_seconds",
+        "stdout_sha256",
+        "stderr_sha256",
+        "failure_category",
+    }
 
 
 def test_cancellation_and_invalid_utf8_fail_closed(tmp_path: Path) -> None:
