@@ -1292,3 +1292,100 @@ schema-valid responses, in both cases). Nothing in this result points at
 the split-call design or the prompt; it reads as an isolated transient
 transport failure rather than a structural issue. A same-design retry
 under a fresh manifest is the next step.
+
+## OpenRouter edit smoke r4: first full content, deterministic first-line truncation (2026-07-20)
+
+The operator approved bundle
+`9aae26d85e53564e29db1c01fedda7813bf5e4f4c8749d449649e2ed3c46ef5c`
+(purpose `graphite_openrouter_edit_smoke_kimi27_r4`), a byte-identical
+same-design retry of r3 (prompt and schema hashes match r3 exactly)
+under a fresh worktree (`openrouter-edit-kimi27-r4`) and a fresh
+manifest -- a pure retry-with-new-approval on the hypothesis that r3's
+first-sub-call `unavailable` was transient. Execution failed with
+`failure_category: test_validation_failed`. For the first time across
+all four rounds, *both* sub-calls completed and returned content:
+`access_py` (263 input / 401 output tokens, 1748 microunits, 6848 ms)
+and `test_access_py` (325 input / 196 output tokens, 1022 microunits,
+3249 ms); total 2770 microunits, each call under its per-call ceiling.
+The store was confirmed untouched (capability_snapshots 10,
+lifecycle_snapshot_bindings 10, telemetry_events 19, integrity ok).
+
+The failure is the r2 truncation pattern recurring: both files were
+overwritten with exactly their first line and no trailing newline.
+`src/access.py` contained only
+`def can_read_record(actor_tenant: str, record_tenant: str) -> bool:`
+(a function signature with no body -- a `SyntaxError`, so pytest cannot
+import it, which is why the test gate, not `git diff --check`, is the
+one that failed), and `tests/test_access.py` contained only
+`from src.access import can_read_record`. The r3/r4 split-call redesign
+therefore did *not* fix the truncation: r4 is the first round in which
+the split design actually produced content, and it truncated exactly as
+the single-call r2 did.
+
+### Root cause is the endpoint, not graphite (code-traced)
+
+The whole-file content path was read end to end. `execute_openrouter`
+extracts the model completion, does `json.loads(content)` and returns
+`json.dumps(structured)` -- a faithful JSON round-trip with no
+line-based logic, so a multi-line `content` string survives intact
+(newlines become `\n` escapes and back). `apply_whole_file_edit`
+writes the full `content.encode("utf-8")` bytes; there is no
+`splitlines`, first-line, or newline-boundary logic anywhere in the
+parse or apply path. The single-file schema's `content` field is
+`{"maxLength": 1048576, "type": "string"}` (a full file is permitted),
+and the prompt explicitly demands the complete runnable source with the
+original embedded between BEGIN/END markers. The 401 / 196 output
+tokens against a one-line result are `reasoning: {effort: HIGH}`
+reasoning tokens counted in `completion_tokens` -- 401 is far below the
+16,384 `max_output_tokens`, and a transport-level cap would have raised
+`response_limit` before any write rather than silently truncating. So
+the one-line `content` field arrived from OpenRouter already truncated;
+graphite reproduced it faithfully.
+
+### What "verification" actually proved -- and the decisive consequence
+
+The OpenRouter profile-verification round that promoted
+`kimi-k2.7-code` and `kimi-k2.6` as active capability snapshots did call
+`execute_openrouter` through the *same* structured-output content
+channel, but its `VERIFY_SCHEMA` field is
+`{"verification": {"const": "GRAPHITE_PROFILE_OK"}}` -- a single
+`const`-pinned field -- and it only checks
+`json.loads(result.message) == {"verification": "GRAPHITE_PROFILE_OK"}`.
+That is ~40 bytes with zero free-form generation: strict json_schema
+pins the only field to one allowed value. So "verified" establishes
+only that the endpoint returns a const acknowledgment; it is *not*
+evidence the model can emit a large free-form string field. The precise
+boundary across all evidence: strict `json_schema` structured output on
+this endpoint reliably carries a const / trivial field but does not
+carry a large free-form `content` string (r1 echoed delimiter text, r2
+and r4 truncated to line one; three distinct content failures, never
+one correct file).
+
+This matters because OpenRouter models have no local CLI. Claude and
+Codex deliver edits by writing into the worktree and letting graphite
+read the resulting diff; an OpenRouter model can only return
+work-product through this structured-output content channel. That
+channel is therefore the *only* possible edit path for any OpenRouter
+model, and it has never carried a real free-form payload. The current
+pool-readiness of the two verified models does not establish edit
+capability.
+
+### Operator decision (2026-07-20): request-shape experiment
+
+Re-running the same approved digest was ruled out: unlike r3's transient
+`unavailable`, this failure is deterministic at temperature 0 and would
+truncate identically. The operator chose a controlled request-shape
+experiment as the next step: change `execute_openrouter` to stop using
+`strict` json_schema for the content field (a `json_object` contract, or
+plain text with graphite parsing a fenced code block), changing that one
+variable while holding reasoning effort and everything else constant.
+This is simultaneously the candidate fix and the only remaining way to
+disambiguate the model itself from OpenRouter's strict-structured-output
+layer, because raw provider output is not persisted
+(`raw_provider_output_persistence: false`) and graphite cannot observe
+the completion before that layer. A full free-form file returned under
+the relaxed contract would prove the strict-structured layer was the
+cause and would fix the channel for every OpenRouter model; a repeated
+line-one truncation would localize the fault to the model. The change
+touches graphite implementation code and so requires a fresh manifest
+and explicit operator approval before any live call.
