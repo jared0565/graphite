@@ -1505,3 +1505,81 @@ which are now verification- and edit-promoted. Both can proceed to pool
 registration as edit-capable; any additional OpenRouter model added later
 should still get its own single-call json_object edit-smoke before
 edit-promotion.
+
+## OpenRouter ISOLATED_CODE edit-pool registration (offline loadability + selectability proof)
+
+2026-07-20. With both OpenRouter edit profiles promoted (r7 `kimi-k2.7-code`,
+r8 `kimi-k2.6`), this step proved -- offline, read-only, with zero store
+mutation -- that the two edit-promoted models are loadable, correctly ordered
+`ApprovedRoutePool` candidates for the ISOLATED_CODE edit category and are
+selected in order by `select_route` against their live ACTIVE
+`RouteAuthority`s. This closes the pool-coordinator gap that r7/r8 bypassed by
+calling `execute_openrouter` directly; it spent no budget and made no network
+call. Design and plan:
+`docs/superpowers/specs/2026-07-20-openrouter-pool-registration-design.md`,
+`docs/superpowers/plans/2026-07-20-openrouter-pool-registration.md`. The
+harness pair `_prepare/_execute_openrouter_pool_registration.py` follows the
+rN convention but is non-inference and read-only.
+
+Resolution recorded: the design's step 3 framed approvability as an
+`ApprovalAuthority.issue` call, but reading the code showed `issue()` calls
+`store.save_approval_record(...)`, which writes the routing store and would
+violate the `mutated: false` guarantee. The proof therefore does NOT call
+`issue()`; approvability is proven by successful `ApprovedRoutePool`
+construction, which enforces the full cross-candidate
+permission/risk/trust/capability/expiry/budget envelope. `select_route`
+requires no signature; the signed-approval path remains covered by
+`test_route_pool`/`approval` unit tests and by the out-of-scope live routed
+smoke through `execute_approved_route_pool`.
+
+Read-live was verified byte-safe before the run: both stores are already
+SQLite WAL, so the store's `journal_mode = WAL`-on-connect is a no-op on the
+main file and read-only queries append zero frames; a hash round-trip left
+both `.sqlite3` files byte-identical with no sidecars. The harness therefore
+reads the live stores directly -- no copy.
+
+The operator approved bundle
+`e9510df6e8d4feca40a54ca3b84c9019eb450bb9bdf67d999770657abd26ad20`. Execution
+**passed**. Pool composition (category ISOLATED_CODE, WORKSPACE_WRITE,
+`pool_digest 41af6a65404f93177143910d3ad24a79b334a7c72eea54495ea9b910aeecbf08`):
+
+- `candidate[0]` primary `openrouter-kimi27-code-primary` --
+  `moonshotai/kimi-k2.7-code`, edit snapshot
+  `500cda19a907c53df9433dde2ec4cab58f0aa10e109420417fbbd3bac7ec9574`, ACTIVE
+  identity `c8cece35646deec30fa9538ba998722781074027a6bdd2dabafd1986359439ab`,
+  candidate digest
+  `da0e80ea4352decc741fbefe1af23dd68788e6ba0faaaf6925817df1fec1763f`;
+  `loadable: true`, `selectable: true`, `authority_state: active`.
+- `candidate[1]` capacity fallback `openrouter-kimi26-fallback` --
+  `moonshotai/kimi-k2.6`, edit snapshot
+  `1b2a7c8e99452b1ff1132545b160e88f4f6abd7864154e05b413faa310f15936`, ACTIVE
+  identity `6333c4d577f8fcb111f57f23c4c2f6b3ab889cc3ba19edfb78cc082a63f6bade`,
+  candidate digest
+  `6f6c3b63be272a69741ced869d8f39bd54c4aa798bca69d0ce972e13054220a1`;
+  `loadable: true`, `selectable: true`, `authority_state: active`.
+
+`select_route` selected `candidate[0]` with empty attempts, and `candidate[1]`
+after one synthesized `capacity_unavailable` attempt on the primary
+(`accepted_output: false`, `side_effect_state: none`): `selection.primary =
+openrouter-kimi27-code-primary`, `selection.fallback_after_capacity_unavailable
+= openrouter-kimi26-fallback`.
+
+Decisive diagnostic -- **positive** (`diagnostic:
+edit_snapshots_directly_selectable`): each edit snapshot's
+`lifecycle_snapshot_binding` equals the current ACTIVE identity, because
+edit-promotion (`promote_bound_capability_snapshot_record`) re-bound the edit
+snapshot to the same identity that verification activated, and the edit-smoke
+path never touched the lifecycle store. No governed re-activation to the edit
+snapshot is required for these two models to be directly selectable.
+
+No store mutation: the receipt reported `mutated: false` with audit 12/12/21,
+integrity ok, 0 foreign-key violations; an independent pre/post file hash
+confirmed `events.sqlite3` unchanged at `21e73d3f...` and
+`provider-lifecycle.sqlite3` unchanged at `a99f7cc4...`, with no `-wal`/`-shm`
+sidecars left behind. The proof called neither `execute_openrouter` nor
+`ApprovalAuthority.issue`, made no network call, and required no graphite
+source change (`test_route_pool` + `test_routing_profiles` remained green, 55
+passed). `IMPLEMENTATION_COMMIT 3040c18`, feature worktree clean. Deferred
+(out of scope): the read-only review/authorization pool, a live routed smoke
+through `execute_approved_route_pool`, and the three unverified models
+(`kimi-k3`, `glm-5.2`, `muse-spark-1.1`).
