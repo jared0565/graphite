@@ -31,6 +31,9 @@ from .process_runner import (
 
 MAX_PROBE_RESPONSE_BYTES: Final = 64 * 1024
 MAX_PROBE_REQUEST_BYTES: Final = 64 * 1024
+# The OpenRouter models catalog is one bounded JSON document that legitimately
+# exceeds the metadata cap (measured 512 KiB / 338 entries on 2026-07-20).
+MAX_CATALOG_RESPONSE_BYTES: Final = 4_194_304
 MAX_INFERENCE_REQUEST_BYTES: Final = 1_048_576
 MAX_INFERENCE_RESPONSE_BYTES: Final = 4_194_304
 MAX_INFERENCE_TIMEOUT_SECONDS: Final = 600.0
@@ -104,6 +107,7 @@ _BODY_PURPOSES: Final = frozenset(
     {ProbeEndpointPurpose.OLLAMA_SHOW, ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS}
 )
 _INFERENCE_PURPOSES: Final = frozenset({ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS})
+_CATALOG_PURPOSES: Final = frozenset({ProbeEndpointPurpose.OPENROUTER_MODELS})
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,6 +346,13 @@ def _read_response(
     chunks: list[bytes] = []
     size = 0
     while True:
+        # Chunked responses (no Content-Length) end with http.client closing
+        # the socket under Connection: close; touching the dead socket again
+        # raises WinError 10038 on Windows, so stop once the response reports
+        # itself complete.
+        closed = getattr(response, "isclosed", None)
+        if callable(closed) and closed():
+            break
         transport_socket.settimeout(_remaining(deadline, clock))
         chunk = response.read(min(8192, maximum + 1 - size))
         if not isinstance(chunk, bytes):
@@ -415,7 +426,12 @@ def run_http_probe(
     inference = endpoint.purpose in _INFERENCE_PURPOSES
     timeout_ceiling = MAX_INFERENCE_TIMEOUT_SECONDS if inference else 30.0
     request_ceiling = MAX_INFERENCE_REQUEST_BYTES if inference else MAX_PROBE_REQUEST_BYTES
-    response_ceiling = MAX_INFERENCE_RESPONSE_BYTES if inference else MAX_PROBE_RESPONSE_BYTES
+    if inference:
+        response_ceiling = MAX_INFERENCE_RESPONSE_BYTES
+    elif endpoint.purpose in _CATALOG_PURPOSES:
+        response_ceiling = MAX_CATALOG_RESPONSE_BYTES
+    else:
+        response_ceiling = MAX_PROBE_RESPONSE_BYTES
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))

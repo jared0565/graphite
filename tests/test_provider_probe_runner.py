@@ -16,6 +16,7 @@ import graphite.routing.probe_runner as probe_runner_module
 from graphite.probe_process import ProbeProcessResult
 from graphite.routing.lifecycle import LifecycleProviderId
 from graphite.routing.probe_runner import (
+    MAX_CATALOG_RESPONSE_BYTES,
     MAX_INFERENCE_RESPONSE_BYTES,
     HttpProbeEndpoint,
     ProbeEndpointPurpose,
@@ -167,6 +168,80 @@ def test_openrouter_probe_pins_public_address_and_injects_credential_at_boundary
     assert connection.closed is True
 
 
+def test_chunked_response_socket_close_after_final_read_is_not_a_failure() -> None:
+    """OpenRouter sends chunked bodies; http.client closes the socket at the
+    final chunk under Connection: close, and the read loop must not touch the
+    dead socket again (live failure 2026-07-20: WinError 10038 on settimeout
+    surfaced as probe_unavailable on the first authenticated call)."""
+
+    class _ClosingSocket:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def getpeername(self) -> tuple[str, int]:
+            return ("93.184.216.34", 443)
+
+        def settimeout(self, timeout: float) -> None:
+            if self.closed:
+                raise OSError(10038, "operation on non-socket")
+            assert timeout > 0
+
+    class _ChunkedResponse:
+        def __init__(self, body: bytes, sock: _ClosingSocket) -> None:
+            self.status = 200
+            self._body = body
+            self._offset = 0
+            self._socket = sock
+            self.headers = Message()
+            self.headers["Content-Type"] = "application/json"
+
+        def read(self, amount: int) -> bytes:
+            chunk = self._body[self._offset : self._offset + amount]
+            self._offset += len(chunk)
+            if self._offset >= len(self._body):
+                self._socket.closed = True
+            return chunk
+
+        def isclosed(self) -> bool:
+            return self._offset >= len(self._body)
+
+    sock = _ClosingSocket()
+    response = _ChunkedResponse(b'{"ok":true}', sock)
+
+    class _Connection:
+        def __init__(self) -> None:
+            self.sock = sock
+
+        def connect(self) -> None:
+            return None
+
+        def request(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def getresponse(self) -> _ChunkedResponse:
+            return response
+
+        def close(self) -> None:
+            return None
+
+    endpoint = HttpProbeEndpoint(
+        LifecycleProviderId.OPENROUTER,
+        "https",
+        "openrouter.ai",
+        443,
+        ProbeEndpointPurpose.OPENROUTER_AUTH_KEY,
+    )
+    result = run_http_probe(
+        endpoint=endpoint,
+        timeout_seconds=5,
+        authorization="Bearer test-key",
+        resolver=lambda *_args, **_kwargs: _resolver("93.184.216.34"),
+        connection_factory=lambda *_args: _Connection(),
+    )
+    assert result.status_code == 200
+    assert result.body == b'{"ok":true}'
+
+
 def test_inference_purpose_allows_post_body_and_long_deadline() -> None:
     connection = _FakeConnection("93.184.216.34", _FakeResponse())
     endpoint = HttpProbeEndpoint(
@@ -208,6 +283,48 @@ def test_inference_purpose_requires_request_body() -> None:
             timeout_seconds=10.0,
             request_body=None,
             authorization="Bearer test-key",
+            resolver=lambda *_args, **_kwargs: _resolver("93.184.216.34"),
+            connection_factory=lambda *_args: connection,
+        )
+
+
+def test_models_catalog_purpose_allows_bounded_large_response() -> None:
+    body = (b'{"data":"' + b"x" * 100_000 + b'"}')
+    connection = _FakeConnection("93.184.216.34", _FakeResponse(body=body))
+    endpoint = HttpProbeEndpoint(
+        LifecycleProviderId.OPENROUTER,
+        "https",
+        "openrouter.ai",
+        443,
+        ProbeEndpointPurpose.OPENROUTER_MODELS,
+    )
+    result = run_http_probe(
+        endpoint=endpoint,
+        timeout_seconds=10.0,
+        authorization="Bearer test-key",
+        max_response_bytes=MAX_CATALOG_RESPONSE_BYTES,
+        resolver=lambda *_args, **_kwargs: _resolver("93.184.216.34"),
+        connection_factory=lambda *_args: connection,
+    )
+    assert result.status_code == 200
+    assert len(result.body) == len(body)
+
+
+def test_non_catalog_probe_purposes_keep_sixty_four_kib_response_ceiling() -> None:
+    connection = _FakeConnection("93.184.216.34", _FakeResponse())
+    endpoint = HttpProbeEndpoint(
+        LifecycleProviderId.OPENROUTER,
+        "https",
+        "openrouter.ai",
+        443,
+        ProbeEndpointPurpose.OPENROUTER_AUTH_KEY,
+    )
+    with pytest.raises(ProviderProbeError, match="^probe_request_invalid$"):
+        run_http_probe(
+            endpoint=endpoint,
+            timeout_seconds=10.0,
+            authorization="Bearer test-key",
+            max_response_bytes=64 * 1024 + 1,
             resolver=lambda *_args, **_kwargs: _resolver("93.184.216.34"),
             connection_factory=lambda *_args: connection,
         )

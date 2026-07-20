@@ -110,6 +110,24 @@ def test_completion_cost_rounds_up_in_exact_decimal() -> None:
         completion_cost_microunits(pricing, input_tokens=100_000_001, output_tokens=0)
 
 
+def test_observation_binds_catalog_response_allowance_to_models_call_only() -> None:
+    from graphite.routing.probe_runner import MAX_CATALOG_RESPONSE_BYTES
+
+    transport = _fake_transport_with_models(
+        [{"id": "moonshotai/kimi-k3", "pricing": {"prompt": "0.0000006", "completion": "0.0000025"}}]
+    )
+    observe_openrouter_with_pricing(
+        endpoint=CANONICAL_ENDPOINT, api_key="k", model_id="moonshotai/kimi-k3",
+        routing_policy={}, observed_at=1, policy_version="1.0.0",
+        transport=transport,
+    )
+    auth_call, models_call = transport.calls
+    assert auth_call["endpoint"].purpose is ProbeEndpointPurpose.OPENROUTER_AUTH_KEY
+    assert "max_response_bytes" not in auth_call
+    assert models_call["endpoint"].purpose is ProbeEndpointPurpose.OPENROUTER_MODELS
+    assert models_call["max_response_bytes"] == MAX_CATALOG_RESPONSE_BYTES
+
+
 def test_openrouter_auth_http_failure_is_sanitized_and_not_retried() -> None:
     calls = 0
 

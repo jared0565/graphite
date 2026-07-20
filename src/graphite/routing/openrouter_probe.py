@@ -11,7 +11,14 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 from .lifecycle import LifecycleProviderId, ProviderRuntimeIdentity, RuntimeKind
-from .probe_runner import HttpProbeEndpoint, HttpProbeResult, ProbeEndpointPurpose, ProviderProbeError, run_http_probe
+from .probe_runner import (
+    MAX_CATALOG_RESPONSE_BYTES,
+    HttpProbeEndpoint,
+    HttpProbeResult,
+    ProbeEndpointPurpose,
+    ProviderProbeError,
+    run_http_probe,
+)
 
 CANONICAL_ENDPOINT = "https://openrouter.ai/api/v1"
 API_CONTRACT_VERSION = "1.0.0"
@@ -109,8 +116,13 @@ def _observe(
         if remaining <= 0:
             raise ProviderProbeError("probe_timeout")
         target = HttpProbeEndpoint(LifecycleProviderId.OPENROUTER, "https", "openrouter.ai", 443, purpose)
+        allowance: dict[str, int] = (
+            {"max_response_bytes": MAX_CATALOG_RESPONSE_BYTES}
+            if purpose is ProbeEndpointPurpose.OPENROUTER_MODELS
+            else {}
+        )
         try:
-            result = transport(endpoint=target, timeout_seconds=remaining, authorization=authorization)
+            result = transport(endpoint=target, timeout_seconds=remaining, authorization=authorization, **allowance)
         except ProviderProbeError as exc:
             if purpose is ProbeEndpointPurpose.OPENROUTER_AUTH_KEY and exc.code == "probe_http_status":
                 raise ProviderProbeError("probe_auth_unhealthy") from None

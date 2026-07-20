@@ -929,3 +929,47 @@ OpenRouter has occurred: catalog probing, verification bundles, edit
 smokes, reviews, and pool registration each require a displayed manifest
 and explicit operator approval, and the store-constraint note above must
 be resolved as part of that live phase.
+
+## OpenRouter catalog-probe attempt 1: fail-closed, root-caused, fixed offline (2026-07-20)
+
+The operator approved catalog-probe bundle
+`19a889534816a7a6489db249b9a74bd990ee53374ce943384a18df865a179b9b`
+(purpose `graphite_openrouter_catalog_probe_batch`, five slugs, zero
+inference, persistence none). Execution failed closed on the first slug with
+sanitized receipt `{action: openrouter_catalog_probe_1, slug:
+moonshotai/kimi-k3, failure_category: probe_unavailable, duration_ms: 344}`;
+no receipts advanced, the store hashes were untouched, and no retry was
+performed under that manifest.
+
+Root cause (reproduced deterministically without the credential): OpenRouter
+serves chunked responses with no `Content-Length`. Under the transport's
+`Connection: close` discipline, `http.client` closes the socket when the
+final chunk is consumed, and `_read_response`'s next loop iteration called
+`settimeout` on the dead socket — `OSError` WinError 10038 on Windows —
+which the transport sanitizes to `probe_unavailable`. The path was never
+exercised live before: Ollama responses carry `Content-Length` (the
+declared-size break avoids the extra iteration), an unauthenticated auth
+call fails on HTTP status before any body read, and the offline fakes did
+not model socket closure.
+
+Two offline corrections, each test-first:
+
+- `_read_response` now stops when the response reports itself complete
+  (`isclosed`) before touching the socket again; a deterministic fake
+  reproducing the closed-socket-after-final-chunk sequence fails on the old
+  code with `probe_unavailable` and passes with the fix.
+- A second latent fault was found immediately behind the first and fixed in
+  the same pass: the live models catalog measured 524,192 bytes / 338
+  entries (diagnostic, unauthenticated, size-and-count only), exceeding the
+  64 KiB metadata cap and guaranteeing `probe_response_limit` on the next
+  attempt. The transport gains `MAX_CATALOG_RESPONSE_BYTES` (4 MiB) scoped
+  to the `OPENROUTER_MODELS` purpose only, and `observe_openrouter` passes
+  that allowance solely on the models call; every other non-inference
+  purpose keeps the exact 64 KiB / 30 s caps, and the entry-count bound
+  (2,048) is unchanged.
+
+Verification after the fixes: affected modules 86 passed; full routing
+selection 625 passed, 1 intentional skip; complete offline suite 1,784
+passed, 44 intentional skips; Ruff and `git diff --check` clean. A fresh
+catalog-probe manifest pinned to the new implementation commit is required
+before any further live attempt.
