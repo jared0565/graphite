@@ -21,6 +21,13 @@ from .process_runner import (
 )
 
 ADAPTER_PROTOCOL_VERSION: Final = "1.0.0"
+# Windows write authority depends on Codex's [windows] sandbox setting, which
+# normally lives in user config. `--ignore-user-config` strips it, so a
+# workspace-write execution must bind the sandbox mode explicitly in argv or
+# every write tool call is denied under `-a never` and the edit becomes a
+# silent no-op. The binding is passed on every platform for one deterministic
+# argv contract; non-Windows Codex ignores the [windows] section.
+WINDOWS_SANDBOX_MODE: Final = "elevated"
 PREFLIGHT_TIMEOUT_SECONDS: Final = 15.0
 EXECUTION_TIMEOUT_SECONDS: Final = 1_800.0
 MAX_EVENT_COUNT: Final = 10_000
@@ -322,6 +329,11 @@ def execute_codex(
         requested,
         "-c",
         f'model_reasoning_effort="{normalized_effort.value}"',
+        *(
+            ("-c", f'windows.sandbox="{WINDOWS_SANDBOX_MODE}"')
+            if permission is PermissionMode.WORKSPACE_WRITE
+            else ()
+        ),
         "exec",
         "--json",
         "--ephemeral",

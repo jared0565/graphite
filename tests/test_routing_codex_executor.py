@@ -185,6 +185,8 @@ def test_execution_uses_canonical_argv_and_allowlisted_jsonl(tmp_path: Path) -> 
         "gpt-5.6-codex",
         "-c",
         'model_reasoning_effort="xhigh"',
+        "-c",
+        'windows.sandbox="elevated"',
         "exec",
         "--json",
         "--ephemeral",
@@ -195,6 +197,134 @@ def test_execution_uses_canonical_argv_and_allowlisted_jsonl(tmp_path: Path) -> 
     forbidden = {"--dangerously-bypass-approvals-and-sandbox", "resume", "cloud", "--oss"}
     assert forbidden.isdisjoint(transport.calls[0]["argv"])
     assert len(transport.calls) == 1
+
+
+def test_execution_read_only_argv_omits_windows_sandbox_binding(
+    tmp_path: Path,
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    transport = ScriptedTransport(
+        [
+            _result(
+                _jsonl(
+                    {
+                        "type": "item.completed",
+                        "item": {"type": "agent_message", "text": "GRAPHITE_PROFILE_OK"},
+                    },
+                    {
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 5, "output_tokens": 2},
+                    },
+                )
+            )
+        ]
+    )
+
+    execute_codex(
+        executable=executable,
+        workspace=workspace,
+        credential_home=credentials,
+        prompt=b"verify",
+        requested_model="gpt-5.6-sol",
+        expected_effective_model="gpt-5.6-sol",
+        effort=Effort.HIGH,
+        permission_mode=PermissionMode.READ_ONLY,
+        transport=transport,
+    )
+
+    assert transport.calls[0]["argv"] == (
+        str(executable.resolve()),
+        "--strict-config",
+        "-a",
+        "never",
+        "-s",
+        "read-only",
+        "-C",
+        str(workspace.resolve()),
+        "-m",
+        "gpt-5.6-sol",
+        "-c",
+        'model_reasoning_effort="high"',
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "-",
+    )
+    assert all("windows.sandbox" not in value for value in transport.calls[0]["argv"])
+
+
+def test_execution_schema_edit_argv_binds_windows_sandbox_and_schema(
+    tmp_path: Path,
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    schema = tmp_path / "edit-schema.json"
+    schema_body = (
+        b'{"additionalProperties":false,"properties":{"result":'
+        b'{"const":"GRAPHITE_EDIT_OK","type":"string"}},'
+        b'"required":["result"],"type":"object"}'
+    )
+    schema.write_bytes(schema_body)
+    transport = ScriptedTransport(
+        [
+            _result(
+                _jsonl(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "agent_message",
+                            "text": '{"result":"GRAPHITE_EDIT_OK"}',
+                        },
+                    },
+                    {
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 9, "output_tokens": 4},
+                    },
+                )
+            )
+        ]
+    )
+
+    outcome = execute_codex(
+        executable=executable,
+        workspace=workspace,
+        credential_home=credentials,
+        prompt=b"make the approved bounded edit",
+        requested_model="gpt-5.6-sol",
+        expected_effective_model="gpt-5.6-sol",
+        effort=Effort.HIGH,
+        permission_mode=PermissionMode.WORKSPACE_WRITE,
+        output_schema_path=schema,
+        output_schema_sha256=hashlib.sha256(schema_body).hexdigest(),
+        transport=transport,
+    )
+
+    assert outcome.message == '{"result":"GRAPHITE_EDIT_OK"}'
+    assert transport.calls[0]["argv"] == (
+        str(executable.resolve()),
+        "--strict-config",
+        "-a",
+        "never",
+        "-s",
+        "workspace-write",
+        "-C",
+        str(workspace.resolve()),
+        "-m",
+        "gpt-5.6-sol",
+        "-c",
+        'model_reasoning_effort="high"',
+        "-c",
+        'windows.sandbox="elevated"',
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--output-schema",
+        str(schema.resolve()),
+        "-",
+    )
 
 
 def test_execution_binds_full_requested_slug_when_terminal_omits_model(

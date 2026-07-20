@@ -592,3 +592,46 @@ worktree remains clean. Three installed Codex models have now passed verificatio
 but two independent edit smokes (`gpt-5.6-sol` and `gpt-5.6-terra`) produced no
 change, while Spark exceeded the hard input budget. Production readiness remains
 blocked on a verified Codex edit smoke.
+
+## Codex no-op edit root cause and offline argv correction
+
+Offline diagnosis on 2026-07-20 identified why every Codex edit smoke made no
+filesystem change while read-only verifications passed. The installed Codex
+0.144.6 enables its Windows write-capable sandbox only through the user
+configuration key `[windows] sandbox = "elevated"` in the operator's
+`CODEX_HOME/config.toml`. The immutable execution argv passes
+`--ignore-user-config`, which strips that enablement from every bounded exec
+child. Codex's own local sandbox logs show constant successful
+`codex-windows-sandbox-setup.exe` write-ACE grants for interactive sessions and
+zero sandbox engagements for any harness exec child or edit worktree, ever.
+Without the sandbox, and with `-a never` making escalation impossible, every
+write tool call is auto-denied: `gpt-5.6-sol` and `gpt-5.6-terra` completed
+their turns and returned the schema-bound terminal message without writing
+(empty diff, `edit_diff_mismatch`), while `gpt-5.3-codex-spark` repeatedly
+fought the denials across turns until cumulative input usage (263,655 tokens)
+exceeded its approved budget. No raw provider output was read or persisted
+during this diagnosis, and no provider, network inference, retry, fallback, or
+substitution was invoked.
+
+The offline correction binds the Windows sandbox mode explicitly in the
+immutable argv: a workspace-write execution now appends
+`-c windows.sandbox="elevated"` after the reasoning-effort override, on every
+platform, so the contract remains deterministic and survives
+`--ignore-user-config` under `--strict-config`. Read-only argv is byte-for-byte
+unchanged from the contract that passed live verification. Budgets were not
+weakened, empty diffs still fail closed at both the harness diff comparison and
+the `profile_edit_smoke_diff_invalid` promotion boundary, and over-budget usage
+still fails closed before any write authority exists.
+
+Deterministic fake-process acceptance now asserts the exact workspace-write
+argv including the sandbox binding, the exact schema-bound edit argv with
+`--output-schema`, and the exact read-only argv with the binding absent. The
+focused adapter, process-runner, and profile selection passed 89 tests. The
+full routing, lifecycle, probe, route-pool, daemon, and overlay selection
+passed 659 tests with 5 intentional skips, and the complete offline suite
+passed 1,710 tests with 44 intentional skips. Repository-wide Ruff over `src`
+and `tests` and `git diff --check` passed. The canonical `--llm none` rebuild is
+fresh with 7,508 nodes, 16,713 edges, 161 communities, and 183 scanned files.
+This correction is offline only: the next Codex edit smoke still requires a
+complete fresh manifest and explicit operator approval, and production
+readiness remains blocked on that live acceptance.
