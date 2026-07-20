@@ -7,6 +7,8 @@ import math
 import re
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 from .lifecycle import LifecycleProviderId, ProviderRuntimeIdentity, RuntimeKind
 from .probe_runner import HttpProbeEndpoint, HttpProbeResult, ProbeEndpointPurpose, ProviderProbeError, run_http_probe
@@ -14,6 +16,7 @@ from .probe_runner import HttpProbeEndpoint, HttpProbeResult, ProbeEndpointPurpo
 CANONICAL_ENDPOINT = "https://openrouter.ai/api/v1"
 API_CONTRACT_VERSION = "1.0.0"
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}/[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$")
+_PRICE = re.compile(r"^(0|[0-9]{1,10}(\.[0-9]{1,18})?|\.[0-9]{1,18})$")
 HttpProbe = Callable[..., HttpProbeResult]
 
 
@@ -36,12 +39,61 @@ def _json(result: HttpProbeResult) -> object:
         raise ProviderProbeError("probe_protocol_invalid") from None
 
 
-def observe_openrouter(
+@dataclass(frozen=True, slots=True)
+class OpenRouterPricing:
+    """Catalog-reported per-token USD prices as exact decimal strings."""
+
+    prompt: str
+    completion: str
+
+    def __post_init__(self) -> None:
+        for value in (self.prompt, self.completion):
+            if (
+                not isinstance(value, str)
+                or len(value) > 64
+                or _PRICE.fullmatch(value) is None
+            ):
+                raise ProviderProbeError("probe_protocol_invalid")
+            try:
+                parsed = Decimal(value)
+            except InvalidOperation:
+                raise ProviderProbeError("probe_protocol_invalid") from None
+            if not Decimal(0) <= parsed <= Decimal(1):
+                raise ProviderProbeError("probe_protocol_invalid")
+
+    @property
+    def digest(self) -> str:
+        return _digest({"completion": self.completion, "prompt": self.prompt})
+
+
+@dataclass(frozen=True, slots=True)
+class OpenRouterObservation:
+    identity: ProviderRuntimeIdentity
+    pricing: OpenRouterPricing
+
+
+def completion_cost_microunits(
+    pricing: OpenRouterPricing, *, input_tokens: int, output_tokens: int
+) -> int:
+    """Ceiling of the exact-decimal USD cost expressed in microunits."""
+    if not isinstance(pricing, OpenRouterPricing):
+        raise ProviderProbeError("probe_request_invalid")
+    for value in (input_tokens, output_tokens):
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100_000_000:
+            raise ProviderProbeError("probe_request_invalid")
+    cost = (
+        Decimal(input_tokens) * Decimal(pricing.prompt)
+        + Decimal(output_tokens) * Decimal(pricing.completion)
+    ) * Decimal(1_000_000)
+    whole = int(cost)
+    return whole if cost == whole else whole + 1
+
+
+def _observe(
     *, endpoint: str, api_key: str, model_id: str, routing_policy: Mapping[str, object],
     observed_at: int, policy_version: str, timeout_seconds: float = 10.0,
     transport: HttpProbe = run_http_probe, clock: Callable[[], float] = time.monotonic,
-) -> ProviderRuntimeIdentity:
-    """Observe exact OpenRouter auth/model metadata; never invoke inference."""
+) -> tuple[ProviderRuntimeIdentity, dict[str, object]]:
     if endpoint != CANONICAL_ENDPOINT:
         raise ProviderProbeError("probe_endpoint_invalid")
     if not isinstance(api_key, str) or not api_key or len(api_key) > 4096 or any(char in api_key for char in "\r\n\x00") or not isinstance(model_id, str) or _MODEL_ID.fullmatch(model_id) is None or not isinstance(routing_policy, Mapping):
@@ -74,10 +126,51 @@ def observe_openrouter(
     data = models.get("data") if isinstance(models, dict) else None
     if not isinstance(data, list) or len(data) > 2048:
         raise ProviderProbeError("probe_protocol_invalid")
-    identifiers = [item.get("id") for item in data if isinstance(item, dict) and isinstance(item.get("id"), str)]
-    if model_id not in identifiers:
+    matched = next(
+        (
+            item
+            for item in data
+            if isinstance(item, dict) and item.get("id") == model_id
+        ),
+        None,
+    )
+    if matched is None:
         raise ProviderProbeError("probe_model_unavailable")
     try:
-        return ProviderRuntimeIdentity(LifecycleProviderId.OPENROUTER, RuntimeKind.REMOTE_HTTPS, API_CONTRACT_VERSION, hashlib.sha256(endpoint.encode("ascii")).hexdigest(), _digest(model_id), routing_digest, ("credential_health", "models_metadata"), policy_version, observed_at)
+        identity = ProviderRuntimeIdentity(LifecycleProviderId.OPENROUTER, RuntimeKind.REMOTE_HTTPS, API_CONTRACT_VERSION, hashlib.sha256(endpoint.encode("ascii")).hexdigest(), _digest(model_id), routing_digest, ("credential_health", "models_metadata"), policy_version, observed_at)
     except ValueError:
         raise ProviderProbeError("probe_request_invalid") from None
+    return identity, matched
+
+
+def observe_openrouter(
+    *, endpoint: str, api_key: str, model_id: str, routing_policy: Mapping[str, object],
+    observed_at: int, policy_version: str, timeout_seconds: float = 10.0,
+    transport: HttpProbe = run_http_probe, clock: Callable[[], float] = time.monotonic,
+) -> ProviderRuntimeIdentity:
+    """Observe exact OpenRouter auth/model metadata; never invoke inference."""
+    return _observe(
+        endpoint=endpoint, api_key=api_key, model_id=model_id,
+        routing_policy=routing_policy, observed_at=observed_at,
+        policy_version=policy_version, timeout_seconds=timeout_seconds,
+        transport=transport, clock=clock,
+    )[0]
+
+
+def observe_openrouter_with_pricing(
+    *, endpoint: str, api_key: str, model_id: str, routing_policy: Mapping[str, object],
+    observed_at: int, policy_version: str, timeout_seconds: float = 10.0,
+    transport: HttpProbe = run_http_probe, clock: Callable[[], float] = time.monotonic,
+) -> OpenRouterObservation:
+    """Observe auth/model metadata and bind the catalog's exact pricing; never invoke inference."""
+    identity, entry = _observe(
+        endpoint=endpoint, api_key=api_key, model_id=model_id,
+        routing_policy=routing_policy, observed_at=observed_at,
+        policy_version=policy_version, timeout_seconds=timeout_seconds,
+        transport=transport, clock=clock,
+    )
+    raw = entry.get("pricing")
+    if not isinstance(raw, dict):
+        raise ProviderProbeError("probe_protocol_invalid")
+    pricing = OpenRouterPricing(prompt=raw.get("prompt"), completion=raw.get("completion"))
+    return OpenRouterObservation(identity, pricing)
