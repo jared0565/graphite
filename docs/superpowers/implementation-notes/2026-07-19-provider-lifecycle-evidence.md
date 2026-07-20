@@ -720,7 +720,30 @@ output tokens, so the earlier 120-second bound killed it mid-generation. The
 responses, not a thinking-inclusive high-risk review. The replacement
 manifest proposes an 8,192-token review output maximum — a bounded increase
 subject to separate explicit operator approval, not a harness-side
-relaxation — with every other limit unchanged. The canonical `--llm none` rebuild is
+relaxation — with every other limit unchanged.
+
+The separately approved 8,192-token replacement
+(`graphite_claude_review_completion_r9`, bundle
+`81196e83137cf2718ef88dd383db38ea90d63aff509a19a5eda6c88e235427d5`,
+implementation commit `cfff02dafaa2429acd38098f2e6b3cd1b59db34d`) also
+completed without timing out or tripping the turn bound and again failed
+closed as `review_budget_exceeded`. Sanitized receipt evidence is: effective
+model `claude-sonnet-5`; duration 211,047 milliseconds; usage 6 input and
+8,242 output tokens; stdout SHA-256
+`1a4e35e3085804d19b0800b22ad8f3bc1301e9112ea64f5a9f3dc22a6e2b2c15`; stderr
+SHA-256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+No terminal message was inspected, nothing was persisted, the stores remained
+byte-identical and integrity-clean, the review worktree remained clean, and
+there was no retry, fallback, resume, substitution, merge, push, or
+deployment.
+
+Two clean completions now measure the true high-effort review workload at
+5,002 and 8,242 thinking-inclusive output tokens with matching duration
+growth, demonstrating high run-to-run variance rather than a loop or
+truncation defect. The next manifest proposes a 16,384-token review output
+maximum — roughly twice the worst observed sample — and a 480-second
+timeout, both explicit operator-approval items, with attempts, input, tools,
+turn bound, and every persistence rule unchanged. The canonical `--llm none` rebuild is
 fresh with 7,508 nodes, 16,713 edges, 161 communities, and 183 scanned files.
 This correction is offline only: the next Codex edit smoke still requires a
 complete fresh manifest and explicit operator approval, and production
