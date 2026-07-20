@@ -1469,3 +1469,39 @@ independent of the contract question. The two verified models
 (`kimi-k2.7-code`, now also edit-promoted, and `kimi-k2.6`) can proceed
 to pool registration; a future edit-smoke for `kimi-k2.6` should reuse
 this single-call json_object shape.
+
+## OpenRouter edit smoke r8: kimi-k2.6 edit-promoted, fix proven on a second model -- PASSED (2026-07-20)
+
+r8 reused r7's single-call json_object shape unchanged -- same prompt and
+schema byte-for-byte -- with the model swapped to `moonshotai/kimi-k2.6`
+and the manifest re-pinned to the post-r7 state (implementation commit
+`29ee64a`, existing store contract 11/11/20, current routing-store hash;
+the lifecycle store is untouched by the edit-smoke path). No graphite
+change was needed. The cost ceiling was recomputed from k2.6's own
+(cheaper) pricing.
+
+The operator approved bundle
+`579c69e41b42c76cdb159e30c87cb5f256f62465efee4af69e84104588fd43db`.
+Execution **passed**: a single json_object completion (414 input / 3281
+output tokens -- k2.6 spent far more reasoning than k2.7-code's 451, and
+took 42.6 s vs 7.5 s -- 11505 microunits) returned complete, correct
+source for both files; `apply_whole_file_edit` wrote exactly the two
+scoped files (`changed_file_count` 2, `changed_byte_count` 1007); git
+diff --check was clean and pytest passed (`validation_outcome: passed`).
+The edit profile for `moonshotai/kimi-k2.6` was promoted
+(`capability_snapshot_digest 1b2a7c8e99452b1ff1132545b160e88f4f6abd7864154e05b413faa310f15936`),
+and the final audit confirmed the store moved 11/11/20 -> 12/12/21 with
+integrity ok and no foreign-key violations.
+
+The decisive corroboration: r8's `diff_sha256` is
+`005f1ae8ae072d35b003b3804cb9b3c0dee49058f4e488eddb3cb3031702b93e` --
+**byte-identical to r7's**. Two different OpenRouter models produced the
+exact same edit, which both validates the pinned reference diff for
+cross-provider review and strengthens the causal finding: the json_object
+contract, not any model-specific behaviour, is what carries a complete
+free-form edit. The shared-channel fix is now proven on two of two
+governed OpenRouter models (`kimi-k2.7-code` r7, `kimi-k2.6` r8), both of
+which are now verification- and edit-promoted. Both can proceed to pool
+registration as edit-capable; any additional OpenRouter model added later
+should still get its own single-call json_object edit-smoke before
+edit-promotion.
