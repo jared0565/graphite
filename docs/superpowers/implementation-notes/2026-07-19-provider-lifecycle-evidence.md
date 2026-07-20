@@ -743,7 +743,30 @@ growth, demonstrating high run-to-run variance rather than a loop or
 truncation defect. The next manifest proposes a 16,384-token review output
 maximum — roughly twice the worst observed sample — and a 480-second
 timeout, both explicit operator-approval items, with attempts, input, tools,
-turn bound, and every persistence rule unchanged. The canonical `--llm none` rebuild is
+turn bound, and every persistence rule unchanged.
+
+The separately approved 16,384-token, 480-second replacement
+(`graphite_claude_review_completion_r10`, bundle
+`6cbc81cde9e1c7cf28f917e750bbcd700647d6262681a9b63b2f112871bbce36`,
+implementation commit `e63962dcbf5ff5ec2cb7521f1cea8d9769ad93ba`) completed
+within every bound and failed closed as `review_not_accepted`. Sanitized
+receipt evidence is: effective model `claude-sonnet-5`; duration 76,171
+milliseconds; usage 10 input and 6,110 output tokens; stdout SHA-256
+`40ced7b5abe21f8f6183915a0348ee4fb39694c04f238518b16c583b658cb2cb`; stderr
+SHA-256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+The review worktree remained clean, so the terminal message was either a
+findings verdict or not exactly the required JSON object; the harness
+discarded which, reported no verdict detail, and persisted nothing. The
+stores remained byte-identical and integrity-clean, and there was no retry,
+fallback, resume, substitution, merge, push, or deployment.
+
+Because the review response contract sanitizes findings by construction —
+each finding carries only a category enum, a severity enum, and an opaque
+summary SHA-256 — the next harness reports the parsed verdict and any
+shape-valid findings as allowlisted failure evidence, and distinguishes a
+parse failure from a findings verdict. Acceptance criteria, bounds, and
+persistence rules are unchanged; a findings verdict still fails closed and
+is put to the operator. The canonical `--llm none` rebuild is
 fresh with 7,508 nodes, 16,713 edges, 161 communities, and 183 scanned files.
 This correction is offline only: the next Codex edit smoke still requires a
 complete fresh manifest and explicit operator approval, and production
