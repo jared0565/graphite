@@ -167,9 +167,19 @@ def execute_openrouter(
     max_output_tokens: int,
     max_cost_microunits: int,
     timeout_seconds: float,
+    response_format_type: str = "json_schema",
     transport: HttpProbe = run_http_probe,
 ) -> OpenRouterExecutionResult:
-    """Perform exactly one bounded, schema-bound chat completion; no retries."""
+    """Perform exactly one bounded, schema-bound chat completion; no retries.
+
+    ``response_format_type`` selects the provider response contract:
+    ``"json_schema"`` (default) sends the strict json_schema block;
+    ``"json_object"`` sends only ``{"type": "json_object"}``. The output
+    schema is canonicalized and its digest pinned in both modes -- json_object
+    simply does not forward the schema to the provider as an enforcement
+    mechanism. Response parsing (``json.loads`` of the completion content) is
+    identical for both, so switching modes changes exactly one variable.
+    """
     if not isinstance(api_key, str) or not api_key:
         raise AdapterError("auth_required")
     if len(api_key) > 4096 or any(character in api_key for character in "\r\n\x00"):
@@ -191,6 +201,8 @@ def execute_openrouter(
     except (TypeError, ValueError):
         raise AdapterError("request_invalid") from None
     if normalized_effort not in _EXECUTION_EFFORTS:
+        raise AdapterError("request_invalid")
+    if response_format_type not in ("json_schema", "json_object"):
         raise AdapterError("request_invalid")
     if not isinstance(output_schema, dict) or not output_schema:
         raise AdapterError("request_invalid")
@@ -222,19 +234,23 @@ def execute_openrouter(
         or not 0.1 <= timeout_seconds <= MAX_INFERENCE_TIMEOUT_SECONDS
     ):
         raise AdapterError("request_invalid")
-    payload = {
-        "max_tokens": max_output_tokens,
-        "messages": [{"content": prompt_text, "role": "user"}],
-        "model": requested,
-        "reasoning": {"effort": normalized_effort.value},
-        "response_format": {
+    if response_format_type == "json_schema":
+        response_format: dict[str, object] = {
             "json_schema": {
                 "name": "graphite_response",
                 "schema": output_schema,
                 "strict": True,
             },
             "type": "json_schema",
-        },
+        }
+    else:
+        response_format = {"type": "json_object"}
+    payload = {
+        "max_tokens": max_output_tokens,
+        "messages": [{"content": prompt_text, "role": "user"}],
+        "model": requested,
+        "reasoning": {"effort": normalized_effort.value},
+        "response_format": response_format,
         "stream": False,
         "temperature": 0,
         "usage": {"include": True},

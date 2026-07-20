@@ -190,6 +190,50 @@ def test_execute_builds_canonical_schema_bound_request_and_returns_canonical_jso
     assert "GRAPHITE_EDIT_OK" not in repr(outcome)
 
 
+def test_execute_json_object_mode_relaxes_response_format_only() -> None:
+    transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}'))
+    outcome = _execute(transport, response_format_type="json_object")
+    # Parsing and the returned canonical JSON are unchanged from strict mode.
+    assert outcome.message == '{"result":"GRAPHITE_EDIT_OK"}'
+    assert outcome.input_tokens == 100
+    assert outcome.output_tokens == 50
+    assert len(transport.calls) == 1
+    body = json.loads(transport.request_body)
+    # The ONLY change: the provider receives json_object mode, no schema block.
+    assert body["response_format"] == {"type": "json_object"}
+    # Everything else is held constant (single-variable experiment).
+    assert body["temperature"] == 0
+    assert body["stream"] is False
+    assert body["model"] == "moonshotai/kimi-k3"
+    assert body["max_tokens"] == 4096
+    assert body["reasoning"] == {"effort": "high"}
+    assert body["messages"] == [{"content": "do the approved task", "role": "user"}]
+    assert body["usage"] == {"include": True}
+    assert transport.request_body == json.dumps(
+        body, sort_keys=True, separators=(",", ":")
+    ).encode()
+
+
+def test_execute_still_pins_schema_digest_in_json_object_mode() -> None:
+    # Governance is preserved: the schema is still canonicalized and pinned even
+    # though it is no longer sent to the provider as an enforcement mechanism.
+    transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}'))
+    with pytest.raises(AdapterError, match="^request_invalid$"):
+        _execute(
+            transport,
+            response_format_type="json_object",
+            output_schema_sha256="0" * 64,
+        )
+    assert transport.calls == []
+
+
+def test_execute_rejects_unknown_response_format_type() -> None:
+    transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}'))
+    with pytest.raises(AdapterError, match="^request_invalid$"):
+        _execute(transport, response_format_type="fenced_text")
+    assert transport.calls == []
+
+
 def test_execute_fails_closed_over_cost_ceiling() -> None:
     transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}'))
     with pytest.raises(AdapterError, match="^cost_ceiling_exceeded$"):
