@@ -26,7 +26,7 @@ from .contracts import (
     TaskCategory,
 )
 
-SCHEMA_VERSION: Final = "5"
+SCHEMA_VERSION: Final = "6"
 BUSY_TIMEOUT_MS: Final = 2_000
 DEFAULT_RECOVERY_PAGE_SIZE: Final = 50
 MAX_RECOVERY_PAGE_SIZE: Final = 100
@@ -251,6 +251,71 @@ def _secure_file(path: Path) -> None:
         raise StorageError("storage_unavailable") from exc
 
 
+_CAPABILITY_SNAPSHOTS_DDL: Final = """CREATE TABLE IF NOT EXISTS capability_snapshots (
+        capability_snapshot_digest TEXT PRIMARY KEY CHECK(
+            length(capability_snapshot_digest) = 64
+            AND capability_snapshot_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex', 'openrouter')),
+        requested_model TEXT NOT NULL,
+        effective_model TEXT NOT NULL,
+        effort TEXT NOT NULL CHECK(effort IN ('default', 'low', 'medium', 'high', 'xhigh', 'max')),
+        executable_sha256 TEXT NOT NULL CHECK(
+            length(executable_sha256) = 64
+            AND executable_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        cli_version TEXT NOT NULL,
+        adapter_protocol_version TEXT NOT NULL,
+        permission_mode TEXT NOT NULL CHECK(permission_mode IN ('read-only', 'workspace-write')),
+        payload_json TEXT NOT NULL,
+        verified_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL CHECK(expires_at > verified_at)
+    )"""
+_CAPABILITY_SNAPSHOTS_COLUMNS: Final = (
+    "capability_snapshot_digest, provider, requested_model, effective_model, "
+    "effort, executable_sha256, cli_version, adapter_protocol_version, "
+    "permission_mode, payload_json, verified_at, expires_at"
+)
+_CLI_EXECUTION_ATTEMPTS_DDL: Final = """CREATE TABLE IF NOT EXISTS cli_execution_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        approval_id TEXT NOT NULL UNIQUE REFERENCES approvals(approval_id) ON DELETE RESTRICT,
+        task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
+        decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE RESTRICT,
+        worktree_id TEXT NOT NULL REFERENCES task_worktrees(worktree_id) ON DELETE RESTRICT,
+        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex', 'openrouter')),
+        requested_model TEXT NOT NULL,
+        effective_model TEXT NOT NULL,
+        effort TEXT NOT NULL CHECK(effort IN ('default', 'low', 'medium', 'high', 'xhigh', 'max')),
+        cli_version TEXT NOT NULL,
+        executable_sha256 TEXT NOT NULL CHECK(
+            length(executable_sha256) = 64
+            AND executable_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        capability_snapshot_digest TEXT NOT NULL REFERENCES capability_snapshots(capability_snapshot_digest) ON DELETE RESTRICT,
+        manifest_hash TEXT NOT NULL CHECK(
+            length(manifest_hash) = 64 AND manifest_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        expected_prompt_hash TEXT NOT NULL CHECK(
+            length(expected_prompt_hash) = 64 AND expected_prompt_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        reserved_tokens INTEGER NOT NULL CHECK(reserved_tokens > 0),
+        status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'failed', 'persistence_failed', 'quarantined')),
+        failure_reason TEXT,
+        execution_id TEXT UNIQUE REFERENCES executions(execution_id) ON DELETE RESTRICT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )"""
+_CLI_EXECUTION_ATTEMPTS_COLUMNS: Final = (
+    "attempt_id, approval_id, task_id, decision_id, worktree_id, provider, "
+    "requested_model, effective_model, effort, cli_version, executable_sha256, "
+    "capability_snapshot_digest, manifest_hash, expected_prompt_hash, "
+    "reserved_tokens, status, failure_reason, execution_id, created_at, updated_at"
+)
+_PRE_V6_WIDENED_TABLES: Final = {
+    "capability_snapshots": (_CAPABILITY_SNAPSHOTS_DDL, _CAPABILITY_SNAPSHOTS_COLUMNS),
+    "cli_execution_attempts": (_CLI_EXECUTION_ATTEMPTS_DDL, _CLI_EXECUTION_ATTEMPTS_COLUMNS),
+}
+
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     """CREATE TABLE IF NOT EXISTS tasks (
@@ -423,26 +488,7 @@ _SCHEMA = (
         refreshed_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL
     )""",
-    """CREATE TABLE IF NOT EXISTS capability_snapshots (
-        capability_snapshot_digest TEXT PRIMARY KEY CHECK(
-            length(capability_snapshot_digest) = 64
-            AND capability_snapshot_digest NOT GLOB '*[^0-9a-f]*'
-        ),
-        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex', 'openrouter')),
-        requested_model TEXT NOT NULL,
-        effective_model TEXT NOT NULL,
-        effort TEXT NOT NULL CHECK(effort IN ('default', 'low', 'medium', 'high', 'xhigh', 'max')),
-        executable_sha256 TEXT NOT NULL CHECK(
-            length(executable_sha256) = 64
-            AND executable_sha256 NOT GLOB '*[^0-9a-f]*'
-        ),
-        cli_version TEXT NOT NULL,
-        adapter_protocol_version TEXT NOT NULL,
-        permission_mode TEXT NOT NULL CHECK(permission_mode IN ('read-only', 'workspace-write')),
-        payload_json TEXT NOT NULL,
-        verified_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL CHECK(expires_at > verified_at)
-    )""",
+    _CAPABILITY_SNAPSHOTS_DDL,
     """CREATE TABLE IF NOT EXISTS task_worktrees (
         worktree_id TEXT PRIMARY KEY,
         task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
@@ -458,35 +504,7 @@ _SCHEMA = (
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
     )""",
-    """CREATE TABLE IF NOT EXISTS cli_execution_attempts (
-        attempt_id TEXT PRIMARY KEY,
-        approval_id TEXT NOT NULL UNIQUE REFERENCES approvals(approval_id) ON DELETE RESTRICT,
-        task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
-        decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE RESTRICT,
-        worktree_id TEXT NOT NULL REFERENCES task_worktrees(worktree_id) ON DELETE RESTRICT,
-        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex', 'openrouter')),
-        requested_model TEXT NOT NULL,
-        effective_model TEXT NOT NULL,
-        effort TEXT NOT NULL CHECK(effort IN ('default', 'low', 'medium', 'high', 'xhigh', 'max')),
-        cli_version TEXT NOT NULL,
-        executable_sha256 TEXT NOT NULL CHECK(
-            length(executable_sha256) = 64
-            AND executable_sha256 NOT GLOB '*[^0-9a-f]*'
-        ),
-        capability_snapshot_digest TEXT NOT NULL REFERENCES capability_snapshots(capability_snapshot_digest) ON DELETE RESTRICT,
-        manifest_hash TEXT NOT NULL CHECK(
-            length(manifest_hash) = 64 AND manifest_hash NOT GLOB '*[^0-9a-f]*'
-        ),
-        expected_prompt_hash TEXT NOT NULL CHECK(
-            length(expected_prompt_hash) = 64 AND expected_prompt_hash NOT GLOB '*[^0-9a-f]*'
-        ),
-        reserved_tokens INTEGER NOT NULL CHECK(reserved_tokens > 0),
-        status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'failed', 'persistence_failed', 'quarantined')),
-        failure_reason TEXT,
-        execution_id TEXT UNIQUE REFERENCES executions(execution_id) ON DELETE RESTRICT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-    )""",
+    _CLI_EXECUTION_ATTEMPTS_DDL,
     """CREATE TABLE IF NOT EXISTS validation_results (
         attempt_id TEXT PRIMARY KEY REFERENCES cli_execution_attempts(attempt_id) ON DELETE RESTRICT,
         diff_hash TEXT NOT NULL CHECK(
@@ -814,6 +832,12 @@ class RepositoryStore:
     def schema_v4_backup_marker_path(self) -> Path:
         return self.path.parent / "backups" / "events-schema-v4.sha256.json"
 
+    def _pre_v6_backup_path(self, source_version: str) -> Path:
+        return self.path.parent / "backups" / f"events-schema-v{source_version}-pre-v6.sqlite3"
+
+    def _pre_v6_backup_marker_path(self, source_version: str) -> Path:
+        return self.path.parent / "backups" / f"events-schema-v{source_version}-pre-v6.sha256.json"
+
     def _connect(self) -> sqlite3.Connection:
         try:
             connection = sqlite3.connect(
@@ -832,6 +856,7 @@ class RepositoryStore:
     def initialize(self) -> None:
         _secure_repository_directory(self.root, self.path.parent)
         _validate_database_file(self.path)
+        self._migrate_pre_v6_provider_widening()
         connection: sqlite3.Connection | None = None
         try:
             connection = self._connect()
@@ -841,10 +866,12 @@ class RepositoryStore:
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()
             if existing_version is not None and existing_version[0] not in {
-                "1", "2", "3", "4", SCHEMA_VERSION
+                "1", "2", "3", "4", "5", SCHEMA_VERSION
             }:
                 raise StorageError("storage_schema_unsupported")
             if existing_version is not None and existing_version[0] == SCHEMA_VERSION:
+                self._validate_v6_schema(connection)
+            if existing_version is not None and existing_version[0] == "5":
                 self._validate_v5_schema(connection)
             if existing_version is not None and existing_version[0] == "1":
                 self._migrate_v1_attempts(connection)
@@ -1055,6 +1082,99 @@ class RepositoryStore:
         }
         if not required_tables <= existing_tables:
             raise StorageError("storage_rollback_required")
+
+    @staticmethod
+    def _validate_v6_schema(connection: sqlite3.Connection) -> None:
+        RepositoryStore._validate_v5_schema(connection)
+        for table in _PRE_V6_WIDENED_TABLES:
+            row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if row is None or "'openrouter'" not in str(row[0]):
+                raise StorageError("storage_rollback_required")
+
+    def _migrate_pre_v6_provider_widening(self) -> None:
+        """Rebuild the two provider-constrained tables to admit 'openrouter'.
+
+        Runs on a dedicated connection before the main initialize transaction
+        because both tables are foreign-key parents: the rebuild copies rows
+        aside, recreates each table under its original name (so child
+        REFERENCES clauses are never rewritten), and restores the rows, with
+        foreign-key enforcement off for the duration and a full
+        foreign_key_check before commit. Guard triggers dropped with the old
+        tables are recreated by the normal schema pass that follows.
+        """
+        if not self.path.exists():
+            return
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                self.path,
+                timeout=self.busy_timeout_ms / 1_000,
+                isolation_level=None,
+            )
+            try:
+                version = connection.execute(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'"
+                ).fetchone()
+            except sqlite3.Error:
+                return
+            if version is None or version[0] not in {"4", "5"}:
+                return
+            table_sql: dict[str, str] = {}
+            for table in _PRE_V6_WIDENED_TABLES:
+                row = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                if row is None:
+                    return
+                table_sql[table] = str(row[0])
+            if all("'openrouter'" in sql for sql in table_sql.values()):
+                return
+            self._create_schema_backup(
+                source_version=version[0],
+                backup=self._pre_v6_backup_path(version[0]),
+                marker=self._pre_v6_backup_marker_path(version[0]),
+            )
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute("BEGIN IMMEDIATE")
+            for table, (ddl, columns) in _PRE_V6_WIDENED_TABLES.items():
+                before = connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0]
+                connection.execute(
+                    f"CREATE TABLE {table}_pre_v6_copy AS SELECT * FROM {table}"
+                )
+                connection.execute(f"DROP TABLE {table}")
+                connection.execute(ddl)
+                connection.execute(
+                    f"INSERT INTO {table} ({columns}) "
+                    f"SELECT {columns} FROM {table}_pre_v6_copy"
+                )
+                connection.execute(f"DROP TABLE {table}_pre_v6_copy")
+                after = connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0]
+                if before != after:
+                    raise StorageError("storage_migration_quarantined")
+            if connection.execute("PRAGMA foreign_key_check").fetchall():
+                raise StorageError("storage_migration_quarantined")
+            connection.execute("COMMIT")
+            if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                raise StorageError("storage_corrupt")
+        except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
 
     @staticmethod
     def _validate_v4_core_schema(connection: sqlite3.Connection) -> None:

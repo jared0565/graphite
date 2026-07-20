@@ -144,7 +144,7 @@ def test_schema_migration_is_idempotent_and_enables_safety_pragmas(tmp_path: Pat
         "execution_attempts",
         "execution_receipts",
     } <= tables
-    assert version == "5"
+    assert version == "6"
     assert attempt_columns["max_input_tokens"] == 1
     assert attempt_columns["max_output_tokens"] == 1
     assert attempt_columns["expected_prompt_hash"] == 1
@@ -218,7 +218,7 @@ def test_schema_v3_compatibility_fixture_reconstructs_digest_contract(
     assert "inventory_digest" in staged_columns
 
 
-def test_v3_to_v5_creates_verified_backup_and_quarantines_live_ollama_attempts(
+def test_v3_to_current_creates_verified_backup_and_quarantines_live_ollama_attempts(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "project"
@@ -278,7 +278,7 @@ def test_v3_to_v5_creates_verified_backup_and_quarantines_live_ollama_attempts(
     with sqlite3.connect(store.path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("5",)
+        ).fetchone() == ("6",)
         assert connection.execute(
             "SELECT status,failure_reason FROM execution_attempts "
             "WHERE attempt_id='attempt-legacy'"
@@ -345,7 +345,7 @@ def test_v3_v4_rollback_drill_restores_verified_backup_for_old_reader(
     with sqlite3.connect(preserved_v5) as v5_reader:
         assert v5_reader.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("5",)
+        ).fetchone() == ("6",)
 
 
 def test_v3_migration_fails_closed_while_another_writer_holds_lock(tmp_path: Path) -> None:
@@ -417,7 +417,7 @@ def test_v3_migration_requires_external_backup_digest_marker(
         ).fetchone() == ("3",)
 
 
-def test_v4_to_v5_creates_verified_backup_and_leaves_history_unbound(
+def test_v4_to_current_creates_verified_backup_and_leaves_history_unbound(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "project"
@@ -453,13 +453,13 @@ def test_v4_to_v5_creates_verified_backup_and_leaves_history_unbound(
     with sqlite3.connect(store.path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("5",)
+        ).fetchone() == ("6",)
     assert store.lifecycle_identity_binding(
         authority_kind="capability_snapshot", authority_id="4" * 64
     ) is None
 
 
-def test_committed_v4_fixture_migrates_to_v5_without_granting_authority(
+def test_committed_v4_fixture_migrates_to_current_without_granting_authority(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "project"
@@ -484,7 +484,7 @@ def test_committed_v4_fixture_migrates_to_v5_without_granting_authority(
     with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("5",)
+        ).fetchone() == ("6",)
 
 
 def test_v4_v5_rollback_drill_restores_verified_v4_backup(tmp_path: Path) -> None:
@@ -732,7 +732,7 @@ def test_v4_cli_authority_identity_is_constrained_and_immutable(tmp_path: Path) 
             )
 
 
-def test_partial_v5_schema_requires_rollback_or_forward_repair(tmp_path: Path) -> None:
+def test_partial_core_schema_requires_rollback_or_forward_repair(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
     store = RepositoryStore(root)
@@ -747,7 +747,7 @@ def test_partial_v5_schema_requires_rollback_or_forward_repair(tmp_path: Path) -
     with sqlite3.connect(store.path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("5",)
+        ).fetchone() == ("6",)
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_links'"
         ).fetchone() is None
@@ -1034,7 +1034,7 @@ def test_v1_database_migrates_to_v2_without_losing_rows(tmp_path: Path) -> None:
         }
         foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
-    assert version == "5"
+    assert version == "6"
     assert after == before
     expected_attempt_fields = []
     for legacy in before_attempts:
@@ -1213,7 +1213,7 @@ def test_v2_digestless_recovery_is_quarantined_without_fabrication(tmp_path: Pat
     with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("5",)
+        ).fetchone() == ("6",)
         rows = connection.execute(
             "SELECT attempt_id,status,failure_reason,inventory_digest "
             "FROM execution_attempts ORDER BY attempt_id"
@@ -1651,3 +1651,184 @@ def test_storage_permissions_are_current_user_only_where_supported(tmp_path: Pat
 
     assert store.path.parent.stat().st_mode & 0o777 == 0o700
     assert store.path.stat().st_mode & 0o777 == 0o600
+
+
+def _narrow_provider_checks(path: Path, *, stamp_version: str) -> None:
+    """Rewrite the two provider CHECKs back to the legacy two-provider form."""
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA writable_schema=ON")
+        for table in ("capability_snapshots", "cli_execution_attempts"):
+            row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            assert row is not None and "'openrouter'" in row[0]
+            narrowed = row[0].replace(
+                "provider IN ('claude-code', 'codex', 'openrouter')",
+                "provider IN ('claude-code', 'codex')",
+            )
+            connection.execute(
+                "UPDATE sqlite_master SET sql=? WHERE type='table' AND name=?",
+                (narrowed, table),
+            )
+        connection.execute("PRAGMA writable_schema=OFF")
+        connection.execute(
+            "UPDATE schema_meta SET value=? WHERE key='schema_version'",
+            (stamp_version,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _seed_claude_snapshot(root: Path) -> str:
+    from graphite.routing.contracts import (
+        CliIdentity,
+        PermissionMode,
+        ProviderId,
+        RiskTier,
+    )
+    from graphite.routing.profiles import (
+        BUNDLED_REQUESTED_PROFILES,
+        create_capability_snapshot,
+        save_capability_snapshot,
+    )
+
+    store = RepositoryStore(root)
+    snapshot = create_capability_snapshot(
+        requested=BUNDLED_REQUESTED_PROFILES["claude-code/sonnet"],
+        identity=CliIdentity(ProviderId.CLAUDE_CODE, "a" * 64, "2.1.208", "1.0.0"),
+        effective_model="claude-sonnet-5",
+        effort=Effort.HIGH,
+        capabilities=("code", "reasoning"),
+        context_window_tokens=200_000,
+        risk_ceiling=RiskTier.MEDIUM,
+        permission_mode=PermissionMode.READ_ONLY,
+        verified_at=1_700_000_000,
+        ttl_seconds=86_400,
+    )
+    assert save_capability_snapshot(store, snapshot) is True
+    return snapshot.digest
+
+
+def _save_openrouter_snapshot(root: Path) -> bool:
+    from graphite.routing.contracts import (
+        CliIdentity,
+        Effort as _Effort,
+        PermissionMode,
+        ProviderId,
+        RiskTier,
+    )
+    from graphite.routing.profiles import (
+        create_capability_snapshot,
+        operator_openrouter_profile,
+        save_capability_snapshot,
+    )
+
+    store = RepositoryStore(root)
+    snapshot = create_capability_snapshot(
+        requested=operator_openrouter_profile(
+            model_id="moonshotai/kimi-k3",
+            supported_efforts=(_Effort.HIGH,),
+            evidence_url="https://openrouter.ai/moonshotai/kimi-k3",
+            evidence_accessed="2026-07-20",
+        ),
+        identity=CliIdentity(ProviderId.OPENROUTER, "b" * 64, "1.0.0", "1.0.0"),
+        effective_model="moonshotai/kimi-k3",
+        effort=_Effort.HIGH,
+        capabilities=("code",),
+        context_window_tokens=262_144,
+        risk_ceiling=RiskTier.HIGH,
+        permission_mode=PermissionMode.READ_ONLY,
+        verified_at=1_700_000_100,
+        ttl_seconds=86_400,
+    )
+    return save_capability_snapshot(store, snapshot)
+
+
+def test_v5_store_with_legacy_provider_check_migrates_preserving_rows(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    claude_digest = _seed_claude_snapshot(root)
+    _narrow_provider_checks(store.path, stamp_version="5")
+    narrowed = sqlite3.connect(store.path)
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            narrowed.execute(
+                "INSERT INTO capability_snapshots VALUES"
+                " (?, 'openrouter', 'm/m', 'm/m', 'high', ?,"
+                " '1.0.0', '1.0.0', 'read-only', '{}', 1, 2)",
+                ("f" * 64, "b" * 64),
+            )
+    finally:
+        narrowed.close()
+
+    RepositoryStore(root).initialize()
+
+    connection = sqlite3.connect(store.path)
+    try:
+        version = connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+        assert version == "6"
+        for table in ("capability_snapshots", "cli_execution_attempts"):
+            sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()[0]
+            assert "'openrouter'" in sql
+        preserved = connection.execute(
+            "SELECT capability_snapshot_digest FROM capability_snapshots"
+        ).fetchall()
+        assert preserved == [(claude_digest,)]
+        triggers = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        }
+        assert "capability_snapshot_update_guard" in triggers
+        assert "cli_attempt_identity_update_guard" in triggers
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    finally:
+        connection.close()
+    backup = store.path.parent / "backups" / "events-schema-v5-pre-v6.sqlite3"
+    assert backup.exists()
+    assert _save_openrouter_snapshot(root) is True
+
+
+def test_migrated_store_reinitializes_idempotently(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    _seed_claude_snapshot(root)
+    _narrow_provider_checks(store.path, stamp_version="5")
+    RepositoryStore(root).initialize()
+    RepositoryStore(root).initialize()
+    connection = sqlite3.connect(store.path)
+    try:
+        assert connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone() == ("6",)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM capability_snapshots"
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
+
+
+def test_v6_stamped_store_with_narrow_check_fails_closed(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    _narrow_provider_checks(store.path, stamp_version="6")
+    with pytest.raises(StorageError, match="^storage_rollback_required$"):
+        RepositoryStore(root).initialize()
