@@ -1192,3 +1192,46 @@ Two OpenRouter capability snapshots remain active:
 (`6816edaf...`). Whether to keep chasing the remaining three, or proceed
 to edit-smoke and pool registration with the two verified models, is an
 operator decision.
+
+## OpenRouter edit smoke r1: harness bug plus a model-quality miss (2026-07-20)
+
+The operator approved bundle
+`67525c07c998213cde9da5c393287b1d291b471f548313e9613c0fd85187b736`
+(purpose `graphite_openrouter_edit_smoke_kimi27_r1`), the first live
+write-authority test for OpenRouter -- `moonshotai/kimi-k2.7-code`
+against `src/access.py` and `tests/test_access.py` in a fresh isolated
+worktree, using the whole-file replacement engine for the first time
+against a real model. Execution failed with the opaque
+`failure_category: harness_failed`; the routing store was confirmed
+unchanged (10 capability_snapshots, 10 lifecycle_snapshot_bindings, 19
+telemetry_events -- no partial write this time).
+
+Read-only inspection of the created worktree (a harmless disk artifact,
+not a governed store) showed both files had been overwritten with the
+literal text `"===== src/access.py ====="` / `"===== tests/test_access.py ====="`
+-- the section-header delimiters from the prompt, not real code. The
+model's structured response was schema-valid (a non-empty string under
+every length cap), so `apply_whole_file_edit` wrote it correctly; the
+content itself was wrong. This is very unlikely to be response-budget
+truncation (16,384 output tokens against files of a few hundred bytes
+each) and looks instead like the delimiter format in the prompt
+confusing the model's completion for the `content` field specifically.
+
+Separately, and this is what actually produced the opaque
+`harness_failed` rather than the intended `test_validation_failed`: the
+harness script's `run_validation` helper (reused from
+`_execute_live_batch.py`) raises that module's own locally-defined
+`HarnessFailure` class, which is a distinct class object from this
+script's own identically-named `HarnessFailure` -- Python's `except
+HarnessFailure` did not match it, so the real failure code and evidence
+were discarded into the generic catch-all. Fixed in the harness script
+(not the graphite implementation -- this bug is confined to disposable
+acceptance-test code, not the codebase under test): the imported
+exception class is now caught explicitly and translated into this
+script's own evidence-carrying exception. Confirmed the bundle digest
+is unchanged by this fix (prepare-script content untouched).
+
+The prompt's delimiter format is being revised before any further
+attempt (explicit instruction that delimiter lines are not file content)
+under a fresh manifest with a new worktree task id, since a byte-identical
+retry at temperature 0 would likely reproduce the same output.
