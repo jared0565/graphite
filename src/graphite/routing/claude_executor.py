@@ -191,6 +191,8 @@ def _parse_result(
     stdout: bytes,
     expected_model: str,
     expected_structured_output: dict[str, object] | None = None,
+    *,
+    structured_output_required: bool = False,
 ) -> tuple[str, str, int, int]:
     try:
         lines = decode_cli_output(stdout).splitlines()
@@ -221,14 +223,24 @@ def _parse_result(
         if "quota" in subtype or "rate" in subtype or "limit" in subtype:
             raise AdapterError("quota")
         raise AdapterError("unavailable")
-    if expected_structured_output is None:
-        message = payload.get("result")
-        if not isinstance(message, str) or not message or len(message) > MAX_MESSAGE_LENGTH:
-            raise AdapterError("protocol")
-    else:
+    if expected_structured_output is not None:
         if payload.get("structured_output") != expected_structured_output:
             raise AdapterError("protocol")
         message = PROFILE_VERIFICATION_MARKER
+    elif structured_output_required:
+        structured = payload.get("structured_output")
+        if not isinstance(structured, dict):
+            raise AdapterError("protocol")
+        try:
+            message = json.dumps(structured, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            raise AdapterError("protocol") from None
+        if not message or len(message) > MAX_MESSAGE_LENGTH:
+            raise AdapterError("protocol")
+    else:
+        message = payload.get("result")
+        if not isinstance(message, str) or not message or len(message) > MAX_MESSAGE_LENGTH:
+            raise AdapterError("protocol")
     assistant_models: list[str] = []
     for event in events[:-1]:
         if event.get("type") != "assistant":
@@ -263,6 +275,7 @@ def execute_claude(
     expected_effective_model: str,
     effort: Effort,
     permission_mode: PermissionMode,
+    output_schema: dict[str, object] | None = None,
     transport: Transport = run_cli_process,
     timeout_seconds: float = EXECUTION_TIMEOUT_SECONDS,
     _verification_marker: str | None = None,
@@ -306,6 +319,23 @@ def execute_claude(
             "--json-schema",
             json.dumps(schema, sort_keys=True, separators=(",", ":")),
         )
+    if output_schema is not None:
+        # CLI-validated structured output is the only reliable bare-JSON
+        # response contract; free text cannot guarantee parseability.
+        if (
+            _verification_marker is not None
+            or permission is not PermissionMode.READ_ONLY
+            or not isinstance(output_schema, dict)
+            or not output_schema
+        ):
+            raise AdapterError("request_invalid")
+        try:
+            schema_argument = json.dumps(
+                output_schema, sort_keys=True, separators=(",", ":")
+            )
+        except (TypeError, ValueError):
+            raise AdapterError("request_invalid") from None
+        structured_args = ("--json-schema", schema_argument)
     turn_args: tuple[str, ...] = ()
     if _verification_marker is None and permission is PermissionMode.READ_ONLY:
         turn_args = ("--max-turns", str(READ_ONLY_EXECUTION_MAX_TURNS))
@@ -343,7 +373,10 @@ def execute_claude(
         timeout_seconds=timeout_seconds,
     )
     message, effective_model, input_tokens, output_tokens = _parse_result(
-        result.stdout, expected, structured_output
+        result.stdout,
+        expected,
+        structured_output,
+        structured_output_required=output_schema is not None,
     )
     return ClaudeExecutionResult(
         effective_model,

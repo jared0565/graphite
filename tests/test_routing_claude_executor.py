@@ -256,6 +256,107 @@ def test_execution_read_only_argv_bounds_turns(tmp_path: Path) -> None:
     )
 
 
+def test_execution_read_only_schema_binds_structured_output(tmp_path: Path) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    schema = {
+        "additionalProperties": False,
+        "properties": {
+            "findings": {"items": {"type": "object"}, "type": "array"},
+            "verdict": {"enum": ["pass", "findings"], "type": "string"},
+        },
+        "required": ["verdict", "findings"],
+        "type": "object",
+    }
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": "prose the harness must ignore",
+        "structured_output": {"verdict": "pass", "findings": []},
+        "usage": {"input_tokens": 8, "output_tokens": 900},
+    }
+    transport = ScriptedTransport(
+        [_result(_stream_result(payload, model="claude-sonnet-4-6"))]
+    )
+
+    outcome = execute_claude(
+        executable=executable,
+        workspace=workspace,
+        credential_home=credentials,
+        prompt=b"review the supplied diff",
+        requested_model="sonnet",
+        expected_effective_model="claude-sonnet-4-6",
+        effort=Effort.HIGH,
+        permission_mode=PermissionMode.READ_ONLY,
+        output_schema=schema,
+        transport=transport,
+    )
+
+    assert outcome.message == '{"findings":[],"verdict":"pass"}'
+    argv = transport.calls[0]["argv"]
+    schema_argument = json.dumps(schema, sort_keys=True, separators=(",", ":"))
+    assert argv[argv.index("--json-schema") + 1] == schema_argument
+    assert argv[argv.index("--max-turns") + 1] == "8"
+
+
+def test_execution_read_only_schema_requires_structured_output(tmp_path: Path) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": "free text without structured output",
+        "usage": {"input_tokens": 8, "output_tokens": 20},
+    }
+    transport = ScriptedTransport(
+        [_result(_stream_result(payload, model="claude-sonnet-4-6"))]
+    )
+
+    with pytest.raises(AdapterError, match="^protocol$"):
+        execute_claude(
+            executable=executable,
+            workspace=workspace,
+            credential_home=credentials,
+            prompt=b"review",
+            requested_model="sonnet",
+            expected_effective_model="claude-sonnet-4-6",
+            effort=Effort.HIGH,
+            permission_mode=PermissionMode.READ_ONLY,
+            output_schema={"type": "object"},
+            transport=transport,
+        )
+
+
+@pytest.mark.parametrize(
+    ("permission", "schema"),
+    [
+        (PermissionMode.WORKSPACE_WRITE, {"type": "object"}),
+        (PermissionMode.READ_ONLY, {}),
+        (PermissionMode.READ_ONLY, "not-a-schema"),
+    ],
+)
+def test_execution_rejects_invalid_output_schema_requests(
+    tmp_path: Path, permission: PermissionMode, schema: object
+) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    transport = ScriptedTransport([])
+
+    with pytest.raises(AdapterError, match="^request_invalid$"):
+        execute_claude(
+            executable=executable,
+            workspace=workspace,
+            credential_home=credentials,
+            prompt=b"task",
+            requested_model="sonnet",
+            expected_effective_model="claude-sonnet-4-6",
+            effort=Effort.HIGH,
+            permission_mode=permission,
+            output_schema=schema,
+            transport=transport,
+        )
+    assert not transport.calls
+
+
 def test_execution_rejects_effective_model_mismatch_without_retry(tmp_path: Path) -> None:
     executable, workspace, credentials = _paths(tmp_path)
     transport = ScriptedTransport(

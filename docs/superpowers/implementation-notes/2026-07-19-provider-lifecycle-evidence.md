@@ -766,7 +766,46 @@ summary SHA-256 — the next harness reports the parsed verdict and any
 shape-valid findings as allowlisted failure evidence, and distinguishes a
 parse failure from a findings verdict. Acceptance criteria, bounds, and
 persistence rules are unchanged; a findings verdict still fails closed and
-is put to the operator. The canonical `--llm none` rebuild is
+is put to the operator.
+
+## Review format root cause and structured-output correction
+
+The separately approved discriminating replacement
+(`graphite_claude_review_completion_r11`, bundle
+`a1f4c91170c0f75f03a51e664f65b9b336915c4a5656cbaf7961325b5d299f42`,
+implementation commit `f864dc02df707d7f0146d407419f61bc9dd460e6`) completed
+within every bound and failed closed as `review_parse_failed`. Sanitized
+receipt evidence is: effective model `claude-sonnet-5`; duration 32,058
+milliseconds; usage 4 input and 2,347 output tokens; terminal message 1,742
+bytes with SHA-256
+`06bf23ba80d38cfb0b90a6c09367e6d8c1f5811b9aeada75ba6855d81a4ac648`; stdout
+SHA-256 `19c36f0806954568fbe64bffb9d25f5a0be485fbdb6b7fc60abec319e1a77644`;
+stderr SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. The
+review worktree remained clean, nothing was persisted, the stores remained
+byte-identical, and there was no retry, fallback, resume, substitution,
+merge, push, or deployment.
+
+This isolates the final review defect class: a free-text terminal message
+cannot guarantee the bare-JSON response contract. The prior classes are
+closed — timeouts ended with the 480-second bound, budget rejections ended
+with the measured 16,384-token cap, and the eight-turn bound never tripped.
+The offline correction extends the Claude adapter with an external
+output-schema mode for read-only execution, mirroring both the Codex
+`--output-schema` binding and Claude's own live-proven verification path:
+the argv gains `--json-schema` with the canonical serialized contract, the
+CLI validates the response, and the adapter accepts only a terminal
+`structured_output` object, returned as canonical JSON. Requests combining
+an output schema with workspace-write, the verification marker, or a
+non-object schema fail closed as invalid before any process starts. The
+workspace-write edit argv and the verification path are unchanged.
+
+Focused adapter, process, and profile selection passed 95 tests; the full
+routing selection passed 665 tests with 5 intentional skips; the complete
+offline suite passed 1,716 tests with 44 intentional skips; repository-wide
+Ruff and `git diff --check` passed, and the canonical rebuild is fresh. The
+next review manifest binds the same review contract schema to the CLI
+itself, with all bounds unchanged from the approved r11 values. The canonical `--llm none` rebuild is
 fresh with 7,508 nodes, 16,713 edges, 161 communities, and 183 scanned files.
 This correction is offline only: the next Codex edit smoke still requires a
 complete fresh manifest and explicit operator approval, and production
