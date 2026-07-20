@@ -281,8 +281,13 @@ def test_execute_rejects_unsupported_effort(effort: Effort) -> None:
     [
         ("probe_response_limit", "response_limit"),
         ("probe_timeout", "timeout"),
-        ("probe_http_status", "unavailable"),
+        # Provider-side HTTP rejections surface distinctly (not transient).
+        ("probe_http_status", "http_status"),
+        ("probe_redirect_rejected", "http_status"),
+        # Genuine transport failures remain the transient "unavailable".
         ("probe_dns_busy", "unavailable"),
+        ("probe_unavailable", "unavailable"),
+        ("probe_failed", "unavailable"),
     ],
 )
 def test_execute_maps_transport_failures_to_diagnosable_codes(

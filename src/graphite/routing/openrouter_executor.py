@@ -52,6 +52,12 @@ _PROBE_FAILURE_CODES: Final = {
 _EXECUTION_TRANSPORT_CODES: Final = {
     "probe_response_limit": "response_limit",
     "probe_timeout": "timeout",
+    # A non-2xx / redirect from the completions POST is a provider-side
+    # rejection of the request (e.g. an unsupported response_format), NOT a
+    # transient network failure -- surface it distinctly so it is not
+    # conflated with dns_busy/unavailable/failed under one opaque code.
+    "probe_http_status": "http_status",
+    "probe_redirect_rejected": "http_status",
 }
 
 __all__ = [
