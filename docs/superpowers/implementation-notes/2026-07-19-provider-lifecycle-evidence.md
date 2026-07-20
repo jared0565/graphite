@@ -681,7 +681,46 @@ selection passed 90 tests, the full routing selection passed 660 tests with
 5 intentional skips, and the complete offline suite passed 1,711 tests with
 44 intentional skips; Ruff and `git diff --check` passed. The next review
 attempt requires a new manifest with a longer review timeout so a slow
-legitimate review and a turn-bounded loop produce different outcomes. The canonical `--llm none` rebuild is
+legitimate review and a turn-bounded loop produce different outcomes.
+
+## Second review attempt completed but exceeded its output budget
+
+The operator approved single-action bundle
+`22ba48a30ae5e6bb9f757ec4c85efffeac40a141c0578c6b043893c4ec43b7a2`
+(`graphite_claude_review_completion_r8`, implementation commit
+`3298e1f9b71c726e2ca582e76d2283ad68cbd34f`, review timeout 300 seconds).
+Preflight verified both store digests and row counts, the retained Codex edit
+diff, the clean review worktree, the unexpired Claude read snapshot, and the
+live Claude identity. Codex was not invoked.
+
+The single review attempt completed without timing out and without tripping
+the eight-turn bound. Sanitized receipt evidence is:
+
+- effective model: `claude-sonnet-5`;
+- duration: 153,485 milliseconds;
+- usage: 6 input tokens and 5,002 output tokens;
+- stdout SHA-256:
+  `b04fda08be35d0dd75c671817ab4461df67e56791942485179ec842d73b9cdba`;
+- stderr SHA-256:
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+The 5,002 reported output tokens exceeded the approved 4,096 maximum, so the
+attempt failed closed as `review_budget_exceeded` before the terminal message
+was inspected and before any persistence. The routing and lifecycle stores
+remained byte-identical at
+`e45a40a06efcb2086707e10fd5cce780a88c534df595b38e68cc44c4381bbec2` and
+`d7bd02146e98c9b79e102d75c400f046189a6424d30a225126f109489a258d1b` with
+integrity ok, and the review worktree remained clean. There was no retry,
+fallback, resume, substitution, merge, push, or deployment.
+
+This result also explains the prior r7 timeout: a legitimate high-effort
+review runs roughly 150 seconds and emits roughly 5,000 thinking-inclusive
+output tokens, so the earlier 120-second bound killed it mid-generation. The
+4,096-token output cap was calibrated for terse verification and edit
+responses, not a thinking-inclusive high-risk review. The replacement
+manifest proposes an 8,192-token review output maximum — a bounded increase
+subject to separate explicit operator approval, not a harness-side
+relaxation — with every other limit unchanged. The canonical `--llm none` rebuild is
 fresh with 7,508 nodes, 16,713 edges, 161 communities, and 183 scanned files.
 This correction is offline only: the next Codex edit smoke still requires a
 complete fresh manifest and explicit operator approval, and production
