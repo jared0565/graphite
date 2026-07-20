@@ -548,3 +548,112 @@ def test_snapshot_persistence_is_canonical_bounded_and_expiry_aware(tmp_path: Pa
         )
     with pytest.raises(StorageError, match="^storage_corrupt$"):
         load_verified_capability_snapshots(store, now=1_700_000_001)
+
+
+def _openrouter_identity() -> CliIdentity:
+    return CliIdentity(ProviderId.OPENROUTER, "b" * 64, "1.0.0", "1.0.0")
+
+
+def _openrouter_requested():
+    return operator_openrouter_profile(
+        model_id="moonshotai/kimi-k3",
+        supported_efforts=(Effort.HIGH,),
+        evidence_url="https://openrouter.ai/moonshotai/kimi-k3",
+        evidence_accessed="2026-07-20",
+    )
+
+
+def _bound_openrouter_read_only_snapshot(
+    store: RepositoryStore,
+    *,
+    lifecycle_digest: str = "5" * 64,
+):
+    return verify_and_save_approved_profile(
+        store,
+        requested=_openrouter_requested(),
+        identity=_openrouter_identity(),
+        effort=Effort.HIGH,
+        verified_at=1_700_000_000,
+        ttl_seconds=3_600,
+        approval_granted=True,
+        max_input_tokens=32_768,
+        max_output_tokens=4_096,
+        verifier=lambda *_: VerificationEvidence(
+            "moonshotai/kimi-k3", ("code", "reasoning"), 262_144,
+            RiskTier.HIGH, 1_024, 256,
+        ),
+        lifecycle_identity_digest=lifecycle_digest,
+    )
+
+
+def test_openrouter_snapshot_round_trips_storage_and_lifecycle_binding(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    lifecycle_digest = "5" * 64
+
+    snapshot = _bound_openrouter_read_only_snapshot(
+        store, lifecycle_digest=lifecycle_digest
+    )
+
+    assert snapshot.identity.provider is ProviderId.OPENROUTER
+    assert snapshot.profile.requested_model == "moonshotai/kimi-k3"
+    assert snapshot.profile.effective_model == "moonshotai/kimi-k3"
+    assert snapshot.profile.permission_mode is PermissionMode.READ_ONLY
+    loaded = load_verified_capability_snapshots(store, now=1_700_000_001)
+    assert loaded == (snapshot,)
+    assert loaded[0].digest == snapshot.digest
+    assert store.lifecycle_identity_binding(
+        authority_kind="capability_snapshot", authority_id=snapshot.digest
+    ) == lifecycle_digest
+
+
+def test_openrouter_read_only_snapshot_promotes_to_workspace_write(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    lifecycle_digest = "5" * 64
+    source = _bound_openrouter_read_only_snapshot(
+        store, lifecycle_digest=lifecycle_digest
+    )
+
+    promoted = verify_and_save_approved_edit_profile(
+        store,
+        verified_snapshot=source,
+        verified_at=1_700_000_100,
+        ttl_seconds=3_600,
+        approval_granted=True,
+        max_input_tokens=32_768,
+        max_output_tokens=4_096,
+        max_changed_files=2,
+        max_changed_bytes=2_048,
+        lifecycle_identity_digest=lifecycle_digest,
+        verifier=lambda _snapshot: EditSmokeEvidence(
+            effective_model="moonshotai/kimi-k3",
+            input_tokens=2_048,
+            output_tokens=512,
+            duration_ms=1_250,
+            diff_sha256="e" * 64,
+            changed_file_count=2,
+            changed_byte_count=64,
+            validation_outcome="passed",
+        ),
+    )
+
+    assert promoted.identity.provider is ProviderId.OPENROUTER
+    assert promoted.profile.permission_mode is PermissionMode.WORKSPACE_WRITE
+    assert promoted.identity == source.identity
+    assert promoted.profile.effective_model == "moonshotai/kimi-k3"
+    assert store.lifecycle_identity_binding(
+        authority_kind="capability_snapshot", authority_id=promoted.digest
+    ) == lifecycle_digest
+    telemetry = store.cli_telemetry_records()
+    assert len(telemetry) == 1
+    assert telemetry[0]["capability_snapshot_digest"] == promoted.digest
+    assert telemetry[0]["validation_outcome"] == "passed"

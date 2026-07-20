@@ -32,6 +32,9 @@ DEFAULT_RECOVERY_PAGE_SIZE: Final = 50
 MAX_RECOVERY_PAGE_SIZE: Final = 100
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+_MODEL_IDENTIFIER = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(/[A-Za-z0-9][A-Za-z0-9._:+-]{0,127})?$"
+)
 _MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}(?::cloud)?$")
 _SNAPSHOT_MODEL_ID = re.compile(
     r"^[a-z0-9][a-z0-9._-]{0,127}(?::[a-z0-9][a-z0-9._-]{0,63})?$"
@@ -125,6 +128,13 @@ def _selected_root(root: Path) -> Path:
 
 def _identifier(value: object, code: str) -> str:
     if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
+        raise ValueError(code)
+    return value
+
+
+def _model_identifier(value: object, code: str) -> str:
+    """Model names additionally permit one OpenRouter-style vendor/model slash."""
+    if not isinstance(value, str) or not _MODEL_IDENTIFIER.fullmatch(value):
         raise ValueError(code)
     return value
 
@@ -418,7 +428,7 @@ _SCHEMA = (
             length(capability_snapshot_digest) = 64
             AND capability_snapshot_digest NOT GLOB '*[^0-9a-f]*'
         ),
-        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex')),
+        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex', 'openrouter')),
         requested_model TEXT NOT NULL,
         effective_model TEXT NOT NULL,
         effort TEXT NOT NULL CHECK(effort IN ('default', 'low', 'medium', 'high', 'xhigh', 'max')),
@@ -454,7 +464,7 @@ _SCHEMA = (
         task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
         decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE RESTRICT,
         worktree_id TEXT NOT NULL REFERENCES task_worktrees(worktree_id) ON DELETE RESTRICT,
-        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex')),
+        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex', 'openrouter')),
         requested_model TEXT NOT NULL,
         effective_model TEXT NOT NULL,
         effort TEXT NOT NULL CHECK(effort IN ('default', 'low', 'medium', 'high', 'xhigh', 'max')),
@@ -2235,8 +2245,8 @@ class RepositoryStore:
             _identifier(decision_id, "decision_id_invalid"),
             _identifier(worktree_id, "worktree_id_invalid"),
             ProviderId(provider).value,
-            _identifier(requested_model, "requested_model_invalid"),
-            _identifier(effective_model, "effective_model_invalid"),
+            _model_identifier(requested_model, "requested_model_invalid"),
+            _model_identifier(effective_model, "effective_model_invalid"),
             Effort(effort).value,
             _semantic_version(cli_version, "cli_version_invalid"),
             executable_sha256,
@@ -2492,8 +2502,8 @@ class RepositoryStore:
             TaskCategory(payload["category"])
             RiskTier(payload["risk"])
             EvidenceProvenance(payload["provenance"])
-            _identifier(payload["requested_model"], "cli_telemetry_payload_invalid")
-            _identifier(payload["effective_model"], "cli_telemetry_payload_invalid")
+            _model_identifier(payload["requested_model"], "cli_telemetry_payload_invalid")
+            _model_identifier(payload["effective_model"], "cli_telemetry_payload_invalid")
         except (TypeError, ValueError) as exc:
             raise ValueError("cli_telemetry_payload_invalid") from exc
         if (
