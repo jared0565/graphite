@@ -1041,3 +1041,69 @@ The fixture routing store now accepts OpenRouter capability snapshots.
 The next live phase is a read-only verification bundle for the five
 probed slugs, each requiring its own approved manifest with token and
 cost bounds.
+
+## OpenRouter profile verification: partial crash, root cause, and repair (2026-07-20)
+
+The operator approved verification bundle
+`999f62c727fb18bd46d6aa147a826c9de351c7849c17ef6411159133936da6c9`
+(purpose `graphite_openrouter_profile_verification_batch`, implementation
+commit `69d23a92ad27da0caa1a173a4d2c99f83de41f8e`, five independent
+per-slug actions, `stop_on_failure: false`). This was the first live
+inference call to OpenRouter under this feature.
+
+**Slug 1 (moonshotai/kimi-k3):** failed closed with `failure_category:
+unavailable` at the transport/execute layer, sanitized receipt only, zero
+persistence. The partial-success design worked exactly as intended: the
+harness recorded the failure and moved to the next slug.
+
+**Slug 2 (moonshotai/kimi-k2.7-code):** the real call succeeded --
+schema-validated response matched exactly -- and its capability snapshot
+and lifecycle binding persisted correctly. The harness then crashed
+writing telemetry: `telemetry.py`'s `_SAFE_MODEL` regex was a sibling
+copy of the pattern already widened in `storage.py`'s `_model_identifier`
+(commit 52bca89) but was never itself widened, so
+`CliTelemetryRecord.__post_init__` raised an uncaught `ValueError` for
+any vendor/model slug. Root-caused and reproduced offline deterministically
+(no live call needed); fixed in commit `1ce1492` with a failing test
+first. Full offline verification after the fix: telemetry module 10
+passed; routing selection 628 passed, 1 intentional skip; complete suite
+1,787 passed, 44 intentional skips; Ruff and `git diff --check` clean;
+graph fresh.
+
+**Remaining slugs 3-5** (kimi-k2.6, glm-5.2, muse-spark-1.1) were never
+attempted; the crash happened mid-batch on slug 2.
+
+**Store state and repair.** Before investigating any fix, the store was
+checked read-only: the kimi-k2.7-code capability snapshot
+(`99db4a4a53aac5a97aae36d1d2ace5de3b194c63a8605c59dbd4837446a205f5`) and
+its lifecycle binding are genuinely valid -- nothing fabricated -- but
+the exact input/output token counts from that call existed only in the
+crashed process's memory and are unrecoverable. The operator's first
+choice, retracting the orphaned rows and re-verifying fresh, was checked
+against the schema before any action was taken: `capability_snapshots`
+and `lifecycle_snapshot_bindings` both carry unconditional
+`BEFORE DELETE ... RAISE(ABORT, '...immutable')` triggers -- the store is
+append-only by design, and the delete would simply have aborted. This was
+surfaced back to the operator, who then approved the alternative: complete
+the record with the token counts recorded as unknown, matching the
+existing `cost_status: "unknown"` precedent already used for every CLI
+provider call.
+
+Repair bundle
+`c7b3ffa6899b361c6ed97788756c4b8cedbb55464d0f24b42f63426f6bac432f`
+(purpose `graphite_openrouter_telemetry_repair_kimi_k2_7_code`, zero
+network, zero inference, zero cost) wrote exactly the two missing
+telemetry records (machine-verified and human-accepted, `input_tokens`,
+`output_tokens`, and `latency_ms` all `null`) for the existing snapshot
+digest, verified against the exact persisted snapshot facts
+(provider, requested_model, verified_at) before writing. Final audit
+matched exactly: capability_snapshots 9 (unchanged), lifecycle_snapshot_bindings
+9 (unchanged), telemetry_events 15 to 17, zero foreign-key violations,
+integrity ok. Duration 123 ms.
+
+The fixture store now holds one complete, promoted-to-active OpenRouter
+capability snapshot (`kimi-k2.7-code`, read-only, RiskTier.HIGH) with a
+full and honest evidence trail. The next live phase is a fresh
+verification attempt for the four remaining slugs (kimi-k3 retry,
+kimi-k2.6, glm-5.2, muse-spark-1.1), each requiring its own approved
+manifest.
