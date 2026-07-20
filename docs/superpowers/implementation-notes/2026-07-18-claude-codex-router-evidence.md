@@ -9,6 +9,19 @@ subscription CLIs. OpenRouter is reserved for application inference. Ollama repo
 enrichment remains a separate compatibility feature, while earlier Ollama routing
 records are historical and non-replayable.
 
+**Scope revocation (2026-07-20).** The operator revoked the statement above that
+OpenRouter is reserved for application inference. Selected OpenRouter models may
+now participate in governed development execution as a third provider alongside
+the Claude Code and Codex CLIs, under the identical snapshot/lifecycle/manifest
+regime: no execution without a displayed manifest and explicit approval, capability
+snapshots only from approved live verification, write authority only through a
+promoted workspace-write snapshot earned by a passing edit smoke, and sanitized
+persistence only. Model availability is verified by the bounded non-inference
+OpenRouter catalog probe, never assumed. Design:
+`docs/superpowers/specs/2026-07-20-openrouter-development-participation-design.md`.
+The paragraph above is retained unchanged as the historical record of the earlier
+scope.
+
 Capability evidence is not authorization authority. A verified snapshot proves only
 the executable/profile facts observed at verification time. Every execution,
 cross-provider review, acceptance, policy promotion, rollback, and cleanup retains a

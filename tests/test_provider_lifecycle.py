@@ -58,7 +58,11 @@ def test_provider_ids_and_runtime_kinds_cover_all_approved_adapters() -> None:
         "ollama",
         "openrouter",
     )
-    assert tuple(item.value for item in ProviderId) == ("claude-code", "codex")
+    assert tuple(item.value for item in ProviderId) == (
+        "claude-code",
+        "codex",
+        "openrouter",
+    )
     assert tuple(item.value for item in RuntimeKind) == (
         "local-cli",
         "local-http",

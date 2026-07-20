@@ -859,3 +859,73 @@ fresh with 7,508 nodes, 16,713 edges, 161 communities, and 183 scanned files.
 This correction is offline only: the next Codex edit smoke still requires a
 complete fresh manifest and explicit operator approval, and production
 readiness remains blocked on that live acceptance.
+
+## Offline OpenRouter development-participation implementation (2026-07-20)
+
+Following the operator's revocation of the OpenRouter application-only scope
+(recorded in `2026-07-18-claude-codex-router-evidence.md`), the offline
+implementation of OpenRouter as a third governed development provider was
+completed per
+`docs/superpowers/specs/2026-07-20-openrouter-development-participation-design.md`
+and its 9-task plan. All work is deterministic-fake TDD; no live, network,
+or credentialed call of any kind was made.
+
+Delivered, each with its own failing-test-first cycle and commit:
+
+- `ProviderId.OPENROUTER` with evidence host `openrouter.ai`,
+  `operator_openrouter_profile`, and a CLI-transport guard rejecting
+  non-CLI providers with `provider_invalid` in both
+  `build_cli_environment` and `run_cli_process`;
+- one governed inference purpose `OPENROUTER_CHAT_COMPLETIONS`
+  (POST `/api/v1/chat/completions`) in the pinned HTTP transport with
+  purpose-aware ceilings (1 MiB request, 4 MiB response, 600 s) while every
+  non-inference purpose keeps the exact 64 KiB / 30 s probe caps; the
+  no-inference-endpoint guard test now scopes to non-inference purposes and
+  additionally pins the inference set to exactly that one purpose;
+- catalog pricing capture (`OpenRouterPricing` decimal strings bounded to
+  [0, 1] USD/token, canonical pricing digest) via
+  `observe_openrouter_with_pricing`, and exact-`Decimal` ceiling cost
+  arithmetic `completion_cost_microunits`;
+- `openrouter_executor` preflight binding endpoint, model, routing-policy,
+  and pricing digests into one composite identity digest carried as
+  `CliIdentity(openrouter, <digest>, 1.0.0, 1.0.0)`;
+- `execute_openrouter`: exactly one canonical, schema-bound, temperature-0
+  chat completion with strict `response_format`, fail-closed usage parsing,
+  and a hard cost ceiling (`cost_ceiling_exceeded`); schema-digest mismatch
+  and credential absence fail before any transport call;
+- the atomic whole-file edit engine `apply_whole_file_edit`: full validation
+  (exact scope-set equality, hostile-path battery including traversal,
+  absolute, drive, backslash, symlinked-parent, temp-name collision, and
+  byte caps) completes before any filesystem change; staged temps are
+  promoted with `os.replace` and a mid-set failure restores every
+  already-replaced file byte-identically (`edit_scope_violation` /
+  `edit_apply_failed`);
+- snapshot, lifecycle-binding, promotion, and route-pool parity proven by
+  tests. Two provider-assumption gaps surfaced and were fixed minimally:
+  the `capability_snapshots` and `cli_execution_attempts` provider CHECK
+  now admits `openrouter` (newly created stores only — existing stores,
+  including the current live fixture store, retain the narrower baked-in
+  constraint and will reject OpenRouter rows until deliberately migrated
+  or replaced under an approved manifest), and model-name validation gained
+  a dedicated rule permitting one `vendor/model` slash without widening the
+  global identifier charset;
+- the pre-existing guard test asserting `ProviderId` covers only the two
+  CLI adapters was updated to the approved three-provider set.
+
+Verification at the final offline state:
+
+- focused new selections (openrouter executor/probe, probe runner,
+  profiles, process runner): 127 passed;
+- full routing selection (35 modules): 621 passed, 1 intentional skip;
+- complete offline suite with out-of-repo `--basetemp`: 1,780 passed,
+  44 intentional skips (previously 1,716/44 — 64 new tests);
+- repository-wide Ruff and `git diff --check`: clean;
+- canonical `--llm none` rebuild fresh: 7,679 nodes, 17,142 edges,
+  152 communities.
+
+Claude and Codex adapter argv and behavior are byte-unchanged; their
+existing exact-argv tests pass unmodified. No live acceptance for
+OpenRouter has occurred: catalog probing, verification bundles, edit
+smokes, reviews, and pool registration each require a displayed manifest
+and explicit operator approval, and the store-constraint note above must
+be resolved as part of that live phase.
