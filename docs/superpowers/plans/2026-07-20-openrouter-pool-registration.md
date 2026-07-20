@@ -160,7 +160,13 @@ LIFECYCLE_STORE_SHA256 = "a99f7cc454e4b8ad000c1d0ba6b203b44cf6d12c3fef1b9c57d428
 
 ISSUED_AT = 1784578461
 EXPIRES_AT = 1784648044  # = min(edit snapshot expiry) = k2.7-code snapshot_expires_at
-POOL_NOW = 1784578461    # the `now` select_route is evaluated at in the offline proof
+# POOL_NOW is the frozen `now` select_route is evaluated at. Freezing it is safe ONLY
+# because EXPIRES_AT == min(snapshot expiry) AND the execute preflight fails closed on
+# `time.time() >= EXPIRES_AT`: that interlock guarantees the proof cannot report a pass
+# after either snapshot has expired. Do NOT bump POOL_NOW past a snapshot expiry to
+# "fix" a run — re-promote the snapshot instead. (Real `int(time.time())` would be
+# equally safe given the same preflight gate; frozen is chosen for a deterministic digest.)
+POOL_NOW = 1784578461
 
 
 def digest(value: object) -> str:
@@ -726,6 +732,8 @@ if __name__ == "__main__":
 
 This dry-run proves the full control flow **without** the live store and without operator approval, by pointing the execute module's paths at a byte copy. It must pass before Task 3.
 
+Note a deliberate method difference from the real execute: this dry-run runs `PRAGMA wal_checkpoint(TRUNCATE)` before its byte-comparison, whereas `_execute_openrouter_pool_registration.py` hashes `after_routing`/`after_lifecycle` with no checkpoint. Both correctly land on byte-unchanged because read-only WAL access appends zero frames to the main file (already proven by the standalone `pool_reg_hash_drycheck.py`: `routing_unchanged: true`, no sidecars). The extra checkpoint here only makes the copy comparison robust to leaked connections in-process; it does not paper over a mutation.
+
 Create scratchpad `dryrun_pool_registration.py`:
 ```python
 from __future__ import annotations
@@ -823,6 +831,8 @@ git -C "F:/tmp/graphite-claude-codex-router" status --porcelain=v1   # must be e
 PYTHONPATH="F:/tmp/graphite-claude-codex-router/src" python -c "import hashlib,pathlib; r=pathlib.Path(r'F:\tmp\graphite-production-live-fixture\.graphite\routing'); print('routing', hashlib.sha256((r/'events.sqlite3').read_bytes()).hexdigest()); print('lifecycle', hashlib.sha256((r/'provider-lifecycle.sqlite3').read_bytes()).hexdigest())"
 ```
 Set `IMPLEMENTATION_COMMIT` to the current clean feature HEAD, and `ROUTING_STORE_SHA256`/`LIFECYCLE_STORE_SHA256` to the printed hashes (they should already match `21e73d3f…`/`a99f7cc4…` if nothing wrote to the store since 2026-07-20). Confirm `now < 1784648044` (runway remains). Re-run Task 1 Step 2 and Task 2 Step 3 after any edit so the `BUNDLE_DIGEST` and dry-run stay green.
+
+**Mandatory if anything wrote to the live store since the 2026-07-20 read** (any other rN run, promotion, or activation): the store hashes and/or the ACTIVE identity digests will have moved. Re-pinning the hashes is required, and the execute script's per-candidate `pool_candidate_drift` check will fail closed if a live identity/model/routing digest no longer matches the pinned `CANDIDATE_SPECS`. In that case, re-read the live values (`scratchpad/pool_reg_values.py`), update `CANDIDATE_SPECS`, and re-run both dry-runs before requesting approval — this is not optional. The drift firing is correct fail-closed behavior, not a harness bug.
 
 - [ ] **Step 2: Display the composition manifest and request approval**
 
