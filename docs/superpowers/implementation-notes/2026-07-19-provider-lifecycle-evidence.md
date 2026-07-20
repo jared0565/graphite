@@ -570,3 +570,25 @@ ran; no retry, fallback, resume, substitution, merge, push, or deployment occurr
 The routing store remains integrity-clean with five snapshots, five bindings, and
 nine telemetry events. The lifecycle store and worktree remain clean. The budget
 was not weakened to accommodate the provider response.
+
+## Codex Terra verification passed; edit smoke made no change
+
+The operator approved Terra bundle
+`46960ffe870888432f06c342e816c9d4ec38e798fe74fa2544ec3bb72c8e1f09`.
+The read-only `gpt-5.6-terra` verification passed in 12,912 milliseconds using
+20,876 input and 18 output tokens, creating snapshot
+`5dfbfccf956a981137554d0228ac19111a31a8fcf81524a2a65767eed55ee0cc`.
+
+The schema-bound Terra edit smoke returned successfully but produced no filesystem
+changes. The bounded diff was empty with SHA-256
+`2dc01697677c6dfe69b7f6af1b4b7cb8e5ee8681d44f47886b9675be8035a997`, so the batch
+stopped as `edit_diff_mismatch` after two total attempts. No write snapshot was
+promoted, no validation or Claude review ran, and there was no retry, fallback,
+resume, substitution, merge, push, or deployment.
+
+The routing store remains integrity-clean with six snapshots, six bindings, and
+eleven telemetry events. The lifecycle store remains integrity-clean and the edit
+worktree remains clean. Three installed Codex models have now passed verification,
+but two independent edit smokes (`gpt-5.6-sol` and `gpt-5.6-terra`) produced no
+change, while Spark exceeded the hard input budget. Production readiness remains
+blocked on a verified Codex edit smoke.
