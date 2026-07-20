@@ -1389,3 +1389,83 @@ cause and would fix the channel for every OpenRouter model; a repeated
 line-one truncation would localize the fault to the model. The change
 touches graphite implementation code and so requires a fresh manifest
 and explicit operator approval before any live call.
+
+## OpenRouter edit smoke r5: json_object transient (2026-07-20)
+
+Implementation commit `d5ac22c` added a keyword-only
+`response_format_type` parameter to `execute_openrouter` (default
+`json_schema` preserves the strict block and every existing caller; the
+new `json_object` value sends `{"type": "json_object"}` instead). The
+output schema is still canonicalized and its digest pinned in both modes,
+and response parsing is unchanged, so switching modes changes exactly one
+variable. The operator approved bundle
+`bb0384f46786a023776249a9abf07dbad18a8af38127276e3d11c7b71bca0b1c` (r5,
+the split two-call design under json_object). Execution failed
+`unavailable` on the first sub-call before any content, after preflight
+and worktree creation succeeded; zero persistence (store 10/10/19,
+worktree pristine). This is the r3 transient class; the json_object
+hypothesis was not yet tested.
+
+## OpenRouter edit smoke r6: json_object accepted, per-call flakiness (2026-07-20)
+
+`execute_openrouter` previously collapsed every transport failure except
+`response_limit`/`timeout` into one opaque `unavailable`. Implementation
+commit `6906a7d` split provider HTTP rejections
+(`probe_http_status`/`probe_redirect_rejected`) out to a distinct
+`http_status` code so a rejection is diagnosable from a genuine transient
+(`dns_busy`/`unavailable`/`failed` stay `unavailable`). The operator
+approved bundle
+`eef9df321dae0733e585f3f5a0273e99a1498bf299a39c402abcdd5d3b196a28` (r6,
+split json_object, diagnostic-hardened). Result: the first sub-call
+(`access_py`) **succeeded** -- a schema-valid `GRAPHITE_EDIT_OK` response
+came back (263 input / 270 output tokens) -- and the second sub-call
+failed `http_status`. Two conclusions: json_object is **accepted** by the
+endpoint (the rejection hypothesis is dead), and the failure is an
+intermittent per-call transport flakiness, not a contract problem --
+across rounds, r3 dropped call one, r5 dropped call one, r6 dropped call
+two, and only r4 landed both. The split design's requirement that *both*
+flaky calls land is why the pytest gate was almost never reached. Zero
+persistence (store 10/10/19, worktree pristine).
+
+## OpenRouter edit smoke r7: json_object fixes the truncation -- PASSED (2026-07-20)
+
+Because the split design multiplied the per-call flakiness, r7 returned
+to a **single** two-file call (the r1/r2 structure) with the r2 prompt
+and schema byte-for-byte unchanged, differing from r2 in exactly one
+variable: `response_format_type=json_object` instead of the strict
+json_schema block. Only one completion has to land to reach
+apply->diff->pytest, making it robust to the per-call flakiness. No
+graphite change was required (`execute_openrouter` already supports
+json_object and `apply_whole_file_edit` already accepts a multi-file
+payload), so `IMPLEMENTATION_COMMIT` stayed `6906a7d`.
+
+The operator approved bundle
+`113f0f9ea2524cc1b267112f4421e80ff712cbc5ce459cbe4ae8aa808349b67f`.
+Execution **passed**: a single json_object completion (414 input / 451
+output tokens, 2066 microunits, 7547 ms) returned complete, correct
+source for both files; `apply_whole_file_edit` wrote exactly the two
+scoped files (`changed_file_count` 2, `changed_byte_count` 1007 -- real
+content, not a first-line truncation); `git diff --check` was clean and
+`pytest` passed against the genuinely edited function
+(`validation_outcome: passed`). The edit profile for
+`moonshotai/kimi-k2.7-code` was promoted
+(`capability_snapshot_digest 500cda19a907c53df9433dde2ec4cab58f0aa10e109420417fbbd3bac7ec9574`,
+`diff_sha256 005f1ae8ae072d35b003b3804cb9b3c0dee49058f4e488eddb3cb3031702b93e`
+now pinned), and the final audit confirmed the store moved 10/10/19 ->
+11/11/20 with integrity ok and no foreign-key violations.
+
+This is the first end-to-end OpenRouter edit-smoke success across seven
+rounds, and it **confirms the root cause**. The same model with a
+byte-identical prompt truncated its free-form `content` field to the
+first line under strict json_schema structured output (r2, r4) and
+returned the complete file under json_object (r7). Strict-schema-
+constrained decoding was therefore the truncator, not the model and not
+any graphite parse/apply defect; relaxing the response contract to
+json_object fixes the whole-file edit channel for every OpenRouter model,
+since the channel is shared. r1's delimiter echo was a separate,
+already-fixed prompt-format issue; the r3/r5/r6 `unavailable`/`http_status`
+results were intermittent transport flakiness on individual completions,
+independent of the contract question. The two verified models
+(`kimi-k2.7-code`, now also edit-promoted, and `kimi-k2.6`) can proceed
+to pool registration; a future edit-smoke for `kimi-k2.6` should reuse
+this single-call json_object shape.
