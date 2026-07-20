@@ -16,6 +16,7 @@ import graphite.routing.probe_runner as probe_runner_module
 from graphite.probe_process import ProbeProcessResult
 from graphite.routing.lifecycle import LifecycleProviderId
 from graphite.routing.probe_runner import (
+    MAX_INFERENCE_RESPONSE_BYTES,
     HttpProbeEndpoint,
     ProbeEndpointPurpose,
     ProviderProbeError,
@@ -164,6 +165,70 @@ def test_openrouter_probe_pins_public_address_and_injects_credential_at_boundary
     assert headers["Authorization"] == "Bearer private-value"
     assert "private-value" not in repr(result)
     assert connection.closed is True
+
+
+def test_inference_purpose_allows_post_body_and_long_deadline() -> None:
+    connection = _FakeConnection("93.184.216.34", _FakeResponse())
+    endpoint = HttpProbeEndpoint(
+        LifecycleProviderId.OPENROUTER,
+        "https",
+        "openrouter.ai",
+        443,
+        ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS,
+    )
+
+    result = run_http_probe(
+        endpoint=endpoint,
+        timeout_seconds=480.0,
+        request_body=b'{"model":"moonshotai/kimi-k3"}',
+        authorization="Bearer test-key",
+        max_response_bytes=MAX_INFERENCE_RESPONSE_BYTES,
+        resolver=lambda *_args, **_kwargs: _resolver("93.184.216.34"),
+        connection_factory=lambda *_args: connection,
+    )
+
+    assert result.status_code == 200
+    assert connection.request_args is not None
+    assert connection.request_args[0] == "POST"
+    assert connection.request_args[1] == "/api/v1/chat/completions"
+
+
+def test_inference_purpose_requires_request_body() -> None:
+    connection = _FakeConnection("93.184.216.34", _FakeResponse())
+    endpoint = HttpProbeEndpoint(
+        LifecycleProviderId.OPENROUTER,
+        "https",
+        "openrouter.ai",
+        443,
+        ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS,
+    )
+    with pytest.raises(ProviderProbeError, match="^probe_request_invalid$"):
+        run_http_probe(
+            endpoint=endpoint,
+            timeout_seconds=10.0,
+            request_body=None,
+            authorization="Bearer test-key",
+            resolver=lambda *_args, **_kwargs: _resolver("93.184.216.34"),
+            connection_factory=lambda *_args: connection,
+        )
+
+
+def test_non_inference_purposes_keep_thirty_second_ceiling() -> None:
+    connection = _FakeConnection("93.184.216.34", _FakeResponse())
+    endpoint = HttpProbeEndpoint(
+        LifecycleProviderId.OPENROUTER,
+        "https",
+        "openrouter.ai",
+        443,
+        ProbeEndpointPurpose.OPENROUTER_MODELS,
+    )
+    with pytest.raises(ProviderProbeError, match="^probe_request_invalid$"):
+        run_http_probe(
+            endpoint=endpoint,
+            timeout_seconds=31.0,
+            resolver=lambda *_args, **_kwargs: _resolver("93.184.216.34"),
+            connection_factory=lambda *_args: connection,
+        )
 
 
 def test_real_loopback_ollama_metadata_probe_uses_allowlisted_ephemeral_port() -> None:
@@ -401,10 +466,14 @@ def test_connection_failure_is_sanitized_as_unavailable() -> None:
     assert caught.value.__cause__ is None
 
 
-def test_probe_purpose_enum_has_no_inference_endpoint() -> None:
+def test_only_governed_chat_completions_purpose_reaches_inference() -> None:
+    assert probe_runner_module._INFERENCE_PURPOSES == frozenset(
+        {ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS}
+    )
     values = " ".join(
         value
         for item in ProbeEndpointPurpose
+        if item not in probe_runner_module._INFERENCE_PURPOSES
         for value in (
             item.value,
             probe_runner_module._PURPOSE_POLICY[item][1],

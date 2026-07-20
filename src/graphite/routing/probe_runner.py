@@ -31,6 +31,9 @@ from .process_runner import (
 
 MAX_PROBE_RESPONSE_BYTES: Final = 64 * 1024
 MAX_PROBE_REQUEST_BYTES: Final = 64 * 1024
+MAX_INFERENCE_REQUEST_BYTES: Final = 1_048_576
+MAX_INFERENCE_RESPONSE_BYTES: Final = 4_194_304
+MAX_INFERENCE_TIMEOUT_SECONDS: Final = 600.0
 MAX_PROBE_HEADERS: Final = 64
 MAX_PROBE_HEADER_BYTES: Final = 16 * 1024
 MAX_DNS_WORKERS: Final = 4
@@ -62,6 +65,7 @@ class ProbeEndpointPurpose(StrEnum):
     OLLAMA_SHOW = "ollama_show"
     OPENROUTER_MODELS = "openrouter_models"
     OPENROUTER_AUTH_KEY = "openrouter_auth_key"
+    OPENROUTER_CHAT_COMPLETIONS = "openrouter_chat_completions"
 
 
 _PURPOSE_POLICY: Final = {
@@ -90,7 +94,16 @@ _PURPOSE_POLICY: Final = {
         "GET",
         "/api/v1/auth/key",
     ),
+    ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS: (
+        LifecycleProviderId.OPENROUTER,
+        "POST",
+        "/api/v1/chat/completions",
+    ),
 }
+_BODY_PURPOSES: Final = frozenset(
+    {ProbeEndpointPurpose.OLLAMA_SHOW, ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS}
+)
+_INFERENCE_PURPOSES: Final = frozenset({ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS})
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,18 +412,22 @@ def run_http_probe(
     """Perform one pinned, redirect-free metadata request under one deadline."""
     if not isinstance(endpoint, HttpProbeEndpoint):
         raise ProviderProbeError("probe_endpoint_invalid")
+    inference = endpoint.purpose in _INFERENCE_PURPOSES
+    timeout_ceiling = MAX_INFERENCE_TIMEOUT_SECONDS if inference else 30.0
+    request_ceiling = MAX_INFERENCE_REQUEST_BYTES if inference else MAX_PROBE_REQUEST_BYTES
+    response_ceiling = MAX_INFERENCE_RESPONSE_BYTES if inference else MAX_PROBE_RESPONSE_BYTES
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
         or not math.isfinite(timeout_seconds)
-        or not 0.1 <= timeout_seconds <= 30
+        or not 0.1 <= timeout_seconds <= timeout_ceiling
         or isinstance(max_response_bytes, bool)
         or not isinstance(max_response_bytes, int)
-        or not 1 <= max_response_bytes <= MAX_PROBE_RESPONSE_BYTES
+        or not 1 <= max_response_bytes <= response_ceiling
         or request_body is not None
         and (
             not isinstance(request_body, bytes)
-            or len(request_body) > MAX_PROBE_REQUEST_BYTES
+            or len(request_body) > request_ceiling
         )
         or authorization is not None
         and (
@@ -426,7 +443,7 @@ def run_http_probe(
     provider, method, path = _PURPOSE_POLICY[endpoint.purpose]
     if provider is not endpoint.provider:
         raise ProviderProbeError("probe_endpoint_invalid")
-    if (request_body is not None) is (endpoint.purpose is not ProbeEndpointPurpose.OLLAMA_SHOW):
+    if (request_body is not None) is (endpoint.purpose not in _BODY_PURPOSES):
         raise ProviderProbeError("probe_request_invalid")
     if endpoint.provider is LifecycleProviderId.OLLAMA and authorization is not None:
         raise ProviderProbeError("probe_request_invalid")
