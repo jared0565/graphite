@@ -205,6 +205,57 @@ def test_execution_has_fixed_safe_argv_and_parses_one_terminal_result(tmp_path: 
     assert len(transport.calls) == 1
 
 
+def test_execution_read_only_argv_bounds_turns(tmp_path: Path) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": '{"verdict":"pass","findings":[]}',
+        "usage": {"input_tokens": 40, "output_tokens": 12},
+    }
+    transport = ScriptedTransport(
+        [_result(_stream_result(payload, model="claude-sonnet-4-6"))]
+    )
+
+    execute_claude(
+        executable=executable,
+        workspace=workspace,
+        credential_home=credentials,
+        prompt=b"review the supplied diff",
+        requested_model="sonnet",
+        expected_effective_model="claude-sonnet-4-6",
+        effort=Effort.HIGH,
+        permission_mode=PermissionMode.READ_ONLY,
+        transport=transport,
+    )
+
+    assert transport.calls[0]["argv"] == (
+        str(executable.resolve()),
+        "--safe-mode",
+        "--no-chrome",
+        "--disable-slash-commands",
+        "--strict-mcp-config",
+        "--permission-mode",
+        "plan",
+        "--allowedTools",
+        "Read",
+        "--model",
+        "sonnet",
+        "--effort",
+        "high",
+        "--max-turns",
+        "8",
+        "--no-session-persistence",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--input-format",
+        "text",
+        "--print",
+    )
+
+
 def test_execution_rejects_effective_model_mismatch_without_retry(tmp_path: Path) -> None:
     executable, workspace, credentials = _paths(tmp_path)
     transport = ScriptedTransport(

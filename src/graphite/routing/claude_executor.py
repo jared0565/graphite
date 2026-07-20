@@ -26,6 +26,14 @@ from .process_runner import (
 ADAPTER_PROTOCOL_VERSION: Final = "1.0.0"
 PREFLIGHT_TIMEOUT_SECONDS: Final = 15.0
 EXECUTION_TIMEOUT_SECONDS: Final = 1_800.0
+# Read-only execution runs in plan permission mode, whose system guidance
+# pushes the model toward the non-allowlisted ExitPlanMode tool. Without a
+# turn bound, a denial-retry loop can only end at the process timeout, which
+# is indistinguishable from slow analysis. A fixed cap converts that loop
+# into a distinguishable max-turns failure while leaving room for bounded
+# Read exploration. Workspace-write argv is intentionally unbounded here to
+# preserve the live-proven edit contract.
+READ_ONLY_EXECUTION_MAX_TURNS: Final = 8
 MAX_MESSAGE_LENGTH: Final = 1_048_576
 MAX_TOKEN_COUNT: Final = 10_000_000
 PROFILE_VERIFICATION_MARKER: Final = "GRAPHITE_PROFILE_OK"
@@ -298,6 +306,9 @@ def execute_claude(
             "--json-schema",
             json.dumps(schema, sort_keys=True, separators=(",", ":")),
         )
+    turn_args: tuple[str, ...] = ()
+    if _verification_marker is None and permission is PermissionMode.READ_ONLY:
+        turn_args = ("--max-turns", str(READ_ONLY_EXECUTION_MAX_TURNS))
     argv = (
         str(resolved),
         "--safe-mode",
@@ -313,6 +324,7 @@ def execute_claude(
         "--effort",
         normalized_effort.value,
         *structured_args,
+        *turn_args,
         "--no-session-persistence",
         "--output-format",
         "stream-json",

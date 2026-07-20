@@ -630,7 +630,58 @@ focused adapter, process-runner, and profile selection passed 89 tests. The
 full routing, lifecycle, probe, route-pool, daemon, and overlay selection
 passed 659 tests with 5 intentional skips, and the complete offline suite
 passed 1,710 tests with 44 intentional skips. Repository-wide Ruff over `src`
-and `tests` and `git diff --check` passed. The canonical `--llm none` rebuild is
+and `tests` and `git diff --check` passed.
+
+## Codex Terra sandbox-bound edit smoke passed; Claude review timed out
+
+The operator explicitly approved bundle
+`b59a99feee2dee993eb4c96dd58abd2e11e152855e36606949a0867a4c6979ba`
+(`graphite_codex_terra_sandbox_bound_acceptance_r7`, implementation commit
+`9a5e7b4db45ae7c44d8c12c946e089f6101210ef`). Preflight verified the manifest
+digest, fixture commit and graph, both store SHA-256 values and row counts,
+clean worktrees, unchanged executable digests, and matching live lifecycle
+identities.
+
+The `gpt-5.6-terra` schema-bound read-only verification passed and created
+read-only snapshot
+`ca79928e51fb2880921ec6ca427cb2ac337cc1e55c22fed4b5f2e540bcc39718`.
+The sandbox-bound schema edit smoke then passed for the first time: the
+bounded process succeeded, the terminal structured message matched exactly,
+and the worktree diff matched the pinned expectation
+`53b31139102f8b2a324ea331285dfb0e39e9b54c8430e6cee113187c67895b8b` with two
+changed files inside the byte bound. Deterministic local validation (diff
+check plus pytest) passed, and atomic promotion created workspace-write
+snapshot `ad449131682185c3ea11ca0039384585864b04d6734bf5a5edc086b898735723`,
+confirming the Windows sandbox argv binding as the root-cause fix for the
+earlier no-op edits. An independent post-run comparison confirmed the edited
+worktree and the expected worktree produce byte-identical normalized patches
+under identical git configuration.
+
+The third action, the first-ever live Claude cross-provider review, failed
+closed as `timeout` after its 120-second bound with three total model
+attempts. No review telemetry was persisted, no raw output was retained, and
+there was no retry, fallback, resume, substitution, merge, push, or
+deployment. The routing store is integrity-clean with eight snapshots, eight
+bindings, and fourteen telemetry events; the lifecycle store is unchanged.
+The review worktree remained clean at baseline, and the edited Codex worktree
+retains exactly the accepted diff.
+
+## Read-only execution turn bound
+
+Offline analysis of the timed-out review path found that read-only execution
+maps to `--permission-mode plan` with only the `Read` tool allowlisted and no
+turn bound: plan-mode guidance steers the model toward the non-allowlisted
+`ExitPlanMode` tool, so a denial-retry loop can only end at the process
+timeout, indistinguishable from legitimately slow high-effort analysis. The
+adapter now passes `--max-turns 8` for read-only execution calls, converting
+any such loop into a distinguishable fail-closed max-turns error while
+leaving bounded room for reads. The verification path keeps `--max-turns 1`
+and the live-proven workspace-write edit argv is unchanged. Focused adapter
+selection passed 90 tests, the full routing selection passed 660 tests with
+5 intentional skips, and the complete offline suite passed 1,711 tests with
+44 intentional skips; Ruff and `git diff --check` passed. The next review
+attempt requires a new manifest with a longer review timeout so a slow
+legitimate review and a turn-bounded loop produce different outcomes. The canonical `--llm none` rebuild is
 fresh with 7,508 nodes, 16,713 edges, 161 communities, and 183 scanned files.
 This correction is offline only: the next Codex edit smoke still requires a
 complete fresh manifest and explicit operator approval, and production
