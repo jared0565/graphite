@@ -1107,3 +1107,48 @@ full and honest evidence trail. The next live phase is a fresh
 verification attempt for the four remaining slugs (kimi-k3 retry,
 kimi-k2.6, glm-5.2, muse-spark-1.1), each requiring its own approved
 manifest.
+
+## OpenRouter profile verification round r2: one more verified, a pattern to chase (2026-07-20)
+
+The operator approved bundle
+`0220b2fe10538f6dfbaab28e1378d10d65a4931b84209d542b22c4046f5dd79b`
+(purpose `graphite_openrouter_profile_verification_batch_r2`,
+implementation commit `fd8012c3d035e00be6e92319db73c59993de3c3f`,
+covering the four slugs round r1 left unresolved). Before executing,
+the per-model exception handling was hardened with a catch-all inside
+the per-slug loop (any exception type, not just the three anticipated
+classes, now records that slug's failure and continues the batch) --
+a direct, code-only response to the r1 crash that does not alter the
+already-approved bundle content (confirmed by an unchanged bundle
+digest before and after the change).
+
+The batch ran to completion (no crash). Result: `moonshotai/kimi-k2.6`
+verified successfully -- real call, 23 input tokens, 1,389 output
+tokens, cost 4,767 microunits (~$0.005), 22.2 s -- and is now the
+second active OpenRouter capability. `moonshotai/kimi-k3`,
+`z-ai/glm-5.2`, and `meta/muse-spark-1.1` all failed closed with
+`failure_category: unavailable`, zero persistence each. Final audit
+matched the delta formula exactly: capability_snapshots 9 to 10,
+lifecycle_snapshot_bindings 9 to 10, telemetry_events 17 to 19, zero
+foreign-key violations, integrity ok.
+
+The three failures share one exact characteristic that the two
+successes (kimi-k2.7-code, kimi-k2.6) don't: a 1,048,576-token context
+window (the successes are both 262,144). `execute_openrouter`'s
+transport-failure handling collapsed every non-2xx/timeout/oversized-body
+outcome into a single opaque `unavailable` code -- a real gap against
+the design spec's own stated intent ("HTTP failure ... provider-process-failure
+class with status class and body hash only") that Task 5's
+implementation never delivered. Fixed offline (commit `f54f21e`):
+`probe_response_limit` now maps to the existing precedent code
+`response_limit` and `probe_timeout` to `timeout` (both already used by
+the Codex adapter), leaving `unavailable` for genuine HTTP-status
+failures. No raw provider output is exposed by this change. Full
+verification: openrouter_executor module 50 passed; routing selection
+632 passed, 1 intentional skip; complete suite 1,791 passed, 44
+intentional skips; Ruff and `git diff --check` clean; graph fresh.
+
+A round r3 with this diagnostic improvement live, targeting the same
+three slugs, is the next step to determine whether they are genuinely
+unavailable on OpenRouter right now or hitting the response cap on
+verbose reasoning output.
