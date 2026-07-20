@@ -277,15 +277,18 @@ def test_routing_docs_state_each_authority_and_recovery_gate() -> None:
 
 
 def test_glm5_references_are_confined_to_labelled_history_sections() -> None:
+    # Guards the retired Ollama alias glm-5/glm-5:cloud only; the distinct
+    # operator-approved OpenRouter model z-ai/glm-5.2 is current, not history.
     documents = routing_operator_documents()
     found = 0
     labels = ("removed", "historical", "migration", "superseded")
+    retired = re.compile(r"glm-5(?!\.2)", re.IGNORECASE)
     for name in documents:
         current_heading = ""
         for line in read_document(name).splitlines():
             if line.startswith("#"):
                 current_heading = line.casefold()
-            if "glm-5" in line.casefold():
+            if retired.search(line):
                 found += 1
                 assert any(label in current_heading for label in labels), (name, line)
     assert found > 0
