@@ -973,3 +973,42 @@ selection 625 passed, 1 intentional skip; complete offline suite 1,784
 passed, 44 intentional skips; Ruff and `git diff --check` clean. A fresh
 catalog-probe manifest pinned to the new implementation commit is required
 before any further live attempt.
+
+## OpenRouter catalog-probe r2: passed (2026-07-20)
+
+The operator approved fresh bundle
+`6a6a71892bc5dbecec6dbf2cd2a835173574d8a10eebb1a273fe69548a59a9bf`
+(purpose `graphite_openrouter_catalog_probe_batch_r2`, implementation
+commit `c2f2f675222e9186cea1df7b1c930f4163ea7426`). Execution passed with
+zero inference requests, persistence none, and both store hashes verified
+unchanged post-flight. All five requested slugs exist in the catalog with
+pricing captured at probe time (USD per token, exact catalog strings):
+
+| slug | prompt | completion | duration_ms |
+| --- | --- | --- | --- |
+| moonshotai/kimi-k3 | 0.000003 | 0.000015 | 473 |
+| moonshotai/kimi-k2.7-code | 0.00000085 | 0.0000038 | 310 |
+| moonshotai/kimi-k2.6 | 0.000000684 | 0.00000342 | 326 |
+| z-ai/glm-5.2 | 0.000000973 | 0.000003058 | 331 |
+| meta/muse-spark-1.1 | 0.00000125 | 0.00000425 | 314 |
+
+Composite identity digests (endpoint+model+pricing+routing) per slug:
+kimi-k3 `51b617d9078e248c8e0622b4ce0a0b2a4ab426ef7598261d566c994497b5518e`;
+kimi-k2.7-code `b6db813804d86c546a6bab908675e25b2638e074a977136f70c86212f774a9c7`;
+kimi-k2.6 `54210070138299ac4930de833999aaf44e66d1eba7dfba94771107385911a238`;
+glm-5.2 `5caaa90d4785a3fb1999dcd7b274644ffa30abfacdd66236324113e63dd08007`;
+muse-spark-1.1 `375618987b94aa93060016b1549e52f02e19f102e3d2293a357a70a1cd6cdcf8`.
+Shared endpoint digest
+`76ef4ad6f0c8a4ae66efb13875c107cee40c78997a212353d379acfbb2f45591`;
+shared routing-policy digest
+`916df225733c25f6d9976d29edb6b7a2050f61457fa978e178544bcd53615b39`
+(policy `{"allow_fallbacks": false}`). Both r1 root-cause fixes are
+therefore live-proven: the authenticated chunked auth response was read
+cleanly and the 512 KiB models catalog was accepted under the scoped
+4 MiB allowance.
+
+The next live phase (read-only verification bundle for the five slugs) is
+blocked on the fixture-store provider constraint recorded above: the live
+routing store predates the widened provider CHECK and cannot persist
+OpenRouter capability snapshots until it is migrated or replaced under an
+approved manifest.
