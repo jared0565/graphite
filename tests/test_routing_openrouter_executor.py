@@ -232,6 +232,27 @@ def test_execute_rejects_unsupported_effort(effort: Effort) -> None:
     assert transport.calls == []
 
 
+@pytest.mark.parametrize(
+    ("probe_code", "adapter_code"),
+    [
+        ("probe_response_limit", "response_limit"),
+        ("probe_timeout", "timeout"),
+        ("probe_http_status", "unavailable"),
+        ("probe_dns_busy", "unavailable"),
+    ],
+)
+def test_execute_maps_transport_failures_to_diagnosable_codes(
+    probe_code: str, adapter_code: str
+) -> None:
+    from graphite.routing.probe_runner import ProviderProbeError
+
+    def failing(**_kwargs: object) -> None:
+        raise ProviderProbeError(probe_code)
+
+    with pytest.raises(AdapterError, match=f"^{adapter_code}$"):
+        _execute(failing)
+
+
 def test_execute_requires_api_key_before_any_request() -> None:
     transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}'))
     with pytest.raises(AdapterError, match="^auth_required$"):

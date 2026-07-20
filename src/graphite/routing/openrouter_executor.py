@@ -49,6 +49,10 @@ _PROBE_FAILURE_CODES: Final = {
     "probe_model_unavailable": "model_unavailable",
     "probe_auth_unhealthy": "auth_required",
 }
+_EXECUTION_TRANSPORT_CODES: Final = {
+    "probe_response_limit": "response_limit",
+    "probe_timeout": "timeout",
+}
 
 __all__ = [
     "ADAPTER_PROTOCOL_VERSION",
@@ -253,8 +257,10 @@ def execute_openrouter(
             authorization=f"Bearer {api_key}",
             max_response_bytes=MAX_INFERENCE_RESPONSE_BYTES,
         )
-    except ProviderProbeError:
-        raise AdapterError("unavailable") from None
+    except ProviderProbeError as error:
+        raise AdapterError(
+            _EXECUTION_TRANSPORT_CODES.get(error.code, "unavailable")
+        ) from None
     except Exception:
         raise AdapterError("unavailable") from None
     if not isinstance(result, HttpProbeResult):
