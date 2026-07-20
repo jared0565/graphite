@@ -1152,3 +1152,43 @@ A round r3 with this diagnostic improvement live, targeting the same
 three slugs, is the next step to determine whether they are genuinely
 unavailable on OpenRouter right now or hitting the response cap on
 verbose reasoning output.
+
+## OpenRouter profile verification round r3: diagnostic, inconclusive on cause (2026-07-20)
+
+The operator approved bundle
+`99b78b74e63bef071eca3fa68477033c6e61026f7bce593ff9de1405cc397b4c`
+(purpose `graphite_openrouter_profile_verification_batch_r3`,
+implementation commit `e3a0abf5407f0312e9b97cbbbe8fd7d2c6b74231`), a
+diagnostic-only re-attempt of the three still-unresolved slugs with the
+newly split `response_limit`/`timeout`/`unavailable` codes live, run
+purely to observe which bucket occurred, not to force a different
+outcome.
+
+All three (`moonshotai/kimi-k3`, `z-ai/glm-5.2`, `meta/muse-spark-1.1`)
+again failed with `failure_category: unavailable`, zero persistence
+each. This rules out response-truncation from verbose reasoning output
+and rules out a deadline/timeout cause -- the two leading hypotheses
+after round r2. `kimi-k3` has now failed identically in three
+consecutive rounds; `glm-5.2` and `muse-spark-1.1` in two. Final audit
+confirmed the store was untouched: capability_snapshots 10,
+lifecycle_snapshot_bindings 10, telemetry_events 19, unchanged from
+before the round, integrity ok.
+
+`unavailable` in `execute_openrouter` covers a genuine HTTP-status-level
+rejection or any other non-response-limit/non-timeout transport failure.
+No raw provider diagnostics are captured by design, so this cannot be
+narrowed further without either a live capacity check against OpenRouter
+directly (outside the governed non-inference probe's current scope) or
+another status-class split, at the cost of a fourth approval round for
+uncertain diagnostic payoff. The consistent, repeatable pattern across
+three attempts on the same 1,048,576-context axis is more consistent
+with these three models genuinely having no active serving capacity on
+OpenRouter right now than with a bug in this implementation -- the two
+successfully verified models (`kimi-k2.7-code`, `kimi-k2.6`) are both
+262,144-context and passed cleanly.
+
+Two OpenRouter capability snapshots remain active:
+`moonshotai/kimi-k2.7-code` (`99db4a4a...`) and `moonshotai/kimi-k2.6`
+(`6816edaf...`). Whether to keep chasing the remaining three, or proceed
+to edit-smoke and pool registration with the two verified models, is an
+operator decision.
