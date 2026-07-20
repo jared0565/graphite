@@ -1235,3 +1235,38 @@ The prompt's delimiter format is being revised before any further
 attempt (explicit instruction that delimiter lines are not file content)
 under a fresh manifest with a new worktree task id, since a byte-identical
 retry at temperature 0 would likely reproduce the same output.
+
+## OpenRouter edit smoke r2: harness fix confirmed, new truncation pattern (2026-07-20)
+
+The operator approved bundle
+`38f9a05456efc06df09c84f062aa25853b564cff4bf674130e32cb7665782a1e`
+(purpose `graphite_openrouter_edit_smoke_kimi27_r2`), a retry with a
+fresh worktree and a revised prompt (explicit BEGIN/END delimiters with
+an instruction never to echo them, replacing r1's ambiguous `=====`
+markers). Execution failed with `failure_category: test_validation_failed`
+-- a real, specific code this time, confirming the r1 harness bug
+(`run_validation` raising a same-named-but-distinct exception class) is
+fixed. Store confirmed untouched: capability_snapshots 10,
+lifecycle_snapshot_bindings 10, telemetry_events 19, unchanged.
+
+The delimiter-echo pattern from r1 did not recur. Instead, both files
+were written as exactly their first line and nothing else, with no
+trailing newline: `src/access.py` contains only
+`def can_read_record(actor_tenant: str, record_tenant: str) -> bool:`
+and `tests/test_access.py` contains only
+`from src.access import can_read_record`. The response was schema-valid
+(passed strict json_schema validation, exactly the two required files,
+each parsed to a well-formed content string) so this is not a
+transport-level truncation -- `execute_openrouter` would have raised
+`response_limit` before any write if it were. Both fields stopping at
+exactly one line, independently, with a 16,384-token budget dramatically
+larger than either file needs, does not look like ordinary
+budget-exhaustion truncation; it looks like the model terminating each
+`content` string early for some other reason specific to this
+two-file, whole-file-replacement request shape.
+
+Two edit-smoke attempts have now failed for two different reasons
+(prompt-format confusion in r1, early truncation in r2). Whether to
+try a third attempt -- e.g. splitting the request into two independent
+single-file edit calls to reduce per-call output complexity -- or take
+a different approach is an operator decision recorded separately.
