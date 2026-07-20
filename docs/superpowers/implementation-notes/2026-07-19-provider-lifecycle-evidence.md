@@ -1012,3 +1012,32 @@ blocked on the fixture-store provider constraint recorded above: the live
 routing store predates the widened provider CHECK and cannot persist
 OpenRouter capability snapshots until it is migrated or replaced under an
 approved manifest.
+
+## Fixture routing store migrated to schema v6 (2026-07-20)
+
+The operator approved migration bundle
+`d403a5c576c8c0a5e564f7d5e92df8fcf811e1c7a23b4b5e6dd9139944b582fd`
+(purpose `graphite_routing_store_schema_v6_migration`, implementation
+commit `57057b541bc39231f6a9dddcbf3d69a1d1cd06c2`). Execution ran
+`RepositoryStore(fixture).initialize()` once, in 786 ms, with zero
+network, inference, or credential access and zero row changes to any
+table. The store contract before and after the migration is identical
+(8 capability snapshots, 8 lifecycle snapshot bindings, 15 telemetry
+events, 0 foreign-key violations, integrity `ok`); only the schema
+version (5 to 6) and the routing store's own file hash changed, since the
+two provider-constrained tables were rebuilt in place. Evidence:
+
+- routing store SHA-256 before/after:
+  `ff60056cca576a282fdd0e1069ffb8ed43f21ddc2be71da47b08a25aca706f05` to
+  `1bfaae1813288b08bd3c73911ab1a36be231f65ffb10521b892ad11cd698572b`;
+- lifecycle store SHA-256 unchanged:
+  `d7bd02146e98c9b79e102d75c400f046189a6424d30a225126f109489a258d1b`;
+- verified pre-v6 backup SHA-256:
+  `0a1dbdc3fb59f185d495b3082b6fc62d8850e246ba4d3f72caccc6d3a9783fe1`
+  (`events-schema-v5-pre-v6.sqlite3`, integrity `ok`, stamped schema
+  version 5), enabling database-restore rollback if ever needed.
+
+The fixture routing store now accepts OpenRouter capability snapshots.
+The next live phase is a read-only verification bundle for the five
+probed slugs, each requiring its own approved manifest with token and
+cost bounds.
