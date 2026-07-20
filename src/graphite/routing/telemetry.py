@@ -59,7 +59,9 @@ class HumanVerdict(StrEnum):
     REWORK = "rework"
 
 
-_SAFE_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_SAFE_MODEL = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(/[A-Za-z0-9][A-Za-z0-9._:+-]{0,127})?$"
+)
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _VALIDATION_OUTCOMES = frozenset({"passed", "failed", "blocked", "not_run"})
 

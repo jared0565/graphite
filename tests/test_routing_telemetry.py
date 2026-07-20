@@ -218,6 +218,17 @@ def test_cli_telemetry_schema_is_allowlisted_append_only_and_cost_unknown(tmp_pa
         CliTelemetryRecord(**{**record.__dict__, "source": "super-secret"})
     with pytest.raises(ValueError, match="telemetry_model_invalid"):
         _cli_record(requested_model="../../src/private.py")
+    openrouter_record = _cli_record(
+        provider="openrouter",
+        requested_model="moonshotai/kimi-k2.7-code",
+        effective_model="moonshotai/kimi-k2.7-code",
+        capability_snapshot_digest="f" * 64,
+    )
+    assert record_cli_telemetry(store, openrouter_record) is True
+    with pytest.raises(ValueError, match="telemetry_model_invalid"):
+        _cli_record(requested_model="a/b/c")
+    with pytest.raises(ValueError, match="telemetry_model_invalid"):
+        _cli_record(requested_model="/leading-slash")
     with pytest.raises(ValueError, match="telemetry_cost_status_invalid"):
         _cli_record(cost_status="0-usd")
     with pytest.raises(ValueError, match="telemetry_diff_hash_invalid"):
