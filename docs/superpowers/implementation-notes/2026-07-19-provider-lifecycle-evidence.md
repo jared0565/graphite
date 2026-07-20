@@ -1270,3 +1270,25 @@ Two edit-smoke attempts have now failed for two different reasons
 try a third attempt -- e.g. splitting the request into two independent
 single-file edit calls to reduce per-call output complexity -- or take
 a different approach is an operator decision recorded separately.
+
+## OpenRouter edit smoke r3: transient transport failure on first sub-call (2026-07-20)
+
+The operator approved bundle
+`93df22386f69abb0174f9bbe71f88f30225bf4d6e8bc962acd1f28ed544c6db7`
+(purpose `graphite_openrouter_edit_smoke_kimi27_r3`), the two-single-file-call
+redesign. Execution failed on the first sub-call (`access_py`) with
+`failure_category: unavailable` before any content was received; the
+second sub-call never ran, `apply_whole_file_edit` was never invoked, and
+the store was confirmed untouched (capability_snapshots 10,
+lifecycle_snapshot_bindings 10, telemetry_events 19). The worktree's
+`src/access.py` is byte-identical to the pristine baseline.
+
+Unlike the earlier three-model `unavailable` pattern (repeated
+identically across 2-3 rounds each for kimi-k3/glm-5.2/muse-spark-1.1),
+this is the first `unavailable` result for `moonshotai/kimi-k2.7-code`
+across every round so far -- it passed profile verification cleanly and
+both prior edit-smoke attempts got well past this exact call (through to
+schema-valid responses, in both cases). Nothing in this result points at
+the split-call design or the prompt; it reads as an isolated transient
+transport failure rather than a structural issue. A same-design retry
+under a fresh manifest is the next step.
