@@ -683,3 +683,45 @@ Tests: storage round-trip preserves the digest and provider; lifecycle binding s
 - Spec coverage: executor+preflight (Tasks 4-5), edit engine (6), identity/profiles (1, 4), cost ceiling (3, 5), transport discipline (2), pool/snapshot parity (7), docs/scope revocation (8), live order (9, gated). Review-role execution needs no new code beyond Task 5 (the review schema is just a different `output_schema`).
 - Type consistency: `OpenRouterPricing`/`completion_cost_microunits` defined in Task 3, consumed in Tasks 4-5 with matching signatures; `HttpProbeEndpoint` purpose from Task 2 used in Task 5's transport assertion.
 - No placeholders: every step carries code or exact commands; Task 7's "fix only if a test exposes a gap" is bounded by named modules and the mapping-table remedy.
+
+---
+
+## Live-acceptance status (post-plan, manifest-gated)
+
+Live acceptance runs as the separate manifest-gated phase noted in the Global
+Constraints and Task 9, on the disposable fixture
+`F:\tmp\graphite-production-live-fixture` (routing store 12/12/21). Each step
+is behind its own operator approval:
+
+- **Catalog probe** — DONE (five slugs; auth health once + per-slug catalog
+  existence and pricing capture, no inference).
+- **Verification** — DONE for `moonshotai/kimi-k2.7-code` and
+  `moonshotai/kimi-k2.6` (both lifecycle-ACTIVE); `moonshotai/kimi-k3`,
+  `z-ai/glm-5.2`, and `meta/muse-spark-1.1` remain `verification_required`.
+- **Edit smokes** — DONE (r7 `kimi-k2.7-code`, r8 `kimi-k2.6`; single-call
+  `json_object` shape; both edit-promoted; identical `diff_sha256
+  005f1ae8…`). Root cause of the earlier truncation was strict `json_schema`
+  structured output constraining free-form content; `json_object` fixed it.
+- **Pool registration** — ✅ **DONE 2026-07-20.** Offline, read-only
+  loadability + selectability proof: both edit-promoted models construct as an
+  ordered WORKSPACE_WRITE `ApprovedRoutePool` and `select_route` selects
+  `kimi-k2.7-code` primary (empty attempts) then `kimi-k2.6` after one
+  synthesized `capacity_unavailable` attempt, each against its live ACTIVE
+  `RouteAuthority`. Diagnostic positive (`edit_snapshots_directly_selectable` —
+  no re-activation needed); `mutated: false`; both stores byte-unchanged; no
+  `ApprovalAuthority.issue`, no network, no graphite source change. Spec:
+  `docs/superpowers/specs/2026-07-20-openrouter-pool-registration-design.md`;
+  plan: `docs/superpowers/plans/2026-07-20-openrouter-pool-registration.md`;
+  evidence:
+  `docs/superpowers/implementation-notes/2026-07-19-provider-lifecycle-evidence.md`
+  (commit `7454283`).
+
+This satisfies the parent spec's live-acceptance success criterion "verified
+models are loadable pool candidates for their categories" for the edit
+(ISOLATED_CODE / WORKSPACE_WRITE) category on both edit-promoted models.
+
+Deferred (future operator decisions, each its own approval): the read-only
+review / authorization pool; a live routed smoke through
+`execute_approved_route_pool` (the persisted, signed-pool path — nothing was
+persisted by the offline proof); the three unverified models; and branch
+integration (push/merge of `feat/claude-codex-router`).
