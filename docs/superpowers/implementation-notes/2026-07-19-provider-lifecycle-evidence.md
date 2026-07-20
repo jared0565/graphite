@@ -805,7 +805,56 @@ routing selection passed 665 tests with 5 intentional skips; the complete
 offline suite passed 1,716 tests with 44 intentional skips; repository-wide
 Ruff and `git diff --check` passed, and the canonical rebuild is fresh. The
 next review manifest binds the same review contract schema to the CLI
-itself, with all bounds unchanged from the approved r11 values. The canonical `--llm none` rebuild is
+itself, with all bounds unchanged from the approved r11 values.
+
+## Cross-provider review passed; live acceptance complete
+
+The operator approved schema-bound bundle
+`9b656e36a078a2124247a5d98d41d04c5cd7116bd0d444fc45fdcf7c359f3f43`
+(`graphite_claude_review_completion_r12`, implementation commit
+`c38119857ed9fb3215774d99e6b8a7e98076db8b`). The single approved review
+attempt passed. Sanitized receipt evidence is:
+
+- effective model: `claude-sonnet-5`;
+- duration: 108,574 milliseconds;
+- usage: 2 input tokens and 9,436 output tokens against 65,536 / 16,384;
+- review verdict: `pass` with zero findings, CLI-validated against the
+  pinned response contract `16c1816b92cd620e4a8d9a1f1a01d2e537c9e4e477da9563f78c30a82adf32c9`;
+- primary diff: `53b31139102f8b2a324ea331285dfb0e39e9b54c8430e6cee113187c67895b8b`;
+- stdout SHA-256:
+  `c44ea53991ba0079febffde2c3dbdb0b2d02614a6ddca0802207b34057a4127c`;
+- stderr SHA-256:
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+The review worktree remained clean and exactly one sanitized telemetry event
+was appended. The final audit passed with the exact expected store contract:
+routing integrity ok, zero foreign-key violations, eight capability
+snapshots, eight lifecycle bindings, fifteen telemetry events; lifecycle
+integrity ok with two current observations and six lifecycle events; both
+provider states active. There was no retry, fallback, resume, substitution,
+merge, push, or deployment.
+
+Every live acceptance gate defined for this capability has now passed:
+
+- current Codex profile verification (`gpt-5.6-terra`, snapshot
+  `ca79928e51fb2880921ec6ca427cb2ac337cc1e55c22fed4b5f2e540bcc39718`);
+- Codex edit smoke with the exact expected diff and atomic promotion of
+  workspace-write snapshot
+  `ad449131682185c3ea11ca0039384585864b04d6734bf5a5edc086b898735723`;
+- Claude edit smoke with the exact expected diff and promoted
+  workspace-write snapshot
+  `d7f276c1dbb1650e35499e5f401c49c923c7931e34c4ef0e1955cd064f97ec09`,
+  retained in the same active store;
+- read-only cross-provider high-risk review with a schema-validated pass
+  verdict;
+- final audit persistence matching the approved store contract.
+
+The complete offline suite passed 1,716 tests with 44 intentional skips at
+the final implementation state (`c38119857ed9fb3215774d99e6b8a7e98076db8b`);
+subsequent commits on this branch are documentation-only. The branch remains
+unpushed and unmerged; integration, promotion beyond this fixture, and any
+production deployment remain separate operator decisions with their own
+approvals. The canonical `--llm none` rebuild is
 fresh with 7,508 nodes, 16,713 edges, 161 communities, and 183 scanned files.
 This correction is offline only: the next Codex edit smoke still requires a
 complete fresh manifest and explicit operator approval, and production
