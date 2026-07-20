@@ -1583,3 +1583,53 @@ passed). `IMPLEMENTATION_COMMIT 3040c18`, feature worktree clean. Deferred
 (out of scope): the read-only review/authorization pool, a live routed smoke
 through `execute_approved_route_pool`, and the three unverified models
 (`kimi-k3`, `glm-5.2`, `muse-spark-1.1`).
+
+## OpenRouter live routed edit smoke through `execute_approved_route_pool`
+
+2026-07-21. Closes the last gap the offline registration left open: a real
+`kimi-k2.7-code` edit was routed end-to-end through `execute_approved_route_pool`
+against a signed, consumed two-candidate pool, and the coordinator selected the
+primary against its live ACTIVE `RouteAuthority`. Design + plan:
+`docs/superpowers/specs/2026-07-20-openrouter-routed-smoke-design.md`,
+`docs/superpowers/plans/2026-07-20-openrouter-routed-smoke.md`. Harness pair
+`_prepare/_execute_openrouter_routed_smoke.py`, `IMPLEMENTATION_COMMIT 462a07f`.
+Unlike the offline proof, this round mutates the store and spends budget by
+design; it reuses the r7/r8 tenant-authorization edit target (reference
+`diff_sha256 005f1ae8...`, 2 files, 1007 bytes) as a deterministic oracle.
+
+Approval-consumption chronology (`execute_approved_route_pool` consumes the
+signed approval BEFORE the runner executes, so a runner failure still spends the
+single-use approval): the first two attempts (`openrouter-routed-smoke-1`,
+`-2`) failed at the runner with `auth_required` -- an inline
+`OPENROUTER_API_KEY="<placeholder>"` in the operator command shadowed the
+operator's real ambient key, which OpenRouter rejected at the preflight auth
+check before any completion. Each consumed its approval and advanced the routing
+store hash (`21e73d3f -> b6301bf9 -> ec94ff04`) by writing the approval record,
+but performed **no inference, incurred no cost, wrote no telemetry, and changed
+no snapshot/binding**; the lifecycle store stayed byte-unchanged throughout.
+Each retry was a fresh governed round (new `approval_id`/`nonce`, re-pinned
+routing hash, re-displayed manifest, re-approval). The fix was to run with **no
+inline key** (ambient `OPENROUTER_API_KEY`, exactly as r7/r8 did).
+
+The third round (`openrouter-routed-smoke-3`, bundle
+`e13109faac2ad1ccbc5c93dde68ee0f025cd6aaff5da576bb8363215b1bac0f0`, routing pin
+`ec94ff04...`) **passed**. `select_route` selected `candidate[0]`
+(`openrouter-kimi27-code-primary`, edit snapshot `500cda19...`) with empty
+attempts; the runner performed one live `json_object` inference (414 input / 452
+output tokens, 3825 ms, **2035 microunits** -- far under the 128000 ceiling),
+applied the whole-file edit in an isolated worktree, and produced
+`diff_sha256 005f1ae8...` (`reference_match: true`, 2 files) with deterministic
+validation passed. `execute_approved_route_pool` returned the primary result;
+`approval_status("openrouter-routed-smoke-3") == "consumed"`; one routed
+`CliTelemetryRecord` (outcome `succeeded`, `MACHINE_VERIFIED`) was persisted
+(`cli_telemetry_events` 21 -> 22). Final audit: capability_snapshots 12 and
+lifecycle_snapshot_bindings 12 **unchanged** (no promotion), integrity ok, 0
+foreign-key violations. Routing-store hash moved to the new baseline
+`aef018b0...`; the lifecycle store remained `a99f7cc4...` (untouched). The run
+made exactly one live completion, called neither `verify_and_save_approved_edit_profile`
+nor any promotion path, and required no graphite source change
+(`test_route_pool` + `test_routing_openrouter_executor` + `test_routing_profiles`
+remained green, 111 passed). Deferred (out of scope): forcing the live
+capacity-fallback to `kimi-k2.6` (non-deterministic; proven selectable offline),
+the read-only review/authorization pool, the three unverified models, and branch
+integration.
