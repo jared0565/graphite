@@ -64,6 +64,7 @@ class Effort(StrEnum):
 class ProviderId(StrEnum):
     CLAUDE_CODE = "claude-code"
     CODEX = "codex"
+    OPENROUTER = "openrouter"
 
 
 class PermissionMode(StrEnum):

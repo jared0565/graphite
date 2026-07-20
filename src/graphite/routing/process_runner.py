@@ -62,6 +62,7 @@ _CAPACITY_DIAGNOSTICS: Final = {
         b"selected model is at capacity. please try a different model.",
     ),
 }
+_CLI_PROVIDERS: Final = frozenset({ProviderId.CLAUDE_CODE, ProviderId.CODEX})
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +204,8 @@ def build_cli_environment(
         normalized_provider = ProviderId(provider)
     except (TypeError, ValueError) as exc:
         raise CliProcessError("provider_invalid") from exc
+    if normalized_provider not in _CLI_PROVIDERS:
+        raise CliProcessError("provider_invalid")
     canonical_workspace = _canonical_directory(workspace, "workspace_invalid")
     canonical_executable = _canonical_executable(executable, canonical_workspace)
     ambient = dict(os.environ)
@@ -282,6 +285,8 @@ def run_cli_process(
         normalized_provider = ProviderId(provider)
     except (TypeError, ValueError) as exc:
         raise CliProcessError("provider_invalid") from exc
+    if normalized_provider not in _CLI_PROVIDERS:
+        raise CliProcessError("provider_invalid")
     if (
         not isinstance(stdin, bytes)
         or not math.isfinite(timeout_seconds)

@@ -27,6 +27,30 @@ def _credential_home(tmp_path: Path) -> Path:
     return path
 
 
+def test_cli_transport_rejects_non_cli_provider(tmp_path: Path) -> None:
+    executable = tmp_path / "bin" / "tool.exe"
+    executable.parent.mkdir()
+    executable.write_bytes(b"binary")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with pytest.raises(CliProcessError, match="^provider_invalid$"):
+        build_cli_environment(
+            provider=ProviderId.OPENROUTER,
+            executable=executable,
+            workspace=workspace,
+            credential_home=None,
+        )
+    with pytest.raises(CliProcessError, match="^provider_invalid$"):
+        run_cli_process(
+            argv=(str(executable),),
+            cwd=workspace,
+            stdin=b"",
+            provider=ProviderId.OPENROUTER,
+            credential_home=None,
+            timeout_seconds=5.0,
+        )
+
+
 def test_cli_environment_is_allowlisted_and_strips_ambient_secrets(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

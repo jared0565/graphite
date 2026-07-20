@@ -22,6 +22,7 @@ from graphite.routing.profiles import (
     create_capability_snapshot,
     load_verified_capability_snapshots,
     operator_codex_profile,
+    operator_openrouter_profile,
     save_capability_snapshot,
     verify_and_save_approved_edit_profile,
     verify_and_save_approved_profile,
@@ -62,6 +63,35 @@ def test_codex_profile_requires_explicit_official_operator_evidence() -> None:
             supported_efforts=(Effort.HIGH,),
             evidence_url="https://example.invalid/models",
             evidence_accessed="2026-07-18",
+        )
+
+
+def test_operator_openrouter_profile_allows_openrouter_evidence_host() -> None:
+    profile = operator_openrouter_profile(
+        model_id="moonshotai/kimi-k3",
+        supported_efforts=(Effort.HIGH,),
+        evidence_url="https://openrouter.ai/moonshotai/kimi-k3",
+        evidence_accessed="2026-07-20",
+    )
+    assert profile.provider is ProviderId.OPENROUTER
+    assert profile.requested_model == "moonshotai/kimi-k3"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://developers.openai.com/models/kimi",
+        "https://platform.claude.com/docs",
+        "http://openrouter.ai/moonshotai/kimi-k3",
+    ],
+)
+def test_operator_openrouter_profile_rejects_foreign_or_insecure_evidence(url: str) -> None:
+    with pytest.raises(ProfileError, match="^profile_evidence_invalid$"):
+        operator_openrouter_profile(
+            model_id="moonshotai/kimi-k3",
+            supported_efforts=(Effort.HIGH,),
+            evidence_url=url,
+            evidence_accessed="2026-07-20",
         )
 
 

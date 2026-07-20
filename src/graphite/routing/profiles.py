@@ -26,6 +26,11 @@ MIN_SNAPSHOT_TTL_SECONDS: Final = 60
 MAX_SNAPSHOT_TTL_SECONDS: Final = 86_400
 MAX_VERIFICATION_INPUT_TOKENS: Final = 262_144
 MAX_VERIFICATION_OUTPUT_TOKENS: Final = 32_768
+_EVIDENCE_HOSTS: Final = {
+    ProviderId.CLAUDE_CODE: "platform.claude.com",
+    ProviderId.CODEX: "developers.openai.com",
+    ProviderId.OPENROUTER: "openrouter.ai",
+}
 
 
 class ProfileError(RuntimeError):
@@ -64,11 +69,7 @@ class RequestedProfile:
         if not efforts or len(set(efforts)) != len(efforts):
             raise ProfileError("profile_effort_invalid")
         parsed = urlparse(self.evidence_url)
-        allowed_host = (
-            "platform.claude.com"
-            if provider is ProviderId.CLAUDE_CODE
-            else "developers.openai.com"
-        )
+        allowed_host = _EVIDENCE_HOSTS[provider]
         if parsed.scheme != "https" or parsed.hostname != allowed_host or parsed.username:
             raise ProfileError("profile_evidence_invalid")
         try:
@@ -162,6 +163,23 @@ def operator_codex_profile(
     """Create an operator-selected Codex request without claiming subscription access."""
     return RequestedProfile(
         ProviderId.CODEX,
+        model_id,
+        supported_efforts,
+        evidence_url,
+        evidence_accessed,
+    )
+
+
+def operator_openrouter_profile(
+    *,
+    model_id: str,
+    supported_efforts: tuple[Effort, ...],
+    evidence_url: str,
+    evidence_accessed: str,
+) -> RequestedProfile:
+    """Create an operator-selected OpenRouter request without claiming key validity."""
+    return RequestedProfile(
+        ProviderId.OPENROUTER,
         model_id,
         supported_efforts,
         evidence_url,
