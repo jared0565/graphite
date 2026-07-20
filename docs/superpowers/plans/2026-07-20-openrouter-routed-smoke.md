@@ -138,6 +138,8 @@ EXPECTED_CHANGED_BYTES = 1007
 
 REPOSITORY_QUOTA_TOKENS = 262_144
 MACHINE_QUOTA_TOKENS = 262_144
+# ApprovalAuthority REJECTS a key/quota path inside the store's repository root
+# (approval_key_path_invalid / quota_path_invalid). This state dir is outside FIXTURE.
 _STATE_DIR = Path(r"F:\tmp\graphite-live-acceptance-harness") / ".routed-smoke-state"
 APPROVAL_KEY_PATH = _STATE_DIR / "approval.key"
 APPROVAL_QUOTA_PATH = _STATE_DIR / "quota.sqlite3"
@@ -512,12 +514,12 @@ def main() -> int:
         spec_by_candidate = {c.candidate_id: s for c, s in zip(candidates, specs)}
 
         action = "issue"
-        prepared.APPROVAL_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        approval_authority = ApprovalAuthority(
-            routing_store, key_path=APPROVAL_KEY_PATH, quota_path=APPROVAL_QUOTA_PATH,
-            now=lambda: int(time.time()),
-        )
-        try:
+        APPROVAL_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        try:  # ApprovalAuthority(...) itself raises ApprovalError on a bad key/quota path
+            approval_authority = ApprovalAuthority(
+                routing_store, key_path=APPROVAL_KEY_PATH, quota_path=APPROVAL_QUOTA_PATH,
+                now=lambda: int(time.time()),
+            )
             signed = approval_authority.issue(pool)
         except ApprovalError as error:
             raise HarnessFailure("approval_issue_failed", code=error.code) from None
@@ -660,8 +662,11 @@ shutil.copy2(LIVE / LR, WORKDIR / LR)
 ex.FIXTURE = WORKDIR
 ex.ROUTING_PATH = WORKDIR / RR
 ex.LIFECYCLE_PATH = WORKDIR / LR
-ex.APPROVAL_KEY_PATH = WORKDIR / "approval.key"
-ex.APPROVAL_QUOTA_PATH = WORKDIR / "quota.sqlite3"
+# key/quota MUST be outside the store root -> a sibling state dir, not WORKDIR.
+_STATE = Path(r"F:\tmp\graphite-routed-smoke-dryrun-state")
+shutil.rmtree(_STATE, ignore_errors=True); _STATE.mkdir(parents=True, exist_ok=True)
+ex.APPROVAL_KEY_PATH = _STATE / "approval.key"
+ex.APPROVAL_QUOTA_PATH = _STATE / "quota.sqlite3"
 prep.APPROVAL_KEY_PATH = ex.APPROVAL_KEY_PATH
 prep.APPROVAL_QUOTA_PATH = ex.APPROVAL_QUOTA_PATH
 prep.ROUTING_STORE_SHA256 = sha(WORKDIR / RR)
