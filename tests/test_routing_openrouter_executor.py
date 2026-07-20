@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +14,8 @@ from graphite.routing.openrouter_executor import (
     ADAPTER_PROTOCOL_VERSION,
     API_CONTRACT_VERSION,
     CANONICAL_ENDPOINT,
+    MAX_EDIT_FILE_BYTES,
+    apply_whole_file_edit,
     execute_openrouter,
     preflight_openrouter,
 )
@@ -240,3 +244,232 @@ def test_execute_rejects_undecodable_prompt() -> None:
     with pytest.raises(AdapterError, match="^request_invalid$"):
         _execute(transport, prompt=b"\xff\xfe")
     assert transport.calls == []
+
+
+_EDIT_SCOPE = ("src/alpha.py", "src/beta.py")
+
+
+def _edit_workspace(tmp_path: Path) -> Path:
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "alpha.py").write_bytes(b"alpha = 1\r\n")
+    (workspace / "src" / "beta.py").write_bytes(b"beta = 2\n")
+    return workspace
+
+
+def _tree(workspace: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(workspace).as_posix(): path.read_bytes()
+        for path in sorted(workspace.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _edit_payload(files: object, result: object = "GRAPHITE_EDIT_OK") -> dict[str, object]:
+    return {"files": files, "result": result}
+
+
+def _both_files(alpha: str = "alpha = 2\r\n", beta: str = "beta = 3\n") -> list[dict[str, str]]:
+    return [
+        {"content": beta, "path": "src/beta.py"},
+        {"content": alpha, "path": "src/alpha.py"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "../escape.py",
+        "C:/x.py",
+        "/x.py",
+        "src\\alpha.py",
+        "./x.py",
+        "src//x.py",
+        "src/../alpha.py",
+        "",
+        "x" * 513,
+    ],
+)
+def test_edit_rejects_hostile_paths_without_writing(tmp_path: Path, hostile: str) -> None:
+    workspace = _edit_workspace(tmp_path)
+    before = _tree(workspace)
+    with pytest.raises(AdapterError, match="^edit_scope_violation$"):
+        apply_whole_file_edit(
+            workspace=workspace,
+            payload=_edit_payload([{"content": "x", "path": hostile}]),
+            edit_scope=(hostile,),
+            max_total_bytes=2048,
+        )
+    assert _tree(workspace) == before
+    assert not (tmp_path / "escape.py").exists()
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        [{"content": "x", "path": "src/alpha.py"}],
+        [
+            {"content": "x", "path": "src/alpha.py"},
+            {"content": "y", "path": "src/beta.py"},
+            {"content": "z", "path": "src/gamma.py"},
+        ],
+        [
+            {"content": "x", "path": "src/alpha.py"},
+            {"content": "y", "path": "src/alpha.py"},
+        ],
+        "not-a-list",
+        [],
+        [{"content": 42, "path": "src/alpha.py"}, {"content": "y", "path": "src/beta.py"}],
+        [{"path": "src/alpha.py"}, {"content": "y", "path": "src/beta.py"}],
+    ],
+)
+def test_edit_rejects_scope_mismatch_and_malformed_files(tmp_path: Path, files: object) -> None:
+    workspace = _edit_workspace(tmp_path)
+    before = _tree(workspace)
+    with pytest.raises(AdapterError, match="^edit_scope_violation$"):
+        apply_whole_file_edit(
+            workspace=workspace,
+            payload=_edit_payload(files),
+            edit_scope=_EDIT_SCOPE,
+            max_total_bytes=2048,
+        )
+    assert _tree(workspace) == before
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"files": []},
+        {"files": [], "result": "DONE"},
+        {"files": [], "result": "GRAPHITE_EDIT_OK", "extra": 1},
+        "prose",
+        {},
+    ],
+)
+def test_edit_rejects_missing_or_wrong_marker(tmp_path: Path, payload: object) -> None:
+    workspace = _edit_workspace(tmp_path)
+    before = _tree(workspace)
+    with pytest.raises(AdapterError, match="^edit_scope_violation$"):
+        apply_whole_file_edit(
+            workspace=workspace,
+            payload=payload,
+            edit_scope=_EDIT_SCOPE,
+            max_total_bytes=2048,
+        )
+    assert _tree(workspace) == before
+
+
+def test_edit_rejects_file_over_byte_cap(tmp_path: Path) -> None:
+    workspace = _edit_workspace(tmp_path)
+    before = _tree(workspace)
+    files = _both_files(alpha="x" * (MAX_EDIT_FILE_BYTES + 1))
+    with pytest.raises(AdapterError, match="^edit_scope_violation$"):
+        apply_whole_file_edit(
+            workspace=workspace,
+            payload=_edit_payload(files),
+            edit_scope=_EDIT_SCOPE,
+            max_total_bytes=10 * MAX_EDIT_FILE_BYTES,
+        )
+    assert _tree(workspace) == before
+
+
+def test_edit_rejects_aggregate_over_total_budget(tmp_path: Path) -> None:
+    workspace = _edit_workspace(tmp_path)
+    before = _tree(workspace)
+    files = _both_files(alpha="a" * 8, beta="b" * 8)
+    with pytest.raises(AdapterError, match="^edit_scope_violation$"):
+        apply_whole_file_edit(
+            workspace=workspace,
+            payload=_edit_payload(files),
+            edit_scope=_EDIT_SCOPE,
+            max_total_bytes=15,
+        )
+    assert _tree(workspace) == before
+
+
+def test_edit_rejects_symlinked_parent_directory(tmp_path: Path) -> None:
+    workspace = _edit_workspace(tmp_path)
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "alpha.py").write_bytes(b"alpha = 1\n")
+    link = workspace / "linked"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    with pytest.raises(AdapterError, match="^edit_scope_violation$"):
+        apply_whole_file_edit(
+            workspace=workspace,
+            payload=_edit_payload([{"content": "x", "path": "linked/alpha.py"}]),
+            edit_scope=("linked/alpha.py",),
+            max_total_bytes=2048,
+        )
+    assert (real / "alpha.py").read_bytes() == b"alpha = 1\n"
+
+
+def test_edit_rejects_missing_scope_target(tmp_path: Path) -> None:
+    workspace = _edit_workspace(tmp_path)
+    before = _tree(workspace)
+    with pytest.raises(AdapterError, match="^edit_scope_violation$"):
+        apply_whole_file_edit(
+            workspace=workspace,
+            payload=_edit_payload([{"content": "x", "path": "src/missing.py"}]),
+            edit_scope=("src/missing.py",),
+            max_total_bytes=2048,
+        )
+    assert _tree(workspace) == before
+    assert not (workspace / "src" / "missing.py").exists()
+
+
+def test_edit_rejects_preexisting_temp_collision(tmp_path: Path) -> None:
+    workspace = _edit_workspace(tmp_path)
+    (workspace / "src" / "alpha.py.graphite-tmp").write_bytes(b"stale")
+    before = _tree(workspace)
+    with pytest.raises(AdapterError, match="^edit_scope_violation$"):
+        apply_whole_file_edit(
+            workspace=workspace,
+            payload=_edit_payload(_both_files()),
+            edit_scope=_EDIT_SCOPE,
+            max_total_bytes=2048,
+        )
+    assert _tree(workspace) == before
+
+
+def test_edit_replaces_files_atomically_and_byte_exactly(tmp_path: Path) -> None:
+    workspace = _edit_workspace(tmp_path)
+    applied = apply_whole_file_edit(
+        workspace=workspace,
+        payload=_edit_payload(_both_files()),
+        edit_scope=_EDIT_SCOPE,
+        max_total_bytes=2048,
+    )
+    assert applied == ("src/alpha.py", "src/beta.py")
+    assert (workspace / "src" / "alpha.py").read_bytes() == b"alpha = 2\r\n"
+    assert (workspace / "src" / "beta.py").read_bytes() == b"beta = 3\n"
+    assert not list(workspace.rglob("*.graphite-tmp"))
+
+
+def test_edit_mid_set_replace_failure_restores_originals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _edit_workspace(tmp_path)
+    before = _tree(workspace)
+    original_replace = os.replace
+    calls = {"count": 0}
+
+    def flaky(source: object, destination: object) -> None:
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OSError("simulated")
+        original_replace(source, destination)
+
+    monkeypatch.setattr("os.replace", flaky)
+    with pytest.raises(AdapterError, match="^edit_apply_failed$"):
+        apply_whole_file_edit(
+            workspace=workspace,
+            payload=_edit_payload(_both_files(alpha="alpha = 9\n", beta="beta = 9\n")),
+            edit_scope=_EDIT_SCOPE,
+            max_total_bytes=2048,
+        )
+    assert calls["count"] == 2
+    assert _tree(workspace) == before
