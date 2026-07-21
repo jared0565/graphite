@@ -37,6 +37,7 @@ class LifecycleProviderId(StrEnum):
     CODEX = "codex"
     OLLAMA = "ollama"
     OPENROUTER = "openrouter"
+    ZAI = "zai"
 
 
 class ProviderLifecycleState(StrEnum):
@@ -94,6 +95,7 @@ _PROVIDER_RUNTIME_KINDS = {
     LifecycleProviderId.CODEX: RuntimeKind.LOCAL_CLI,
     LifecycleProviderId.OLLAMA: RuntimeKind.LOCAL_HTTP,
     LifecycleProviderId.OPENROUTER: RuntimeKind.REMOTE_HTTPS,
+    LifecycleProviderId.ZAI: RuntimeKind.REMOTE_HTTPS,
 }
 
 
@@ -222,6 +224,7 @@ class ProviderRuntimeIdentity(PublicRecord):
         if provider in {
             LifecycleProviderId.OLLAMA,
             LifecycleProviderId.OPENROUTER,
+            LifecycleProviderId.ZAI,
         } and model_digest is None:
             raise ValueError("model_identity_digest_invalid")
         if provider is LifecycleProviderId.OPENROUTER and routing_digest is None:

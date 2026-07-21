@@ -238,3 +238,9 @@ def test_routing_settings_use_only_route_prefix_and_are_not_exported_as_secrets(
 def test_routing_settings_reject_security_widening(name: str, value: str, code: str) -> None:
     with pytest.raises(RoutingSettingsError, match=code):
         RoutingSettings.from_env({name: value})
+
+
+def test_zai_provider_id_in_contracts() -> None:
+    from graphite.routing.contracts import ProviderId
+
+    assert ProviderId.ZAI.value == "zai"

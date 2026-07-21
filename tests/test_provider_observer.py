@@ -98,7 +98,7 @@ def test_options_are_bounded() -> None:
 def test_config_builds_fail_closed_observer_options() -> None:
     config = Config.from_env(
         {
-            "GRAPHITE_PROVIDER_OBSERVER_ENABLED_PROVIDERS": "claude-code,codex,ollama,openrouter",
+            "GRAPHITE_PROVIDER_OBSERVER_ENABLED_PROVIDERS": "claude-code,codex,ollama,openrouter,zai",
             "GRAPHITE_PROVIDER_OBSERVER_INTERVAL": "30",
             "GRAPHITE_PROVIDER_OBSERVER_TIMEOUT": "2.5",
             "GRAPHITE_PROVIDER_OBSERVER_MAX_PER_CYCLE": "2",
@@ -230,7 +230,13 @@ def test_all_absent_providers_are_independent_and_never_retried_in_cycle(tmp_pat
     }
     calls: list[LifecycleProviderId] = []
     targets: list[ProviderObservationTarget] = []
-    for index, provider in enumerate(LifecycleProviderId):
+    # lifecycle_storage.py's boundary-table CHECK constraints do not yet list
+    # ZAI as a provider value — that migration (v1->v2) lands in a later task
+    # in the z.ai native-provider plan. Exclude it here rather than exercising
+    # persistence for an unsupported provider.
+    for index, provider in enumerate(
+        p for p in LifecycleProviderId if p is not LifecycleProviderId.ZAI
+    ):
         runtime_kind = runtime_kinds[provider]
 
         def absent(_timeout: float, _observed_at: int, provider=provider):
@@ -261,7 +267,7 @@ def test_all_absent_providers_are_independent_and_never_retried_in_cycle(tmp_pat
 
     summary = observer.run_cycle(targets, now=100)
 
-    assert calls == list(LifecycleProviderId)
+    assert calls == [p for p in LifecycleProviderId if p is not LifecycleProviderId.ZAI]
     assert summary.attempted == 4
     assert summary.failed == 4
     assert summary.state_counts == {"unavailable": 4}

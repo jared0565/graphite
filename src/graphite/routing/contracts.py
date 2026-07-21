@@ -65,6 +65,7 @@ class ProviderId(StrEnum):
     CLAUDE_CODE = "claude-code"
     CODEX = "codex"
     OPENROUTER = "openrouter"
+    ZAI = "zai"
 
 
 class PermissionMode(StrEnum):

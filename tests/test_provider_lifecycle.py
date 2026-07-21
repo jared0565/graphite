@@ -17,6 +17,7 @@ from graphite.routing.lifecycle import (
     ProviderLifecycleState,
     ProviderRuntimeIdentity,
     RuntimeKind,
+    _PROVIDER_RUNTIME_KINDS,
     assess_identity_change,
     classify_identity_change,
 )
@@ -57,11 +58,13 @@ def test_provider_ids_and_runtime_kinds_cover_all_approved_adapters() -> None:
         "codex",
         "ollama",
         "openrouter",
+        "zai",
     )
     assert tuple(item.value for item in ProviderId) == (
         "claude-code",
         "codex",
         "openrouter",
+        "zai",
     )
     assert tuple(item.value for item in RuntimeKind) == (
         "local-cli",
@@ -459,3 +462,26 @@ def test_lifecycle_public_records_exclude_sensitive_fields() -> None:
         "source_code",
     ):
         assert forbidden not in serialized
+
+
+def test_zai_is_remote_https_and_requires_model_digest_and_forbids_routing() -> None:
+    assert LifecycleProviderId.ZAI.value == "zai"
+    assert _PROVIDER_RUNTIME_KINDS[LifecycleProviderId.ZAI] is RuntimeKind.REMOTE_HTTPS
+    # routing_policy_digest MUST be None for zai (forbidden for non-OPENROUTER)
+    identity = ProviderRuntimeIdentity(
+        LifecycleProviderId.ZAI, RuntimeKind.REMOTE_HTTPS, "1.0.0",
+        "a" * 64, "b" * 64, None, ("remote_inference",), "1.0.0", 1_700_000_000,
+    )
+    assert identity.provider is LifecycleProviderId.ZAI
+    # passing a routing digest for zai must fail
+    with pytest.raises(ValueError):
+        ProviderRuntimeIdentity(
+            LifecycleProviderId.ZAI, RuntimeKind.REMOTE_HTTPS, "1.0.0",
+            "a" * 64, "b" * 64, "c" * 64, ("remote_inference",), "1.0.0", 1_700_000_000,
+        )
+    # zai now REQUIRES a model_identity_digest (parity with OLLAMA/OPENROUTER): None must fail
+    with pytest.raises(ValueError):
+        ProviderRuntimeIdentity(
+            LifecycleProviderId.ZAI, RuntimeKind.REMOTE_HTTPS, "1.0.0",
+            "a" * 64, None, None, ("remote_inference",), "1.0.0", 1_700_000_000,
+        )
