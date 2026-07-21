@@ -15,7 +15,7 @@
 - **Two schema migrations, both additive + backward-compatible.** Routing v6→v7 and lifecycle v1→v2 only *widen* CHECKs; every existing row (12 capability_snapshots / 12 lifecycle_snapshot_bindings / 23 cli_telemetry_events; and the lifecycle store's observations/events) is preserved and re-counted. Both migrate a *copy* in dry-runs; the live migration is a separate governed step.
 - **Verification is plain-text const**, not JSON: prompt asks for exactly `GRAPHITE_PROFILE_OK`; oracle is `result.message.strip() == "GRAPHITE_PROFILE_OK"`. No `response_format`, no `json.loads(content)`, no output-schema.
 - **Operator-pinned pricing** (no z.ai catalog): `prompt "0.0000014"` ($1.40/1M), `completion "0.0000044"` ($4.40/1M). Feeds the hard cost ceiling.
-- **Live inference, one call, key from `ZAI_API_KEY`** in the session env — never argv/bundle/receipt. Operator runs each live step via `!` with **no inline key** (an inline value shadows the ambient key). Requires a Claude Code restart first (User-scope var). Never touches `F:\Projects\graphite` (main); no merge/push/deploy.
+- **Live inference, one call, key from `ZAI_API_KEY`** in the session env — never argv/bundle/receipt. Operator runs each live step via `!` with **no inline key** (an inline value shadows the ambient key). **Up-front restart prerequisite:** Claude Code is restarted *once, before Task 1*, so the session inherits `ZAI_API_KEY` (a User-scope var a process started earlier cannot see); the key *value* never enters the transcript, a bundle, or a receipt — only its presence (boolean + length) is ever checked. With the key ambient from session start, the offline build (Tasks 1–9), the live migration (Task 10), and the live verification (Task 11) run in one uninterrupted session — **no restart between the two live steps.** Never touches `F:\Projects\graphite` (main); no merge/push/deploy.
 - **Sanitized receipts only:** digests, counts, tokens, cost, durations, outcome categories, booleans. `raw_provider_output_persistence: false`.
 - **Store end-state correction:** the OpenRouter verification precedent writes **+2** telemetry rows (machine `MACHINE_VERIFIED` + human `ACCEPTED`), so verification takes the store **12/12/23 → 13/13/25** (+1 snapshot, +1 binding, +2 telemetry) — not the spec's estimated 13/13/24. This plan mirrors the +2 precedent; flag at handoff.
 
@@ -877,7 +877,7 @@ The migrations auto-run when `RepositoryStore(FIXTURE)` / `LifecycleStore(FIXTUR
 
 ### Task 11: Governed live GLM 5.2 verification (operator-executed)
 
-**Prerequisite:** Task 10 applied (stores at v7/v2) and **Claude Code restarted** so the process inherits `ZAI_API_KEY` (User-scope var).
+**Prerequisite:** Task 10 applied (stores at v7/v2). `ZAI_API_KEY` is *already* ambient — the session was restarted once up front (the Global-Constraints prerequisite), so **no restart happens between the migration and this step.** The harness reads the key in its **preflight gate** (`os.environ["ZAI_API_KEY"]` or `credential_missing`), *before* any store write, so a `credential_missing` here mutates nothing and leaves the manifest unspent.
 
 - [ ] **Step 1** Re-pin `_prepare_zai_glm52_verification.py`: `IMPLEMENTATION_COMMIT` = current clean HEAD; `ROUTING_STORE_SHA256`/`LIFECYCLE_STORE_SHA256` = the post-Task-10 hashes; `EXISTING_STORE_CONTRACT` 12/12/23; `EXPECTED_FINAL_STORE_CONTRACT` **13/13/25**; confirm `now < EXPIRES_AT`. Re-run Task 9 dry-run.
 - [ ] **Step 2** Display the manifest: purpose `graphite_zai_glm52_verification`, provider `zai`, model `glm-5.2`, endpoint, evidence host `docs.z.ai`, pinned pricing, cost ceiling, `live_inference:true`, `store_write:true`, `expected_mutation` (snapshots 12→13, bindings 12→13, telemetry 23→25), and `BUNDLE_DIGEST`. State plainly: **live inference, mutates the store, spends budget.** Wait for `Approved: graphite_zai_glm52_verification bundle <BUNDLE_DIGEST>`.
@@ -885,7 +885,7 @@ The migrations auto-run when `RepositoryStore(FIXTURE)` / `LifecycleStore(FIXTUR
 ```bash
 PYTHONPATH="F:/tmp/graphite-claude-codex-router/src;F:/tmp/graphite-live-acceptance-harness" python "F:/tmp/graphite-live-acceptance-harness/_execute_zai_glm52_verification.py" --approved <BUNDLE_DIGEST>
 ```
-Expected receipt: `status:passed`, verification `GRAPHITE_PROFILE_OK`, boundary ACTIVE, snapshot promoted, tokens/cost within ceiling, audit 13/13/25, integrity ok. If `credential_missing` → confirm the restart happened / `ZAI_API_KEY` is set (only then, retry with `ZAI_API_KEY="<real>"` prefixed). If `http_status`/`response_limit`/`unavailable`/`model_mismatch` → record the diagnostic (this is the real answer to "does GLM 5.2 work via z.ai"); do not weaken the oracle; a retry is a fresh governed round.
+Expected receipt: `status:passed`, verification `GRAPHITE_PROFILE_OK`, boundary ACTIVE, snapshot promoted, tokens/cost within ceiling, audit 13/13/25, integrity ok. If `credential_missing` → the session was not started with `ZAI_API_KEY` ambient. Because the credential check is a preflight gate, **nothing was mutated and the manifest is unspent** — **restart Claude Code and re-run the round** (re-run with the same `--approved <BUNDLE_DIGEST>` if still within the manifest window; re-pin + re-approve if it expired). Do **not** paste an inline `ZAI_API_KEY=...` prefix — an inline value shadows the ambient key and reintroduces the shadowing trap that burned approvals on the OpenRouter track. If `http_status`/`response_limit`/`unavailable`/`model_mismatch` → record the diagnostic (this is the real answer to "does GLM 5.2 work via z.ai"); do not weaken the oracle; a retry is a fresh governed round.
 - [ ] **Step 4** Post-run: re-hash both stores (they differ now), audit 13/13/25, confirm the boundary is ACTIVE and the snapshot is loadable; record the new baseline hashes.
 
 ---
@@ -920,6 +920,8 @@ Expected receipt: `status:passed`, verification `GRAPHITE_PROFILE_OK`, boundary 
 - Branch integration (push/merge of `feat/claude-codex-router`).
 
 ## Execution Handoff
+
+**Prerequisite (before Task 1): restart Claude Code once** so the session inherits `ZAI_API_KEY` (the User-scope var a session started earlier cannot see). The **first action in the fresh session is a presence gate** — confirm `ZAI_API_KEY` is set in the process env (boolean + length only; the value is never printed). If it is absent, the restart did not take: fix it before building, do not start Task 1. With the key ambient from the start, the offline build (Tasks 1–9), the live migration (Task 10), and the live verification (Task 11) all run in one uninterrupted session — the restart is *not* deferred to between the two live steps.
 
 Plan complete. Two execution options:
 1. **Subagent-Driven (recommended)** — fresh subagent per task + adversarial verification (as the review-smoke build ran), stopping before the two governed live steps (Tasks 10–11) which the operator runs via `!`.
