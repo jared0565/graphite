@@ -1633,3 +1633,63 @@ remained green, 111 passed). Deferred (out of scope): forcing the live
 capacity-fallback to `kimi-k2.6` (non-deterministic; proven selectable offline),
 the read-only review/authorization pool, the three unverified models, and branch
 integration.
+
+## OpenRouter live routed review smoke through `execute_approved_route_pool`
+
+2026-07-21. Extends the routed path into the **review role** and the
+**AUTHORIZATION** category, which the edit track never exercised: a real
+`kimi-k2.7-code` review was routed end-to-end through
+`execute_approved_route_pool` against a signed, consumed two-candidate
+**READ_ONLY / AUTHORIZATION** pool built from the models' *verification*
+capability snapshots, and the coordinator selected the primary against its live
+ACTIVE `RouteAuthority`. Design + plan:
+`docs/superpowers/specs/2026-07-21-openrouter-review-smoke-design.md`,
+`docs/superpowers/plans/2026-07-21-openrouter-review-smoke.md`. Harness pair
+`_prepare/_execute_openrouter_review_smoke.py`, `IMPLEMENTATION_COMMIT 15f0c69`.
+The review pool reuses the same per-model ACTIVE identities as the edit pool
+(identity is per-model; both the edit and verification snapshots bind to it),
+differing only in the `capability_snapshot_digest` (verification `99db4a4a...` /
+`6816edaf...`), `permission_mode READ_ONLY`, and `task_risk HIGH`.
+
+Review target (disclosed substitution): the approved spec named the r7/r8
+tenant-authorization diff, but the r7/r8 diff text was never persisted (disposable
+worktrees). The prompt instead embeds the **`expected-codex` golden worktree
+diff** -- the same `can_read_record` tenant-isolation change plus two denial tests,
+CLI-agent-authored and pytest-validated, and the exact diff the earlier
+cross-provider CLI review already returned `pass` on -- frozen once into a
+sha-pinned sidecar (`openrouter-review-diff.txt`, 999 bytes, `diff_sha256
+7a6fc7ed...`). The substance matches the spec's oracle criteria; the provenance is
+codex-golden rather than r7/r8. Success oracle: the parsed `{verdict, findings}`
+must have `verdict == "pass"` **and** `findings == []` (a non-`pass` verdict or any
+finding fails closed as `review_not_accepted`, recording only the verdict string
+and finding count).
+
+The run (`openrouter-review-smoke-1`, bundle
+`e6400c9cf19200394fbb49e1273323e2803c1c6d92b6c7f184b95f8c381b9dae`, routing pin
+`aef018b0...`) **passed** on the first attempt, with no inline key (ambient
+`OPENROUTER_API_KEY`). `select_route` selected `candidate[0]`
+(`openrouter-kimi27-code-review-primary`, verification snapshot `99db4a4a...`) with
+empty attempts. The stateless review runner performed one live `json_object`
+inference (486 input / 224 output tokens, 3919 ms, **1239 microunits** -- far under
+the 64000 ceiling) -- no worktree, no `apply_whole_file_edit`, no diff capture, no
+validation subprocess (READ_ONLY by construction) -- and returned
+`{verdict: "pass", finding_count: 0}`. `execute_approved_route_pool` returned the
+primary result; `approval_status("openrouter-review-smoke-1") == "consumed"`; one
+routed AUTHORIZATION `CliTelemetryRecord` (category `AUTHORIZATION`, risk `HIGH`,
+`changed_file_count 0`, `changed_byte_count 0`, `validation_outcome passed`,
+`review_defect_classes ()`, `MACHINE_VERIFIED`, `diff_sha256 7a6fc7ed...`) was
+persisted (`cli_telemetry_events` 22 -> 23). Final audit: capability_snapshots 12
+and lifecycle_snapshot_bindings 12 **unchanged** (no promotion, no lifecycle
+transition), integrity ok, 0 foreign-key violations. Routing-store hash moved to
+the new baseline `495e7de6...`; the lifecycle store remained `a99f7cc4...`
+(untouched). The run made exactly one live completion, READ_ONLY, called no
+promotion path, and required no graphite source change (`test_route_pool` +
+`test_routing_openrouter_executor` + `test_routing_profiles` remained green, 111
+passed). The offline dry-run exercised the real review runner against a fake
+transport on both the accept path (verdict `pass` -> telemetry 22 -> 23 on a store
+copy) and the reject path (a finding -> `review_not_accepted`, telemetry left at 22
+-- the evidence sink persists only the `succeeded` outcome). Deferred (out of
+scope): forcing the live capacity-fallback to `kimi-k2.6` (non-deterministic;
+proven selectable offline), a discriminative review of an intentionally-flawed diff
+(a stronger, separate smoke), the three unverified models (`kimi-k3`, `glm-5.2`,
+`muse-spark-1.1`), and branch integration.
