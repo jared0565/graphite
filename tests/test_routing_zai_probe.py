@@ -22,3 +22,8 @@ def test_preflight_zai_rejects_bad_model_id():
     from graphite.routing.zai_probe import preflight_zai
     with pytest.raises(Exception):
         preflight_zai(model_id="bad model", observed_at=1, policy_version="1.0.0")
+
+def test_zai_policy_supports_zai_identity():
+    from graphite.routing.zai_probe import _ZAI_POLICY, preflight_zai, ZAI_MODEL
+    pf = preflight_zai(model_id=ZAI_MODEL, observed_at=1_700_000_000, policy_version="1.0.0")
+    assert _ZAI_POLICY.supports(pf.runtime) is True

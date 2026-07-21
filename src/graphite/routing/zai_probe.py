@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 from .contracts import CliIdentity, ProviderId
-from .lifecycle import LifecycleProviderId, ProviderRuntimeIdentity, RuntimeKind
+from .lifecycle import (
+    LifecycleProviderId,
+    ProviderCompatibilityPolicy,
+    ProviderRuntimeIdentity,
+    RuntimeKind,
+)
 from .probe_runner import ProviderProbeError
 
 ZAI_HOST = "api.z.ai"
@@ -20,6 +25,21 @@ ZAI_CAPABILITIES = ("remote_inference",)
 # z.ai model ids are single-segment (no vendor/model slash, unlike OpenRouter).
 _ZAI_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _PRICE = re.compile(r"^(0|[0-9]{1,10}(\.[0-9]{1,18})?|\.[0-9]{1,18})$")
+
+# Compatibility policy for lifecycle observe(): promotes a DISCOVERED z.ai
+# runtime identity to VERIFICATION_REQUIRED once it matches this shape.
+# No `_OPENROUTER_POLICY` (or any other per-provider policy constant)
+# exists elsewhere in this codebase to clone; policies are otherwise built
+# ad hoc at each call site. This constant is the zai-owned analog of where
+# such a policy would live for OpenRouter (openrouter_probe.py).
+_ZAI_POLICY = ProviderCompatibilityPolicy(
+    provider=LifecycleProviderId.ZAI,
+    runtime_kind=RuntimeKind.REMOTE_HTTPS,
+    policy_version="1.0.0",
+    minimum_version="1.0.0",
+    maximum_version_exclusive="2.0.0",
+    required_capabilities=ZAI_CAPABILITIES,
+)
 
 
 def _digest(value: object) -> str:
