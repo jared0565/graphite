@@ -23,7 +23,7 @@ def discover_routing_evidence_documents(root: Path = ROOT) -> tuple[str, ...]:
     return tuple(sorted(
         path.relative_to(root).as_posix()
         for path in notes.glob("*.md")
-        if "routing" in path.name or "model-pool" in path.name
+        if "routing" in path.name or "model-pool" in path.name or "provider-lifecycle" in path.name
     ))
 
 
@@ -61,19 +61,20 @@ def test_adaptive_routing_boundary_is_documented() -> None:
     readme = read_document("README.md").casefold()
     architecture = read_document("ARCHITECTURE.md").casefold()
     contributing = read_document("CONTRIBUTING.md").casefold()
-    combined = "\n".join((readme, architecture, contributing))
+    combined = re.sub(r"\s+", " ", "\n".join((readme, architecture, contributing)))
 
     for required in (
-        "ollama cloud",
+        "claude code",
+        "codex",
+        "subscription",
         "openrouter",
-        "manual handoff",
-        "defaults to no",
-        "outbound manifest",
-        "sanitized aggregate",
-        "shadow",
+        "capability snapshot",
+        "detached worktree",
+        "single-use approval",
+        "no automatic retry",
+        "capacity_unavailable",
         "high-risk",
         "untrusted",
-        "retention",
         "incident response",
         "graphite route recommend",
         "graphite route run",
@@ -81,8 +82,9 @@ def test_adaptive_routing_boundary_is_documented() -> None:
         "graphite route policy",
     ):
         assert required in combined
-    assert "openrouter is reserved for production in-application inference" in combined
-    assert "cannot mutate code" in combined
+    assert "openrouter is reserved for" in combined
+    assert "ollama is not a development-routing provider" in combined
+    assert "it never merges" in combined
 
 
 def test_hardened_routing_model_pool_and_evidence_are_documented() -> None:
@@ -106,12 +108,6 @@ def test_hardened_routing_model_pool_and_evidence_are_documented() -> None:
     ):
         assert required in combined
 
-    active_pool = document_section(readme, "### Active router model pool")
-    assert "glm-5:cloud" not in active_pool.casefold()
-    assert all(
-        "glm-5:cloud" not in code.casefold()
-        for _, code in markdown_code_fragments(active_pool)
-    )
     removal_history = document_section(evidence, "## Removed and migration history")
     assert "glm-5:cloud" in removal_history.casefold()
     before_removal_history = evidence[: evidence.index("## Removed and migration history")]
@@ -223,6 +219,28 @@ def test_active_routing_evidence_table_matches_the_approved_snapshot() -> None:
     assert hashlib.sha256(encoded).hexdigest() in evidence
 
 
+def test_cli_router_trust_migration_and_readiness_boundaries_are_documented() -> None:
+    combined = re.sub(
+        r"\s+",
+        " ",
+        "\n".join((read_document("README.md"), read_document("ARCHITECTURE.md"))),
+    ).casefold()
+    for phrase in (
+        "claude.ai",
+        "logged in using chatgpt",
+        "executable replacement",
+        "separately approved, read-only review by the other provider",
+        "source, prompts, responses, diff contents, paths, secrets, and raw diagnostics",
+        "subscription cost is `unknown`, never zero",
+        "cannot change the provider allowlist, permission ceiling, risk ceilings, or autonomy",
+        "stop all graphite routing writers",
+        "events-schema-v4.sha256.json",
+        "rollback is a database restore, not an in-place downgrade",
+        "tested forward fix",
+    ):
+        assert phrase in combined, phrase
+
+
 def test_routing_docs_state_each_authority_and_recovery_gate() -> None:
     combined = re.sub(
         r"\s+",
@@ -230,33 +248,27 @@ def test_routing_docs_state_each_authority_and_recovery_gate() -> None:
         "\n".join(read_document(name) for name in routing_operator_documents()),
     ).casefold()
     required = (
-        "30-day minimum retirement runway",
-        "capability and context",
-        "inventory presence does not authorize a model",
-        "exact digest revalidation",
-        "default-only effort",
-        "manual frontier handoff",
+        "authenticated claude code and codex subscription clis",
+        "does not accept or use anthropic/openai api keys",
+        "executable replacement",
+        "detached worktree",
         "single-use approval",
-        "context-bound",
-        "quota-bound",
-        "configured request/repository budget",
-        "actual repository and machine quota reservation occurs when the signed approval is consumed",
-        "not proof that quota remains",
-        "no automatic fallback",
-        "retry",
-        "model switching",
-        "framed, escaped, ephemeral text",
+        "prompt-hash-bound",
+        "commit-bound",
+        "token-bound",
+        "capacity-only route-pool transition",
+        "read-only review by the other provider",
+        "cherry-pickable commit",
+        "it never merges",
         "non-tty",
         "json mode",
         "ci",
-        "`--yes` cannot execute",
-        "`pending` to `completed`",
-        "graphite route recoverable",
-        "graphite route reconcile",
-        "no provider call",
-        "approval reuse",
-        "reconcilable only while",
-        "storage is unavailable",
+        "`--yes` cannot grant consent",
+        "source, prompts, responses, diff contents, paths, secrets, and raw diagnostics",
+        "subscription cost is `unknown`, never zero",
+        "rollback is a database restore, not an in-place downgrade",
+        "stop every process that can write",
+        "tested forward fix",
         "legacy_unrecoverable",
         "read-only history",
     )
@@ -265,15 +277,18 @@ def test_routing_docs_state_each_authority_and_recovery_gate() -> None:
 
 
 def test_glm5_references_are_confined_to_labelled_history_sections() -> None:
+    # Guards the retired Ollama alias glm-5/glm-5:cloud only; the distinct
+    # operator-approved OpenRouter model z-ai/glm-5.2 is current, not history.
     documents = routing_operator_documents()
     found = 0
     labels = ("removed", "historical", "migration", "superseded")
+    retired = re.compile(r"glm-5(?!\.2)", re.IGNORECASE)
     for name in documents:
         current_heading = ""
         for line in read_document(name).splitlines():
             if line.startswith("#"):
                 current_heading = line.casefold()
-            if "glm-5" in line.casefold():
+            if retired.search(line):
                 found += 1
                 assert any(label in current_heading for label in labels), (name, line)
     assert found > 0
@@ -1666,6 +1681,60 @@ def test_architecture_guide_has_pipeline_and_boundaries() -> None:
     architecture_lower = architecture.lower()
     assert "repository input" in architecture_lower
     assert "model provider" in architecture_lower
+
+
+def test_overlay_boundary_is_documented_as_non_authoritative_and_isolated() -> None:
+    readme = read_document("README.md")
+    architecture = read_document("ARCHITECTURE.md")
+    combined = f"{readme}\n{architecture}".casefold()
+
+    required = (
+        "graphite overlay build",
+        "provider-lifecycle",
+        "model identity",
+        "routing-policy digest",
+        "canonical bundle fingerprint",
+        "content-addressed",
+        "manifest-last",
+        "failure category",
+        "non-authoritative",
+        "independently stale",
+        "reparse",
+        "restrictive",
+        "canonical readers never load",
+    )
+    for phrase in required:
+        assert phrase in combined
+
+    assert "query`, `context`, `impact`, validation, routing, watch, and daemon do not read overlays" in readme
+    assert "raw provider diagnostics" in combined
+    assert "never argv or a repository file" in readme
+
+
+def test_provider_lifecycle_operator_and_v5_recovery_are_documented() -> None:
+    combined = re.sub(
+        r"\s+",
+        " ",
+        f"{read_document('README.md')}\n{read_document('ARCHITECTURE.md')}",
+    ).casefold()
+    for phrase in (
+        "graphite lifecycle list",
+        "graphite lifecycle status",
+        "graphite lifecycle history",
+        "lifecycle policy prepare",
+        "lifecycle verification prepare",
+        "verification_required",
+        "never directly to `active`",
+        "lazy identity check",
+        "cannot activate a provider",
+        "schema-v4 to schema-v5",
+        "events-schema-v4.sqlite3",
+        "pragma foreign_key_check",
+        "tested forward fix",
+        "one-step",
+        "capacity_unavailable",
+    ):
+        assert phrase in combined, phrase
 
 
 def test_release_guide_has_gates_and_version_sources() -> None:

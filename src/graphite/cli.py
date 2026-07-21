@@ -33,9 +33,12 @@ from .graph_io import GraphReadError, load_validated_graph_bundle
 from .ingest import collect_files
 from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
-from .llm import enrich_report
+from .llm import CANONICAL_ENRICHMENT_MIGRATION_MESSAGE
+from .overlays import OverlayError, OverlayRequest, build_overlay
 from .routing.approval import approval_prompt
-from .routing.service import RoutingService
+from .routing.contracts import Effort
+from .routing.lifecycle_operator import LifecycleOperator, LifecycleOperatorError
+from .routing.service import RoutingService, RoutingServiceError
 from .routing.storage import DEFAULT_RECOVERY_PAGE_SIZE, StorageError
 from .query import _find_node, annotate_communities, query
 from .replacement_audit import audit_replacement, format_replacement_audit
@@ -76,11 +79,34 @@ _TEST_SUFFIXES = (
 
 # Review graph reads are bounded to prevent untrusted artifacts exhausting memory.
 _MAX_REVIEW_GRAPH_BYTES = 128 * 1024 * 1024
+_CANONICAL_COMMANDS = frozenset(
+    {
+        "scan",
+        "build",
+        "report",
+        "check",
+        "validate",
+        "query",
+        "impact",
+        "context",
+        "watch",
+        "daemon",
+    }
+)
+_LEGACY_LLM_ARGUMENTS = (
+    "llm_provider",
+    "llm_model",
+    "llm_base_url",
+    "llm_api_key",
+    "llm_timeout",
+    "llm_max_input_chars",
+    "llm_max_output_tokens",
+)
 
 
-def _config_from_args(args: argparse.Namespace) -> Config:
+def _config_from_args(args: argparse.Namespace, *, canonical: bool = False) -> Config:
     """Build config from defaults + CLI args + env."""
-    base = Config.from_env()
+    base = Config.from_env(include_llm=not canonical)
     kwargs: dict[str, Any] = {**base.to_dict()}
     if getattr(args, "output_dir", None) is not None:
         kwargs["output_dir"] = Path(args.output_dir)
@@ -92,21 +118,27 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         kwargs["verbose"] = True
     if getattr(args, "no_typescript_symbol_references", False):
         kwargs["typescript_symbol_references"] = False
-    for arg_name, cfg_name in (
+    configurable = (
         ("typescript_resolver", "typescript_resolver"),
         ("typescript_resolver_timeout", "typescript_resolver_timeout_seconds"),
-        ("llm", "llm_mode"),
-        ("llm_provider", "llm_provider"),
-        ("llm_model", "llm_model"),
-        ("llm_base_url", "llm_base_url"),
-        ("llm_api_key", "llm_api_key"),
-        ("llm_timeout", "llm_timeout_seconds"),
-        ("llm_max_input_chars", "llm_max_input_chars"),
-    ):
+    )
+    if not canonical:
+        configurable += (
+            ("llm", "llm_mode"),
+            ("llm_provider", "llm_provider"),
+            ("llm_model", "llm_model"),
+            ("llm_base_url", "llm_base_url"),
+            ("llm_api_key", "llm_api_key"),
+            ("llm_timeout", "llm_timeout_seconds"),
+            ("llm_max_input_chars", "llm_max_input_chars"),
+            ("llm_max_output_tokens", "llm_max_output_tokens"),
+        )
+    for arg_name, cfg_name in configurable:
         value = getattr(args, arg_name, None)
         if value is not None:
             kwargs[cfg_name] = value
-    return Config(**kwargs)
+    cfg = Config(**kwargs)
+    return cfg.canonical_graph() if canonical else cfg
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
@@ -114,6 +146,7 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def _scan(args: argparse.Namespace, cfg: Config) -> tuple[dict[str, Any], list[Any]]:
+    cfg = cfg.canonical_graph()
     root = Path(args.path).resolve()
     if not root.exists():
         print(f"[graphite] path not found: {root}", file=sys.stderr)
@@ -141,6 +174,7 @@ def _build(
     manifest: dict[str, Any],
     entries: list[Any],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    cfg = cfg.canonical_graph()
     cache = Cache(cfg.cache_dir, cfg.cache_version)
     start = time.time()
     extraction = extract_all(entries, cfg, cache)
@@ -163,12 +197,6 @@ def _build(
     annotate_communities(g, clusters["node_to_community"])
     graph_data = graph_to_json(g)
     analysis = analyze(g)
-    llm = enrich_report(graph_data, clusters, analysis, cfg)
-    analysis["llm"] = llm
-    if cfg.verbose and llm.get("enabled"):
-        status = llm.get("status", "unknown")
-        provider = llm.get("provider", cfg.llm_provider)
-        print(f"[graphite] llm enrichment {status} via {provider}")
 
     return graph_data, clusters, analysis
 
@@ -180,20 +208,12 @@ def _report(
     clusters: dict[str, Any],
     analysis: dict[str, Any],
 ) -> None:
+    cfg = cfg.canonical_graph()
     out = cfg.output_dir
     out.mkdir(parents=True, exist_ok=True)
 
-    llm = analysis.get("llm", {})
     public_manifest = {
         **manifest,
-        "llm_mode": cfg.llm_mode,
-        "llm_provider": llm.get("provider") or cfg.llm_provider,
-        "llm_model": llm.get("model") or cfg.llm_model,
-        "llm_status": llm.get("status", "disabled" if not llm.get("enabled") else "unknown"),
-        "llm_effective_mode": llm.get("effective_mode"),
-        "llm_reason": llm.get("reason"),
-        "llm_auto": llm.get("auto"),
-        "llm_tokens": llm.get("tokens", 0),
         "typescript_resolver": cfg.typescript_resolver,
     }
 
@@ -217,6 +237,7 @@ def _report(
 
 
 def _build_project(path: Path, cfg: Config) -> None:
+    cfg = cfg.canonical_graph()
     args = argparse.Namespace(path=str(path))
     manifest, entries = _scan(args, cfg)
     graph_data, clusters, analysis = _build(args, cfg, manifest, entries)
@@ -319,7 +340,7 @@ def _print_watch_impact(root: Path, cfg: Config, change: WatchChange, depth: int
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
-    cfg = _config_from_args(args)
+    cfg = _config_from_args(args, canonical=True)
     manifest, _ = _scan(args, cfg)
     _write_json(cfg.output_dir / ".graphite_manifest.json", manifest)
     print(f"[graphite] manifest written: {cfg.output_dir / '.graphite_manifest.json'}")
@@ -327,7 +348,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
-    cfg = _config_from_args(args)
+    cfg = _config_from_args(args, canonical=True)
     _build_project(Path(args.path).resolve(), cfg)
     return 0
 
@@ -337,7 +358,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    cfg = _config_from_args(args)
+    cfg = _config_from_args(args, canonical=True)
     status = check_graph_freshness(Path(args.path).resolve(), cfg)
     if args.json:
         print(json.dumps(status, ensure_ascii=False, indent=2))
@@ -370,8 +391,58 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return int(report["exit_code"])
 
 
-def _project_scoped_config(args: argparse.Namespace, root: Path) -> Config:
-    cfg = _config_from_args(args)
+def _print_overlay_result(payload: dict[str, Any], *, json_mode: bool) -> None:
+    if json_mode:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    outcome = payload.get("outcome_category", "failed")
+    provider = payload.get("provider", "unknown")
+    identity = payload.get("overlay_identity_digest", "unknown")
+    print(f"[graphite] overlay {outcome}: provider={provider} identity={identity}")
+    if payload.get("failure_category"):
+        print(f"  - failure_category: {payload['failure_category']}")
+
+
+def _overlay_error(code: str, *, json_mode: bool) -> None:
+    if json_mode:
+        print(json.dumps({"error": code}, sort_keys=True))
+    else:
+        print(f"[graphite] overlay error: {code}", file=sys.stderr)
+
+
+def cmd_overlay_build(args: argparse.Namespace) -> int:
+    """Run one explicit non-authoritative enrichment operation."""
+    if args.llm_api_key is not None:
+        _overlay_error("overlay_credential_argv_forbidden", json_mode=args.json)
+        return 2
+    root = Path(args.path).resolve()
+    cfg = _project_scoped_config(args, root)
+    try:
+        request = OverlayRequest(
+            repository_root=root,
+            output_dir=cfg.output_dir,
+            provider=cfg.llm_provider.strip().casefold().replace("_", "-"),
+            provider_lifecycle_identity_digest=args.provider_identity_digest,
+            model_identity_digest=args.model_identity_digest,
+            routing_policy_digest=args.routing_policy_digest,
+            created_at=int(time.time()),
+        )
+        payload = build_overlay(request, cfg)
+    except ValueError:
+        _overlay_error("overlay_request_invalid", json_mode=args.json)
+        return 2
+    except OverlayError as exc:
+        code = str(exc)
+        _overlay_error(code, json_mode=args.json)
+        return 3 if code.startswith("canonical_") else 2
+    _print_overlay_result(payload, json_mode=args.json)
+    return 0 if payload.get("outcome_category") == "succeeded" else 4
+
+
+def _project_scoped_config(
+    args: argparse.Namespace, root: Path, *, canonical: bool = False
+) -> Config:
+    cfg = _config_from_args(args, canonical=canonical)
     data = cfg.to_dict()
     if not Path(data["output_dir"]).is_absolute():
         data["output_dir"] = root / data["output_dir"]
@@ -439,7 +510,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
     result = bootstrap_project(root, daemon_base=daemon_base).to_dict()
-    cfg = _project_scoped_config(args, root)
+    cfg = _project_scoped_config(args, root, canonical=True)
     activation = _activate_typescript_for_onboarding(args, root, cfg)
     build: dict[str, Any] = {"requested": not args.no_build, "ok": None}
     validation: dict[str, Any] = {"requested": not args.no_validate, "ok": None}
@@ -502,7 +573,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     platforms = resolve_platform_selection(requested, interactive=interactive)
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
     result = init_project(root, platforms=platforms, daemon_base=daemon_base).to_dict()
-    cfg = _project_scoped_config(args, root)
+    cfg = _project_scoped_config(args, root, canonical=True)
     activation = _activate_typescript_for_onboarding(args, root, cfg)
     build: dict[str, Any] = {"requested": not args.no_build, "ok": None}
     validation: dict[str, Any] = {"requested": not args.no_validate, "ok": None}
@@ -556,7 +627,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_audit_replacement(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
-    cfg = _project_scoped_config(args, root)
+    cfg = _project_scoped_config(args, root, canonical=True)
     report = audit_replacement(root, daemon_base=daemon_base, cfg=cfg)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -693,7 +764,7 @@ def cmd_review_changes(args: argparse.Namespace) -> int:
         changes = discover_git_changes(root, timeout_seconds=args.git_timeout)
         discovery = "git"
 
-    cfg = _project_scoped_config(args, root)
+    cfg = _project_scoped_config(args, root, canonical=True)
     custom_graph = args.graph_json is not None
     graph_path = _resolve_review_graph_path(root, cfg, args.graph_json)
     graph_bundle, graph_error = _load_review_graph(graph_path, root)
@@ -727,7 +798,7 @@ def cmd_context(args: argparse.Namespace) -> int:
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
-    cfg = _config_from_args(args)
+    cfg = _config_from_args(args, canonical=True)
     root = Path(args.path).resolve()
     options = WatchOptions(
         interval_seconds=args.interval,
@@ -759,8 +830,6 @@ def cmd_watch(args: argparse.Namespace) -> int:
         f"[graphite] watching {root} "
         f"(interval={options.interval_seconds}s, debounce={options.debounce_seconds}s)"
     )
-    if cfg.llm_mode != "none":
-        print("[graphite] warning: LLM enrichment is enabled for watch rebuilds")
     processed = watch_loop(root, cfg, on_change, options, on_error=on_error)
     if args.once:
         print(f"[graphite] watch once complete ({processed} rebuilds)")
@@ -768,7 +837,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
-    cfg = _config_from_args(args)
+    cfg = _config_from_args(args, canonical=True)
     base = Path(args.base_path).resolve()
     options = DaemonOptions(
         scan_interval_seconds=args.scan_interval,
@@ -784,8 +853,6 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         max_cycles=args.max_cycles,
         state_dir=Path(args.state_dir).resolve() if args.state_dir else None,
     )
-    if cfg.llm_mode != "none":
-        print("[graphite] warning: LLM enrichment is enabled for daemon rebuilds")
     status = run_daemon(base, cfg, options)
     if args.json:
         print(json.dumps(status, ensure_ascii=False, indent=2))
@@ -989,9 +1056,9 @@ _ROUTE_RECOVERY_ERROR_CODES = frozenset({
 
 
 def _route_recovery_error(
-    error: StorageError | ValueError | OSError, *, json_mode: bool
+    error: StorageError | RoutingServiceError | ValueError | OSError, *, json_mode: bool
 ) -> int:
-    if isinstance(error, StorageError):
+    if isinstance(error, (StorageError, RoutingServiceError)):
         candidate = error.code
     elif isinstance(error, FileNotFoundError):
         candidate = "repository_root_invalid"
@@ -1072,6 +1139,31 @@ def cmd_route_run(args: argparse.Namespace) -> int:
     _route_print(public, json_mode=args.json)
     if recommendation.manual_handoff:
         return 3
+    try:
+        prepared = service.prepare(recommendation)
+    except RoutingServiceError as exc:
+        _route_print({"error": {"code": exc.code}}, json_mode=args.json)
+        return 1
+    _route_print(prepared.to_dict(), json_mode=args.json)
+    approved = approval_prompt(
+        stdin=sys.stdin,
+        stdout=sys.stdout,
+        stdin_is_tty=sys.stdin.isatty(),
+        stdout_is_tty=sys.stdout.isatty(),
+        json_mode=args.json,
+        assume_yes=args.yes,
+        ci=bool(os.environ.get("CI")),
+    )
+    if not approved:
+        service.decline(prepared)
+        return 2
+    result = service.run_approved(prepared, approval_granted=True)
+    _render_model_output(result.text, stdout=sys.stdout)
+    _route_print(result.to_public_dict(), json_mode=False)
+    return 0
+
+
+def _route_terminal_action(args: argparse.Namespace, action: str) -> int:
     approved = approval_prompt(
         stdin=sys.stdin,
         stdout=sys.stdout,
@@ -1083,20 +1175,49 @@ def cmd_route_run(args: argparse.Namespace) -> int:
     )
     if not approved:
         return 2
-    if args.shadow:
-        print(json.dumps({"shadow": "separate_approval_required", "budget": "bounded"}))
-        shadow_approved = approval_prompt(
-            stdin=sys.stdin,
-            stdout=sys.stdout,
-            stdin_is_tty=sys.stdin.isatty(),
-            stdout_is_tty=sys.stdout.isatty(),
-            json_mode=args.json,
-            assume_yes=args.yes,
-            ci=bool(os.environ.get("CI")),
-        )
-        if not shadow_approved:
-            print(json.dumps({"shadow": "declined", "primary": "continuing"}))
-    result = service.execute_approved(recommendation)
+    service = RoutingService(args.path)
+    try:
+        payload = getattr(service, action)(args.task_id, authority_granted=True)
+    except RoutingServiceError as exc:
+        _route_print({"error": {"code": exc.code}}, json_mode=args.json)
+        return 1
+    _route_print(payload, json_mode=args.json)
+    return 0
+
+
+def cmd_route_accept(args: argparse.Namespace) -> int:
+    return _route_terminal_action(args, "accept")
+
+
+def cmd_route_reject(args: argparse.Namespace) -> int:
+    return _route_terminal_action(args, "reject")
+
+
+def cmd_route_cleanup(args: argparse.Namespace) -> int:
+    return _route_terminal_action(args, "cleanup")
+
+
+def cmd_route_review(args: argparse.Namespace) -> int:
+    service = RoutingService(args.path)
+    try:
+        prepared = service.prepare_review(args.task_id)
+    except RoutingServiceError as exc:
+        _route_print({"error": {"code": exc.code}}, json_mode=args.json)
+        return 1
+    _route_print(prepared.to_dict(), json_mode=args.json)
+    approved = approval_prompt(
+        stdin=sys.stdin,
+        stdout=sys.stdout,
+        stdin_is_tty=sys.stdin.isatty(),
+        stdout_is_tty=sys.stdout.isatty(),
+        json_mode=args.json,
+        assume_yes=args.yes,
+        ci=bool(os.environ.get("CI")),
+    )
+    if not approved:
+        service.decline(prepared)
+        return 2
+    result = service.run_review_approved(prepared, approval_granted=True)
     _render_model_output(result.text, stdout=sys.stdout)
     _route_print(result.to_public_dict(), json_mode=False)
     return 0
@@ -1112,7 +1233,7 @@ def cmd_route_recoverable(args: argparse.Namespace) -> int:
         page = RoutingService(args.path).recoverable_attempts(
             limit=args.limit, after=args.after
         )
-    except (StorageError, ValueError, OSError) as exc:
+    except (StorageError, RoutingServiceError, ValueError, OSError) as exc:
         return _route_recovery_error(exc, json_mode=args.json)
     _route_print(page.to_dict(), json_mode=args.json)
     return 0
@@ -1121,18 +1242,34 @@ def cmd_route_recoverable(args: argparse.Namespace) -> int:
 def cmd_route_reconcile(args: argparse.Namespace) -> int:
     try:
         payload = RoutingService(args.path).reconcile_execution(args.attempt_id)
-    except (StorageError, ValueError, OSError) as exc:
+    except (StorageError, RoutingServiceError, ValueError, OSError) as exc:
         return _route_recovery_error(exc, json_mode=args.json)
     _route_print(payload, json_mode=args.json)
     return 0
 
 
 def cmd_route_policy(args: argparse.Namespace) -> int:
-    payload = RoutingService(args.path).policy(
-        refresh_models=args.refresh_models,
-        promote=args.promote,
-        rollback=args.rollback,
-    )
+    authority_granted = False
+    if args.promote or args.rollback:
+        authority_granted = approval_prompt(
+            stdin=sys.stdin,
+            stdout=sys.stdout,
+            stdin_is_tty=sys.stdin.isatty(),
+            stdout_is_tty=sys.stdout.isatty(),
+            json_mode=args.json,
+            assume_yes=False,
+            ci=bool(os.environ.get("CI")),
+        )
+        if not authority_granted:
+            return 2
+    try:
+        payload = RoutingService(args.path).policy(
+            promote=args.promote,
+            rollback=args.rollback,
+            authority_granted=authority_granted,
+        )
+    except (StorageError, RoutingServiceError, ValueError, OSError) as exc:
+        return _route_recovery_error(exc, json_mode=args.json)
     _route_print(payload, json_mode=args.json)
     return 0
 
@@ -1151,6 +1288,72 @@ def cmd_route_record_outcome(args: argparse.Namespace) -> int:
     return 0
 
 
+def _lifecycle_result(args: argparse.Namespace, operation: str, **kwargs: Any) -> int:
+    try:
+        payload = getattr(LifecycleOperator(args.path), operation)(**kwargs)
+    except (LifecycleOperatorError, ValueError, OSError) as exc:
+        code = getattr(exc, "code", "lifecycle_operator_invalid")
+        _route_print({"error": {"code": code}}, json_mode=args.json)
+        return 1
+    _route_print(payload, json_mode=args.json)
+    return 0
+
+
+def cmd_lifecycle_list(args: argparse.Namespace) -> int:
+    return _lifecycle_result(args, "list_observations", limit=args.limit)
+
+
+def cmd_lifecycle_status(args: argparse.Namespace) -> int:
+    return _lifecycle_result(args, "status", boundary_digest=args.boundary_digest)
+
+
+def cmd_lifecycle_history(args: argparse.Namespace) -> int:
+    return _lifecycle_result(
+        args, "history", boundary_digest=args.boundary_digest, limit=args.limit
+    )
+
+
+def cmd_lifecycle_policy_inspect(args: argparse.Namespace) -> int:
+    return _lifecycle_result(
+        args, "inspect_policy", boundary_digest=args.boundary_digest
+    )
+
+
+def cmd_lifecycle_policy_prepare(args: argparse.Namespace) -> int:
+    return _lifecycle_result(
+        args,
+        "prepare_policy_promotion",
+        boundary_digest=args.boundary_digest,
+        lifecycle_identity_digest=args.lifecycle_identity_digest,
+        proposed_policy_version=args.proposed_policy_version,
+        minimum_version=args.minimum_version,
+        maximum_version_exclusive=args.maximum_version_exclusive,
+        required_capabilities=tuple(args.required_capability),
+        prepared_at=args.prepared_at,
+    )
+
+
+def cmd_lifecycle_verification_prepare(args: argparse.Namespace) -> int:
+    return _lifecycle_result(
+        args,
+        "prepare_verification_manifest",
+        boundary_digest=args.boundary_digest,
+        lifecycle_identity_digest=args.lifecycle_identity_digest,
+        requested_model=args.requested_model,
+        expected_effective_model=args.expected_effective_model,
+        effort=Effort(args.effort),
+        max_input_tokens=args.max_input_tokens,
+        max_output_tokens=args.max_output_tokens,
+        timeout_seconds=args.timeout_seconds,
+        expires_at=args.expires_at,
+        fixture_repository_commit=args.fixture_repository_commit,
+        graph_fingerprint=args.graph_fingerprint,
+        prompt_contract_hash=args.prompt_contract_hash,
+        response_contract_hash=args.response_contract_hash,
+        max_cost_microunits=args.max_cost_microunits,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="graphite", description="Local-first code knowledge graph.")
     parser.add_argument("--output-dir", default=None, help="Output directory (default: graph-out)")
@@ -1160,15 +1363,126 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--typescript-resolver", choices=["auto", "compiler", "heuristic", "disabled"], default=None, help="TypeScript resolver mode (default: auto)")
     parser.add_argument("--typescript-resolver-timeout", type=float, default=None, help="TypeScript compiler resolver timeout in seconds")
     parser.add_argument("--no-typescript-symbol-references", action="store_true", help="Disable TypeScript compiler symbol-reference edges")
-    parser.add_argument("--llm", choices=["none", "auto", "local", "cloud"], default=None, help="Optional LLM enrichment mode")
-    parser.add_argument("--llm-provider", default=None, help="LLM provider: ollama, openai, openai-compatible, lmstudio, vllm, openrouter, groq")
-    parser.add_argument("--llm-model", default=None, help="LLM model name")
-    parser.add_argument("--llm-base-url", default=None, help="LLM provider base URL")
-    parser.add_argument("--llm-api-key", default=None, help="LLM API key; prefer GRAPHITE_LLM_API_KEY for shells/history")
-    parser.add_argument("--llm-timeout", type=float, default=None, help="LLM request timeout in seconds")
-    parser.add_argument("--llm-max-input-chars", type=int, default=None, help="Maximum graph-summary prompt characters")
+    parser.add_argument("--llm", choices=["none", "auto", "local", "cloud"], default=None, help="Optional integration mode; canonical graph commands accept only none")
+    parser.add_argument("--llm-provider", default=None, help="Provider for explicit doctor/overlay operations; rejected by canonical commands")
+    parser.add_argument("--llm-model", default=None, help="Model for explicit doctor/overlay operations")
+    parser.add_argument("--llm-base-url", default=None, help="Provider base URL for explicit doctor/overlay operations")
+    parser.add_argument("--llm-api-key", default=None, help="Provider key for explicit doctor/overlay operations; prefer a session-scoped environment value")
+    parser.add_argument("--llm-timeout", type=float, default=None, help="Provider timeout for explicit doctor/overlay operations")
+    parser.add_argument("--llm-max-input-chars", type=int, default=None, help="Maximum explicit overlay input characters")
+    parser.add_argument("--llm-max-output-tokens", type=int, default=None, help="Maximum explicit overlay output tokens")
 
     sub = parser.add_subparsers(dest="command")
+
+    p_lifecycle = sub.add_parser(
+        "lifecycle", help="Inspect provider lifecycle authority and prepare bounded candidates"
+    )
+    lifecycle_sub = p_lifecycle.add_subparsers(
+        dest="lifecycle_command", required=True
+    )
+
+    p_lifecycle_list = lifecycle_sub.add_parser(
+        "list", help="List bounded current lifecycle observations"
+    )
+    p_lifecycle_list.add_argument("path", help="Repository path")
+    p_lifecycle_list.add_argument("--limit", type=int, default=50)
+    p_lifecycle_list.add_argument("--json", action="store_true")
+    p_lifecycle_list.set_defaults(func=cmd_lifecycle_list)
+
+    for name, handler in (
+        ("status", cmd_lifecycle_status),
+        ("history", cmd_lifecycle_history),
+    ):
+        lifecycle_read = lifecycle_sub.add_parser(
+            name, help=f"Read lifecycle {name}"
+        )
+        lifecycle_read.add_argument("path", help="Repository path")
+        lifecycle_read.add_argument("--boundary-digest", required=True)
+        if name == "history":
+            lifecycle_read.add_argument("--limit", type=int, default=50)
+        lifecycle_read.add_argument("--json", action="store_true")
+        lifecycle_read.set_defaults(func=handler)
+
+    p_lifecycle_policy = lifecycle_sub.add_parser(
+        "policy", help="Inspect policy binding or prepare a non-activating promotion"
+    )
+    lifecycle_policy_sub = p_lifecycle_policy.add_subparsers(
+        dest="lifecycle_policy_command", required=True
+    )
+    p_lifecycle_policy_inspect = lifecycle_policy_sub.add_parser(
+        "inspect", help="Inspect persisted policy binding"
+    )
+    p_lifecycle_policy_inspect.add_argument("path", help="Repository path")
+    p_lifecycle_policy_inspect.add_argument("--boundary-digest", required=True)
+    p_lifecycle_policy_inspect.add_argument("--json", action="store_true")
+    p_lifecycle_policy_inspect.set_defaults(func=cmd_lifecycle_policy_inspect)
+
+    p_lifecycle_policy_prepare = lifecycle_policy_sub.add_parser(
+        "prepare", help="Prepare a policy promotion candidate without activating it"
+    )
+    p_lifecycle_policy_prepare.add_argument("path", help="Repository path")
+    p_lifecycle_policy_prepare.add_argument("--boundary-digest", required=True)
+    p_lifecycle_policy_prepare.add_argument(
+        "--lifecycle-identity-digest", required=True
+    )
+    p_lifecycle_policy_prepare.add_argument(
+        "--proposed-policy-version", required=True
+    )
+    p_lifecycle_policy_prepare.add_argument("--minimum-version", required=True)
+    p_lifecycle_policy_prepare.add_argument(
+        "--maximum-version-exclusive", required=True
+    )
+    p_lifecycle_policy_prepare.add_argument(
+        "--required-capability", action="append", required=True
+    )
+    p_lifecycle_policy_prepare.add_argument("--prepared-at", type=int, required=True)
+    p_lifecycle_policy_prepare.add_argument("--json", action="store_true")
+    p_lifecycle_policy_prepare.set_defaults(func=cmd_lifecycle_policy_prepare)
+
+    p_lifecycle_verification = lifecycle_sub.add_parser(
+        "verification", help="Prepare an exact verification manifest"
+    )
+    lifecycle_verification_sub = p_lifecycle_verification.add_subparsers(
+        dest="lifecycle_verification_command", required=True
+    )
+    p_lifecycle_verification_prepare = lifecycle_verification_sub.add_parser(
+        "prepare", help="Prepare a manifest without invoking a provider"
+    )
+    p_lifecycle_verification_prepare.add_argument("path", help="Repository path")
+    p_lifecycle_verification_prepare.add_argument("--boundary-digest", required=True)
+    p_lifecycle_verification_prepare.add_argument(
+        "--lifecycle-identity-digest", required=True
+    )
+    p_lifecycle_verification_prepare.add_argument("--requested-model", required=True)
+    p_lifecycle_verification_prepare.add_argument(
+        "--expected-effective-model", required=True
+    )
+    p_lifecycle_verification_prepare.add_argument(
+        "--effort", choices=[value.value for value in Effort], required=True
+    )
+    for option in (
+        "max-input-tokens", "max-output-tokens", "timeout-seconds", "expires-at"
+    ):
+        p_lifecycle_verification_prepare.add_argument(
+            f"--{option}", type=int, required=True
+        )
+    p_lifecycle_verification_prepare.add_argument(
+        "--fixture-repository-commit", required=True
+    )
+    p_lifecycle_verification_prepare.add_argument("--graph-fingerprint", required=True)
+    p_lifecycle_verification_prepare.add_argument(
+        "--prompt-contract-hash", required=True
+    )
+    p_lifecycle_verification_prepare.add_argument(
+        "--response-contract-hash", required=True
+    )
+    p_lifecycle_verification_prepare.add_argument(
+        "--max-cost-microunits", type=int, default=None
+    )
+    p_lifecycle_verification_prepare.add_argument("--json", action="store_true")
+    p_lifecycle_verification_prepare.set_defaults(
+        func=cmd_lifecycle_verification_prepare
+    )
 
     p_route = sub.add_parser("route", help="Recommend or run approval-gated model routing")
     route_sub = p_route.add_subparsers(dest="route_command", required=True)
@@ -1180,14 +1494,50 @@ def main(argv: list[str] | None = None) -> int:
     p_route_recommend.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_route_recommend.set_defaults(func=cmd_route_recommend)
 
-    p_route_run = route_sub.add_parser("run", help="Run one separately approved Ollama call")
+    p_route_run = route_sub.add_parser(
+        "run", help="Prepare and run one separately approved authenticated CLI task"
+    )
     p_route_run.add_argument("path", help="Repository path")
     p_route_run.add_argument("--objective", required=True, help="Bounded task objective")
     p_route_run.add_argument("--target", action="append", default=[], help="Repository-relative target")
-    p_route_run.add_argument("--shadow", action="store_true", help="Offer a separate bounded shadow evaluation")
     p_route_run.add_argument("--yes", action="store_true", help="Never grants routing consent; interactive approval is still required")
     p_route_run.add_argument("--json", action="store_true", help="Non-interactive output; execution is disabled")
     p_route_run.set_defaults(func=cmd_route_run)
+
+    for action, handler in (
+        ("accept", cmd_route_accept),
+        ("reject", cmd_route_reject),
+        ("cleanup", cmd_route_cleanup),
+    ):
+        action_parser = route_sub.add_parser(
+            action, help=f"Explicitly {action} one prepared routing task"
+        )
+        action_parser.add_argument("path", help="Repository path")
+        action_parser.add_argument("--task-id", required=True)
+        action_parser.add_argument(
+            "--yes",
+            action="store_true",
+            help="Never grants consent; interactive approval is still required",
+        )
+        action_parser.add_argument(
+            "--json", action="store_true", help="Non-interactive output; action is disabled"
+        )
+        action_parser.set_defaults(func=handler)
+
+    p_route_review = route_sub.add_parser(
+        "review", help="Run a separately approved read-only other-provider review"
+    )
+    p_route_review.add_argument("path", help="Repository path")
+    p_route_review.add_argument("--task-id", required=True)
+    p_route_review.add_argument(
+        "--yes",
+        action="store_true",
+        help="Never grants consent; interactive approval is still required",
+    )
+    p_route_review.add_argument(
+        "--json", action="store_true", help="Non-interactive output; review is disabled"
+    )
+    p_route_review.set_defaults(func=cmd_route_review)
 
     p_route_outcome = route_sub.add_parser("record-outcome", help="Append supported outcome evidence")
     p_route_outcome.add_argument("path", help="Repository path")
@@ -1230,11 +1580,40 @@ def main(argv: list[str] | None = None) -> int:
 
     p_route_policy = route_sub.add_parser("policy", help="Inspect or explicitly manage recommendation policy")
     p_route_policy.add_argument("path", help="Repository path")
-    p_route_policy.add_argument("--refresh-models", action="store_true")
     p_route_policy.add_argument("--promote", default=None)
     p_route_policy.add_argument("--rollback", default=None)
     p_route_policy.add_argument("--json", action="store_true")
     p_route_policy.set_defaults(func=cmd_route_policy)
+
+    p_overlay = sub.add_parser(
+        "overlay",
+        help="Manage explicit non-authoritative model overlays",
+    )
+    overlay_sub = p_overlay.add_subparsers(dest="overlay_command", required=True)
+    p_overlay_build = overlay_sub.add_parser(
+        "build",
+        help="Build one identity-bound overlay from a fresh canonical graph",
+    )
+    p_overlay_build.add_argument("path", help="Repository path")
+    p_overlay_build.add_argument(
+        "--provider-identity-digest",
+        required=True,
+        help="Exact current provider lifecycle identity SHA-256",
+    )
+    p_overlay_build.add_argument(
+        "--model-identity-digest",
+        required=True,
+        help="Exact current model identity SHA-256",
+    )
+    p_overlay_build.add_argument(
+        "--routing-policy-digest",
+        default=None,
+        help="Exact OpenRouter routing-policy SHA-256",
+    )
+    p_overlay_build.add_argument(
+        "--json", action="store_true", help="Emit sanitized machine-readable output"
+    )
+    p_overlay_build.set_defaults(func=cmd_overlay_build)
 
     p_scan = sub.add_parser("scan", help="Scan files and write manifest")
     p_scan.add_argument("path", help="Repository path")
@@ -1468,6 +1847,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.command == "doctor" and args.include_llm and not args.deep:
         p_doctor.error("--include-llm requires --deep")
+    if args.command in _CANONICAL_COMMANDS and (
+        getattr(args, "llm", None) not in (None, "none")
+        or any(getattr(args, name, None) is not None for name in _LEGACY_LLM_ARGUMENTS)
+    ):
+        print(CANONICAL_ENRICHMENT_MIGRATION_MESSAGE, file=sys.stderr)
+        return 2
 
     try:
         return int(args.func(args) or 0)

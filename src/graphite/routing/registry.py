@@ -239,6 +239,8 @@ def _model_from_payload(value: object) -> InventoryModel:
     ):
         raise RegistryError("registry_model_invalid")
     digest = value.get("digest")
+    if isinstance(digest, str) and digest.startswith("sha256:"):
+        digest = digest[7:]
     if not isinstance(digest, str) or not _DIGEST.fullmatch(digest):
         raise RegistryError("registry_digest_invalid")
     details = value.get("details", {})
@@ -255,6 +257,16 @@ def _model_from_payload(value: object) -> InventoryModel:
             raise RegistryError("registry_capabilities_invalid")
         capabilities.append(capability)
     return InventoryModel(name, digest, context, tuple(sorted(set(capabilities))))
+
+
+def find_inventory_model(snapshot: RegistrySnapshot, model_id: str) -> InventoryModel:
+    """Find an exact observed tag without applying routing-profile policy."""
+    if not isinstance(snapshot, RegistrySnapshot) or not isinstance(model_id, str) or _MODEL_ID.fullmatch(model_id) is None:
+        raise RegistryError("registry_model_invalid")
+    for model in snapshot.models:
+        if model.model_id == model_id:
+            return model
+    raise RegistryError("model_unavailable")
 
 
 def parse_inventory(

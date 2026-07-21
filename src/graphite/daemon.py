@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from typing import Callable
 
 from .config import Config
 from .io import atomic_write_json
+from .provider_observer import ProviderObservationSummary
 from .watch import Snapshot, WatchChange, diff_snapshots, snapshot, wait_for_stable_snapshot
 
 PROJECT_MARKERS: tuple[str, ...] = (
@@ -29,6 +31,20 @@ PROJECT_MARKERS: tuple[str, ...] = (
 )
 
 MAX_DAEMON_STATUS_BYTES = 4 * 1024 * 1024
+_PROVIDER_ENV_PREFIXES = (
+    "GRAPHITE_LLM",
+    "GRAPHITE_PROVIDER_",
+    "GRAPHITE_ROUTE_",
+    "ANTHROPIC_",
+    "CLAUDE_",
+    "CODEX_",
+    "GROQ_",
+    "LMSTUDIO_",
+    "OLLAMA_",
+    "OPENAI_",
+    "OPENROUTER_",
+    "VLLM_",
+)
 
 
 class DaemonStatusTooLargeError(OSError):
@@ -172,13 +188,15 @@ class DaemonLogger:
         self.state_dir = state_dir
         self.max_bytes = max_bytes
         self.log_path = state_dir / "graphite-daemon.log"
+        self._lock = threading.Lock()
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def event(self, event: str, **fields: object) -> None:
-        self._rotate_if_needed()
-        payload = {"ts": utc_now(), "event": event, **fields}
-        with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        with self._lock:
+            self._rotate_if_needed()
+            payload = {"ts": utc_now(), "event": event, **fields}
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
     def _rotate_if_needed(self) -> None:
         try:
@@ -239,7 +257,7 @@ def discover_projects(base: Path, *, max_depth: int = 6, max_projects: int = 128
 
 
 def daemon_config_for_project(cfg: Config, root: Path, options: DaemonOptions) -> Config:
-    data = cfg.to_dict()
+    data = cfg.canonical_graph().to_dict()
     if not Path(data["output_dir"]).is_absolute():
         data["output_dir"] = root / data["output_dir"]
     if not Path(data["cache_dir"]).is_absolute():
@@ -251,6 +269,7 @@ def daemon_config_for_project(cfg: Config, root: Path, options: DaemonOptions) -
 
 
 def _build_command(cfg: Config, root: Path) -> tuple[list[str], dict[str, str]]:
+    cfg = cfg.canonical_graph()
     cmd = [
         sys.executable,
         "-B",
@@ -269,28 +288,16 @@ def _build_command(cfg: Config, root: Path) -> tuple[list[str], dict[str, str]]:
     ]
     if not cfg.typescript_symbol_references:
         cmd.append("--no-typescript-symbol-references")
-    cmd.extend([
-        "--llm",
-        cfg.llm_mode,
-        "--llm-provider",
-        cfg.llm_provider,
-        "--llm-timeout",
-        str(cfg.llm_timeout_seconds),
-        "--llm-max-input-chars",
-        str(cfg.llm_max_input_chars),
-    ])
-    if cfg.llm_model:
-        cmd.extend(["--llm-model", cfg.llm_model])
-    if cfg.llm_base_url:
-        cmd.extend(["--llm-base-url", cfg.llm_base_url])
-    cmd.extend(["build", str(root)])
+    cmd.extend(["--llm", "none", "build", str(root)])
 
-    env = os.environ.copy()
+    env: dict[str, str] = {}
+    for key in os.environ:
+        if key.upper().startswith(_PROVIDER_ENV_PREFIXES):
+            continue
+        env[key] = os.environ[key]
     src_root = str(Path(__file__).resolve().parents[1])
     existing_pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = src_root if not existing_pythonpath else f"{src_root}{os.pathsep}{existing_pythonpath}"
-    if cfg.llm_api_key:
-        env["GRAPHITE_LLM_API_KEY"] = cfg.llm_api_key
     return cmd, env
 
 
@@ -336,9 +343,85 @@ def run_graphite_build(root: Path, cfg: Config, timeout_seconds: float) -> Build
 
 BuildProject = Callable[[Path, Config, float], BuildResult]
 SleepFn = Callable[[float], None]
+ProviderObservationCycle = Callable[[], ProviderObservationSummary]
 
 
-def _write_status(state_dir: Path, base: Path, states: dict[Path, ProjectRuntime], options: DaemonOptions, cycle: int) -> dict[str, object]:
+class _ProviderObservationWorker:
+    """Run bounded provider work outside the graph scheduling thread."""
+
+    def __init__(
+        self,
+        cycle: ProviderObservationCycle,
+        logger: DaemonLogger,
+        interval_seconds: float,
+    ) -> None:
+        self._cycle = cycle
+        self._logger = logger
+        self._interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._status: dict[str, object] = {
+            "status": "observing",
+            "attempted": 0,
+            "deferred": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "state_counts": {},
+            "reason_counts": {},
+        }
+        self._thread = threading.Thread(
+            target=self._run,
+            name="graphite-provider-observer",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def snapshot(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                **self._status,
+                "state_counts": dict(self._status["state_counts"]),
+                "reason_counts": dict(self._status["reason_counts"]),
+            }
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                result = self._cycle()
+                if not isinstance(result, ProviderObservationSummary):
+                    raise TypeError("provider_observation_result_invalid")
+                status = result.to_status()
+                status["status"] = "degraded" if result.failed else "ok"
+            except Exception:
+                status = {
+                    "status": "degraded",
+                    "attempted": 1,
+                    "deferred": 0,
+                    "succeeded": 0,
+                    "failed": 1,
+                    "state_counts": {},
+                    "reason_counts": {"observer_cycle_failed": 1},
+                }
+            with self._lock:
+                self._status = status
+            self._logger.event("provider_observation_cycle", **status)
+            if self._stop.wait(self._interval_seconds):
+                return
+
+
+def _write_status(
+    state_dir: Path,
+    base: Path,
+    states: dict[Path, ProjectRuntime],
+    options: DaemonOptions,
+    cycle: int,
+    provider_lifecycle: dict[str, object] | None = None,
+) -> dict[str, object]:
     projects = [state.to_status() for _, state in sorted(states.items(), key=lambda item: str(item[0]).lower())]
     healthy = sum(1 for state in states.values() if state.last_error is None and not state.needs_initial_build)
     failing = sum(1 for state in states.values() if state.last_error is not None)
@@ -364,6 +447,8 @@ def _write_status(state_dir: Path, base: Path, states: dict[Path, ProjectRuntime
         },
         "projects": projects,
     }
+    if provider_lifecycle is not None:
+        payload["provider_lifecycle"] = provider_lifecycle
     atomic_write_json(state_dir / "status.json", payload, indent=2)
     return payload
 
@@ -405,6 +490,7 @@ def run_daemon(
     *,
     build_project: BuildProject = run_graphite_build,
     sleep: SleepFn = time.sleep,
+    provider_observation_cycle: ProviderObservationCycle | None = None,
 ) -> dict[str, object]:
     """Run the multi-project daemon loop and return the last written status."""
     options.validate()
@@ -414,6 +500,15 @@ def run_daemon(
     state_dir = (options.state_dir or (base / ".graphite-daemon")).resolve()
     logger = DaemonLogger(state_dir, options.log_max_bytes)
     logger.event("daemon_start", base_path=str(base), once=options.once)
+    provider_worker = None
+    if provider_observation_cycle is not None:
+        provider_options = cfg.provider_observer_options()
+        provider_worker = _ProviderObservationWorker(
+            provider_observation_cycle,
+            logger,
+            provider_options.interval_seconds,
+        )
+        provider_worker.start()
 
     states: dict[Path, ProjectRuntime] = {}
     last_discovery = 0.0
@@ -485,13 +580,23 @@ def run_daemon(
                 logger.event("build_failed", project=str(project), seconds=state.last_build_seconds, error=state.last_error)
             builds_this_cycle += 1
 
-        last_status = _write_status(state_dir, base, states, options, cycle)
+        last_status = _write_status(
+            state_dir,
+            base,
+            states,
+            options,
+            cycle,
+            None if provider_worker is None else provider_worker.snapshot(),
+        )
         if options.once:
+            if provider_worker is not None:
+                provider_worker.stop()
             logger.event("daemon_stop", reason="once", cycle=cycle)
             return last_status
         cycle += 1
         if options.max_cycles is not None and cycle >= options.max_cycles:
+            if provider_worker is not None:
+                provider_worker.stop()
             logger.event("daemon_stop", reason="max_cycles", cycle=cycle)
             return last_status
         sleep(options.scan_interval_seconds)
-

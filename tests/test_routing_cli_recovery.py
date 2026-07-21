@@ -26,7 +26,8 @@ def _forbidden(*_args: object, **_kwargs: object) -> NoReturn:
 
 @pytest.fixture(autouse=True)
 def _deny_execution_authority(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(service_module, "execute_ollama", _forbidden)
+    monkeypatch.setattr(service_module, "execute_claude", _forbidden)
+    monkeypatch.setattr(service_module, "execute_codex", _forbidden)
     monkeypatch.setattr(ApprovalAuthority, "issue", _forbidden)
     monkeypatch.setattr(ApprovalAuthority, "consume", _forbidden)
 

@@ -4,9 +4,9 @@ Local-first, deterministic knowledge graph extraction for codebases. A safer, fa
 
 ## Principles
 
-- **Zero-LLM by default** — structural extraction only; no API keys, no tokens, no cost.
-- **Local-first** — runs entirely on your machine unless optional LLM enrichment is explicitly enabled.
-- **Model-agnostic enrichment** — optional summaries use native Ollama or any OpenAI-compatible HTTP endpoint.
+- **Inference-free canonical graph** — structural extraction never reads provider credentials or invokes a model.
+- **Local-first** — canonical scan, build, report, check, query, context, impact, watch, and daemon operations stay local.
+- **Isolated enrichment** — model output belongs only in explicit, non-authoritative overlays and never changes canonical artifacts.
 - **Deterministic graph** — same commit produces the same structural graph.
 - **Safe output** — no absolute paths or system metadata leak into artifacts.
 - **Incremental** — content-addressed cache means only changed files are re-parsed.
@@ -25,7 +25,7 @@ Local-first, deterministic knowledge graph extraction for codebases. A safer, fa
 pip install -e F:/Projects/graphite
 ```
 
-No model SDK is required for optional LLM enrichment; Graphite uses standard-library HTTP adapters.
+No model SDK or provider credential is required for canonical graph operation.
 
 ## System readiness and optional integrations
 
@@ -104,7 +104,7 @@ The angle-bracket value is a placeholder, not a literal path or a repository-loc
 
 The validator target in that command is `validate-packages.cjs typescript`; preserve that package spelling exactly.
 
-Local Ollama activation needs no API key: set `GRAPHITE_LLM=local`, `GRAPHITE_LLM_PROVIDER=ollama`, and an explicit `GRAPHITE_LLM_MODEL`; leave `GRAPHITE_LLM_API_KEY` unset. For a cloud provider, use a newly rotated, session-scoped `GRAPHITE_LLM_API_KEY` and explicitly set the provider, model, and HTTPS base URL. Never place the value in a command example, repository file, persistent parent-process configuration, shell history, or log. If a credential may have been exposed, revoke it in the provider dashboard, remove it from parent secret configuration, rotate it, and restart the parent and all affected processes so they cannot retain the old environment.
+Canonical commands ignore ambient `GRAPHITE_LLM*` settings and never read `GRAPHITE_LLM_API_KEY`. Optional doctor probing remains a separate, explicit network action. For the explicit doctor probe, local Ollama needs no API key; a cloud probe requires a newly rotated, session-scoped value. Never place a credential in a repository file, persistent parent-process configuration, shell history, or log. If a credential may have been exposed, revoke it in the provider dashboard, remove it from parent secret configuration, rotate it, and restart the parent and all affected processes so they cannot retain the old environment.
 
 `--include-llm` is an explicit network action and uses synthetic content only. It sends one bounded constant probe with no repository data, follows no redirects or retries, and reports neither response text, raw error text, nor secrets. The normal enrichment setting `GRAPHITE_LLM_MAX_OUTPUT_TOKENS` defaults to 512 and is clamped to 1–4096. The doctor probe overrides it with a fixed 16-token cap. Keep the LLM probe disabled unless network access to the configured endpoint is approved.
 
@@ -356,11 +356,11 @@ graphite watch . --impact
 Behavior:
 
 - Builds once on startup unless `--no-initial-build` is set.
-- Polls locally with no network calls by default.
+- Polls locally and rebuilds canonical graphs without model inference.
 - Debounces file changes before rebuilding, so save bursts do not cause repeated builds.
 - Uses content hashes, not timestamps, to avoid unnecessary rebuilds.
 - With `--impact`, prints impacted files and likely tests from the previous graph before rebuilding.
-- Does not enable LLM enrichment unless `GRAPHITE_LLM` or `--llm` is explicitly set.
+- Ignores ambient provider configuration. Legacy non-`none` `--llm` and provider flags are rejected.
 
 Useful controls:
 
@@ -426,140 +426,182 @@ graphite daemon-uninstall-startup-windows F:\Projects
 
 The fallback writes a hidden VBS launcher in the current user's Startup folder and an idempotent PowerShell launcher in `F:\Projects\.graphite-daemon`.
 
-## Optional LLM enrichment
+## Canonical graph and enrichment isolation
 
-LLM enrichment is off by default. When enabled, its prompt does not intentionally include source-file contents, but it transmits graph metadata, filenames, identifiers, labels, and analysis summaries to the configured provider. Use `--llm auto` when you want Graphite to decide whether the graph is complex/risky enough to justify the extra LLM call.
+`scan`, `build`, `report`, `check`, `validate`, `query`, `context`, `impact`, `watch`, and `daemon` are canonical operations. They force an internal no-inference configuration, ignore ambient `GRAPHITE_LLM*` values, exclude provider data from graph artifacts, and reject legacy non-`none` `--llm` or provider flags. `--llm none` remains a temporary compatibility no-op.
 
-```bash
-# Native Ollama, local only
-GRAPHITE_LLM=local GRAPHITE_LLM_PROVIDER=ollama GRAPHITE_LLM_MODEL=qwen2.5-coder graphite report .
+Model enrichment uses the explicit `graphite overlay build` boundary. The command requires an existing fresh canonical graph plus exact current provider-lifecycle and model identity SHA-256 digests. OpenRouter additionally requires its routing-policy digest. Only lifecycle-governed Ollama and OpenRouter overlays are accepted; Ollama is restricted to loopback HTTP and OpenRouter to its canonical HTTPS API root.
 
-# OpenAI-compatible local server, such as LM Studio
-GRAPHITE_LLM=local GRAPHITE_LLM_PROVIDER=lmstudio GRAPHITE_LLM_MODEL=local-model graphite report .
+Global provider options precede the subcommand. These examples deliberately omit credentials; provide an OpenRouter credential only through an approved session-scoped secret environment, never argv or a repository file:
 
+```powershell
+graphite --llm local --llm-provider ollama --llm-model qwen2.5-coder:7b overlay build . `
+  --provider-identity-digest <64-lowercase-hex-lifecycle-digest> `
+  --model-identity-digest <64-lowercase-hex-model-digest>
 
-# OpenRouter model routing
-GRAPHITE_LLM=cloud GRAPHITE_LLM_PROVIDER=openrouter GRAPHITE_LLM_MODEL=~openai/gpt-latest GRAPHITE_LLM_API_KEY=... graphite report .
-GRAPHITE_LLM=cloud GRAPHITE_LLM_PROVIDER=openrouter GRAPHITE_LLM_MODEL=~anthropic/claude-sonnet-latest GRAPHITE_LLM_API_KEY=... graphite report .
-# Generic OpenAI-compatible endpoint
-GRAPHITE_LLM=cloud GRAPHITE_LLM_PROVIDER=openai-compatible GRAPHITE_LLM_BASE_URL=https://example.com/v1 GRAPHITE_LLM_MODEL=my-model GRAPHITE_LLM_API_KEY=... graphite report .
+graphite --llm cloud --llm-provider openrouter --llm-model <exact-provider-model-id> overlay build . `
+  --provider-identity-digest <64-lowercase-hex-lifecycle-digest> `
+  --model-identity-digest <64-lowercase-hex-model-digest> `
+  --routing-policy-digest <64-lowercase-hex-routing-policy-digest>
 ```
 
-Equivalent CLI flags are available:
+The overlay manifest binds the canonical bundle fingerprint, lifecycle/model/routing identities, input/output/time limits, creation time, outcome, and schema version. Successful payloads are content-addressed and the manifest is replaced last, so interruption cannot replace the last valid overlay with a partial result. A failed call writes only a separate allowlisted failure category; raw diagnostics, prompts, credentials, endpoints, and paths are excluded.
 
-```bash
-graphite --llm auto --llm-provider openrouter report .
-graphite --llm local --llm-provider ollama --llm-model qwen2.5-coder report .
-graphite --llm cloud --llm-provider openai-compatible --llm-base-url https://example.com/v1 --llm-model my-model report .
-graphite --llm cloud --llm-provider openrouter report .
-graphite --llm cloud --llm-provider openrouter --llm-model "~openai/gpt-latest" report .
-```
-
-Supported provider adapters:
-
-- `ollama` — native `http://localhost:11434/api/chat`.
-- `openai-compatible` — any `/v1/chat/completions` compatible endpoint.
-- Aliases with sensible base URLs: `openai`, `openrouter`, `groq`, `lmstudio`, `vllm`.
-- `openrouter` uses `https://openrouter.ai/api/v1` and defaults to `moonshotai/kimi-k2.7-code`; use `--llm-model` for any OpenRouter model slug, including latest aliases such as `~openai/gpt-latest`.
+Overlay files are non-authoritative, independently stale, and stored only beneath `graph-out/overlays/<provider>/<identity-digest>/`. Identity-derived paths reject traversal, symlinks, reparse points, collisions, and output-root escape. Restrictive file permissions are applied. Changing the canonical graph or provider/model/routing identity makes the overlay stale without changing canonical freshness or exit status. `query`, `context`, `impact`, validation, routing, watch, and daemon do not read overlays. Deleting the overlay tree removes annotations without changing canonical artifacts.
 
 ## Adaptive development routing
 
-Graphite can recommend an Ollama Cloud model for a development task and, only after
-separate interactive consent, make one bounded request through the local Ollama
-loopback API. This development router is distinct from optional report enrichment:
-OpenRouter is reserved for production in-application inference. Claude Code and
-Codex are manual handoff channels only; Graphite never launches either CLI.
+Graphite's governed development router invokes only locally installed Claude Code
+and Codex CLIs that are already authenticated through a Claude subscription or a
+ChatGPT subscription. It does not accept or use Anthropic/OpenAI API keys. Ollama is
+not a development-routing provider. Future Ollama/OpenAI-compatible enrichment is
+restricted to the separate overlay boundary, and OpenRouter remains separate from
+governed development routing.
 
-### Active router model pool
+Authenticated Claude Code and Codex subscription CLIs are the only governed
+development execution providers.
 
-The bundled allowlist is deliberately small. Every active profile is provisional
-and supports only the `default` effort:
-
-| Exact model ID | Approved roles | Provider-reported usage class |
-|---|---|---|
-| `kimi-k2.7-code:cloud` | Primary coding; coding | high |
-| `minimax-m2.7:cloud` | Coding; agentic | medium |
-| `nemotron-3-super:cloud` | Reasoning; review | medium |
-| `minimax-m3:cloud` | Long-context; agentic | high |
-
-The provider-reported usage class is coarse routing metadata, not a USD price or
-measured cost saving. Medium may rank ahead of high only after every hard gate is
-satisfied. The profile allowlist is the authority boundary: inventory presence does
-not authorize a model, and unknown inventory entries and aliases are excluded.
-Exact identifier and digest, required capabilities, context capacity, risk, data
-policy, configured request/repository budget, effort support, registry freshness,
-and the 30-day minimum retirement
-runway are hard gates before ranking. A dated retirement must be strictly more than
-30 days away. While these profiles remain provisional, high-risk work is ineligible
-and returns a manual frontier handoff to the operator.
+Before routing, install the vendor CLIs through their official distribution paths,
+authenticate them interactively, and verify the exact subscription identity:
 
 ```powershell
-graphite route policy . --refresh-models --json
+claude --version
+claude auth status --json
+codex --version
+codex login status
+```
+
+Claude must report `claude.ai` first-party authentication; Codex must report
+`Logged in using ChatGPT`. Graphite hashes the resolved executable and binds its
+version, adapter protocol, requested model, effective model, effort, permission
+mode, risk ceiling, verification time, and expiry into a capability snapshot.
+The no-edit verifier must report input and output usage. Graphite validates both
+against the exact approved reservation before saving the snapshot; missing,
+invalid, or over-budget usage fails closed and creates no active authority.
+Claude profile verification additionally requires one schema-constrained turn and
+an exact terminal `structured_output` object; free-text output is never verification
+authority. Ordinary task execution remains outside this verification-only schema.
+Profile evidence is explicit and short-lived. A CLI update, executable replacement,
+authentication change, effective-model mismatch, or expired snapshot fails closed.
+Capability evidence helps establish eligibility; it is not authorization authority.
+
+Provider lifecycle state is stored separately from canonical graph artifacts. The
+states are `discovered`, `compatible`, `verification_required`, `active`,
+`incompatible`, and `unavailable`. A changed executable hash or patch version gets
+a bounded standard probe; a minor version or capability change gets an expanded
+probe; a major version leaves the provider `incompatible` until a new compatibility
+policy is separately approved. Passing a probe moves an identity only to
+`verification_required`, never directly to `active`.
+
+The daemon may observe and persist sanitized lifecycle transitions, but it cannot
+activate a provider or add provider facts to the canonical graph. Immediately
+before approval consumption, the lazy execution check re-observes the exact runtime
+identity and is authoritative even when daemon state is stopped or stale. Failure
+or corruption in one provider lifecycle boundary fails that provider closed without
+blocking canonical scan, build, check, query, watch, daemon builds, or another
+independent provider boundary.
+
+Lifecycle operator commands open the existing lifecycle database read-only, enforce
+pages of 1–100 records, and emit the same bounded public fields in compact JSON or
+indented human-readable form. They never create missing state or expose executable
+paths, endpoint query strings, credentials, prompts, or raw diagnostics:
+
+```powershell
+graphite lifecycle list . --limit 50 --json
+graphite lifecycle status . --boundary-digest <64-lowercase-hex> --json
+graphite lifecycle history . --boundary-digest <64-lowercase-hex> --limit 50
+graphite lifecycle policy inspect . --boundary-digest <64-lowercase-hex> --json
+```
+
+`lifecycle policy prepare` creates a content-hashed policy candidate only for the
+exact current incompatible identity. It does not persist, promote, or activate the
+candidate; promotion requires a separate human-authorized operation. `graphite lifecycle verification prepare`
+similarly creates the complete manifest for one exact
+`verification_required` identity and stops before inference. The manifest fixes the
+model, effort, token/time/cost bounds, fixture commit, graph and response-contract
+hashes, one attempt, no fallback, no resume, and no substitution. Display and review
+of either candidate grant no execution authority.
+
+```powershell
 graphite route recommend . --objective "Review listing search" --target src/search.py
 graphite route run . --objective "Review listing search" --target src/search.py
+graphite route review . --task-id task-identifier
+graphite route accept . --task-id task-identifier
+graphite route reject . --task-id task-identifier
+graphite route cleanup . --task-id task-identifier
 graphite route status . --json
-graphite route recoverable . --limit 50 --json
-graphite route reconcile . --attempt-id attempt-identifier --json
+graphite route policy . --json
 ```
 
 `route recommend` is offline and read-only. It requires a fresh validated graph and
-a previously refreshed model snapshot. `route run` prints the selected model,
-effort, quota estimate, and outbound manifest before asking for consent. Approval
-defaults to No. JSON, CI, redirected input/output, and `--yes` cannot execute a
-model. Source context leaves the machine only after the manifest is displayed and
-the user explicitly answers yes.
+a current verified capability snapshot. `route run` creates a detached worktree at
+the approved commit, prints the exact provider/model/effort/permission manifest, and
+then asks for consent. Approval defaults to No. Non-TTY input/output, JSON mode, CI,
+and `--yes` cannot grant consent. Approval is signed, short-lived, single-use,
+snapshot-bound, prompt-hash-bound, commit-bound, and token-bound. It is consumed
+immediately before exactly one provider process.
 
-Every approval is signed, short-lived, single-use, model/digest-bound, effort-bound,
-context-bound, and quota-bound. Model output is untrusted, has no tool authority,
-and cannot mutate code. High-risk work retains a permanent approval gate. Shadow
-evaluation is disabled by default, separately consented, independently budgeted,
-and unavailable for high-risk or sensitive categories.
+The provider may edit only the isolated worktree under the selected permission
+mode. Graphite rejects symlinks/reparse points, nested repositories, submodule
+changes, case collisions, out-of-scope files, excessive file/byte counts, identity
+drift, and diff drift. It runs bounded, credential-free validation and records a
+content hash—not diff contents. Provider output remains untrusted and is never
+validation or merge authority.
 
-Execution is single-shot. Graphite performs no automatic fallback, retry, model
-switching, model pull, or approval reuse. Successful text is shown only on the
-interactive terminal as framed, escaped, ephemeral text. Only the validated receipt
-and bounded audit metadata are persisted; model text is not. Non-TTY input or
-output, JSON mode, CI, and `--yes` cannot execute.
+High-risk work requires a second, separately approved, read-only review by the
+other provider. The reviewer receives an ephemeral synthetic diff and cannot edit.
+`route accept` rechecks the diff and validation evidence, then creates a detached,
+cherry-pickable commit; it never merges the source branch. `route reject` records the
+human verdict. `route cleanup` is a separate destructive authority step.
 
-The recommendation budget gate uses configured request/repository limits; it is not
-proof that quota remains. Actual repository and machine quota reservation occurs
-when the signed approval is consumed immediately before execution. The signature
-binds the exact inventory digest, and runtime independently revalidates that digest.
+There is no automatic retry, arbitrary provider/model switch, session reuse,
+acceptance, cleanup, cherry-pick, or merge. The sole automatic fallback is a bounded
+one-step advance to the other provider when both exact candidates were selected and
+approved in the same immutable route pool and the first returns the allowlisted
+`capacity_unavailable` category before producing output or side effects. Every other
+failure remains failed and requires a new approval flow. Legacy Ollama executions
+are retained as read-only history and cannot be replayed as Claude or Codex attempts.
 
-The durable audit transition is `pending` to `completed`. If the provider call
-succeeds but final persistence fails, the attempt is reconcilable only while its
-fallback staged receipt remains intact and available. Use `graphite route
-recoverable . --limit 50 --json` to list a bounded page of sanitized attempt IDs;
-when `has_more` is true, pass `next_cursor` back with `--after`. Use `graphite route
-reconcile . --attempt-id <id> --json` to finalize one staged receipt. These commands make no
-provider call and cannot issue, consume, or reuse approval. Back up or preserve
-`.graphite/routing` state before repair. If storage is
-unavailable before both finalization and fallback staging complete, Graphite returns
-`execution_persistence_failed`; failed staging, deletion, corruption, or disk loss
-means later reconciliation is unavailable. Expected recovery validation and storage
-failures are rendered as fixed, path-free codes; `--json` emits only an
-`{"error":{"code":"..."}}` object and never includes OS errors or repository data.
+Telemetry is append-only and restricted to provider/profile identity, category and
+risk, latency, reported token usage, diff size, validation outcome, defect classes,
+rework count, human verdict, and provenance. Source, prompts, responses, diff
+contents, paths, secrets, and raw diagnostics have no telemetry field. Subscription
+cost is `unknown`, never zero. Learning can create a signed candidate and comparison
+evidence, but cannot change the provider allowlist, permission ceiling, risk
+ceilings, or autonomy. Promotion and rollback both require interactive human
+approval and never delete evidence.
 
-Schema-v3 migration intentionally quarantines schema-v1 pending or
-persistence-failed rows missing token/request bindings and schema-v2 rows missing
-the inventory digest as `legacy_unrecoverable`; they cannot be replayed or
-reconciled. Database triggers prevent update, deletion, or reactivation of these
-digestless legacy rows. Legacy completed rows missing those bindings are intentionally preserved
-as read-only history rather than rewritten into new evidence.
+### Schema-v4 to schema-v5 migration and rollback
 
-Detailed receipts and evidence stay in repository-local `.graphite/routing` storage;
-they contain hashes and metadata, not prompts or model responses. Machine-wide
-sanitized aggregate learning is opt-in and contains only allowlisted enums, coarse
-buckets, and version identifiers. The default retention window is 90 days. Use
-policy rollback to restore a prior recommendation policy; removing local evidence
-is an explicit operator action, never an automatic side effect.
+Stop all Graphite routing writers before upgrade or rollback. On the first v5 open,
+Graphite creates `backups/events-schema-v4.sqlite3` and
+`backups/events-schema-v4.sha256.json`, verifies the backup is schema v4 and passes
+SQLite integrity and foreign-key checks, then performs the v5 lifecycle-binding
+migration. Historical v4 rows remain readable but do not acquire invented lifecycle
+authority. After migration, run `graphite route status . --json`, SQLite
+`PRAGMA integrity_check`, and `PRAGMA foreign_key_check`, then preserve both backup
+files.
 
-Incident response: stop routing, preserve the append-only evidence, revoke exposed
-credentials if any external system was involved, review the execution correlation,
-close the incident explicitly, and start a new evidence window. A provider outage
-or blocked recommendation does not weaken approval or security gates.
+Rollback is a database restore, not an in-place downgrade:
 
-Relevant environment variables:
+1. Stop every process that can write `.graphite/routing/events.sqlite3`.
+2. Verify the backup SHA-256 against `backups/events-schema-v4.sha256.json` and run
+   SQLite `PRAGMA integrity_check` and `PRAGMA foreign_key_check` against the backup.
+3. Preserve the current v5 database for incident analysis, then atomically restore
+   the verified v4 backup as `events.sqlite3`.
+4. Restore the matching v4 application build and confirm the schema version and
+   historical row counts with its read-only status path before allowing writers.
+
+If the v5 database is partially migrated, the backup marker is absent/mismatched,
+or integrity fails, keep routing stopped. Restore the verified backup or deploy a
+tested forward fix; do not hand-edit schema metadata or delete evidence.
+
+Incident response follows the same containment rule: stop routing, preserve the
+database and worktree evidence, revoke an affected subscription session when
+credential exposure is suspected, and resume only after explicit review.
+
+Provider environment variables are reserved for explicit doctor probes and the
+overlay boundary. Canonical commands do not read them:
 
 - `GRAPHITE_LLM`: `none`, `auto`, `local`, or `cloud`.
 - `GRAPHITE_LLM_PROVIDER`: `ollama`, `openai-compatible`, `openai`, `openrouter`, `groq`, `lmstudio`, or `vllm`.
@@ -568,8 +610,9 @@ Relevant environment variables:
 - `GRAPHITE_LLM_API_KEY`: provider API key; do not commit this.
 - `GRAPHITE_LLM_TIMEOUT`: request timeout seconds.
 - `GRAPHITE_LLM_MAX_INPUT_CHARS`: prompt input budget.
+- `GRAPHITE_LLM_MAX_OUTPUT_TOKENS`: overlay output-token budget, clamped to 1–4096.
 
-Auto mode currently runs only when graph signals pass conservative thresholds, such as larger node/edge counts, many communities, god nodes, surprising connections, or highly linked files. It records the decision and reason in `graph-out/.graphite_manifest.json` and `GRAPH_REPORT.md`.
+These settings never appear in canonical manifests or reports.
 
 ## Output
 

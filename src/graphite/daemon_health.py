@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .daemon import DaemonStatusInvalidError, DaemonStatusTooLargeError, read_daemon_status
+from .routing.lifecycle import LifecycleReasonCode, ProviderLifecycleState
 from .windows_task import DEFAULT_TASK_NAME
 from .windows_startup import startup_status
 
@@ -42,6 +43,32 @@ _MAX_TIMESTAMP_LENGTH = 128
 _MAX_STATUS_LENGTH = 128
 _MAX_REPORT_ISSUES = 100
 _MAX_TEXT_FIELD_LENGTH = 2_048
+_PROVIDER_STATUS_VALUES = frozenset({"observing", "ok", "degraded"})
+_PROVIDER_REASON_CODES = frozenset(reason.value for reason in LifecycleReasonCode) | frozenset(
+    {
+        "lifecycle_invalidation_failed",
+        "lifecycle_observation_invalid",
+        "lifecycle_persistence_failed",
+        "observer_cycle_failed",
+        "probe_auth_unhealthy",
+        "probe_capability_missing",
+        "probe_dns_busy",
+        "probe_endpoint_invalid",
+        "probe_executable_invalid",
+        "probe_failed",
+        "probe_http_status",
+        "probe_identity_changed",
+        "probe_model_unavailable",
+        "probe_protocol_invalid",
+        "probe_request_invalid",
+        "probe_response_too_large",
+        "probe_timeout",
+        "probe_unavailable",
+        "probe_version_invalid",
+        "verification_manifest_invalid",
+    }
+)
+_PROVIDER_STATE_CODES = frozenset(state.value for state in ProviderLifecycleState)
 
 
 def evaluate_daemon_health(
@@ -127,6 +154,17 @@ def evaluate_daemon_health(
 
     if status.get("status") not in ("ok", None):
         errors.append({"code": "daemon_degraded", "message": f"daemon reported status {status.get('status')}"})
+
+    provider_lifecycle = status.get("provider_lifecycle")
+    if isinstance(provider_lifecycle, dict) and (
+        provider_lifecycle["status"] == "degraded"
+        or provider_lifecycle["failed"] > 0
+        or provider_lifecycle["state_counts"].get("unavailable", 0) > 0
+    ):
+        warnings.append({
+            "code": "provider_observation_degraded",
+            "message": "one or more provider lifecycle observations require attention",
+        })
 
     project_health, project_counts = _project_health(
         status,
@@ -388,6 +426,14 @@ def _normalize_status(
         "project_count": raw_status.get("project_count"),
     }
     issues: list[dict[str, Any]] = []
+    if "provider_lifecycle" in raw_status:
+        provider_lifecycle = _normalize_provider_lifecycle(
+            raw_status.get("provider_lifecycle")
+        )
+        if provider_lifecycle is None:
+            issues.append(_schema_issue("provider_lifecycle"))
+        else:
+            status["provider_lifecycle"] = provider_lifecycle
     raw_projects = raw_status.get("projects")
     valid_projects: list[dict[str, Any]] = []
     processed_count = 0
@@ -451,6 +497,54 @@ def _normalize_status(
     return status, issues[:_MAX_REPORT_ISSUES], {
         "processed_count": processed_count,
         "truncated_count": truncated_count,
+    }
+
+
+def _normalize_provider_lifecycle(value: object) -> dict[str, Any] | None:
+    fields = {
+        "status",
+        "attempted",
+        "deferred",
+        "succeeded",
+        "failed",
+        "state_counts",
+        "reason_counts",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        return None
+    if value.get("status") not in _PROVIDER_STATUS_VALUES:
+        return None
+    counts: dict[str, int] = {}
+    for field in ("attempted", "deferred", "succeeded", "failed"):
+        raw = value.get(field)
+        if not _nonnegative_int(raw) or raw > 1_000:
+            return None
+        counts[field] = raw
+    if counts["attempted"] != counts["succeeded"] + counts["failed"]:
+        return None
+
+    normalized_maps: dict[str, dict[str, int]] = {}
+    for field, allowed in (
+        ("state_counts", _PROVIDER_STATE_CODES),
+        ("reason_counts", _PROVIDER_REASON_CODES),
+    ):
+        raw_map = value.get(field)
+        if not isinstance(raw_map, Mapping) or len(raw_map) > 32:
+            return None
+        normalized: dict[str, int] = {}
+        for key, count in raw_map.items():
+            if key not in allowed or not _nonnegative_int(count) or count > 1_000:
+                return None
+            normalized[key] = count
+        normalized_maps[field] = dict(sorted(normalized.items()))
+    if sum(normalized_maps["state_counts"].values()) > counts["attempted"]:
+        return None
+    if sum(normalized_maps["reason_counts"].values()) != counts["attempted"]:
+        return None
+    return {
+        "status": value["status"],
+        **counts,
+        **normalized_maps,
     }
 
 
@@ -529,5 +623,6 @@ def _finalize(
         "warnings": warnings,
         "process": process,
         "startup": startup,
+        "provider_lifecycle": status.get("provider_lifecycle") if status else None,
         "projects": project_health,
     }

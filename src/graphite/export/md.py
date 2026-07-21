@@ -23,33 +23,7 @@ def to_markdown(
     lines.append(f"- **Total nodes:** {graph_data.get('metadata', {}).get('node_count', 0)}")
     lines.append(f"- **Total edges:** {graph_data.get('metadata', {}).get('edge_count', 0)}")
     lines.append(f"- **Communities detected:** {clusters.get('count', 0)}")
-    lines.append(
-        f"- **LLM tokens used:** {manifest.get('llm_tokens', 0)} "
-        f"(mode: {manifest.get('llm_mode', 'none')})"
-    )
     lines.append("")
-
-    llm = analysis.get("llm", {})
-    if llm.get("enabled") or llm.get("mode") == "auto":
-        lines.append("## LLM Enrichment")
-        status = llm.get("status", "unknown")
-        provider = llm.get("provider", manifest.get("llm_provider", "unknown"))
-        model = llm.get("model", manifest.get("llm_model", "unknown"))
-        lines.append(f"- **Status:** {status}")
-        lines.append(f"- **Provider:** {provider}")
-        lines.append(f"- **Model:** {model}")
-        if llm.get("reason"):
-            lines.append(f"- **Reason:** {llm['reason']}")
-        auto = llm.get("auto") or {}
-        if auto:
-            signals = ", ".join(auto.get("signals") or []) or "none"
-            lines.append(f"- **Auto signals:** {signals}")
-        if status == "ok" and llm.get("summary"):
-            lines.append("")
-            lines.append(str(llm["summary"]))
-        elif llm.get("error"):
-            lines.append(f"- **Error:** {llm['error']}")
-        lines.append("")
 
     lines.append("## Top Files by Connectivity")
     for item in analysis.get("top_files_by_links", [])[:10]:
@@ -91,5 +65,4 @@ def to_markdown(
     lines.append("")
 
     atomic_write_text(output_path, "\n".join(lines))
-
 

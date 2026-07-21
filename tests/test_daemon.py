@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from graphite.cli import main
 from graphite.config import Config
 from graphite.daemon import BuildResult, DaemonOptions, discover_projects, run_daemon
+from graphite.provider_observer import ProviderObservationSummary
 
 
 def _write(path: Path, text: str) -> None:
@@ -88,6 +90,150 @@ def test_daemon_respects_max_builds_per_cycle(tmp_path: Path) -> None:
     assert status["pending_projects"] == 1
 
 
+def test_daemon_forces_canonical_project_config(tmp_path: Path) -> None:
+    project = tmp_path / "app"
+    _write(project / "package.json", "{}\n")
+    observed: list[Config] = []
+
+    def fake_build(_root: Path, cfg: Config, _timeout: float) -> BuildResult:
+        observed.append(cfg)
+        return BuildResult(True, 0, 0.01)
+
+    run_daemon(
+        tmp_path,
+        Config(
+            llm_mode="cloud",
+            llm_provider="openrouter",
+            llm_model="vendor/model",
+            llm_base_url="https://provider.invalid/v1",
+            llm_api_key="must-not-propagate",
+        ),
+        DaemonOptions(once=True, debounce_seconds=0, state_dir=tmp_path / "state"),
+        build_project=fake_build,
+    )
+
+    assert len(observed) == 1
+    assert observed[0].llm_mode == "none"
+    assert observed[0].llm_provider == "none"
+    assert observed[0].llm_model is None
+    assert observed[0].llm_base_url is None
+    assert observed[0].llm_api_key is None
+
+
+def test_provider_observation_cannot_delay_or_consume_graph_build_budget(tmp_path: Path) -> None:
+    project = tmp_path / "app"
+    _write(project / "package.json", "{}\n")
+    entered = threading.Event()
+    release = threading.Event()
+    builds: list[Path] = []
+
+    def blocked_observer() -> ProviderObservationSummary:
+        entered.set()
+        release.wait(10)
+        return ProviderObservationSummary(1, 0, 0, 1, {}, {"probe_timeout": 1})
+
+    def fake_build(root: Path, _cfg: Config, _timeout: float) -> BuildResult:
+        assert entered.wait(1)
+        builds.append(root)
+        return BuildResult(True, 0, 0.01)
+
+    try:
+        status = run_daemon(
+            tmp_path,
+            Config(),
+            DaemonOptions(
+                once=True,
+                debounce_seconds=0,
+                max_builds_per_cycle=1,
+                state_dir=tmp_path / "state",
+            ),
+            build_project=fake_build,
+            provider_observation_cycle=blocked_observer,
+        )
+    finally:
+        release.set()
+
+    assert builds == [project]
+    assert status["healthy_projects"] == 1
+    assert status["provider_lifecycle"]["status"] == "observing"
+
+
+def test_daemon_status_contains_only_sanitized_provider_aggregates(tmp_path: Path) -> None:
+    project = tmp_path / "app"
+    _write(project / "package.json", "{}\n")
+    observed = threading.Event()
+
+    def observer() -> ProviderObservationSummary:
+        observed.set()
+        return ProviderObservationSummary(
+            4,
+            0,
+            2,
+            2,
+            {"unavailable": 2, "verification_required": 2},
+            {"hash_changed": 2, "probe_timeout": 2},
+        )
+
+    def fake_build(_root: Path, _cfg: Config, _timeout: float) -> BuildResult:
+        assert observed.wait(1)
+        return BuildResult(True, 0, 0.01)
+
+    status = run_daemon(
+        tmp_path,
+        Config(),
+        DaemonOptions(once=True, debounce_seconds=0, state_dir=tmp_path / "state"),
+        build_project=fake_build,
+        provider_observation_cycle=observer,
+    )
+    serialized = json.dumps(status)
+
+    assert status["provider_lifecycle"] == {
+        "status": "degraded",
+        "attempted": 4,
+        "deferred": 0,
+        "succeeded": 2,
+        "failed": 2,
+        "state_counts": {"unavailable": 2, "verification_required": 2},
+        "reason_counts": {"hash_changed": 2, "probe_timeout": 2},
+    }
+    for forbidden in ("executable", "endpoint", "header", "credential", "prompt", "source"):
+        assert forbidden not in serialized.casefold()
+
+
+def test_provider_lifecycle_state_cannot_change_canonical_daemon_graph(tmp_path: Path) -> None:
+    summaries = (
+        ProviderObservationSummary(1, 0, 1, 0, {"active": 1}, {"identity_unchanged": 1}),
+        ProviderObservationSummary(1, 0, 0, 1, {"unavailable": 1}, {"probe_timeout": 1}),
+        ProviderObservationSummary(1, 0, 0, 1, {}, {"lifecycle_persistence_failed": 1}),
+    )
+    manifests: list[dict] = []
+    for index, summary in enumerate(summaries):
+        base = tmp_path / f"case-{index}"
+        project = base / "app"
+        _write(project / "package.json", "{}\n")
+        _write(project / "src" / "index.ts", "export const value = 1;\n")
+        run_daemon(
+            base,
+            Config(),
+            DaemonOptions(
+                once=True,
+                debounce_seconds=0,
+                state_dir=base / "state",
+            ),
+            provider_observation_cycle=lambda summary=summary: summary,
+        )
+        manifests.append(
+            json.loads(
+                (project / "graph-out" / ".graphite_manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        )
+
+    assert manifests[0]["engine"] == manifests[1]["engine"] == manifests[2]["engine"]
+    assert manifests[0]["files"] == manifests[1]["files"] == manifests[2]["files"]
+
+
 def test_daemon_cli_once_builds_project_and_status_can_be_read(tmp_path: Path, capsys) -> None:
     project = tmp_path / "app"
     _write(project / "package.json", "{}\n")
@@ -117,4 +263,3 @@ def test_daemon_cli_once_builds_project_and_status_can_be_read(tmp_path: Path, c
     assert result == 0
     assert status["project_count"] == 1
     assert status["projects"][0]["build_count"] == 1
-

@@ -231,8 +231,16 @@ def test_routing_settings_use_only_route_prefix_and_are_not_exported_as_secrets(
         ("GRAPHITE_ROUTE_MAX_CONCURRENCY", "2", "max_concurrency_invalid"),
         ("GRAPHITE_ROUTE_SHADOW_RATE_PERCENT", "11", "shadow_rate_percent_invalid"),
         ("GRAPHITE_ROUTE_APPROVAL_TTL_SECONDS", "999999", "approval_ttl_seconds_invalid"),
+        ("GRAPHITE_ROUTE_MAX_CHANGED_FILES", "0", "max_changed_files_invalid"),
+        ("GRAPHITE_ROUTE_MAX_CHANGED_BYTES", "999999999", "max_changed_bytes_invalid"),
     ],
 )
 def test_routing_settings_reject_security_widening(name: str, value: str, code: str) -> None:
     with pytest.raises(RoutingSettingsError, match=code):
         RoutingSettings.from_env({name: value})
+
+
+def test_zai_provider_id_in_contracts() -> None:
+    from graphite.routing.contracts import ProviderId
+
+    assert ProviderId.ZAI.value == "zai"

@@ -1,4 +1,4 @@
-"""Provider-agnostic optional LLM enrichment for Graphite reports."""
+"""Provider-agnostic LLM enrichment primitives for explicit overlays only."""
 from __future__ import annotations
 
 import json
@@ -9,6 +9,11 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 from .config import Config
+
+CANONICAL_ENRICHMENT_MIGRATION_MESSAGE = (
+    "[graphite] canonical graph commands do not accept LLM enrichment; "
+    "use 'graphite overlay build' after building the canonical graph"
+)
 
 MAX_RESPONSE_BYTES = 64 * 1024
 DEFAULT_MAX_OUTPUT_TOKENS = 512
@@ -299,7 +304,7 @@ def enrich_report(
     analysis: dict[str, Any],
     cfg: Config,
 ) -> dict[str, Any]:
-    """Return optional LLM report enrichment without making LLM mandatory for builds."""
+    """Return an optional annotation payload for the explicit overlay pipeline."""
     mode = cfg.llm_mode.strip().lower()
     if mode in {"", "0", "false", "none", "off", "disabled"}:
         return {"enabled": False, "mode": "none", "tokens": 0}
@@ -338,7 +343,15 @@ def enrich_report(
             "output_tokens": completion.output_tokens,
             "tokens": completion.total_tokens or completion.input_tokens + completion.output_tokens,
         }
-    except Exception as exc:  # Optional enrichment must not break deterministic graph builds.
+    except Exception as exc:  # Overlay failures remain isolated from canonical graphs.
+        if isinstance(exc, LLMConfigurationError):
+            category: ProviderErrorCategory = "configuration"
+        elif isinstance(exc, LLMProviderError):
+            category = exc.category
+        elif isinstance(exc, TimeoutError):
+            category = "timeout"
+        else:
+            category = "provider_error"
         return {
             "enabled": True,
             "status": "error",
@@ -348,7 +361,7 @@ def enrich_report(
             "model": cfg.llm_model or _default_model(cfg.llm_provider),
             "auto": auto_decision,
             "tokens": 0,
-            "error": _sanitize_error(exc, cfg),
+            "error_category": category,
         }
 
 
@@ -447,10 +460,3 @@ def _default_model(provider: str) -> str:
     if normalized == "groq":
         return "llama-3.1-8b-instant"
     return "gpt-4o-mini"
-
-
-def _sanitize_error(exc: Exception, cfg: Config) -> str:
-    message = str(exc)
-    if cfg.llm_api_key:
-        message = message.replace(cfg.llm_api_key, "[redacted]")
-    return message[:500]

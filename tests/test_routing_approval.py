@@ -13,7 +13,16 @@ from graphite.routing.approval import (
     ApprovalError,
     approval_prompt,
 )
-from graphite.routing.contracts import ApprovalManifest, Effort
+from graphite.routing.contracts import (
+    ApprovalManifest,
+    CliIdentity,
+    CliApprovalManifest,
+    Effort,
+    PermissionMode,
+    ProviderId,
+    RiskTier,
+)
+from graphite.routing.profiles import BUNDLED_REQUESTED_PROFILES, create_capability_snapshot, save_capability_snapshot
 from graphite.routing.storage import RepositoryStore
 
 
@@ -36,6 +45,35 @@ def _manifest(**changes) -> ApprovalManifest:
     }
     values.update(changes)
     return ApprovalManifest(**values)
+
+
+def _cli_manifest(**changes) -> CliApprovalManifest:
+    values = {
+        "approval_id": "approval-cli-1",
+        "task_id": "task-1",
+        "decision_id": "decision-1",
+        "provider": ProviderId.CLAUDE_CODE,
+        "requested_model": "sonnet",
+        "effective_model": "claude-sonnet-5",
+        "effort": Effort.HIGH,
+        "cli_executable_sha256": "a" * 64,
+        "cli_version": "2.1.208",
+        "adapter_protocol_version": "1.0.0",
+        "capability_snapshot_digest": "b" * 64,
+        "graph_fingerprint": "c" * 64,
+        "context_manifest_hash": "d" * 64,
+        "repository_commit": "e" * 40,
+        "worktree_id": "worktree-1",
+        "permission_mode": PermissionMode.WORKSPACE_WRITE,
+        "max_input_tokens": 8_000,
+        "max_output_tokens": 2_000,
+        "policy_version": "1",
+        "issued_at": 100,
+        "expires_at": 200,
+        "nonce": "nonce-cli-1",
+    }
+    values.update(changes)
+    return CliApprovalManifest(**values)
 
 
 @pytest.mark.parametrize(
@@ -63,7 +101,7 @@ def test_prompt_defaults_no_and_accepts_only_explicit_yes(answer: str, approved:
     )
 
     assert result is approved
-    assert output.getvalue() == "Approve this Ollama model call? [y/N] "
+    assert output.getvalue() == "Approve this development model call? [y/N] "
 
 
 @pytest.mark.parametrize(
@@ -122,6 +160,57 @@ def test_signed_approval_is_bound_to_every_manifest_field(tmp_path: Path) -> Non
     ):
         with pytest.raises(ApprovalError, match="approval_manifest_changed"):
             authority.verify(signed, changed)
+
+
+def test_cli_approval_is_bound_to_provider_cli_model_worktree_and_permissions(
+    tmp_path: Path,
+) -> None:
+    authority, _ = _authority(tmp_path)
+    signed = authority.issue(_cli_manifest())
+
+    authority.verify(signed, _cli_manifest())
+    for changed in (
+        replace(_cli_manifest(), provider=ProviderId.CODEX),
+        replace(_cli_manifest(), requested_model="opus"),
+        replace(_cli_manifest(), effective_model="claude-opus-4-8"),
+        replace(_cli_manifest(), effort=Effort.XHIGH),
+        replace(_cli_manifest(), cli_executable_sha256="f" * 64),
+        replace(_cli_manifest(), cli_version="2.1.209"),
+        replace(_cli_manifest(), adapter_protocol_version="1.0.1"),
+        replace(_cli_manifest(), capability_snapshot_digest="f" * 64),
+        replace(_cli_manifest(), repository_commit="f" * 40),
+        replace(_cli_manifest(), worktree_id="worktree-2"),
+        replace(_cli_manifest(), permission_mode=PermissionMode.READ_ONLY),
+    ):
+        with pytest.raises(ApprovalError, match="approval_manifest_changed"):
+            authority.verify(signed, changed)
+
+
+def test_cli_approval_issue_and_consume_require_exact_lifecycle_binding(tmp_path: Path) -> None:
+    authority, store = _authority(tmp_path)
+    snapshot = create_capability_snapshot(
+        requested=BUNDLED_REQUESTED_PROFILES["claude-code/sonnet"],
+        identity=CliIdentity(ProviderId.CLAUDE_CODE, "a" * 64, "2.1.208", "1.0.0"),
+        effective_model="claude-sonnet-5",
+        effort=Effort.HIGH,
+        capabilities=("code",),
+        context_window_tokens=200_000,
+        risk_ceiling=RiskTier.MEDIUM,
+        permission_mode=PermissionMode.READ_ONLY,
+        verified_at=100,
+        ttl_seconds=3_600,
+    )
+    save_capability_snapshot(store, snapshot)
+    lifecycle_digest = "f" * 64
+    store.save_lifecycle_snapshot_binding(capability_snapshot_digest=snapshot.digest, lifecycle_identity_digest=lifecycle_digest, bound_at=100)
+    manifest = _cli_manifest(capability_snapshot_digest=snapshot.digest)
+    signed = authority.issue(manifest, lifecycle_identity_digest=lifecycle_digest, capability_snapshot_digest=snapshot.digest, bound_at=101)
+
+    with pytest.raises(ApprovalError, match="^approval_lifecycle_stale$"):
+        authority.consume(signed, manifest, repository_quota_tokens=20_000, machine_quota_tokens=30_000, lifecycle_identity_digest="e" * 64, capability_snapshot_digest=snapshot.digest)
+    assert store.approval_status(manifest.approval_id) == "issued"
+    authority.consume(signed, manifest, repository_quota_tokens=20_000, machine_quota_tokens=30_000, lifecycle_identity_digest=lifecycle_digest, capability_snapshot_digest=snapshot.digest)
+    assert store.approval_status(manifest.approval_id) == "consumed"
 
 
 @pytest.mark.parametrize("digest", (None, "", "A" * 64, "a" * 63, "g" * 64))

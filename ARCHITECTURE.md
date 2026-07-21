@@ -6,7 +6,7 @@ This guide describes the current internal architecture and the constraints contr
 
 Graphite is a local Python application. The public CLI is `graphite`, or equivalently `python -m graphite`, with command handling in `src/graphite/cli.py`. The optional `graphite-mcp` entry point in `src/graphite/mcp_server.py` exposes selected operations through MCP. Both are adapters over the same core modules; they are not alternative graph implementations.
 
-The default build is local-first and zero-LLM. It scans a repository, extracts structural facts, constructs and analyzes a directed graph, validates the public bundle, and writes local artifacts. Model enrichment in `src/graphite/llm.py` is a post-analysis option. Its default mode is `none`, and core graph construction has no network requirement.
+Every canonical build is local-first and inference-free. It scans a repository, extracts structural facts, constructs and analyzes a directed graph, validates the public bundle, and writes local artifacts. Canonical operations force a scrubbed configuration, do not read provider credentials, and have no model-provider dependency. `src/graphite/llm.py` is reserved for the separate explicit overlay pipeline.
 
 ## Processing pipeline
 
@@ -16,7 +16,6 @@ repository input
     -> parse and extract symbols/imports/calls
     -> resolve cross-file identities
     -> construct and analyze the directed graph
-    -> optionally enrich a report through a configured model adapter
     -> validate the bundle and render artifacts
 ```
 
@@ -26,10 +25,11 @@ The implementation stages are:
 2. **Extraction — `extract/ast.py`, `cache.py`, `ts_bridge.py`, `ts_resolver.mjs`.** Per-language Tree-sitter extractors handle JavaScript/TypeScript, Python, Go, and Rust, while unsupported or unavailable parsers degrade to a file-level record. Extraction emits symbols, imports, calls, and containment edges in deterministic order. The content-addressed cache avoids repeated AST work. TypeScript/JavaScript may additionally use the Node compiler bridge for compiler-backed module resolution; bridge failure falls back to heuristic resolution rather than making Node mandatory.
 3. **Resolution — `resolve.py`.** `SourceIndex` builds the set of normalized, project-relative source identities, reads TypeScript aliases and workspace package entry points, prefers compiler-backed TypeScript results when available, and otherwise applies bounded heuristics. Global merge logic also resolves supported call identities and deterministically removes duplicates.
 4. **Graph and analysis — `graph.py`, `cluster.py`, `analyze.py`, `query.py`.** `graph.py` constructs a NetworkX `DiGraph` after sorting nodes and edges and normalizing IDs. Analysis filters to project nodes where appropriate and returns bounded, ordered results. Community detection constructs a deterministic undirected view and uses the configured seed (42 by default). JSON conversion preserves the graph's deterministic insertion order.
-5. **Optional enrichment — `llm.py`.** Enrichment runs after deterministic graph construction and analysis but before bundle validation and export. A configured adapter receives a size-capped graph summary, and its response is included as an annotation in the exported analysis; it does not change deterministic graph facts or gain authority to validate them. Provider reads have a hard 64 KiB response cap, redirects are disabled, and configured output tokens are normalized to 1–4096 with a default of 512. Errors are recorded in the analysis report and do not fail the deterministic build path.
-6. **Validation and review — `validation.py`, `context.py`, `review.py`.** Bundle validation checks structural types, node and edge identity, referential integrity, metadata counts, and unsafe `source_file` paths. Review validates a supplied bundle before deriving graph impact evidence; its Git discovery also normalizes status records and rejects malformed or unsafe paths. By contrast, `cmd_query`, `cmd_impact`, `cmd_context`, and `GraphiteMCPServer._load` currently read JSON and call `graph_from_json` without `validate_graph_bundle` or a bounded-read helper. Those direct consumers therefore rely on callers to supply an already validated, reasonably sized artifact.
-7. **Export — `export/json.py`, `export/md.py`, `export/html.py`, `io.py`.** Exporters consume the graph, clusters, analysis (including any enrichment result), and manifest. JSON serialization provides the data encoding; HTML separately JSON-encodes script data, escapes `<`, `>`, and `&`, HTML-escapes the title, and uses text DOM APIs for runtime labels. Text and JSON outputs use temporary files, `fsync`, and `os.replace` for atomic replacement of each file.
-8. **Operations — `watch.py`, `daemon.py`, `daemon_health.py`, `bootstrap.py`, `init.py`, `windows_task.py`, `windows_startup.py`.** These modules watch for changes, maintain multi-project daemon status, evaluate health, generate integration instructions, and manage platform startup. They orchestrate the portable core rather than changing graph semantics.
+5. **Validation and review — `validation.py`, `context.py`, `review.py`.** Bundle validation checks structural types, node and edge identity, referential integrity, metadata counts, and unsafe `source_file` paths. Review validates a supplied bundle before deriving graph impact evidence; its Git discovery also normalizes status records and rejects malformed or unsafe paths. By contrast, `cmd_query`, `cmd_impact`, `cmd_context`, and `GraphiteMCPServer._load` currently read JSON and call `graph_from_json` without `validate_graph_bundle` or a bounded-read helper. Those direct consumers therefore rely on callers to supply an already validated, reasonably sized artifact.
+6. **Export — `export/json.py`, `export/md.py`, `export/html.py`, `io.py`.** Exporters consume only canonical graph, cluster, analysis, and manifest data. JSON serialization provides the data encoding; HTML separately JSON-encodes script data, escapes `<`, `>`, and `&`, HTML-escapes the title, and uses text DOM APIs for runtime labels. Text and JSON outputs use temporary files, `fsync`, and `os.replace` for atomic replacement of each file.
+7. **Operations — `watch.py`, `daemon.py`, `daemon_health.py`, `bootstrap.py`, `init.py`, `windows_task.py`, `windows_startup.py`.** These modules watch for changes, maintain multi-project daemon status, evaluate health, generate integration instructions, and manage platform startup. Watch and daemon canonicalize inherited configuration; daemon child builds use fixed `--llm none` argv and a provider-scrubbed environment.
+8. **Provider lifecycle — `routing/lifecycle.py`, `routing/lifecycle_storage.py`, `routing/lifecycle_service.py`, and `routing/lifecycle_operator.py`.** Runtime observations, compatibility decisions, lifecycle authority, and invalidations live in an isolated database. Operator reads use an existing-database, query-only connection and bounded public records. Policy and verification preparation create non-activating content-hashed candidates; neither surface invokes a provider.
+9. **Optional overlays — `overlays.py` and `llm.py`.** Provider adapters may consume an already-built, fresh, validated graph only through `graphite overlay build`. The overlay manifest binds the canonical bundle fingerprint, exact lifecycle/model/routing identities, limits, creation time, outcome, and schema. Identity-derived contained paths, restrictive permissions, content-addressed payloads, and manifest-last atomic replacement isolate the output below `graph-out/overlays/`. Overlay staleness is independent of canonical freshness and cannot grant graph or routing authority.
 
 ## Module map
 
@@ -41,10 +41,10 @@ The implementation stages are:
 | Graph and analysis | `graph.py`, `cluster.py`, `analyze.py`, `query.py` | Build, cluster, analyze, and query the directed graph | NetworkX and deterministic extracted structures |
 | Validation and evidence | `validation.py`, `context.py`, `review.py` | Validate bundles and derive review/context evidence | Graph structures; review may use the Git adapter |
 | Export | `export/json.py`, `export/md.py`, `export/html.py`, `io.py` | Encode and atomically replace individual artifacts | Validated graph, analysis, clusters, manifest |
-| Optional model enrichment | `llm.py` | Select an explicitly configured provider and append report enrichment from a bounded graph summary | Deterministic graph/analysis data, configuration, network only when enabled |
+| Optional model overlays | `overlays.py`, `llm.py` | Validate identity and canonical freshness; produce fingerprint-bound, non-authoritative annotations outside canonical artifacts | Existing canonical graph, explicit provider configuration, network only when separately authorized |
 | Operations and integration | `watch.py`, `daemon.py`, `daemon_health.py`, `bootstrap.py`, `init.py`, `windows_task.py`, `windows_startup.py` | Freshness, daemon health, generated instructions, and OS startup | Public core operations and explicit platform/process boundaries |
 
-The intended dependency direction is observable in current imports but is not enforced by a dedicated architecture linter. CLI and MCP adapt inputs; portable core modules do not import those UI entry points. Export consumes graph and analysis data; extraction does not depend on exporters. LLM enrichment consumes deterministic reports; graph and validation do not depend on a model provider. Windows startup and task management remain outside the portable core. External execution crosses explicit subprocess boundaries; Git uses the hardened `GitRunner`, while the TypeScript and Windows adapters have their own, not necessarily identical, controls. Contributors must preserve these directions and add tests if a boundary becomes mechanically important.
+The intended dependency direction is observable in current imports but is not enforced by a dedicated architecture linter. CLI and MCP adapt inputs; portable core modules do not import those UI entry points. Export consumes canonical graph and analysis data; extraction does not depend on exporters. Canonical graph construction, validation, and read operations do not depend on model providers. Windows startup and task management remain outside the portable core. External execution crosses explicit subprocess boundaries; Git uses the hardened `GitRunner`, while the TypeScript and Windows adapters have their own, not necessarily identical, controls. Contributors must preserve these directions and add tests if a boundary becomes mechanically important.
 
 ## Trust boundaries
 
@@ -94,7 +94,7 @@ Repository-controlled names and strings remain untrusted when rendered. The norm
 
 **Model and network boundary.**
 
-Model use is disabled by default and requires explicit configuration; no vendor is required by the core. Current adapters use request timeouts, cap prompt characters, apply the hard 64 KiB bound to successful and HTTP-error response reads, disable redirects, redact the configured API key from returned error strings, and truncate errors. Provider output is untrusted report text: it must not become graph facts, execute tools, approve validation, authorize release, or cross tenant/repository contexts. Redaction is presently targeted rather than a general secret scanner, so contributors must avoid adding secrets or raw source to prompts and errors.
+Model use is disabled by default and requires the explicit overlay command; no vendor is required by the core. Current adapters use request timeouts, cap prompt characters and output tokens, apply the hard 64 KiB bound to successful and HTTP-error response reads, and disable redirects. Failure persistence accepts only fixed categories and never raw provider diagnostics. Provider output is untrusted annotation text stored only in a non-authoritative overlay: it must not become graph facts, execute tools, approve validation, authorize release, or cross tenant/repository contexts. Prompts contain bounded graph metrics rather than repository source.
 
 ### Adaptive router authority and audit boundary
 
@@ -102,7 +102,9 @@ Model use is disabled by default and requires explicit configuration; no vendor 
 
 The active provisional pool comprises `kimi-k2.7-code:cloud` for primary coding at high usage, `minimax-m2.7:cloud` for coding and agentic work at medium usage, `nemotron-3-super:cloud` for reasoning and review at medium usage, and `minimax-m3:cloud` for long-context and agentic work at high usage. All four accept only `default` effort. Provisional profiles are ineligible for high-risk tasks, which produce a manual frontier handoff rather than weakening a gate.
 
-The execution authority binds one signed, short-lived, single-use approval to the exact model and inventory digest, effort, graph/context manifest, input and output limits, and quota reservation. Runtime independently revalidates the signed digest against bounded loopback inventory before approval consumption and the provider POST. The canonical loopback executor makes one request. It never automatically retries, falls back, switches models, pulls a model, reuses an approval, or follows redirects. Non-TTY input or output, JSON mode, CI, and `--yes` are incapable of granting execution authority.
+The execution authority binds one signed, short-lived, single-use approval to the exact model and inventory digest, effort, graph/context manifest, input and output limits, and quota reservation. Runtime independently revalidates the signed digest before approval consumption and the provider process. There is no retry or arbitrary substitution. One automatic cross-provider advance is permitted only when the same immutable approved pool contains exactly two eligible candidates and the first fails as `capacity_unavailable` before output or side effects; the second consumes its own exact authority. Non-TTY input or output, JSON mode, CI, and `--yes` are incapable of granting execution authority.
+
+Lifecycle transitions never grant graph authority. `discovered`, `compatible`, `verification_required`, `active`, `incompatible`, and `unavailable` are persisted separately from graph artifacts. Hash/patch changes require a standard probe, minor/capability changes require an expanded probe, and major changes remain incompatible pending a separately authorized policy promotion. A successful probe reaches only `verification_required`; exact bounded verification is still required before activation. Daemon observation is advisory for scheduling and health, while the lazy identity check immediately before approval consumption is authoritative. One corrupt or unavailable provider boundary fails closed without changing canonical graph behavior or another provider's independent boundary.
 
 Provider text crosses only the interactive display boundary. The CLI escapes terminal controls and delimiter impersonation, frames every line, and keeps the text ephemeral. Persistence contains the validated receipt, hashes, bindings, and bounded audit metadata, never the displayed text. A new attempt is durably recorded as `pending`; successful receipt finalization transactionally creates the execution, receipt, evidence, budget link, and `completed` transition.
 
@@ -112,7 +114,7 @@ The schema-v3 migration deliberately maps schema-v1 `pending` and `persistence_f
 
 ## Artifacts and state
 
-A build produces `graph.json`, `graph.html`, and `GRAPH_REPORT.md` in the configurable output directory (`graph-out` by default), plus internal `.graphite_manifest.json`, `.graphite_graph.json`, `.graphite_clusters.json`, `.graphite_analysis.json`, and `.graphite_validation.json` there. The manifest records scanned project-relative file paths and hashes; `graphite check` compares it with a new scan to report added, changed, and removed files. Extraction cache entries live under the configured cache directory (`.cache/graphite` by default) and are keyed by version and content-derived hashes. The daemon writes atomic status JSON under its state directory. Initialization/bootstrap may generate or update platform instruction files such as `GRAPHITE.md` and supported assistant integration files.
+A build produces `graph.json`, `graph.html`, and `GRAPH_REPORT.md` in the configurable output directory (`graph-out` by default), plus internal `.graphite_manifest.json`, `.graphite_graph.json`, `.graphite_clusters.json`, `.graphite_analysis.json`, and `.graphite_validation.json` there. The manifest records scanned project-relative file paths and hashes; `graphite check` compares it with a new scan to report added, changed, and removed files. Explicit model annotations live separately under `graph-out/overlays/<provider>/<identity-digest>/`; canonical readers never load that tree. Extraction cache entries live under the configured cache directory (`.cache/graphite` by default) and are keyed by version and content-derived hashes. The daemon writes atomic status JSON under its state directory. Initialization/bootstrap may generate or update platform instruction files such as `GRAPHITE.md` and supported assistant integration files.
 
 Current code sorts collection, extraction merge, graph construction, community members, and most query/review outputs; validates the public bundle before the normal report path publishes it; rejects unsafe public `source_file` paths on that path; and atomically replaces individual files where `io.py` is used. Cache writes are deterministic JSON but are not routed through the atomic helper. Multi-file report publication is not transactional. Direct query, impact, context, and MCP consumers neither validate the bundle nor bound their JSON read today.
 
@@ -124,7 +126,8 @@ Contributor invariants are stricter: artifact identities and repository paths st
 - `validate_graph_bundle` returns structured errors for malformed bundles, and the normal report path uses `assert_valid_graph_bundle` so an invalid public bundle fails before public exporters run. The standalone validate command exits non-zero on invalid JSON or failed validation. The query, impact, context, and MCP direct-load paths do not invoke validation or bound the read; callers are responsible for validating and constraining artifacts before those paths consume them until that gap is closed.
 - Git failures use typed, sanitized exceptions with fixed messages. Other subprocess adapters currently return bounded diagnostic reasons or platform-specific errors; they do not all share Git's typed exception hierarchy, environment isolation, or output cap.
 - Atomic replacement prevents a partially written individual artifact from being accepted at its final path. It does not make the entire report directory transactional; consumers must reject invalid bundles and use freshness/manifest evidence to detect stale or mixed state.
-- Optional model enrichment catches provider/configuration/network failures, records a sanitized error result, and leaves deterministic graph construction, validation, and export operational. Model output never supplies validation or release authority.
+- Provider absence, drift, incompatibility, credential failure, or overlay failure cannot block or alter canonical graph construction, validation, reads, or export. Model output never supplies graph, validation, routing, or release authority.
+- Overlay success publishes a content-addressed payload before atomically replacing its manifest. Failure preserves the last valid manifest and payload and writes only a separate sanitized category marker. Canonical graph or identity drift marks an overlay stale without making the graph stale.
 
 ## Extension points and invariants
 
@@ -148,29 +151,56 @@ Across all extensions, preserve these invariants:
 - Public schemas and CLI behavior remain compatible unless an explicit, tested migration is provided.
 # Adaptive routing trust boundary
 
-The development router is a governed recommendation subsystem, not an autonomous
-coding agent. Its trust zones are: repository and validated graph; bounded private
-context; repository-local detailed evidence; machine-local signing/quota state; the
-loopback Ollama API; and Ollama Cloud. OpenRouter is reserved for production
-in-application inference. Claude/Codex remain manual handoff destinations.
+The development router is an approval-gated change broker for two authenticated
+subscription CLIs: Claude Code and Codex. Ollama is excluded from governed
+development execution; OpenRouter remains reserved for in-application inference.
+Trust zones are the source repository and validated graph, detached task worktrees,
+the provider CLI process and its existing credential home, repository-local audit
+storage, and machine-local signing state. Graphite neither reads API keys nor copies
+subscription credentials into prompts, telemetry, child arguments, or storage.
 
-The data flow is deterministic classification -> contained context -> outbound
-manifest -> cached model eligibility -> recommendation -> default-No approval ->
-fresh model-digest check -> single request -> hash-only receipt. Untrusted model
-output cannot mutate code, invoke tools, install or pull models, or execute shell
-commands. The endpoint allowlist accepts canonical loopback IPs and the configured
-Ollama port only; redirects, retries, fallbacks, ambient credentials, and automatic
-model pulls are prohibited.
+The authority sequence is capability verification -> deterministic recommendation
+-> detached worktree -> canonical prompt and manifest -> default-No single-use
+approval -> CLI identity recheck -> one bounded process -> diff inspection ->
+credential-free validation -> human accept/reject -> optional explicit cleanup.
+Each transition binds the repository commit, capability snapshot, requested and
+effective model, effort, executable hash/version, adapter protocol, permission
+mode, prompt hash, token reservation, and timeout. No later stage can widen an
+earlier permission. Worktree, approval, attempt, validation, and review identities
+are immutable database evidence.
 
-Detailed task, decision, approval, execution, and outcome events remain in the
-repository. A sanitized aggregate is written machine-wide only after opt-in and
-contains typed model/effort/category/risk/outcome values plus coarse usage and
-latency buckets. Recommendation confidence may learn from correlated machine/CI
-evidence. It never changes risk or execution authority. High-risk tasks always
-require approval. Shadow results are separately approved and excluded from
-autonomy confidence unless a later controlled evaluator promotes that provenance.
+Capability verification reports actual input and output usage. The profile boundary
+validates both values against the approved limits before constructing and saving
+active authority. Invalid, missing, or over-budget usage cannot produce a persisted
+snapshot; acceptance tooling uses the ordered verify-and-save operation rather than
+an independently ordered persistence step.
 
-Retention rebuilds derived confidence from retained append-only events. Reversions
-append corrections instead of rewriting history. Severe failures block eligibility
-until incident response review is explicitly closed, which begins a new evidence
-window. Policy promotion and rollback affect recommendations only.
+Claude capability verification uses the CLI's vendor-documented `--json-schema`
+contract with `--max-turns 1`. The terminal structured object must equal the fixed
+verification payload, every assistant event must retain the expected model identity,
+and usage must pass the approved bounds. Free text, missing or additional fields,
+schema drift, and multi-turn completion fail closed. This constrained mode is not
+used for ordinary development execution.
+
+Provider output and edits are untrusted. The diff boundary rejects filesystem
+indirection, repository nesting, submodule changes, case collisions, scope or size
+violations, and source/diff drift. High-risk tasks require a separately approved
+read-only review by the other provider. Acceptance produces only a detached commit;
+it never merges. Retry, arbitrary provider switching, session reuse, cleanup, and
+merge are never automatic. The only fallback is the pre-authorized, one-step,
+capacity-only route-pool transition described above.
+
+Telemetry has a closed typed schema and excludes source, prompt/response text, diff
+contents, paths, secrets, and raw diagnostics. Subscription cost remains `unknown`.
+Recency weighting and Wilson confidence penalties can propose a signed policy
+candidate. Candidate creation grants no authority. Interactive promotion cannot
+alter provider allowlists, permission ceilings, risk ceilings, or autonomy; rollback
+appends an activation event and retains all prior evidence.
+
+Schema v5 is a forward cutover. Before changing a v4 routing database, Graphite
+creates a private `events-schema-v4.sqlite3` backup and SHA-256 marker, validates
+schema, integrity, and foreign keys, then adds lifecycle bindings without inventing
+authority for historical rows. Rollback requires stopped writers, verified backup
+restore, and the matching v4 code; v5 is not edited into v4. A partial schema,
+missing marker, lock, or failed integrity check leaves routing stopped for verified
+restore or a tested forward fix.
