@@ -115,6 +115,12 @@ def execute_zai(
         "model": requested,
         "stream": False,
         "temperature": 0,
+        # glm-5.2 is a reasoning model; with thinking on it consumes the entire
+        # output budget on reasoning_tokens and returns empty content
+        # (finish_reason=length), so the bounded plain-text answer is never
+        # emitted. Disable thinking so the exact response is produced
+        # deterministically within the token budget (z.ai honors this).
+        "thinking": {"type": "disabled"},
     }
     body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     if len(body) > MAX_INFERENCE_REQUEST_BYTES:

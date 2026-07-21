@@ -69,6 +69,16 @@ straight to z.ai bypasses that path entirely.
 4. **Operator-pinned pricing** from z.ai's published GLM 5.2 rates.
 5. **Plain-text const verification** (`GRAPHITE_PROFILE_OK`), dodging z.ai's
    undocumented JSON mode.
+6. **Disable thinking on the verification call** (added 2026-07-21, live-verified).
+   GLM 5.2 is a reasoning model with thinking **on by default**: at the bounded
+   64-token output budget it spends the whole budget on `reasoning_tokens` and
+   returns empty `content` (`finish_reason=length`), so the plain-text oracle is
+   never emitted. The executor therefore sends z.ai's `thinking: {"type":
+   "disabled"}` (confirmed honored — `reasoning_tokens` → 0, exact
+   `GRAPHITE_PROFILE_OK` in 5 completion tokens). Chosen over raising
+   `max_output_tokens` (which would relax the budget ~16× and pay variable
+   reasoning tokens per call); a deterministic thinking-off call is what an
+   exact-match verification wants. The oracle is unchanged.
 
 ## Design
 

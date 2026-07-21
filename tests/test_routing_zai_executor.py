@@ -24,8 +24,25 @@ def test_execute_zai_returns_plaintext_and_usage():
     assert result.message == "GRAPHITE_PROFILE_OK"        # verbatim, NOT json-parsed
     assert result.input_tokens == 420 and result.output_tokens == 6
     body = json.loads(seen["request_body"])
-    assert body == {"max_tokens": 64, "messages": [{"content": "return GRAPHITE_PROFILE_OK", "role": "user"}], "model": "glm-5.2", "stream": False, "temperature": 0}
+    assert body == {"max_tokens": 64, "messages": [{"content": "return GRAPHITE_PROFILE_OK", "role": "user"}], "model": "glm-5.2", "stream": False, "temperature": 0, "thinking": {"type": "disabled"}}
     assert seen["authorization"] == "Bearer k"
+
+def test_execute_zai_disables_thinking_for_deterministic_plaintext():
+    # glm-5.2 is a reasoning model; with thinking on it spends the whole output
+    # budget on reasoning_tokens and returns empty content (finish_reason=length),
+    # so the bounded plain-text oracle never gets emitted. The executor must send
+    # z.ai's `thinking:{type:disabled}` (confirmed honored -> reasoning_tokens 0)
+    # so the exact answer is produced deterministically inside the 64-token budget.
+    from graphite.routing.zai_executor import execute_zai
+    seen = {}
+    def transport(**kw):
+        seen.update(kw); return _envelope("GRAPHITE_PROFILE_OK")
+    execute_zai(
+        api_key="k", prompt=b"return GRAPHITE_PROFILE_OK", requested_model="glm-5.2",
+        expected_effective_model="glm-5.2", pricing=PRICING, max_output_tokens=64,
+        max_cost_microunits=100000, timeout_seconds=60.0, transport=transport)
+    body = json.loads(seen["request_body"])
+    assert body.get("thinking") == {"type": "disabled"}
 
 def test_execute_zai_cost_ceiling():
     from graphite.routing.zai_executor import execute_zai
