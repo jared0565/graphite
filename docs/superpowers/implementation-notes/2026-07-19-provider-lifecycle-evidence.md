@@ -1693,3 +1693,92 @@ scope): forcing the live capacity-fallback to `kimi-k2.6` (non-deterministic;
 proven selectable offline), a discriminative review of an intentionally-flawed diff
 (a stronger, separate smoke), the three unverified models (`kimi-k3`, `glm-5.2`,
 `muse-spark-1.1`), and branch integration.
+
+## z.ai native provider + GLM 5.2 verification (spec #1, 2026-07-21)
+
+### Scope and authority
+
+Spec #1 adds **z.ai** as a first-class native governed provider so GLM 5.2 runs
+directly against z.ai's own API. It was built and verified on
+`feat/claude-codex-router`. The provider foundation is isolated: two new modules
+(`zai_probe.py`, `zai_executor.py`) plus additive edits to the shared enums,
+profiles, storage/lifecycle schemas, and `probe_runner`. The OpenRouter, Claude,
+and Codex adapters were left **byte-untouched**; the primary repository on `main` was
+never touched; nothing was merged, pushed, or deployed. Exactly **one** live GLM 5.2
+inference ran across the whole verification (the passing round); the failed retry
+rounds performed live calls that never reached a store-promoting path.
+
+### Provider foundation (Tasks 1–9)
+
+`ProviderId.ZAI = "zai"` and `LifecycleProviderId.ZAI = "zai"` (matched in both
+enums and every SQL `CHECK`); `ZAI → RuntimeKind.REMOTE_HTTPS` with
+`routing_policy_digest = None` and a required `model_identity_digest`. Two additive
+schema migrations widen the provider `CHECK`s to admit `zai`: the routing store
+`events.sqlite3` v6 → v7 (mirroring the existing `_migrate_pre_v6_provider_widening`
+rebuild), and the lifecycle store `provider-lifecycle.sqlite3` v1 → v2 (a
+hand-written rebuild of `current_observations` + `lifecycle_events`, since that store
+has no migration framework). The isolated adapter pins operator-supplied GLM 5.2
+pricing ($1.40/$4.40 per 1M in/out), computes a `CliIdentity` over
+`{endpoint, model, pricing}`, and extends `probe_runner` with
+`ProbeEndpointPurpose.ZAI_CHAT_COMPLETIONS` (POST `api.z.ai/api/paas/v4/chat/completions`),
+reusing the hardened `run_http_probe` (DNS pin, no redirects, `application/json`
+gate). `_ZAI_POLICY` (a real `ProviderCompatibilityPolicy`) drives
+`observe → VERIFICATION_REQUIRED`.
+
+### Reasoning-model finding — thinking disabled (design decision #6)
+
+GLM 5.2 is a reasoning model with thinking **on by default**. Against the bounded
+64-token verification budget it consumed the entire budget on `reasoning_tokens`
+(diagnostic: `finish_reason = length`, empty `content`, `reasoning_tokens 63/64`),
+so the plain-text oracle was never emitted. A read-only A/B probe confirmed z.ai
+honors `thinking: {"type": "disabled"}` (`reasoning_tokens → 0`, exact
+`GRAPHITE_PROFILE_OK` in 5 completion tokens). The executor was therefore changed
+(test-first, commit `09838aa`) to send `thinking: {"type": "disabled"}` on its one
+bounded completion; `execute_zai` has no in-`src` caller (verification-only scope),
+the exact-match oracle and 64-token budget were left unchanged, and the full suite
+stayed green (2 unrelated Windows-temp environmental failures, proven not-a-regression
+against the pristine tree).
+
+### Governed schema migration (Task 10)
+
+The live routing fixture migrated under a
+displayed manifest + operator approval, run bare via the operator's shell. Routing
+v6 → v7 kept **12/12/23** (schema-only, zero rows changed); lifecycle v1 → v2
+preserved all 29 rows (7 observations + 22 events) and its 4 immutability triggers;
+both stores now admit `zai`; integrity ok and 0 foreign-key violations on both. A
+pre-migration file-copy of both stores plus the routing store's own v6 auto-backup
+were written. Post-migration hashes: routing
+`d311665e17054bdafc734a341463ed857bb0d48d03fa5ae1e0b4662fdf6739b6`, lifecycle
+`7537063fe86add18f6658e20a448b81731d2f8c3a4aec67dc98341b203fc5fb4`.
+
+### Governed GLM 5.2 verification (Task 11)
+
+Under a displayed manifest (`BUNDLE_DIGEST`
+`e7ab41e4d97c1b4772b7b532ece82f4be852dd3e512ec0cd2f026d371b25691f`,
+implementation commit `09838aa`, routing pin `d311665e`, lifecycle pin `786e3bdd`,
+cost ceiling 64000 microunits, `live_inference true`) and operator approval, the
+harness ran the nine-step sequence exactly once. `service.observe` moved the `zai`
+boundary to `VERIFICATION_REQUIRED`; one bounded live `glm-5.2` completion returned
+the exact plain-text oracle; `verify_and_save_approved_profile` promoted a
+**READ_ONLY** verification capability snapshot (provider `zai`, model `glm-5.2`,
+digest `23e21b4a68d7649f4fc7325b1bededa108ea875ba7dafcb27d31fdc0440c651f`) bound to a
+new **ACTIVE** lifecycle identity
+(`790d45bd584b103696f165a0f82303303cc6b26cadcba9c4a154dff77efd060f`,
+boundary `16a53454...`); and exactly two telemetry rows (`MACHINE_VERIFIED` +
+human `ACCEPTED`) were appended.
+
+The sanitized receipt: `status passed`, `effective_model glm-5.2`, verdict
+`GRAPHITE_PROFILE_OK`, **29 input / 5 output tokens**, **63 microunits** (far under
+the 64000 ceiling), 1627 ms, `lifecycle_state active`, `telemetry_rows 2` — no
+credential, prompt body, or raw provider output persisted
+(`raw_provider_output_persistence false`). The store transition held exactly as
+designed: **12/12/23 → migration 12/12/23 (schema-only) → verification 13/13/25**
+(+1 capability snapshot, +1 lifecycle binding, +2 telemetry). The routing store was
+untouched by the three failed retry rounds (external credential/reasoning-mode
+causes) and moved only on the passing run; each retry left one benign
+`verification_required → verification_required` self-transition in the append-only
+lifecycle log (bounded +1 per round, no authority granted), and the passing run
+closed with `verification_required → active (verification_accepted)`. Final
+post-verification hashes, independently re-verified read-only: routing
+`7d5aff90d5c26ab52d174c3dc22742ce5386a7d712f440b86307b1db1b4b67ff`, lifecycle
+`d5df11c8f15cf703d6844dd91aea71b4d826d9a2e9a1f5e017616c0532b6c7f1`.
