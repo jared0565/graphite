@@ -138,8 +138,10 @@ def _capacity_attempt(pool: ApprovedRoutePool, **changes: object) -> RouteAttemp
 
 @pytest.mark.parametrize(
     "provider",
-    # route_pool.py's own _RUNTIME_BY_PROVIDER map does not yet include ZAI —
-    # that wiring lands in a later task in the z.ai native-provider plan.
+    # route_pool.py's own _RUNTIME_BY_PROVIDER map does not include ZAI.
+    # Pool registration for zai is out of scope for this spec (the z.ai
+    # native-provider verification plan) and is deferred to a future spec —
+    # no task in this plan reverses this exclusion.
     # Exclude it here rather than exercising an unsupported provider.
     tuple(p for p in LifecycleProviderId if p is not LifecycleProviderId.ZAI),
 )

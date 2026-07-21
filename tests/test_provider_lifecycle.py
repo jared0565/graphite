@@ -474,13 +474,13 @@ def test_zai_is_remote_https_and_requires_model_digest_and_forbids_routing() -> 
     )
     assert identity.provider is LifecycleProviderId.ZAI
     # passing a routing digest for zai must fail
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="routing_policy_digest_invalid"):
         ProviderRuntimeIdentity(
             LifecycleProviderId.ZAI, RuntimeKind.REMOTE_HTTPS, "1.0.0",
             "a" * 64, "b" * 64, "c" * 64, ("remote_inference",), "1.0.0", 1_700_000_000,
         )
     # zai now REQUIRES a model_identity_digest (parity with OLLAMA/OPENROUTER): None must fail
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="model_identity_digest_invalid"):
         ProviderRuntimeIdentity(
             LifecycleProviderId.ZAI, RuntimeKind.REMOTE_HTTPS, "1.0.0",
             "a" * 64, None, None, ("remote_inference",), "1.0.0", 1_700_000_000,
