@@ -585,7 +585,10 @@ def test_connection_failure_is_sanitized_as_unavailable() -> None:
 
 def test_only_governed_chat_completions_purpose_reaches_inference() -> None:
     assert probe_runner_module._INFERENCE_PURPOSES == frozenset(
-        {ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS}
+        {
+            ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS,
+            ProbeEndpointPurpose.ZAI_CHAT_COMPLETIONS,
+        }
     )
     values = " ".join(
         value
@@ -606,3 +609,33 @@ def test_only_governed_chat_completions_purpose_reaches_inference() -> None:
         "tool",
     ):
         assert forbidden not in values
+
+
+def test_zai_chat_completions_endpoint_constructs() -> None:
+    from graphite.routing.probe_runner import (
+        _BODY_PURPOSES,
+        _INFERENCE_PURPOSES,
+        _PURPOSE_POLICY,
+        _ZAI_HOSTS,
+        HttpProbeEndpoint,
+        ProbeEndpointPurpose,
+    )
+    from graphite.routing.lifecycle import LifecycleProviderId
+
+    assert _ZAI_HOSTS == frozenset({"api.z.ai"})
+    prov, method, path = _PURPOSE_POLICY[ProbeEndpointPurpose.ZAI_CHAT_COMPLETIONS]
+    assert prov is LifecycleProviderId.ZAI and method == "POST" and path == "/api/paas/v4/chat/completions"
+    assert ProbeEndpointPurpose.ZAI_CHAT_COMPLETIONS in _BODY_PURPOSES
+    assert ProbeEndpointPurpose.ZAI_CHAT_COMPLETIONS in _INFERENCE_PURPOSES
+    ep = HttpProbeEndpoint(
+        LifecycleProviderId.ZAI, "https", "api.z.ai", 443,
+        ProbeEndpointPurpose.ZAI_CHAT_COMPLETIONS)
+    assert ep.host == "api.z.ai"
+
+
+def test_openrouter_endpoint_still_constructs() -> None:  # OpenRouter path untouched
+    from graphite.routing.probe_runner import HttpProbeEndpoint, ProbeEndpointPurpose
+    from graphite.routing.lifecycle import LifecycleProviderId
+
+    HttpProbeEndpoint(LifecycleProviderId.OPENROUTER, "https", "openrouter.ai", 443,
+                      ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS)

@@ -41,6 +41,7 @@ MAX_PROBE_HEADERS: Final = 64
 MAX_PROBE_HEADER_BYTES: Final = 16 * 1024
 MAX_DNS_WORKERS: Final = 4
 _OPENROUTER_HOSTS: Final = frozenset({"openrouter.ai"})
+_ZAI_HOSTS: Final = frozenset({"api.z.ai"})
 _DNS_SLOTS = threading.BoundedSemaphore(MAX_DNS_WORKERS)
 
 
@@ -69,6 +70,7 @@ class ProbeEndpointPurpose(StrEnum):
     OPENROUTER_MODELS = "openrouter_models"
     OPENROUTER_AUTH_KEY = "openrouter_auth_key"
     OPENROUTER_CHAT_COMPLETIONS = "openrouter_chat_completions"
+    ZAI_CHAT_COMPLETIONS = "zai_chat_completions"
 
 
 _PURPOSE_POLICY: Final = {
@@ -102,11 +104,25 @@ _PURPOSE_POLICY: Final = {
         "POST",
         "/api/v1/chat/completions",
     ),
+    ProbeEndpointPurpose.ZAI_CHAT_COMPLETIONS: (
+        LifecycleProviderId.ZAI,
+        "POST",
+        "/api/paas/v4/chat/completions",
+    ),
 }
 _BODY_PURPOSES: Final = frozenset(
-    {ProbeEndpointPurpose.OLLAMA_SHOW, ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS}
+    {
+        ProbeEndpointPurpose.OLLAMA_SHOW,
+        ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS,
+        ProbeEndpointPurpose.ZAI_CHAT_COMPLETIONS,
+    }
 )
-_INFERENCE_PURPOSES: Final = frozenset({ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS})
+_INFERENCE_PURPOSES: Final = frozenset(
+    {
+        ProbeEndpointPurpose.OPENROUTER_CHAT_COMPLETIONS,
+        ProbeEndpointPurpose.ZAI_CHAT_COMPLETIONS,
+    }
+)
 _CATALOG_PURPOSES: Final = frozenset({ProbeEndpointPurpose.OPENROUTER_MODELS})
 
 
@@ -151,6 +167,14 @@ class HttpProbeEndpoint:
                     or not 1 <= value <= 65535
                     for value in self.allowed_ollama_ports
                 )
+            ):
+                raise ProviderProbeError("probe_endpoint_invalid")
+        elif provider is LifecycleProviderId.ZAI:
+            if (
+                self.scheme != "https"
+                or self.host not in _ZAI_HOSTS
+                or self.port != 443
+                or self.allowed_ollama_ports != frozenset({11434})
             ):
                 raise ProviderProbeError("probe_endpoint_invalid")
         elif (
