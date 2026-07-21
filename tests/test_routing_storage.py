@@ -144,7 +144,7 @@ def test_schema_migration_is_idempotent_and_enables_safety_pragmas(tmp_path: Pat
         "execution_attempts",
         "execution_receipts",
     } <= tables
-    assert version == "6"
+    assert version == "7"
     assert attempt_columns["max_input_tokens"] == 1
     assert attempt_columns["max_output_tokens"] == 1
     assert attempt_columns["expected_prompt_hash"] == 1
@@ -278,7 +278,7 @@ def test_v3_to_current_creates_verified_backup_and_quarantines_live_ollama_attem
     with sqlite3.connect(store.path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("6",)
+        ).fetchone() == ("7",)
         assert connection.execute(
             "SELECT status,failure_reason FROM execution_attempts "
             "WHERE attempt_id='attempt-legacy'"
@@ -345,7 +345,7 @@ def test_v3_v4_rollback_drill_restores_verified_backup_for_old_reader(
     with sqlite3.connect(preserved_v5) as v5_reader:
         assert v5_reader.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("6",)
+        ).fetchone() == ("7",)
 
 
 def test_v3_migration_fails_closed_while_another_writer_holds_lock(tmp_path: Path) -> None:
@@ -453,7 +453,7 @@ def test_v4_to_current_creates_verified_backup_and_leaves_history_unbound(
     with sqlite3.connect(store.path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("6",)
+        ).fetchone() == ("7",)
     assert store.lifecycle_identity_binding(
         authority_kind="capability_snapshot", authority_id="4" * 64
     ) is None
@@ -484,7 +484,7 @@ def test_committed_v4_fixture_migrates_to_current_without_granting_authority(
     with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("6",)
+        ).fetchone() == ("7",)
 
 
 def test_v4_v5_rollback_drill_restores_verified_v4_backup(tmp_path: Path) -> None:
@@ -747,7 +747,7 @@ def test_partial_core_schema_requires_rollback_or_forward_repair(tmp_path: Path)
     with sqlite3.connect(store.path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("6",)
+        ).fetchone() == ("7",)
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_links'"
         ).fetchone() is None
@@ -1034,7 +1034,7 @@ def test_v1_database_migrates_to_v2_without_losing_rows(tmp_path: Path) -> None:
         }
         foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
-    assert version == "6"
+    assert version == "7"
     assert after == before
     expected_attempt_fields = []
     for legacy in before_attempts:
@@ -1213,7 +1213,7 @@ def test_v2_digestless_recovery_is_quarantined_without_fabrication(tmp_path: Pat
     with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("6",)
+        ).fetchone() == ("7",)
         rows = connection.execute(
             "SELECT attempt_id,status,failure_reason,inventory_digest "
             "FROM execution_attempts ORDER BY attempt_id"
@@ -1665,7 +1665,7 @@ def _narrow_provider_checks(path: Path, *, stamp_version: str) -> None:
             ).fetchone()
             assert row is not None and "'openrouter'" in row[0]
             narrowed = row[0].replace(
-                "provider IN ('claude-code', 'codex', 'openrouter')",
+                "provider IN ('claude-code', 'codex', 'openrouter', 'zai')",
                 "provider IN ('claude-code', 'codex')",
             )
             connection.execute(
@@ -1775,13 +1775,14 @@ def test_v5_store_with_legacy_provider_check_migrates_preserving_rows(
         version = connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()[0]
-        assert version == "6"
+        assert version == "7"
         for table in ("capability_snapshots", "cli_execution_attempts"):
             sql = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
                 (table,),
             ).fetchone()[0]
             assert "'openrouter'" in sql
+            assert "'zai'" in sql
         preserved = connection.execute(
             "SELECT capability_snapshot_digest FROM capability_snapshots"
         ).fetchall()
@@ -1816,7 +1817,7 @@ def test_migrated_store_reinitializes_idempotently(tmp_path: Path) -> None:
     try:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("6",)
+        ).fetchone() == ("7",)
         assert connection.execute(
             "SELECT COUNT(*) FROM capability_snapshots"
         ).fetchone() == (1,)
@@ -1829,6 +1830,29 @@ def test_v6_stamped_store_with_narrow_check_fails_closed(tmp_path: Path) -> None
     root.mkdir()
     store = RepositoryStore(root)
     store.initialize()
-    _narrow_provider_checks(store.path, stamp_version="6")
+    _narrow_provider_checks(store.path, stamp_version="7")
     with pytest.raises(StorageError, match="^storage_rollback_required$"):
         RepositoryStore(root).initialize()
+
+
+def test_v6_store_migrates_to_v7_and_admits_zai(tmp_path):
+    import sqlite3
+    from graphite.routing.storage import RepositoryStore, SCHEMA_VERSION
+    root = tmp_path / "repo"
+    (root / ".graphite" / "routing").mkdir(parents=True)
+    store = RepositoryStore(root)          # fresh -> should be at SCHEMA_VERSION
+    store.initialize()
+    assert SCHEMA_VERSION == "7"
+    db = root / ".graphite" / "routing" / "events.sqlite3"
+    con = sqlite3.connect(db)
+    try:
+        sv = con.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
+        assert sv == "7"
+        ddl = con.execute(
+            "SELECT sql FROM sqlite_master WHERE name='capability_snapshots'").fetchone()[0]
+        assert "'zai'" in ddl
+        ddl2 = con.execute(
+            "SELECT sql FROM sqlite_master WHERE name='cli_execution_attempts'").fetchone()[0]
+        assert "'zai'" in ddl2
+    finally:
+        con.close()

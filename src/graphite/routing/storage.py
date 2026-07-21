@@ -26,7 +26,7 @@ from .contracts import (
     TaskCategory,
 )
 
-SCHEMA_VERSION: Final = "6"
+SCHEMA_VERSION: Final = "7"
 BUSY_TIMEOUT_MS: Final = 2_000
 DEFAULT_RECOVERY_PAGE_SIZE: Final = 50
 MAX_RECOVERY_PAGE_SIZE: Final = 100
@@ -256,7 +256,7 @@ _CAPABILITY_SNAPSHOTS_DDL: Final = """CREATE TABLE IF NOT EXISTS capability_snap
             length(capability_snapshot_digest) = 64
             AND capability_snapshot_digest NOT GLOB '*[^0-9a-f]*'
         ),
-        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex', 'openrouter')),
+        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex', 'openrouter', 'zai')),
         requested_model TEXT NOT NULL,
         effective_model TEXT NOT NULL,
         effort TEXT NOT NULL CHECK(effort IN ('default', 'low', 'medium', 'high', 'xhigh', 'max')),
@@ -282,7 +282,7 @@ _CLI_EXECUTION_ATTEMPTS_DDL: Final = """CREATE TABLE IF NOT EXISTS cli_execution
         task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
         decision_id TEXT NOT NULL REFERENCES decisions(decision_id) ON DELETE RESTRICT,
         worktree_id TEXT NOT NULL REFERENCES task_worktrees(worktree_id) ON DELETE RESTRICT,
-        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex', 'openrouter')),
+        provider TEXT NOT NULL CHECK(provider IN ('claude-code', 'codex', 'openrouter', 'zai')),
         requested_model TEXT NOT NULL,
         effective_model TEXT NOT NULL,
         effort TEXT NOT NULL CHECK(effort IN ('default', 'low', 'medium', 'high', 'xhigh', 'max')),
@@ -838,6 +838,12 @@ class RepositoryStore:
     def _pre_v6_backup_marker_path(self, source_version: str) -> Path:
         return self.path.parent / "backups" / f"events-schema-v{source_version}-pre-v6.sha256.json"
 
+    def _pre_v7_backup_path(self, source_version: str) -> Path:
+        return self.path.parent / "backups" / f"events-schema-v{source_version}-pre-v7.sqlite3"
+
+    def _pre_v7_backup_marker_path(self, source_version: str) -> Path:
+        return self.path.parent / "backups" / f"events-schema-v{source_version}-pre-v7.sha256.json"
+
     def _connect(self) -> sqlite3.Connection:
         try:
             connection = sqlite3.connect(
@@ -857,6 +863,7 @@ class RepositoryStore:
         _secure_repository_directory(self.root, self.path.parent)
         _validate_database_file(self.path)
         self._migrate_pre_v6_provider_widening()
+        self._migrate_v6_to_v7()
         connection: sqlite3.Connection | None = None
         try:
             connection = self._connect()
@@ -866,7 +873,7 @@ class RepositoryStore:
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()
             if existing_version is not None and existing_version[0] not in {
-                "1", "2", "3", "4", "5", SCHEMA_VERSION
+                "1", "2", "3", "4", "5", "6", SCHEMA_VERSION
             }:
                 raise StorageError("storage_schema_unsupported")
             if existing_version is not None and existing_version[0] == SCHEMA_VERSION:
@@ -1154,6 +1161,79 @@ class RepositoryStore:
                     f"SELECT {columns} FROM {table}_pre_v6_copy"
                 )
                 connection.execute(f"DROP TABLE {table}_pre_v6_copy")
+                after = connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0]
+                if before != after:
+                    raise StorageError("storage_migration_quarantined")
+            if connection.execute("PRAGMA foreign_key_check").fetchall():
+                raise StorageError("storage_migration_quarantined")
+            connection.execute("COMMIT")
+            if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                raise StorageError("storage_corrupt")
+        except StorageError:
+            if connection is not None and connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def _migrate_v6_to_v7(self) -> None:
+        """Rebuild provider-CHECK tables to admit 'zai' (schema v6->v7)."""
+        if not self.path.exists():
+            return
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                self.path,
+                timeout=self.busy_timeout_ms / 1_000,
+                isolation_level=None,
+            )
+            try:
+                version = connection.execute(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'"
+                ).fetchone()
+            except sqlite3.Error:
+                return
+            if version is None or version[0] != "6":
+                return
+            table_sql: dict[str, str] = {}
+            for table in _PRE_V6_WIDENED_TABLES:
+                row = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                if row is None:
+                    return
+                table_sql[table] = str(row[0])
+            if all("'zai'" in sql for sql in table_sql.values()):
+                return
+            self._create_schema_backup(
+                source_version=version[0],
+                backup=self._pre_v7_backup_path(version[0]),
+                marker=self._pre_v7_backup_marker_path(version[0]),
+            )
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute("BEGIN IMMEDIATE")
+            for table, (ddl, columns) in _PRE_V6_WIDENED_TABLES.items():
+                before = connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0]
+                connection.execute(
+                    f"CREATE TABLE {table}_pre_v7_copy AS SELECT * FROM {table}"
+                )
+                connection.execute(f"DROP TABLE {table}")
+                connection.execute(ddl)
+                connection.execute(
+                    f"INSERT INTO {table} ({columns}) "
+                    f"SELECT {columns} FROM {table}_pre_v7_copy"
+                )
+                connection.execute(f"DROP TABLE {table}_pre_v7_copy")
                 after = connection.execute(
                     f"SELECT COUNT(*) FROM {table}"
                 ).fetchone()[0]
