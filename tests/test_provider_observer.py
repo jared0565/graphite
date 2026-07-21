@@ -227,16 +227,11 @@ def test_all_absent_providers_are_independent_and_never_retried_in_cycle(tmp_pat
         LifecycleProviderId.CODEX: RuntimeKind.LOCAL_CLI,
         LifecycleProviderId.OLLAMA: RuntimeKind.LOCAL_HTTP,
         LifecycleProviderId.OPENROUTER: RuntimeKind.REMOTE_HTTPS,
+        LifecycleProviderId.ZAI: RuntimeKind.REMOTE_HTTPS,
     }
     calls: list[LifecycleProviderId] = []
     targets: list[ProviderObservationTarget] = []
-    # lifecycle_storage.py's boundary-table CHECK constraints do not yet list
-    # ZAI as a provider value — that migration (v1->v2) lands in a later task
-    # in the z.ai native-provider plan. Exclude it here rather than exercising
-    # persistence for an unsupported provider.
-    for index, provider in enumerate(
-        p for p in LifecycleProviderId if p is not LifecycleProviderId.ZAI
-    ):
+    for index, provider in enumerate(LifecycleProviderId):
         runtime_kind = runtime_kinds[provider]
 
         def absent(_timeout: float, _observed_at: int, provider=provider):
@@ -262,16 +257,16 @@ def test_all_absent_providers_are_independent_and_never_retried_in_cycle(tmp_pat
             )
         )
     observer = ProviderObserver(
-        ProviderObserverOptions(max_observations_per_cycle=4, jitter_ratio=0)
+        ProviderObserverOptions(max_observations_per_cycle=5, jitter_ratio=0)
     )
 
     summary = observer.run_cycle(targets, now=100)
 
-    assert calls == [p for p in LifecycleProviderId if p is not LifecycleProviderId.ZAI]
-    assert summary.attempted == 4
-    assert summary.failed == 4
-    assert summary.state_counts == {"unavailable": 4}
-    assert summary.reason_counts == {"probe_unavailable": 4}
+    assert calls == list(LifecycleProviderId)
+    assert summary.attempted == 5
+    assert summary.failed == 5
+    assert summary.state_counts == {"unavailable": 5}
+    assert summary.reason_counts == {"probe_unavailable": 5}
 
 
 @pytest.mark.parametrize(

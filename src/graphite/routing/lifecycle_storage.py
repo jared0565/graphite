@@ -29,11 +29,11 @@ from .storage import (
     _validate_database_file,
 )
 
-LIFECYCLE_SCHEMA_VERSION: Final = "1"
+LIFECYCLE_SCHEMA_VERSION: Final = "2"
 MAX_EVENT_PAGE_SIZE: Final = 100
 MAX_INVALIDATION_TARGETS: Final = 128
 
-_PROVIDER_VALUES = "'claude-code','codex','ollama','openrouter'"
+_PROVIDER_VALUES = "'claude-code','codex','ollama','openrouter','zai'"
 _RUNTIME_VALUES = "'local-cli','local-http','remote-https'"
 _STATE_VALUES = (
     "'discovered','compatible','verification_required','active','incompatible','unavailable'"
@@ -168,7 +168,7 @@ _SCHEMA = (
         CHECK(
             (provider IN ('claude-code','codex') AND runtime_kind='local-cli')
             OR (provider='ollama' AND runtime_kind='local-http')
-            OR (provider='openrouter' AND runtime_kind='remote-https')
+            OR (provider IN ('openrouter','zai') AND runtime_kind='remote-https')
         ),
         CHECK(state='unavailable' OR (identity_digest IS NOT NULL AND identity_json IS NOT NULL))
     )""",
@@ -193,7 +193,7 @@ _SCHEMA = (
         CHECK(
             (provider IN ('claude-code','codex') AND runtime_kind='local-cli')
             OR (provider='ollama' AND runtime_kind='local-http')
-            OR (provider='openrouter' AND runtime_kind='remote-https')
+            OR (provider IN ('openrouter','zai') AND runtime_kind='remote-https')
         )
     )""",
     "CREATE INDEX IF NOT EXISTS lifecycle_events_boundary_time_idx ON lifecycle_events(boundary_digest, occurred_at, event_id)",
@@ -323,6 +323,10 @@ class LifecycleStore:
             connection = self._connect()
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(_SCHEMA[0])
+            # Rebuild the provider-CHECK tables in place before the version gate
+            # reads the schema version, so an existing v1 store is at "2" by the
+            # time the gate and validators run.
+            self._migrate_v1_to_v2_zai(connection)
             version = connection.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()
@@ -352,6 +356,76 @@ class LifecycleStore:
                 connection.close()
         _validate_database_file(self.path)
         _secure_file(self.path)
+
+    @staticmethod
+    def _migrate_v1_to_v2_zai(connection: sqlite3.Connection) -> None:
+        """Rebuild the provider-CHECK tables in place so an existing v1 store admits zai.
+
+        Runs on the caller's connection INSIDE ``initialize()``'s open
+        ``BEGIN IMMEDIATE`` transaction and before the schema-version gate. There
+        is no second connection (which would deadlock on the write lock), no
+        ``foreign_keys`` toggle (this store has no foreign keys), and no
+        independent commit/rollback: ``initialize()``'s existing commit finalizes
+        the rebuild and its ``except`` rolls the whole thing back, which also
+        provides the quarantine-on-mismatch path for free.
+        """
+        row = connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()
+        if row is None or row[0] != "1":
+            # Fresh installs (None) and already-migrated stores ("2") get the
+            # widened CHECK straight from _SCHEMA; unknown versions fall through
+            # to initialize()'s version gate.
+            return
+        rebuilds = (
+            (
+                "current_observations",
+                _SCHEMA[1],
+                "boundary_digest,provider,runtime_kind,identity_digest,state,"
+                "policy_version,identity_json,observed_at,updated_at",
+            ),
+            (
+                "lifecycle_events",
+                _SCHEMA[2],
+                "event_id,boundary_digest,provider,runtime_kind,"
+                "previous_identity_digest,current_identity_digest,previous_state,"
+                "current_state,reason,policy_version,occurred_at,payload_json,payload_hash",
+            ),
+        )
+        try:
+            for table, create_sql, columns in rebuilds:
+                rebuilt = create_sql.replace(
+                    f"CREATE TABLE IF NOT EXISTS {table} ",
+                    f"CREATE TABLE IF NOT EXISTS {table}__v2 ",
+                    1,
+                )
+                if rebuilt == create_sql:
+                    raise LifecycleStorageError("lifecycle_migration_failed")
+                connection.execute(rebuilt)
+                connection.execute(
+                    f"INSERT INTO {table}__v2 ({columns}) SELECT {columns} FROM {table}"
+                )
+                before = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                after = connection.execute(
+                    f"SELECT COUNT(*) FROM {table}__v2"
+                ).fetchone()[0]
+                if before != after:
+                    raise LifecycleStorageError("lifecycle_migration_quarantined")
+                connection.execute(f"DROP TABLE {table}")
+                connection.execute(f"ALTER TABLE {table}__v2 RENAME TO {table}")
+            if connection.execute("PRAGMA foreign_key_check").fetchall():
+                raise LifecycleStorageError("lifecycle_migration_quarantined")
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()
+            if integrity is None or integrity[0] != "ok":
+                raise LifecycleStorageError("lifecycle_migration_quarantined")
+            connection.execute(
+                """INSERT INTO schema_meta(key,value) VALUES('schema_version','2')
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value"""
+            )
+        except LifecycleStorageError:
+            raise
+        except sqlite3.Error as exc:
+            raise LifecycleStorageError("lifecycle_migration_failed") from exc
 
     @staticmethod
     def _validate_schema(connection: sqlite3.Connection) -> None:
