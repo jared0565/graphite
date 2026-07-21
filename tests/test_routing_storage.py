@@ -1682,6 +1682,43 @@ def _narrow_provider_checks(path: Path, *, stamp_version: str) -> None:
         connection.close()
 
 
+def _revert_provider_checks_to_v6(path: Path, *, stamp_version: str) -> None:
+    """Rewrite the two provider CHECKs back to the openrouter-inclusive v6 form.
+
+    Unlike ``_narrow_provider_checks`` (which strips the CHECK down to the
+    fail-closed claude/codex form), this reconstructs a *valid* pre-zai v6
+    store: it removes only the ``, 'zai'`` widening so the CHECK reads
+    ``provider IN ('claude-code', 'codex', 'openrouter')`` and stamps the
+    supplied schema version. This is what a genuine v6 store looks like before
+    the v6->v7 rebuild admits 'zai'.
+    """
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA writable_schema=ON")
+        for table in ("capability_snapshots", "cli_execution_attempts"):
+            row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            assert row is not None and "'zai'" in row[0]
+            reverted = row[0].replace(
+                "provider IN ('claude-code', 'codex', 'openrouter', 'zai')",
+                "provider IN ('claude-code', 'codex', 'openrouter')",
+            )
+            connection.execute(
+                "UPDATE sqlite_master SET sql=? WHERE type='table' AND name=?",
+                (reverted, table),
+            )
+        connection.execute("PRAGMA writable_schema=OFF")
+        connection.execute(
+            "UPDATE schema_meta SET value=? WHERE key='schema_version'",
+            (stamp_version,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _seed_claude_snapshot(root: Path) -> str:
     from graphite.routing.contracts import (
         CliIdentity,
@@ -1826,6 +1863,10 @@ def test_migrated_store_reinitializes_idempotently(tmp_path: Path) -> None:
 
 
 def test_v6_stamped_store_with_narrow_check_fails_closed(tmp_path: Path) -> None:
+    # NB: the "v6" in the name is historical; this stamps the CURRENT schema
+    # version ("7") with a narrowed provider CHECK to assert that opening a
+    # current-version store whose DDL lost 'openrouter'/'zai' fails closed
+    # (_validate_v6_schema, the current-version validator, raises).
     root = tmp_path / "project"
     root.mkdir()
     store = RepositoryStore(root)
@@ -1856,3 +1897,83 @@ def test_v6_store_migrates_to_v7_and_admits_zai(tmp_path):
         assert "'zai'" in ddl2
     finally:
         con.close()
+
+
+def test_v6_store_with_rows_rebuilds_to_v7_preserving_rows_and_admitting_zai(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()  # fresh -> current v7; both DDLs already carry 'zai'
+
+    # Seed a claude-code snapshot row (valid under BOTH the old v6 CHECK and the
+    # widened v7 CHECK) so the rebuild has a real row to carry through.
+    claude_digest = _seed_claude_snapshot(root)
+    seeding = sqlite3.connect(store.path)
+    try:
+        # Fail loudly if the seed silently didn't land, so a later "row
+        # survived" assertion can never masquerade over a missing seed.
+        assert seeding.execute(
+            "SELECT COUNT(*) FROM capability_snapshots "
+            "WHERE capability_snapshot_digest=?",
+            (claude_digest,),
+        ).fetchone() == (1,)
+    finally:
+        seeding.close()
+
+    # Reconstruct a genuine v6 store: revert both provider CHECKs to the
+    # openrouter-inclusive pre-zai form and stamp schema_version='6'.
+    _revert_provider_checks_to_v6(store.path, stamp_version="6")
+
+    # Precondition (anti-false-green): at v6, both DDLs admit 'openrouter' but
+    # NOT 'zai'. This is what makes the post-condition meaningful -- the only
+    # thing that can reintroduce 'zai' is the rebuild recreating the tables.
+    precondition = sqlite3.connect(store.path)
+    try:
+        assert precondition.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone() == ("6",)
+        for table in ("capability_snapshots", "cli_execution_attempts"):
+            sql = precondition.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()[0]
+            assert "'openrouter'" in sql
+            assert "'zai'" not in sql
+    finally:
+        precondition.close()
+
+    # Re-initialize a fresh handle -> drives _migrate_v6_to_v7's rebuild body
+    # (CREATE-copy / DROP / recreate-widened / INSERT / COUNT-equality).
+    RepositoryStore(root).initialize()
+
+    # Proof the rebuild body actually ran (NOT an early-return): the pre-v7
+    # backup is created only after all four guards pass (path exists,
+    # version=='6', tables present, not-already-widened), immediately before
+    # the CREATE-copy/DROP/INSERT loop.
+    backup = store.path.parent / "backups" / "events-schema-v6-pre-v7.sqlite3"
+    assert backup.exists()
+
+    verify = sqlite3.connect(store.path)
+    try:
+        assert verify.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone() == ("7",)
+        # Seeded row survived copy->drop->recreate->insert (row preservation).
+        assert verify.execute(
+            "SELECT capability_snapshot_digest FROM capability_snapshots "
+            "WHERE capability_snapshot_digest=?",
+            (claude_digest,),
+        ).fetchone() == (claude_digest,)
+        # Both tables were recreated from the widened DDL -> now admit 'zai'.
+        for table in ("capability_snapshots", "cli_execution_attempts"):
+            sql = verify.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()[0]
+            assert "'openrouter'" in sql
+            assert "'zai'" in sql
+        assert verify.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    finally:
+        verify.close()
