@@ -19,10 +19,12 @@ from graphite.routing.profiles import (
     EditSmokeEvidence,
     ProfileError,
     VerificationEvidence,
+    _EVIDENCE_HOSTS,
     create_capability_snapshot,
     load_verified_capability_snapshots,
     operator_codex_profile,
     operator_openrouter_profile,
+    operator_zai_profile,
     save_capability_snapshot,
     verify_and_save_approved_edit_profile,
     verify_and_save_approved_profile,
@@ -657,3 +659,26 @@ def test_openrouter_read_only_snapshot_promotes_to_workspace_write(
     assert len(telemetry) == 1
     assert telemetry[0]["capability_snapshot_digest"] == promoted.digest
     assert telemetry[0]["validation_outcome"] == "passed"
+
+
+def test_operator_zai_profile_builds_valid_requested_profile() -> None:
+    assert _EVIDENCE_HOSTS[ProviderId.ZAI] == "docs.z.ai"
+    profile = operator_zai_profile(
+        model_id="glm-5.2",
+        supported_efforts=(Effort.HIGH,),
+        evidence_url="https://docs.z.ai/api-reference/introduction",
+        evidence_accessed="2026-07-21",
+    )
+    assert profile.provider is ProviderId.ZAI
+    assert profile.requested_model == "glm-5.2"
+    assert profile.supported_efforts == (Effort.HIGH,)
+
+
+def test_operator_zai_profile_rejects_wrong_evidence_host() -> None:
+    with pytest.raises(ProfileError, match="^profile_evidence_invalid$"):
+        operator_zai_profile(
+            model_id="glm-5.2",
+            supported_efforts=(Effort.HIGH,),
+            evidence_url="https://openrouter.ai/x",
+            evidence_accessed="2026-07-21",
+        )

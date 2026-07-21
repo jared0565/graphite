@@ -30,6 +30,7 @@ _EVIDENCE_HOSTS: Final = {
     ProviderId.CLAUDE_CODE: "platform.claude.com",
     ProviderId.CODEX: "developers.openai.com",
     ProviderId.OPENROUTER: "openrouter.ai",
+    ProviderId.ZAI: "docs.z.ai",
 }
 
 
@@ -180,6 +181,23 @@ def operator_openrouter_profile(
     """Create an operator-selected OpenRouter request without claiming key validity."""
     return RequestedProfile(
         ProviderId.OPENROUTER,
+        model_id,
+        supported_efforts,
+        evidence_url,
+        evidence_accessed,
+    )
+
+
+def operator_zai_profile(
+    *,
+    model_id: str,
+    supported_efforts: tuple[Effort, ...],
+    evidence_url: str,
+    evidence_accessed: str,
+) -> RequestedProfile:
+    """Create an operator-selected z.ai request without claiming key validity."""
+    return RequestedProfile(
+        ProviderId.ZAI,
         model_id,
         supported_efforts,
         evidence_url,
