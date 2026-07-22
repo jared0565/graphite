@@ -5,11 +5,13 @@ from graphite.routing.zai_probe import ZaiPricing
 PRICING = ZaiPricing(prompt="0.0000014", completion="0.0000044")
 
 def _envelope(content, model="glm-5.2", pin=420, cout=6):
-    body = json.dumps({
-        "model": model,
+    payload = {
         "choices": [{"message": {"role": "assistant", "content": content}}],
         "usage": {"prompt_tokens": pin, "completion_tokens": cout},
-    }).encode()
+    }
+    if model is not None:
+        payload["model"] = model
+    body = json.dumps(payload).encode()
     return HttpProbeResult(200, body, hashlib.sha256(body).hexdigest(), 0.05)
 
 def test_execute_zai_returns_plaintext_and_usage():
@@ -63,3 +65,23 @@ def test_execute_zai_maps_transport_failure():
             expected_effective_model="glm-5.2", pricing=PRICING, max_output_tokens=64,
             max_cost_microunits=100000, timeout_seconds=60.0, transport=transport)
     assert e.value.code == "http_status"
+
+def test_execute_zai_rejects_missing_model():
+    from graphite.routing.zai_executor import execute_zai
+    from graphite.routing.claude_executor import AdapterError
+    with pytest.raises(AdapterError) as e:
+        execute_zai(api_key="k", prompt=b"x", requested_model="glm-5.2",
+            expected_effective_model="glm-5.2", pricing=PRICING, max_output_tokens=64,
+            max_cost_microunits=100000, timeout_seconds=60.0,
+            transport=lambda **kw: _envelope("GRAPHITE_PROFILE_OK", model=None))
+    assert e.value.code == "model_identity_unverified"
+
+def test_execute_zai_rejects_wrong_model():
+    from graphite.routing.zai_executor import execute_zai
+    from graphite.routing.claude_executor import AdapterError
+    with pytest.raises(AdapterError) as e:
+        execute_zai(api_key="k", prompt=b"x", requested_model="glm-5.2",
+            expected_effective_model="glm-5.2", pricing=PRICING, max_output_tokens=64,
+            max_cost_microunits=100000, timeout_seconds=60.0,
+            transport=lambda **kw: _envelope("GRAPHITE_PROFILE_OK", model="other-model"))
+    assert e.value.code == "model_mismatch"

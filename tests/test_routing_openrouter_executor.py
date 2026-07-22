@@ -104,15 +104,16 @@ _SCHEMA = {
 def _completion(
     content: str,
     *,
-    model: str = "moonshotai/kimi-k3",
+    model: str | None = "moonshotai/kimi-k3",
     prompt_tokens: int = 100,
     completion_tokens: int = 50,
     usage: bool = True,
 ) -> bytes:
     payload: dict[str, object] = {
-        "model": model,
         "choices": [{"message": {"role": "assistant", "content": content}}],
     }
+    if model is not None:
+        payload["model"] = model
     if usage:
         payload["usage"] = {
             "prompt_tokens": prompt_tokens,
@@ -252,6 +253,12 @@ def test_execute_rejects_wrong_model_echo() -> None:
         _completion('{"result":"GRAPHITE_EDIT_OK"}', model="other/model")
     )
     with pytest.raises(AdapterError, match="^model_mismatch$"):
+        _execute(transport)
+
+
+def test_execute_rejects_missing_model_echo() -> None:
+    transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}', model=None))
+    with pytest.raises(AdapterError, match="^model_identity_unverified$"):
         _execute(transport)
 
 

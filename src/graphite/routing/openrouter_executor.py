@@ -294,11 +294,10 @@ def execute_openrouter(
     if not isinstance(envelope, dict):
         raise AdapterError("protocol")
     reported_model = envelope.get("model")
-    if reported_model is not None:
-        if not isinstance(reported_model, str):
-            raise AdapterError("protocol")
-        if reported_model != expected:
-            raise AdapterError("model_mismatch")
+    if not isinstance(reported_model, str) or not reported_model:
+        raise AdapterError("model_identity_unverified")
+    if reported_model != expected:
+        raise AdapterError("model_mismatch")
     choices = envelope.get("choices")
     if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
         raise AdapterError("protocol")
