@@ -106,7 +106,7 @@ exist in `zai_executor.py` (model check, malformed envelope, protocol). Add:
 
 This brings z.ai to parity with the claude/codex/openrouter executor test suites.
 
-### 4. Dead cross-provider construction guard (defense-in-depth)
+### 4. Vestigial dead cross-provider guard — delete (clarity, behavior-preserving)
 
 `route_pool.py:312-317`:
 
@@ -120,13 +120,20 @@ if (
 ```
 
 `>1` distinct providers requires `>=2` candidates, contradicting `len(candidates) == 1`, so
-the guard never fires — a cross-provider two-candidate pool with `allow_cross_provider=False`
-can be constructed and stored (its primary can then execute). `select_route` still blocks the
-cross-provider *fallback* at attempt time (`cross_provider_denied`), which is why this is
-low-severity.
+the clause is unsatisfiable and never fires.
 
-**Fix:** drop the impossible `len(candidates) == 1` conjunct so the guard rejects any
-cross-provider pool when `allow_cross_provider` is False.
+**Correction to the audit's framing:** "activating" this guard (the audit's suggested
+`>= 2`) would be WRONG. `test_route_pool.py:231` (`test_cross_provider_fallback_requires_
+explicit_authority`) deliberately constructs a cross-provider pool with
+`allow_cross_provider=False` and asserts the denial happens at `select_route` time
+(`cross_provider_denied`), not construction. ARCHITECTURE.md L191 confirms the one-step
+capacity fallback is an intended feature and `allow_cross_provider` gates the *fallback at
+selection time*, not pool construction. Making the guard reject construction would break that
+test and forbid a designed feature. The real gate already exists and works.
+
+**Fix:** delete the unsatisfiable clause as dead code. This is behavior-preserving (it never
+fired) — all route_pool tests stay green — and removes a misleading guard that implies a
+construction-time gate that neither exists nor should.
 
 ### 5. Intrinsic cost/token ceilings — conservative review only
 
