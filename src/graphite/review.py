@@ -25,6 +25,7 @@ class ReviewError(ValueError):
 
 
 MAX_GIT_STATUS_RECORDS = 100_000
+MAX_REVIEW_PACKET_ITEMS = 10_000
 
 
 @dataclass(frozen=True, order=True)
@@ -335,13 +336,30 @@ def build_review_packet(
             }
         )
 
+    change_dicts, changes_truncated = _bounded_list(
+        [change.to_dict() for change in ordered_changes]
+    )
+    bounded_impact: dict[str, list[str]] = {}
+    impact_truncated = False
+    for impact_field in ("matched_nodes", "missing", "impacted_files", "likely_tests"):
+        bounded_values, field_truncated = _bounded_list(impact[impact_field])
+        bounded_impact[impact_field] = bounded_values
+        impact_truncated = impact_truncated or field_truncated
+    if changes_truncated or impact_truncated:
+        warnings.append(
+            {
+                "code": "OUTPUT_TRUNCATED",
+                "message": "Review output was truncated to a bounded size; some entries are not shown.",
+            }
+        )
+
     return {
         "schema_version": 1,
         "project": root_name,
         "discovery": discovery,
-        "changes": [change.to_dict() for change in ordered_changes],
+        "changes": change_dicts,
         "graph": {"status": safe_status, "validation": validation},
-        "impact": impact,
+        "impact": bounded_impact,
         "risk": {"level": level, "signals": signals},
         "acceptance_criteria": [
             {"id": criterion_id, **_CRITERIA[criterion_id]} for criterion_id in criterion_ids
@@ -513,6 +531,13 @@ def _bundle_has_unsafe_source_file(bundle: dict[str, Any]) -> bool:
         if _normalize_safe_relative_path(source_file) is None:
             return True
     return False
+
+
+def _bounded_list(values: list[Any]) -> tuple[list[Any], bool]:
+    """Return values truncated to MAX_REVIEW_PACKET_ITEMS and whether truncation occurred."""
+    if len(values) > MAX_REVIEW_PACKET_ITEMS:
+        return values[:MAX_REVIEW_PACKET_ITEMS], True
+    return values, False
 
 
 def _empty_impact() -> dict[str, list[str]]:
