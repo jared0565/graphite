@@ -309,12 +309,6 @@ class ApprovedRoutePool(PublicRecord):
         attempts = _integer(self.max_attempts, "route_pool_invalid", minimum=1, maximum=2)
         if attempts != len(candidates):
             raise RoutePoolError("route_pool_invalid")
-        if (
-            len({item.provider for item in candidates}) > 1
-            and not self.allow_cross_provider
-            and len(candidates) == 1
-        ):
-            raise RoutePoolError("route_pool_invalid")
         for field_name in (
             "approval_id",
             "task_id",
