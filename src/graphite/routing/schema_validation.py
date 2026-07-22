@@ -1,105 +1,142 @@
-"""Minimal in-house JSON-Schema-subset validator for governed structured output.
+"""Minimal in-house JSON-Schema validator for governed structured output.
 
-Supports only the subset the governed output schemas use; fails closed
-(``is_supported_schema`` returns False) on any keyword outside it, so an
-unsupported schema is rejected at request construction rather than silently
-unchecked. Zero third-party dependencies by design: the router money-path
-must stay auditable and free of supply-chain surface.
+The governed output schemas are sha256-pinned constants (not attacker input), so this
+validator's job is to enforce the constraints those schemas express, not to police keyword
+novelty. It therefore fails closed ONLY on combinator keywords (anyOf/oneOf/allOf/not/$ref/
+patternProperties/...) -- keywords that change what "valid" means and that this validator
+cannot safely approximate. All other (refinement/annotation) keywords are tolerated:
+matches_schema enforces the ones it understands and ignores the rest, which can only
+under-enforce a single constraint, never accept a structurally wrong shape. Zero third-party
+dependencies by design.
 """
 from __future__ import annotations
 
-_SCALAR_TYPES = frozenset({"string", "integer", "number", "boolean", "null"})
-_OBJECT_KEYS = frozenset({"type", "properties", "required", "additionalProperties"})
-_ARRAY_KEYS = frozenset({"type", "items", "minItems", "maxItems"})
-_SCALAR_KEYS = frozenset({"type", "enum", "const"})
+import re
+
+# Keywords that combine/redirect subschemas and thus change what "valid" means. This
+# validator cannot approximate them, so a schema using any of them fails closed at
+# is_supported_schema -> the executor rejects it with request_invalid before any call,
+# rather than being silently under-validated.
+_COMBINATORS = frozenset({
+    "anyOf", "oneOf", "allOf", "not", "$ref", "$dynamicRef",
+    "if", "then", "else", "patternProperties", "propertyNames",
+    "dependencies", "dependentSchemas", "dependentRequired",
+    "unevaluatedProperties", "unevaluatedItems", "contains",
+    "prefixItems", "additionalItems",
+})
 
 
 def is_supported_schema(schema: object) -> bool:
-    """True iff schema is a dict using only the supported subset, recursively."""
+    """True unless the schema uses a combinator keyword this validator cannot safely
+    approximate (or a non-bool additionalProperties, which is a schema-valued shape
+    change). Refinement/annotation keywords are tolerated. Governed schemas are pinned
+    constants, so this gate catches a shape we would mis-validate, not unknown-but-harmless
+    keys."""
     if not isinstance(schema, dict) or not schema:
         return False
-    type_value = schema.get("type")
-    if type_value == "object":
-        if not set(schema) <= _OBJECT_KEYS:
-            return False
-        properties = schema.get("properties", {})
+    if not _COMBINATORS.isdisjoint(schema):
+        return False
+    if not isinstance(schema.get("additionalProperties", False), bool):
+        return False
+    properties = schema.get("properties")
+    if properties is not None:
         if not isinstance(properties, dict):
             return False
         if not all(isinstance(k, str) and is_supported_schema(v) for k, v in properties.items()):
             return False
-        required = schema.get("required", [])
-        if not isinstance(required, list) or not all(isinstance(k, str) for k in required):
-            return False
-        if schema.get("additionalProperties", False) is not False:
-            return False
-        return True
-    if type_value == "array":
-        if not set(schema) <= _ARRAY_KEYS:
-            return False
-        items = schema.get("items")
-        if items is not None and not is_supported_schema(items):
-            return False
-        for bound_key in ("minItems", "maxItems"):
-            bound = schema.get(bound_key)
-            if bound is not None and (isinstance(bound, bool) or not isinstance(bound, int) or bound < 0):
-                return False
-        return True
-    if not set(schema) <= _SCALAR_KEYS:
-        return False
-    if type_value is not None and type_value not in _SCALAR_TYPES:
-        return False
-    if "enum" in schema and (not isinstance(schema["enum"], list) or not schema["enum"]):
-        return False
-    if type_value is None and "const" not in schema and "enum" not in schema:
+    items = schema.get("items")
+    if items is not None and not is_supported_schema(items):
         return False
     return True
 
 
 def matches_schema(value: object, schema: object) -> bool:
-    """True iff value conforms to schema.
+    """True iff value conforms to every constraint in schema that this validator
+    understands; unknown refinement keywords are ignored (never over-reject).
 
-    Precondition: schema must already have passed is_supported_schema -- callers
-    gate the schema once, then match many values against it. Given such a schema
-    this never raises. Untrusted VALUES are always handled safely: a
-    non-conforming (or wrong-typed) value returns False, never raises.
+    Precondition: schema must already have passed is_supported_schema -- callers gate the
+    schema once, then match many values against it. Given such a schema this never raises.
+    Untrusted VALUES are always handled safely: a non-conforming (or wrong-typed) value
+    returns False, never raises.
     """
     if not isinstance(schema, dict):
         return False
     type_value = schema.get("type")
-    if type_value == "object":
-        if not isinstance(value, dict):
-            return False
-        properties = schema.get("properties", {})
-        if not all(key in value for key in schema.get("required", [])):
-            return False
-        if schema.get("additionalProperties", False) is False and not set(value) <= set(properties):
-            return False
-        return all(
-            matches_schema(value[key], subschema)
-            for key, subschema in properties.items()
-            if key in value
-        )
-    if type_value == "array":
-        if not isinstance(value, list):
-            return False
-        minimum = schema.get("minItems")
-        maximum = schema.get("maxItems")
-        if minimum is not None and len(value) < minimum:
-            return False
-        if maximum is not None and len(value) > maximum:
-            return False
-        items = schema.get("items")
-        return items is None or all(matches_schema(element, items) for element in value)
     if type_value is not None and not _matches_type(value, type_value):
         return False
     if "const" in schema and not _json_equal(value, schema["const"]):
         return False
     if "enum" in schema and not any(_json_equal(value, member) for member in schema["enum"]):
         return False
+    if isinstance(value, str) and not _matches_string(value, schema):
+        return False
+    if isinstance(value, dict) and _is_object_schema(schema) and not _matches_object(value, schema):
+        return False
+    if isinstance(value, list) and _is_array_schema(schema) and not _matches_array(value, schema):
+        return False
     return True
 
 
-def _matches_type(value: object, type_value: str) -> bool:
+def _is_object_schema(schema: dict) -> bool:
+    return schema.get("type") == "object" or any(
+        key in schema for key in ("properties", "required", "additionalProperties")
+    )
+
+
+def _is_array_schema(schema: dict) -> bool:
+    return schema.get("type") == "array" or any(
+        key in schema for key in ("items", "minItems", "maxItems")
+    )
+
+
+def _matches_string(value: str, schema: dict) -> bool:
+    pattern = schema.get("pattern")
+    if isinstance(pattern, str) and re.fullmatch(pattern, value) is None:
+        return False
+    maximum = schema.get("maxLength")
+    if _is_bound(maximum) and len(value) > maximum:
+        return False
+    minimum = schema.get("minLength")
+    if _is_bound(minimum) and len(value) < minimum:
+        return False
+    return True
+
+
+def _matches_object(value: dict, schema: dict) -> bool:
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        return False
+    if not all(key in value for key in schema.get("required", [])):
+        return False
+    if schema.get("additionalProperties", False) is False and not set(value) <= set(properties):
+        return False
+    return all(
+        matches_schema(value[key], subschema)
+        for key, subschema in properties.items()
+        if key in value
+    )
+
+
+def _matches_array(value: list, schema: dict) -> bool:
+    minimum = schema.get("minItems")
+    if _is_bound(minimum) and len(value) < minimum:
+        return False
+    maximum = schema.get("maxItems")
+    if _is_bound(maximum) and len(value) > maximum:
+        return False
+    items = schema.get("items")
+    if isinstance(items, dict):
+        return all(matches_schema(element, items) for element in value)
+    return True
+
+
+def _is_bound(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _matches_type(value: object, type_value: object) -> bool:
+    if isinstance(type_value, list):
+        return any(_matches_type(value, member) for member in type_value)
     if type_value == "string":
         return isinstance(value, str)
     if type_value == "integer":
@@ -110,6 +147,10 @@ def _matches_type(value: object, type_value: str) -> bool:
         return isinstance(value, bool)
     if type_value == "null":
         return value is None
+    if type_value == "object":
+        return isinstance(value, dict)
+    if type_value == "array":
+        return isinstance(value, list)
     return False
 
 

@@ -297,7 +297,8 @@ def test_execute_json_object_rejects_extra_keys() -> None:
 
 def test_execute_rejects_unsupported_output_schema_before_transport() -> None:
     bad = {"type": "object", "properties": {"result": {"type": "string"}},
-           "required": ["result"], "additionalProperties": False, "minProperties": 1}
+           "required": ["result"], "additionalProperties": False,
+           "patternProperties": {"^x": {"type": "string"}}}
     transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}'))
     with pytest.raises(AdapterError, match="^request_invalid$"):
         _execute(transport, output_schema=bad, output_schema_sha256=_canonical_sha256(bad))
