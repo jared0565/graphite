@@ -101,6 +101,14 @@ _SCHEMA = {
 }
 
 
+_VERIFY_SCHEMA = {
+    "additionalProperties": False,
+    "properties": {"verification": {"const": "GRAPHITE_PROFILE_OK", "type": "string"}},
+    "required": ["verification"],
+    "type": "object",
+}
+
+
 def _completion(
     content: str,
     *,
@@ -293,6 +301,22 @@ def test_execute_json_object_rejects_extra_keys() -> None:
     transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK","x":1}'))
     with pytest.raises(AdapterError, match="^response_contract_invalid$"):
         _execute(transport, response_format_type="json_object")
+
+
+def test_execute_enforces_verification_oracle_in_json_object_mode() -> None:
+    # The OpenRouter verification path uses VERIFY_SCHEMA; its const IS the oracle. A wrong
+    # verification value must be rejected (response_contract_invalid) even in json_object mode,
+    # which previously enforced nothing. Proves T1a Task 4 closed this for the verify path.
+    wrong = _RecordingTransport(_completion('{"verification":"WRONG"}'))
+    with pytest.raises(AdapterError, match="^response_contract_invalid$"):
+        _execute(wrong, output_schema=_VERIFY_SCHEMA,
+                 output_schema_sha256=_canonical_sha256(_VERIFY_SCHEMA),
+                 response_format_type="json_object")
+    ok = _RecordingTransport(_completion('{"verification":"GRAPHITE_PROFILE_OK"}'))
+    outcome = _execute(ok, output_schema=_VERIFY_SCHEMA,
+                       output_schema_sha256=_canonical_sha256(_VERIFY_SCHEMA),
+                       response_format_type="json_object")
+    assert outcome.message == '{"verification":"GRAPHITE_PROFILE_OK"}'
 
 
 def test_execute_rejects_unsupported_output_schema_before_transport() -> None:

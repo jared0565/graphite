@@ -132,3 +132,16 @@ def test_execute_zai_rejects_non_string_model():
             max_cost_microunits=100000, timeout_seconds=60.0,
             transport=lambda **kw: _envelope("GRAPHITE_PROFILE_OK", model=123))
     assert e.value.code == "model_identity_unverified"
+
+def test_execute_zai_returns_empty_content_verbatim():
+    # When glm-5.2 exhausts its budget on reasoning (finish_reason=length) it returns empty
+    # content. execute_zai returns it verbatim (message==""); the harness-side plaintext oracle
+    # (message.strip() == exact_text) is what rejects it. This pins that the executor stays a
+    # general adapter and does not itself apply the verification string.
+    from graphite.routing.zai_executor import execute_zai
+    result = execute_zai(
+        api_key="k", prompt=b"x", requested_model="glm-5.2",
+        expected_effective_model="glm-5.2", pricing=PRICING, max_output_tokens=64,
+        max_cost_microunits=100000, timeout_seconds=60.0,
+        transport=lambda **kw: _envelope(""))
+    assert result.message == ""
