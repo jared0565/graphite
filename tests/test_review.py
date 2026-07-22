@@ -17,6 +17,7 @@ from graphite.config import Config
 from graphite.engine_identity import engine_identity
 from graphite.review import (
     Change,
+    MAX_REVIEW_PACKET_ITEMS,
     ReviewError,
     _parse_porcelain,
     build_review_packet,
@@ -784,9 +785,6 @@ def test_build_review_packet_sensitive_paths_are_case_insensitive(path: str) -> 
     assert "VERIFY_CONFIG" in [item["id"] for item in packet["acceptance_criteria"]]
 
 
-from graphite.review import MAX_REVIEW_PACKET_ITEMS
-
-
 def test_review_packet_truncates_changes_and_flags_output():
     changes = [Change(f"a/f{index:06d}.py", "modified") for index in range(MAX_REVIEW_PACKET_ITEMS + 1)]
     packet = _packet(changes)
@@ -797,6 +795,13 @@ def test_review_packet_truncates_changes_and_flags_output():
 def test_review_packet_within_cap_is_not_flagged():
     packet = _packet([Change("src/store.py", "modified")])
     assert len(packet["changes"]) == 1
+    assert all(warning.get("code") != "OUTPUT_TRUNCATED" for warning in packet["warnings"])
+
+
+def test_review_packet_at_cap_is_not_truncated():
+    changes = [Change(f"a/f{index:06d}.py", "modified") for index in range(MAX_REVIEW_PACKET_ITEMS)]
+    packet = _packet(changes)
+    assert len(packet["changes"]) == MAX_REVIEW_PACKET_ITEMS
     assert all(warning.get("code") != "OUTPUT_TRUNCATED" for warning in packet["warnings"])
 
 
