@@ -56,7 +56,13 @@ def is_supported_schema(schema: object) -> bool:
 
 
 def matches_schema(value: object, schema: object) -> bool:
-    """True iff value conforms to a supported schema. Fails closed on unknowns."""
+    """True iff value conforms to schema.
+
+    Precondition: schema must already have passed is_supported_schema -- callers
+    gate the schema once, then match many values against it. Given such a schema
+    this never raises. Untrusted VALUES are always handled safely: a
+    non-conforming (or wrong-typed) value returns False, never raises.
+    """
     if not isinstance(schema, dict):
         return False
     type_value = schema.get("type")
@@ -108,9 +114,9 @@ def _matches_type(value: object, type_value: str) -> bool:
 
 
 def _json_equal(value: object, target: object) -> bool:
-    """Equality that does not conflate True==1 or 1==1.0 (JSON-kind aware)."""
-    if isinstance(target, bool) or isinstance(value, bool):
+    """Equality that does not conflate True==1, 1==1.0, or 1.0==1 (JSON-kind aware)."""
+    if isinstance(value, bool) or isinstance(target, bool):
         return value is target
-    if isinstance(target, int) and not isinstance(value, float):
-        return isinstance(value, int) and value == target
+    if isinstance(value, (int, float)) and isinstance(target, (int, float)):
+        return type(value) is type(target) and value == target
     return value == target

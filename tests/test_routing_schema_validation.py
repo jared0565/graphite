@@ -50,3 +50,11 @@ def test_array_bounds():
     assert matches_schema(["a"], schema) is True
     assert matches_schema([], schema) is False
     assert matches_schema(["a", "b", "c"], schema) is False
+
+def test_const_and_enum_distinguish_int_from_float():
+    assert matches_schema(1, {"type": "number", "const": 1}) is True
+    assert matches_schema(1.0, {"type": "number", "const": 1}) is False
+    assert matches_schema(1, {"type": "number", "const": 1.0}) is False
+    assert matches_schema(1, {"type": "integer", "enum": [1, 2]}) is True
+    assert matches_schema(1.0, {"type": "number", "enum": [1, 2]}) is False
+    assert matches_schema(True, {"type": "integer", "const": 1}) is False
