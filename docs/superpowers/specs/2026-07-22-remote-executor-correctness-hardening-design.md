@@ -81,19 +81,36 @@ independently trusted on a money path).
 
 **Validator — minimal, in-house, zero new deps.** graphite has no JSON-Schema dependency,
 and adding one would enlarge the supply-chain surface the open GRA-SUP-R01 audit item is
-about. Implement a small validator supporting exactly the JSON-Schema subset the governed
-output schemas use:
+about. Implement a small validator (`schema_validation.py`: `is_supported_schema` /
+`matches_schema`).
 
-- `type`: `object`, `array`, `string`, `integer`, `number`, `boolean`, `null` (and lists thereof)
-- object: `properties`, `required`, `additionalProperties: false`
-- array: `items` (single schema), optional `minItems` / `maxItems`
-- `enum`
-- `const`
+The governed output schemas are **sha256-pinned constants, not attacker input** — so the
+validator's job is to enforce the constraints those schemas express, not to police keyword
+novelty. (Correction from the first draft of this spec, caught by the whole-branch review:
+the real governed schemas use more than a tiny subset — `EDIT_SCHEMA` uses `maxLength`,
+`REVIEW_SCHEMA` uses `pattern`, both use `minItems`/`maxItems`/`enum` — so an allow-list that
+fails closed on any unknown keyword would reject a live, governed, paid request. That was a
+design-premise error.)
 
-The validator **fails closed**: any schema keyword outside the supported subset is rejected
-as `request_invalid` at request-construction time (before the paid call), so an unsupported
-schema can never silently degrade to "unchecked." This keeps it a small, fully tested
-function rather than a general JSON-Schema engine.
+The correct contract splits keywords two ways:
+
+- **Combinators** (`anyOf`, `oneOf`, `allOf`, `not`, `$ref`, `patternProperties`, `if`/`then`/
+  `else`, `dependencies`, `contains`, `prefixItems`, `additionalItems`, …) and a
+  schema-valued `additionalProperties` **change what "valid" means**. `is_supported_schema`
+  **fails closed** on these (→ `request_invalid` before the paid call), because the validator
+  cannot safely approximate them.
+- **Refinements/annotations** (`pattern`, `maxLength`, `minLength`, `format`, `title`, …) are
+  **tolerated**. `matches_schema` enforces every one it understands — `type`, `enum`, `const`,
+  object `properties`/`required`/`additionalProperties:false`, array `items`/`minItems`/
+  `maxItems`, string `pattern` (via `re.fullmatch` on the pinned constant — no ReDoS, the
+  pattern is governed, not caller-supplied) / `maxLength` / `minLength` — and ignores any it
+  does not. Ignoring a refinement can only under-enforce a single constraint; it can never
+  accept a structurally wrong shape (those are combinators, already rejected).
+
+A regression test asserts `is_supported_schema` accepts every actual governed schema constant
+(`EDIT_SCHEMA`, `REVIEW_SCHEMA`, `VERIFY_SCHEMA`) and that conforming/non-conforming responses
+match/fail against each. This closes the accept-any-object hole for the governed schemas and
+does not shatter when a later spec (Track 2) adds a schema using a new refinement keyword.
 
 ### 3. z.ai executor negative tests (coverage)
 
