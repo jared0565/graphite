@@ -142,3 +142,13 @@ def test_trailing_whitespace_on_marker_lines_tolerated():
     )
     payload = parse_whole_file_edit_text(msg, edit_scope=("a.py",))
     assert payload["files"][0]["content"] == "body\n"
+
+
+def test_non_str_edit_scope_element_rejected():
+    # edit_scope is trusted config, but a malformed (non-str, unhashable)
+    # element must still fail closed with response_contract_invalid, not a raw
+    # TypeError from set(edit_scope).
+    msg = _message(_block("a.py", "x\n"))
+    with pytest.raises(AdapterError) as info:
+        parse_whole_file_edit_text(msg, edit_scope=("a.py", ["nested"]))  # type: ignore[list-item]
+    assert info.value.code == "response_contract_invalid"

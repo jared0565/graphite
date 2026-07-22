@@ -10,11 +10,14 @@ sole authority on path safety and byte caps. Every non-conformance raises
 
 Preamble and interstitial prose (e.g. "Here are the files:") are tolerated by
 design — non-marker lines outside blocks are skipped and the live smoke relies
-on this. Two accepted, documented consequences: (1) a file whose content
-contains a line byte-identical to its own path-qualified end marker truncates
-at that line; (2) prose containing a begin-marker-shaped line yields a phantom
-block, which surfaces as a scope-set mismatch (rejected, not applied).
-Path-qualified markers plus first-matching-end parsing make both improbable.
+on this. Two accepted, documented consequences: (1) a content line byte-identical
+to its own path-qualified end marker truncates at that line (line boundaries
+follow ``str.splitlines`` — any Unicode line terminator, not only ``\n`` —
+though content bytes are always sliced verbatim from the raw message, so
+extraction stays byte-exact); (2) prose containing a begin-marker-shaped line
+yields a phantom block, which surfaces as a scope-set mismatch (rejected, not
+applied). Path-qualified markers plus first-matching-end parsing make both
+improbable.
 """
 from __future__ import annotations
 
@@ -49,6 +52,7 @@ def parse_whole_file_edit_text(message: str, *, edit_scope: tuple[str, ...]) -> 
     if (
         not isinstance(edit_scope, tuple)
         or not edit_scope
+        or not all(isinstance(path, str) for path in edit_scope)
         or len(set(edit_scope)) != len(edit_scope)
     ):
         raise _fail()
