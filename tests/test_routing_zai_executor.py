@@ -1,4 +1,6 @@
-import hashlib, json, pytest
+import hashlib
+import json
+import pytest
 from graphite.routing.probe_runner import HttpProbeResult, ProviderProbeError
 from graphite.routing.zai_probe import ZaiPricing
 
@@ -22,7 +24,8 @@ def test_execute_zai_returns_plaintext_and_usage():
     from graphite.routing.zai_executor import execute_zai
     seen = {}
     def transport(**kw):
-        seen.update(kw); return _envelope("GRAPHITE_PROFILE_OK")
+        seen.update(kw)
+        return _envelope("GRAPHITE_PROFILE_OK")
     result = execute_zai(
         api_key="k", prompt=b"return GRAPHITE_PROFILE_OK", requested_model="glm-5.2",
         expected_effective_model="glm-5.2", pricing=PRICING, max_output_tokens=64,
@@ -42,7 +45,8 @@ def test_execute_zai_disables_thinking_for_deterministic_plaintext():
     from graphite.routing.zai_executor import execute_zai
     seen = {}
     def transport(**kw):
-        seen.update(kw); return _envelope("GRAPHITE_PROFILE_OK")
+        seen.update(kw)
+        return _envelope("GRAPHITE_PROFILE_OK")
     execute_zai(
         api_key="k", prompt=b"return GRAPHITE_PROFILE_OK", requested_model="glm-5.2",
         expected_effective_model="glm-5.2", pricing=PRICING, max_output_tokens=64,
