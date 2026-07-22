@@ -234,6 +234,17 @@ def test_cross_provider_fallback_requires_explicit_authority() -> None:
         select_route(pool, _authorities(pool), (_capacity_attempt(pool),), now=150)
 
 
+def test_cross_provider_pool_constructs_when_fallback_disallowed() -> None:
+    # Intended design: a cross-provider pool CAN be constructed even with
+    # allow_cross_provider=False; the cross-provider gate is enforced at
+    # select_route (see test_cross_provider_fallback_requires_explicit_authority),
+    # not at construction. This pins that behavior against re-introducing a
+    # construction-time guard.
+    pool = _pool(allow_cross_provider=False)
+    assert pool.allow_cross_provider is False
+    assert len({candidate.provider for candidate in pool.candidates}) == 2
+
+
 def test_reordered_dynamic_duplicate_and_expired_authority_is_rejected() -> None:
     pool = _pool()
     with pytest.raises(RoutePoolError, match="^route_authority_invalid$"):

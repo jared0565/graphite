@@ -101,18 +101,27 @@ _SCHEMA = {
 }
 
 
+_VERIFY_SCHEMA = {
+    "additionalProperties": False,
+    "properties": {"verification": {"const": "GRAPHITE_PROFILE_OK", "type": "string"}},
+    "required": ["verification"],
+    "type": "object",
+}
+
+
 def _completion(
     content: str,
     *,
-    model: str = "moonshotai/kimi-k3",
+    model: str | None = "moonshotai/kimi-k3",
     prompt_tokens: int = 100,
     completion_tokens: int = 50,
     usage: bool = True,
 ) -> bytes:
     payload: dict[str, object] = {
-        "model": model,
         "choices": [{"message": {"role": "assistant", "content": content}}],
     }
+    if model is not None:
+        payload["model"] = model
     if usage:
         payload["usage"] = {
             "prompt_tokens": prompt_tokens,
@@ -255,10 +264,68 @@ def test_execute_rejects_wrong_model_echo() -> None:
         _execute(transport)
 
 
+def test_execute_rejects_missing_model_echo() -> None:
+    transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}', model=None))
+    with pytest.raises(AdapterError, match="^model_identity_unverified$"):
+        _execute(transport)
+
+
+def test_execute_rejects_empty_model_echo() -> None:
+    transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}', model=""))
+    with pytest.raises(AdapterError, match="^model_identity_unverified$"):
+        _execute(transport)
+
+
+def test_execute_rejects_non_string_model_echo() -> None:
+    transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}', model=123))
+    with pytest.raises(AdapterError, match="^model_identity_unverified$"):
+        _execute(transport)
+
+
 def test_execute_schema_digest_mismatch_never_reaches_transport() -> None:
     transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}'))
     with pytest.raises(AdapterError, match="^request_invalid$"):
         _execute(transport, output_schema_sha256="0" * 64)
+    assert transport.calls == []
+
+
+def test_execute_json_object_rejects_nonconforming_response() -> None:
+    # A dict that is NOT valid per _SCHEMA (const mismatch) must be rejected even
+    # in json_object mode, where the schema is not provider-enforced.
+    transport = _RecordingTransport(_completion('{"result":"WRONG"}'))
+    with pytest.raises(AdapterError, match="^response_contract_invalid$"):
+        _execute(transport, response_format_type="json_object")
+
+
+def test_execute_json_object_rejects_extra_keys() -> None:
+    transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK","x":1}'))
+    with pytest.raises(AdapterError, match="^response_contract_invalid$"):
+        _execute(transport, response_format_type="json_object")
+
+
+def test_execute_enforces_verification_oracle_in_json_object_mode() -> None:
+    # The OpenRouter verification path uses VERIFY_SCHEMA; its const IS the oracle. A wrong
+    # verification value must be rejected (response_contract_invalid) even in json_object mode,
+    # which previously enforced nothing. Proves T1a Task 4 closed this for the verify path.
+    wrong = _RecordingTransport(_completion('{"verification":"WRONG"}'))
+    with pytest.raises(AdapterError, match="^response_contract_invalid$"):
+        _execute(wrong, output_schema=_VERIFY_SCHEMA,
+                 output_schema_sha256=_canonical_sha256(_VERIFY_SCHEMA),
+                 response_format_type="json_object")
+    ok = _RecordingTransport(_completion('{"verification":"GRAPHITE_PROFILE_OK"}'))
+    outcome = _execute(ok, output_schema=_VERIFY_SCHEMA,
+                       output_schema_sha256=_canonical_sha256(_VERIFY_SCHEMA),
+                       response_format_type="json_object")
+    assert outcome.message == '{"verification":"GRAPHITE_PROFILE_OK"}'
+
+
+def test_execute_rejects_unsupported_output_schema_before_transport() -> None:
+    bad = {"type": "object", "properties": {"result": {"type": "string"}},
+           "required": ["result"], "additionalProperties": False,
+           "patternProperties": {"^x": {"type": "string"}}}
+    transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}'))
+    with pytest.raises(AdapterError, match="^request_invalid$"):
+        _execute(transport, output_schema=bad, output_schema_sha256=_canonical_sha256(bad))
     assert transport.calls == []
 
 

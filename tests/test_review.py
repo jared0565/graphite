@@ -17,6 +17,7 @@ from graphite.config import Config
 from graphite.engine_identity import engine_identity
 from graphite.review import (
     Change,
+    MAX_REVIEW_PACKET_ITEMS,
     ReviewError,
     _parse_porcelain,
     build_review_packet,
@@ -782,6 +783,45 @@ def test_build_review_packet_sensitive_paths_are_case_insensitive(path: str) -> 
 
     assert "SENSITIVE_CONFIG" in packet["risk"]["signals"]
     assert "VERIFY_CONFIG" in [item["id"] for item in packet["acceptance_criteria"]]
+
+
+def test_review_packet_truncates_changes_and_flags_output():
+    changes = [Change(f"a/f{index:06d}.py", "modified") for index in range(MAX_REVIEW_PACKET_ITEMS + 1)]
+    packet = _packet(changes)
+    assert len(packet["changes"]) == MAX_REVIEW_PACKET_ITEMS
+    assert {"code": "OUTPUT_TRUNCATED", "message": "Review output was truncated to a bounded size; some entries are not shown."} in packet["warnings"]
+
+
+def test_review_packet_within_cap_is_not_flagged():
+    packet = _packet([Change("src/store.py", "modified")])
+    assert len(packet["changes"]) == 1
+    assert all(warning.get("code") != "OUTPUT_TRUNCATED" for warning in packet["warnings"])
+
+
+def test_review_packet_at_cap_is_not_truncated():
+    changes = [Change(f"a/f{index:06d}.py", "modified") for index in range(MAX_REVIEW_PACKET_ITEMS)]
+    packet = _packet(changes)
+    assert len(packet["changes"]) == MAX_REVIEW_PACKET_ITEMS
+    assert all(warning.get("code") != "OUTPUT_TRUNCATED" for warning in packet["warnings"])
+
+
+def test_review_packet_detects_sensitive_change_beyond_cap():
+    # A sensitive change sorted BEYOND the cap index is dropped from the serialized
+    # list but MUST still raise its risk signal — detection runs over the full set.
+    bulk = [Change(f"a/f{index:06d}.py", "modified") for index in range(MAX_REVIEW_PACKET_ITEMS + 1)]
+    changes = bulk + [Change("z/pyproject.toml", "modified")]  # basename => sensitive; sorts last
+    packet = _packet(changes)
+    serialized_paths = {change["path"] for change in packet["changes"]}
+    assert "z/pyproject.toml" not in serialized_paths  # truncated out of the visible list
+    assert "SENSITIVE_CONFIG" in packet["risk"]["signals"]  # but detected over the full set
+    assert len(packet["changes"]) == MAX_REVIEW_PACKET_ITEMS
+
+
+def test_review_packet_truncates_impact_lists():
+    bundle = _review_bundle(dependent_count=MAX_REVIEW_PACKET_ITEMS + 1)
+    packet = _packet([Change("src/store.py", "modified")], bundle=bundle)
+    assert len(packet["impact"]["impacted_files"]) == MAX_REVIEW_PACKET_ITEMS
+    assert {"code": "OUTPUT_TRUNCATED", "message": "Review output was truncated to a bounded size; some entries are not shown."} in packet["warnings"]
 
 
 def test_build_review_packet_rejects_negative_depth() -> None:
