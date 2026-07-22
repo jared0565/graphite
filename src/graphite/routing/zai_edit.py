@@ -12,7 +12,7 @@ Preamble and interstitial prose (e.g. "Here are the files:") are tolerated by
 design — non-marker lines outside blocks are skipped and the live smoke relies
 on this. Two accepted, documented consequences: (1) a content line byte-identical
 to its own path-qualified end marker truncates at that line (line boundaries
-follow ``str.splitlines`` — any Unicode line terminator, not only ``\n`` —
+follow ``str.splitlines`` — any Unicode line terminator, not only ``\\n`` —
 though content bytes are always sliced verbatim from the raw message, so
 extraction stays byte-exact); (2) prose containing a begin-marker-shaped line
 yields a phantom block, which surfaces as a scope-set mismatch (rejected, not
