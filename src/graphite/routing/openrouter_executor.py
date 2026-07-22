@@ -31,6 +31,7 @@ from .probe_runner import (
     ProviderProbeError,
     run_http_probe,
 )
+from .schema_validation import is_supported_schema, matches_schema
 
 ADAPTER_PROTOCOL_VERSION: Final = "1.0.0"
 API_CONTRACT_VERSION: Final = "1.0.0"
@@ -212,6 +213,8 @@ def execute_openrouter(
         raise AdapterError("request_invalid")
     if not isinstance(output_schema, dict) or not output_schema:
         raise AdapterError("request_invalid")
+    if not is_supported_schema(output_schema):
+        raise AdapterError("request_invalid")
     try:
         schema_canonical = json.dumps(
             output_schema, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -312,6 +315,8 @@ def execute_openrouter(
     except (json.JSONDecodeError, RecursionError):
         raise AdapterError("response_contract_invalid") from None
     if not isinstance(structured, dict):
+        raise AdapterError("response_contract_invalid")
+    if not matches_schema(structured, output_schema):
         raise AdapterError("response_contract_invalid")
     usage = envelope.get("usage")
     if not isinstance(usage, dict):

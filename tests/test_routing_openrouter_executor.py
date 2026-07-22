@@ -262,10 +262,45 @@ def test_execute_rejects_missing_model_echo() -> None:
         _execute(transport)
 
 
+def test_execute_rejects_empty_model_echo() -> None:
+    transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}', model=""))
+    with pytest.raises(AdapterError, match="^model_identity_unverified$"):
+        _execute(transport)
+
+
+def test_execute_rejects_non_string_model_echo() -> None:
+    transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}', model=123))
+    with pytest.raises(AdapterError, match="^model_identity_unverified$"):
+        _execute(transport)
+
+
 def test_execute_schema_digest_mismatch_never_reaches_transport() -> None:
     transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}'))
     with pytest.raises(AdapterError, match="^request_invalid$"):
         _execute(transport, output_schema_sha256="0" * 64)
+    assert transport.calls == []
+
+
+def test_execute_json_object_rejects_nonconforming_response() -> None:
+    # A dict that is NOT valid per _SCHEMA (const mismatch) must be rejected even
+    # in json_object mode, where the schema is not provider-enforced.
+    transport = _RecordingTransport(_completion('{"result":"WRONG"}'))
+    with pytest.raises(AdapterError, match="^response_contract_invalid$"):
+        _execute(transport, response_format_type="json_object")
+
+
+def test_execute_json_object_rejects_extra_keys() -> None:
+    transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK","x":1}'))
+    with pytest.raises(AdapterError, match="^response_contract_invalid$"):
+        _execute(transport, response_format_type="json_object")
+
+
+def test_execute_rejects_unsupported_output_schema_before_transport() -> None:
+    bad = {"type": "object", "properties": {"result": {"type": "string"}},
+           "required": ["result"], "additionalProperties": False, "minProperties": 1}
+    transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK"}'))
+    with pytest.raises(AdapterError, match="^request_invalid$"):
+        _execute(transport, output_schema=bad, output_schema_sha256=_canonical_sha256(bad))
     assert transport.calls == []
 
 
