@@ -139,12 +139,9 @@ def _capacity_attempt(pool: ApprovedRoutePool, **changes: object) -> RouteAttemp
 
 @pytest.mark.parametrize(
     "provider",
-    # route_pool.py's own _RUNTIME_BY_PROVIDER map does not include ZAI.
-    # Pool registration for zai is out of scope for this spec (the z.ai
-    # native-provider verification plan) and is deferred to a future spec —
-    # no task in this plan reverses this exclusion.
-    # Exclude it here rather than exercising an unsupported provider.
-    tuple(p for p in LifecycleProviderId if p is not LifecycleProviderId.ZAI),
+    # Every lifecycle provider — including z.ai, now registered in
+    # route_pool._RUNTIME_BY_PROVIDER — is a valid single-candidate preapproved route.
+    tuple(LifecycleProviderId),
 )
 def test_every_provider_can_be_an_exact_preapproved_candidate(
     provider: LifecycleProviderId,
