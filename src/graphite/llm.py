@@ -1,12 +1,14 @@
 """Provider-agnostic LLM enrichment primitives for explicit overlays only."""
 from __future__ import annotations
 
+import ipaddress
 import json
 from dataclasses import replace
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
 
 from .config import Config
 
@@ -104,6 +106,7 @@ class OpenAICompatibleProvider:
                 "GRAPHITE_LLM_BASE_URL is required for openai-compatible providers"
             )
         self.base_url = base_url.rstrip("/")
+        _validate_llm_base_url(self.base_url, provider=cfg.llm_provider)
         self.model = cfg.llm_model or _default_model(cfg.llm_provider)
         self.api_key = cfg.llm_api_key
         self.timeout = cfg.llm_timeout_seconds
@@ -155,6 +158,7 @@ class OllamaProvider:
 
     def __init__(self, cfg: Config) -> None:
         self.base_url = (cfg.llm_base_url or "http://localhost:11434").rstrip("/")
+        _validate_llm_base_url(self.base_url, provider=cfg.llm_provider)
         self.model = cfg.llm_model or "llama3.1"
         self.timeout = cfg.llm_timeout_seconds
         self.seed = cfg.seed
@@ -227,6 +231,51 @@ def canonical_provider_name(provider: str) -> Literal[
 def _provider_requires_api_key(provider: str) -> bool:
     normalized = provider.strip().lower().replace("_", "-")
     return normalized in {"openai", "openrouter", "groq"}
+
+
+def _provider_requires_secure_egress(provider: str) -> bool:
+    normalized = provider.strip().lower().replace("_", "-")
+    return normalized in {"openai", "openrouter", "groq"}
+
+
+def _validate_llm_base_url(base_url: str, *, provider: str) -> None:
+    """Apply the provider-class egress policy to an operator-supplied base URL.
+
+    Every provider rejects non-HTTP(S) schemes. The keyed cloud providers
+    (openai/openrouter/groq) additionally require HTTPS and reject IP-literal
+    loopback/private/link-local/reserved hosts and the name 'localhost' -- those
+    providers have no legitimate internal target, so an internal target there is a
+    misconfiguration that would leak the bearer token. Local and generic
+    openai-compatible providers keep http + loopback/private, which are intended.
+    DNS-name hosts are accepted; name-based private targets are out of scope
+    because base_url is operator-controlled (no DNS-rebinding adversary).
+    """
+    parts = urlsplit(base_url)
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise LLMConfigurationError("GRAPHITE_LLM_BASE_URL must use http or https")
+
+    if not _provider_requires_secure_egress(provider):
+        return
+
+    if scheme != "https":
+        raise LLMConfigurationError("this LLM provider requires an https GRAPHITE_LLM_BASE_URL")
+    host = parts.hostname or ""
+    if host.lower() == "localhost":
+        raise LLMConfigurationError("this LLM provider may not target a loopback or private host")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return  # A DNS name; name-based private targets are out of scope.
+    if (
+        address.is_loopback
+        or address.is_private
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    ):
+        raise LLMConfigurationError("this LLM provider may not target a loopback or private host")
 
 
 def _provider_has_default_base_url(provider: str) -> bool:

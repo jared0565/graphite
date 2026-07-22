@@ -14,6 +14,12 @@ from graphite.llm import (
     build_report_prompt,
     enrich_report,
 )
+from graphite.llm import (
+    LLMConfigurationError,
+    OpenAICompatibleProvider,
+    _validate_llm_base_url,
+    make_provider,
+)
 
 
 class _FakeResponse:
@@ -384,3 +390,41 @@ def test_prompt_is_bounded_and_uses_graph_metadata_only() -> None:
     assert len(user) < 750
     assert "truncated by GRAPHITE_LLM_MAX_INPUT_CHARS" in user
     assert "source code" not in user.lower()
+
+
+def test_keyed_provider_rejects_http_base_url():
+    cfg = Config(llm_provider="openrouter", llm_base_url="http://openrouter.ai/api/v1")
+    with pytest.raises(LLMConfigurationError):
+        OpenAICompatibleProvider(cfg)
+
+
+def test_keyed_provider_rejects_loopback_and_private_hosts():
+    for base_url in ("https://127.0.0.1/v1", "https://10.0.0.5/v1", "https://[::1]/v1"):
+        with pytest.raises(LLMConfigurationError):
+            _validate_llm_base_url(base_url, provider="openrouter")
+
+
+def test_keyed_provider_rejects_localhost_name():
+    with pytest.raises(LLMConfigurationError):
+        _validate_llm_base_url("https://localhost/v1", provider="groq")
+
+
+def test_keyed_provider_accepts_public_https_default():
+    # openrouter's built-in default base URL must satisfy the policy.
+    provider = make_provider(Config(llm_provider="openrouter", llm_mode="cloud"))
+    assert provider.base_url == "https://openrouter.ai/api/v1"
+
+
+def test_keyed_provider_accepts_dns_name_host():
+    # A DNS name is out of scope for host filtering (operator-controlled input).
+    _validate_llm_base_url("https://internal-gateway.corp/v1", provider="groq")
+
+
+def test_local_provider_allows_loopback_http():
+    provider = make_provider(Config(llm_provider="vllm", llm_base_url="http://localhost:8000/v1"))
+    assert provider.base_url == "http://localhost:8000/v1"
+
+
+def test_any_provider_rejects_non_http_scheme():
+    with pytest.raises(LLMConfigurationError):
+        _validate_llm_base_url("file:///etc/passwd", provider="ollama")
