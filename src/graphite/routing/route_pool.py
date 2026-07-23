@@ -26,6 +26,7 @@ _RUNTIME_BY_PROVIDER = {
     LifecycleProviderId.CODEX: RuntimeKind.LOCAL_CLI,
     LifecycleProviderId.OLLAMA: RuntimeKind.LOCAL_HTTP,
     LifecycleProviderId.OPENROUTER: RuntimeKind.REMOTE_HTTPS,
+    LifecycleProviderId.ZAI: RuntimeKind.REMOTE_HTTPS,
 }
 _FAILURE_CATEGORIES = frozenset(
     {

@@ -37,6 +37,7 @@ _RUNTIME = {
     LifecycleProviderId.CODEX: RuntimeKind.LOCAL_CLI,
     LifecycleProviderId.OLLAMA: RuntimeKind.LOCAL_HTTP,
     LifecycleProviderId.OPENROUTER: RuntimeKind.REMOTE_HTTPS,
+    LifecycleProviderId.ZAI: RuntimeKind.REMOTE_HTTPS,
 }
 
 
@@ -138,12 +139,9 @@ def _capacity_attempt(pool: ApprovedRoutePool, **changes: object) -> RouteAttemp
 
 @pytest.mark.parametrize(
     "provider",
-    # route_pool.py's own _RUNTIME_BY_PROVIDER map does not include ZAI.
-    # Pool registration for zai is out of scope for this spec (the z.ai
-    # native-provider verification plan) and is deferred to a future spec —
-    # no task in this plan reverses this exclusion.
-    # Exclude it here rather than exercising an unsupported provider.
-    tuple(p for p in LifecycleProviderId if p is not LifecycleProviderId.ZAI),
+    # Every lifecycle provider — including z.ai, now registered in
+    # route_pool._RUNTIME_BY_PROVIDER — is a valid single-candidate preapproved route.
+    tuple(LifecycleProviderId),
 )
 def test_every_provider_can_be_an_exact_preapproved_candidate(
     provider: LifecycleProviderId,
@@ -633,3 +631,38 @@ def test_success_result_cannot_exceed_remaining_aggregate_budget(tmp_path: Path)
             now=lambda: 150,
         )
     assert persisted == []
+
+
+def test_zai_candidate_constructs_with_remote_https_runtime() -> None:
+    # z.ai (GLM-5.2) must be a poolable REMOTE_HTTPS candidate (Track-2 parity). Before adding
+    # ZAI to route_pool._RUNTIME_BY_PROVIDER this raised route_candidate_invalid at construction.
+    candidate = _candidate(LifecycleProviderId.ZAI, 3)
+    assert candidate.provider is LifecycleProviderId.ZAI
+    assert candidate.runtime_kind is RuntimeKind.REMOTE_HTTPS
+    assert candidate.routing_policy_digest is None
+
+
+def test_zai_candidate_rejects_non_remote_https_runtime() -> None:
+    # z.ai is pinned to REMOTE_HTTPS by _RUNTIME_BY_PROVIDER; any other runtime fails closed.
+    with pytest.raises(RoutePoolError, match="^route_candidate_invalid$"):
+        _candidate(LifecycleProviderId.ZAI, 3, runtime_kind=RuntimeKind.LOCAL_CLI)
+
+
+def test_zai_candidate_rejects_routing_policy_digest() -> None:
+    # routing_policy_digest is OpenRouter-exclusive; every other provider (incl. z.ai) must
+    # carry None. A non-None digest on z.ai must fail closed (regression pin for route_pool:172).
+    with pytest.raises(RoutePoolError, match="^route_candidate_invalid$"):
+        _candidate(LifecycleProviderId.ZAI, 3, routing_policy_digest="f" * 64)
+
+
+def test_zai_candidate_pools_alongside_local_provider() -> None:
+    # z.ai is poolable end-to-end: a cross-provider pool pairing a local CLI candidate with z.ai
+    # constructs successfully once z.ai is a registered runtime.
+    pool = _pool(
+        candidates=(
+            _candidate(LifecycleProviderId.CLAUDE_CODE, 1),
+            _candidate(LifecycleProviderId.ZAI, 3),
+        )
+    )
+    assert pool.candidates[1].provider is LifecycleProviderId.ZAI
+    assert pool.candidates[1].runtime_kind is RuntimeKind.REMOTE_HTTPS
