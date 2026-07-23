@@ -238,6 +238,12 @@ def _provider_requires_secure_egress(provider: str) -> bool:
     return normalized in {"openai", "openrouter", "groq"}
 
 
+# RFC 6598 carrier-grade NAT / shared address space. Not classified as private by
+# is_private on every CPython patch version, so reject it explicitly rather than relying
+# on the stdlib's version-dependent classification.
+_CGNAT_SHARED_IPV4 = ipaddress.ip_network("100.64.0.0/10")
+
+
 def _validate_llm_base_url(base_url: str, *, provider: str) -> None:
     """Apply the provider-class egress policy to an operator-supplied base URL.
 
@@ -274,6 +280,7 @@ def _validate_llm_base_url(base_url: str, *, provider: str) -> None:
         or address.is_reserved
         or address.is_multicast
         or address.is_unspecified
+        or (address.version == 4 and address in _CGNAT_SHARED_IPV4)
     ):
         raise LLMConfigurationError("this LLM provider may not target a loopback or private host")
 
