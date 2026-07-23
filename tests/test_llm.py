@@ -428,3 +428,18 @@ def test_local_provider_allows_loopback_http():
 def test_any_provider_rejects_non_http_scheme():
     with pytest.raises(LLMConfigurationError):
         _validate_llm_base_url("file:///etc/passwd", provider="ollama")
+
+
+@pytest.mark.parametrize("host", ["100.64.0.0", "100.64.0.1", "100.127.255.255"])
+def test_keyed_provider_rejects_cgnat_shared_address(host):
+    # RFC 6598 100.64.0.0/10 is not globally routable; a keyed cloud provider aimed there
+    # is a misconfiguration that would leak the bearer token. is_private does not cover it
+    # on all CPython versions, so it must be rejected explicitly.
+    with pytest.raises(LLMConfigurationError):
+        _validate_llm_base_url(f"https://{host}/v1", provider="groq")
+
+
+@pytest.mark.parametrize("host", ["100.63.255.255", "100.128.0.0"])
+def test_keyed_provider_accepts_addresses_just_outside_cgnat(host):
+    # Immediately below/above the /10 -- globally routable, must remain accepted (no raise).
+    _validate_llm_base_url(f"https://{host}/v1", provider="groq")

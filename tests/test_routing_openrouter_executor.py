@@ -297,6 +297,15 @@ def test_execute_json_object_rejects_nonconforming_response() -> None:
         _execute(transport, response_format_type="json_object")
 
 
+def test_execute_json_schema_rejects_nonconforming_response() -> None:
+    # Parity with the json_object nonconforming test: in the default json_schema mode a
+    # structurally nonconforming completion body must also fail closed at matches_schema
+    # (openrouter_executor.py -> response_contract_invalid), not slip through.
+    transport = _RecordingTransport(_completion('{"result":"WRONG"}'))
+    with pytest.raises(AdapterError, match="^response_contract_invalid$"):
+        _execute(transport)   # no response_format_type override => json_schema mode
+
+
 def test_execute_json_object_rejects_extra_keys() -> None:
     transport = _RecordingTransport(_completion('{"result":"GRAPHITE_EDIT_OK","x":1}'))
     with pytest.raises(AdapterError, match="^response_contract_invalid$"):

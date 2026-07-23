@@ -38,6 +38,12 @@ def is_supported_schema(schema: object) -> bool:
         return False
     if not isinstance(schema.get("additionalProperties", False), bool):
         return False
+    pattern = schema.get("pattern")
+    if isinstance(pattern, str):
+        try:
+            re.compile(pattern)
+        except re.error:
+            return False
     properties = schema.get("properties")
     if properties is not None:
         if not isinstance(properties, dict):

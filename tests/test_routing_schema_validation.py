@@ -163,3 +163,18 @@ def test_governed_edit_response_conforms_and_rejects():
     bad_path = {"result": "GRAPHITE_EDIT_OK",
                 "files": [{"path": "evil.py", "content": "x"}, {"path": "tests/test_access.py", "content": "y"}]}
     assert matches_schema(bad_path, EDIT_SCHEMA) is False   # path enum
+
+
+def test_fails_closed_on_uncompilable_pattern():
+    # A malformed regex must be caught at the gate (before any paid call), not raise
+    # re.error inside matches_schema at response time. The "never raises" guarantee on
+    # matches_schema depends on this.
+    assert is_supported_schema({"type": "string", "pattern": "["}) is False
+    assert is_supported_schema({"type": "string", "pattern": "(unclosed"}) is False
+    # caught recursively when nested inside properties / items
+    assert is_supported_schema(
+        {"type": "object", "properties": {"x": {"type": "string", "pattern": "["}}}) is False
+    assert is_supported_schema(
+        {"type": "array", "items": {"type": "string", "pattern": "(?P<n>"}}) is False
+    # a valid pattern is still supported (guards against over-rejection)
+    assert is_supported_schema({"type": "string", "pattern": "^[0-9a-f]{64}$"}) is True
