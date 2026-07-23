@@ -1435,3 +1435,14 @@ def test_review_changes_cli_rejects_nonexistent_root_safely(
     assert output.out == ""
     assert str(missing) not in output.err
     assert len(output.err) < 200
+
+
+def test_formatter_packet_rejects_non_string_matched_nodes():
+    from graphite.review import _validate_formatter_packet
+    with pytest.raises(ReviewError, match="review packet is invalid"):
+        _validate_formatter_packet({"impact": {"matched_nodes": [123]}})
+
+
+def test_formatter_packet_accepts_string_matched_nodes():
+    from graphite.review import _validate_formatter_packet
+    _validate_formatter_packet({"impact": {"matched_nodes": ["store", "cli"]}})  # no raise

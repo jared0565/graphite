@@ -582,7 +582,7 @@ def _validate_formatter_packet(packet: Any) -> None:
         if not isinstance(values, list) or not all(isinstance(value, dict) for value in values):
             raise ReviewError("review packet is invalid")
     impact = packet.get("impact", {})
-    for field in ("impacted_files", "likely_tests", "missing"):
+    for field in ("matched_nodes", "impacted_files", "likely_tests", "missing"):
         values = impact.get(field, [])
         if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
             raise ReviewError("review packet is invalid")
