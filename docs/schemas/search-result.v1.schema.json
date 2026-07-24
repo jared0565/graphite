@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jared0565/graphite/docs/schemas/search-result.v1.schema.json",
+  "title": "graphite search result v1",
+  "description": "Response of `graphite search --json` (and the embedded `search` object of a natural-language fallback). ok:false carries error/error_code (empty_search); ok:true carries query/count/total_matches/truncated/results ranked by deterministic precedence tier, then score, then id. This shape is fully owned by graphite, so it is strict: additive changes require updating this file (compatibility tests enforce it).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "schema_version"],
+  "properties": {
+    "ok": {"type": "boolean"},
+    "schema_version": {"const": 1},
+    "error": {"type": "string"},
+    "error_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "query": {"type": "string"},
+    "count": {"type": "integer"},
+    "total_matches": {"type": "integer"},
+    "truncated": {"type": "boolean"},
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "kind", "source_file", "match_type", "score"],
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "kind": {"type": "string"},
+          "source_file": {"type": "string"},
+          "match_type": {
+            "type": "string",
+            "enum": ["exact-id", "name", "path-suffix", "id-substring", "name-substring", "tokens"]
+          },
+          "score": {"type": "number"}
+        }
+      }
+    }
+  }
+}

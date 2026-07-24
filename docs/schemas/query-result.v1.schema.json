@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jared0565/graphite/docs/schemas/query-result.v1.schema.json",
+  "title": "graphite query result envelope v1",
+  "description": "Common envelope for `graphite query` and `graphite query --natural` responses. Consume rule: branch on the presence of error_code first; success responses carry resolution (per-target, aligned with plan roles). Verb-specific payload keys (callers, calls, depends_on, imported_by, source/target/length/path, community, stats fields, ...) are additive and deliberately not constrained here. Bounded verbs report truncated + limits; a no_path error with truncated:true means the depth bound was hit, not that absence was proven. Note for consumers reusing graphite's subset validator (routing/schema_validation.py): it treats ABSENT additionalProperties as closed, so every deliberately open object in this file says additionalProperties:true explicitly.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "error": {"type": "string"},
+    "error_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "suggestions": {"type": "array", "items": {"type": "string"}},
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["id", "name", "kind", "source_file"],
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "kind": {"type": "string"},
+          "source_file": {"type": "string"}
+        }
+      }
+    },
+    "resolution": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["role", "input", "node", "type"],
+        "properties": {
+          "role": {"type": "string", "enum": ["node", "source", "target"]},
+          "input": {"type": "string"},
+          "node": {"type": "string"},
+          "type": {"type": "string"},
+          "alternates": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "truncated": {"type": "boolean"},
+    "limits": {
+      "type": "object",
+      "properties": {
+        "max_depth": {"type": "integer"},
+        "max_results": {"type": "integer"}
+      }
+    },
+    "count": {"type": "integer"},
+    "total": {"type": "integer"},
+    "plan": {"type": "object", "additionalProperties": true},
+    "natural": {
+      "type": "object",
+      "required": ["question", "intent"],
+      "properties": {
+        "question": {"type": "string"},
+        "intent": {"type": "string"},
+        "pattern": {"type": ["string", "null"]}
+      }
+    },
+    "suggestion": {
+      "type": "object",
+      "required": ["command"],
+      "properties": {
+        "command": {"type": "array", "items": {"type": "string"}},
+        "reason": {"type": "string"}
+      }
+    },
+    "search": {"type": "object", "additionalProperties": true}
+  }
+}

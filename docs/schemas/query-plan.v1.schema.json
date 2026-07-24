@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jared0565/graphite/docs/schemas/query-plan.v1.schema.json",
+  "title": "graphite canonical query plan v1",
+  "description": "Deterministic, inference-free intermediate representation of a structured `graphite query` invocation. This file's body (minus $schema/$id/title/description) is pinned byte-for-byte to graphite.query_plan.PLAN_SCHEMA by tests/test_published_schemas.py. Stays inside graphite's zero-dependency subset validator: no combinator keywords.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["plan_version", "operation", "targets", "options", "source"],
+  "properties": {
+    "plan_version": {"const": 1},
+    "operation": {"type": "string", "minLength": 1},
+    "targets": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "input"],
+        "properties": {
+          "role": {"type": "string", "enum": ["node", "source", "target"]},
+          "input": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_depth": {"type": "integer"},
+        "max_results": {"type": "integer"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {"mode": {"const": "local-graph"}}
+    }
+  }
+}
