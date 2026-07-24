@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import re
 from collections import deque
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 import networkx as nx
 
@@ -11,180 +12,233 @@ import networkx as nx
 _CALL_RELATIONS: frozenset[str] = frozenset({"calls", "references"})
 
 
-def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
-    """Answer a simple query string.
+def _verb_callers(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
+    token = " ".join(rest)
+    detail = _find_node_detail(g, token)
+    if not detail:
+        return _not_found(g, token)
+    node_id = detail[0]
+    callers = [
+        _node_view(g, p)
+        for p in sorted(g.predecessors(node_id))
+        if g[p][node_id].get("relation") in _CALL_RELATIONS
+    ]
+    return {"node": node_id, "match": _match_meta(token, detail), "count": len(callers), "callers": callers}
 
-    Supported patterns:
-    - depends-on <node>         : nodes that <node> directly depends on (out-edges)
-    - imported-by <node>          : nodes that directly point to <node> (in-edges)
-    - callers <symbol>            : functions that call <symbol> (calls/references in-edges)
-    - calls <symbol> (callees)    : functions/symbols that <symbol> calls (calls/references out-edges)
-    - reaches <a> -> <b>          : directed path from a to b over call/reference edges only
-    - path <a> -> <b>             : shortest directed path from a to b
-    - community-of <node>       : cluster/community label for a node
-    - stats                       : basic graph statistics
-    """
+
+def _verb_calls(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
+    token = " ".join(rest)
+    detail = _find_node_detail(g, token)
+    if not detail:
+        return _not_found(g, token)
+    node_id = detail[0]
+    callees = [
+        _node_view(g, s)
+        for s in sorted(g.successors(node_id))
+        if g[node_id][s].get("relation") in _CALL_RELATIONS
+    ]
+    return {"node": node_id, "match": _match_meta(token, detail), "count": len(callees), "calls": callees}
+
+
+def _split_arrow(verb: str, rest: list[str]) -> tuple[str, str] | dict[str, Any]:
+    try:
+        arrow = rest.index("->")
+    except ValueError:
+        return {"error": f"{verb} query format: {verb} <a> -> <b>"}
+    return " ".join(rest[:arrow]), " ".join(rest[arrow + 1 :])
+
+
+def _verb_reaches(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
+    split = _split_arrow("reaches", rest)
+    if isinstance(split, dict):
+        return split
+    a, b = split
+    src_detail = _find_node_detail(g, a)
+    dst_detail = _find_node_detail(g, b)
+    if not src_detail:
+        return _not_found(g, a, label="source")
+    if not dst_detail:
+        return _not_found(g, b, label="target")
+    src, dst = src_detail[0], dst_detail[0]
+    p = _restricted_call_path(g, src, dst)
+    if p is None:
+        return {"error": f"no call path from {src} to {dst}"}
+    return {
+        "source": src,
+        "target": dst,
+        "match": {"source": _match_meta(a, src_detail), "target": _match_meta(b, dst_detail)},
+        "length": len(p) - 1,
+        "path": [_node_view(g, n) for n in p],
+    }
+
+
+def _verb_stats(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
+    del rest
+    kinds: dict[str, int] = {}
+    for _n, data in g.nodes(data=True):
+        kind = data.get("kind", "unknown")
+        kinds[kind] = kinds.get(kind, 0) + 1
+    relations: dict[str, int] = {}
+    for _u, _v, data in g.edges(data=True):
+        relation = data.get("relation", "unknown")
+        relations[relation] = relations.get(relation, 0) + 1
+    communities = {
+        data.get("community") for _n, data in g.nodes(data=True) if data.get("community") is not None
+    }
+    top_in = sorted(g.in_degree(), key=lambda item: item[1], reverse=True)[:5]
+    top_out = sorted(g.out_degree(), key=lambda item: item[1], reverse=True)[:5]
+    return {
+        "node_count": g.number_of_nodes(),
+        "edge_count": g.number_of_edges(),
+        "density": nx.density(g),
+        "community_count": len(communities),
+        "nodes_by_kind": dict(sorted(kinds.items(), key=lambda item: item[1], reverse=True)),
+        "edges_by_relation": dict(sorted(relations.items(), key=lambda item: item[1], reverse=True)),
+        "top_incoming": [{**_node_view(g, n), "in_degree": d} for n, d in top_in],
+        "top_outgoing": [{**_node_view(g, n), "out_degree": d} for n, d in top_out],
+    }
+
+
+def _neighbor_listing(g: nx.DiGraph, rest: list[str], *, key: str, incoming: bool) -> dict[str, Any]:
+    token = " ".join(rest)
+    detail = _find_node_detail(g, token)
+    if not detail:
+        return _not_found(g, token)
+    node_id = detail[0]
+    neighbors = sorted(g.predecessors(node_id) if incoming else g.successors(node_id))
+    return {
+        "node": node_id,
+        "match": _match_meta(token, detail),
+        "count": len(neighbors),
+        key: [
+            {"id": n, "name": g.nodes[n].get("name", n), "kind": g.nodes[n].get("kind", "unknown")}
+            for n in neighbors
+        ],
+    }
+
+
+def _verb_depends_on(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
+    return _neighbor_listing(g, rest, key="depends_on", incoming=False)
+
+
+def _verb_imported_by(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
+    return _neighbor_listing(g, rest, key="imported_by", incoming=True)
+
+
+def _verb_path(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
+    split = _split_arrow("path", rest)
+    if isinstance(split, dict):
+        return split
+    a, b = split
+    src_detail = _find_node_detail(g, a)
+    dst_detail = _find_node_detail(g, b)
+    if not src_detail:
+        return _not_found(g, a, label="source")
+    if not dst_detail:
+        return _not_found(g, b, label="target")
+    src, dst = src_detail[0], dst_detail[0]
+    try:
+        p = nx.shortest_path(g, src, dst)
+    except nx.NetworkXNoPath:
+        return {"error": f"no path from {src} to {dst}"}
+    return {
+        "source": src,
+        "target": dst,
+        "match": {"source": _match_meta(a, src_detail), "target": _match_meta(b, dst_detail)},
+        "length": len(p) - 1,
+        "path": [
+            {"id": n, "name": g.nodes[n].get("name", n), "kind": g.nodes[n].get("kind", "unknown")}
+            for n in p
+        ],
+    }
+
+
+def _verb_community_of(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
+    token = " ".join(rest)
+    detail = _find_node_detail(g, token)
+    if not detail:
+        return _not_found(g, token)
+    node_id = detail[0]
+    return {
+        "node": node_id,
+        "match": _match_meta(token, detail),
+        "community": g.nodes[node_id].get("community"),
+        "name": g.nodes[node_id].get("name", node_id),
+    }
+
+
+@dataclass(frozen=True)
+class QueryVerb:
+    """One dispatchable query verb; the registry drives dispatch, help, and capabilities."""
+
+    name: str
+    aliases: tuple[str, ...]
+    arguments: str
+    description: str
+    handler: Callable[[nx.DiGraph, list[str]], dict[str, Any]]
+
+
+QUERY_VERBS: tuple[QueryVerb, ...] = (
+    QueryVerb(
+        "callers", ("called-by", "called_by"), "<symbol>",
+        "Functions that call <symbol> (calls/references in-edges)", _verb_callers,
+    ),
+    QueryVerb(
+        "calls", ("callees",), "<symbol>",
+        "Functions/symbols that <symbol> calls (calls/references out-edges)", _verb_calls,
+    ),
+    QueryVerb(
+        "reaches", (), "<a> -> <b>",
+        "Directed path from a to b over call/reference edges only", _verb_reaches,
+    ),
+    QueryVerb(
+        "path", (), "<a> -> <b>",
+        "Shortest directed path from a to b over all edges", _verb_path,
+    ),
+    QueryVerb(
+        "depends-on", ("depends_on", "out"), "<node>",
+        "Nodes that <node> directly depends on (out-edges)", _verb_depends_on,
+    ),
+    QueryVerb(
+        "imported-by", ("imported_by", "in"), "<node>",
+        "Nodes that directly point to <node> (in-edges)", _verb_imported_by,
+    ),
+    QueryVerb(
+        "community-of", ("community_of",), "<node>",
+        "Cluster/community label for a node", _verb_community_of,
+    ),
+    QueryVerb("stats", (), "", "Basic graph statistics", _verb_stats),
+)
+
+_VERB_INDEX: dict[str, QueryVerb] = {
+    alias: spec for spec in QUERY_VERBS for alias in (spec.name, *spec.aliases)
+}
+
+
+def verb_catalog() -> list[dict[str, Any]]:
+    """Machine-readable listing of every dispatchable query verb."""
+    return [
+        {
+            "name": spec.name,
+            "aliases": list(spec.aliases),
+            "arguments": spec.arguments,
+            "description": spec.description,
+        }
+        for spec in QUERY_VERBS
+    ]
+
+
+def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
+    """Answer a simple query string; see QUERY_VERBS for the supported patterns."""
     tokens = q.strip().lower().split()
     if not tokens:
         return {"error": "empty query"}
 
     verb = tokens[0]
-
-    if verb in ("callers", "called-by", "called_by"):
-        token = " ".join(tokens[1:])
-        detail = _find_node_detail(g, token)
-        if not detail:
-            return _not_found(g, token)
-        node_id = detail[0]
-        callers = [
-            _node_view(g, p)
-            for p in sorted(g.predecessors(node_id))
-            if g[p][node_id].get("relation") in _CALL_RELATIONS
-        ]
-        return {"node": node_id, "match": _match_meta(token, detail), "count": len(callers), "callers": callers}
-
-    if verb in ("calls", "callees"):
-        token = " ".join(tokens[1:])
-        detail = _find_node_detail(g, token)
-        if not detail:
-            return _not_found(g, token)
-        node_id = detail[0]
-        callees = [
-            _node_view(g, s)
-            for s in sorted(g.successors(node_id))
-            if g[node_id][s].get("relation") in _CALL_RELATIONS
-        ]
-        return {"node": node_id, "match": _match_meta(token, detail), "count": len(callees), "calls": callees}
-
-    if verb == "reaches":
-        # reaches <a> -> <b> over call/reference edges only.
-        try:
-            arrow = tokens.index("->")
-            a = " ".join(tokens[1:arrow])
-            b = " ".join(tokens[arrow + 1 :])
-        except ValueError:
-            return {"error": "reaches query format: reaches <a> -> <b>"}
-        src_detail = _find_node_detail(g, a)
-        dst_detail = _find_node_detail(g, b)
-        if not src_detail:
-            return _not_found(g, a, label="source")
-        if not dst_detail:
-            return _not_found(g, b, label="target")
-        src, dst = src_detail[0], dst_detail[0]
-        p = _restricted_call_path(g, src, dst)
-        if p is None:
-            return {"error": f"no call path from {src} to {dst}"}
-        return {
-            "source": src,
-            "target": dst,
-            "match": {"source": _match_meta(a, src_detail), "target": _match_meta(b, dst_detail)},
-            "length": len(p) - 1,
-            "path": [_node_view(g, n) for n in p],
-        }
-
-    if verb == "stats":
-        kinds: dict[str, int] = {}
-        for _n, data in g.nodes(data=True):
-            kind = data.get("kind", "unknown")
-            kinds[kind] = kinds.get(kind, 0) + 1
-        relations: dict[str, int] = {}
-        for _u, _v, data in g.edges(data=True):
-            relation = data.get("relation", "unknown")
-            relations[relation] = relations.get(relation, 0) + 1
-        communities = {
-            data.get("community") for _n, data in g.nodes(data=True) if data.get("community") is not None
-        }
-        top_in = sorted(g.in_degree(), key=lambda item: item[1], reverse=True)[:5]
-        top_out = sorted(g.out_degree(), key=lambda item: item[1], reverse=True)[:5]
-        return {
-            "node_count": g.number_of_nodes(),
-            "edge_count": g.number_of_edges(),
-            "density": nx.density(g),
-            "community_count": len(communities),
-            "nodes_by_kind": dict(sorted(kinds.items(), key=lambda item: item[1], reverse=True)),
-            "edges_by_relation": dict(sorted(relations.items(), key=lambda item: item[1], reverse=True)),
-            "top_incoming": [{**_node_view(g, n), "in_degree": d} for n, d in top_in],
-            "top_outgoing": [{**_node_view(g, n), "out_degree": d} for n, d in top_out],
-        }
-
-    if verb in ("depends-on", "depends_on", "out"):
-        token = " ".join(tokens[1:])
-        detail = _find_node_detail(g, token)
-        if not detail:
-            return _not_found(g, token)
-        node_id = detail[0]
-        neighbors = sorted(g.successors(node_id))
-        return {
-            "node": node_id,
-            "match": _match_meta(token, detail),
-            "count": len(neighbors),
-            "depends_on": [
-                {"id": n, "name": g.nodes[n].get("name", n), "kind": g.nodes[n].get("kind", "unknown")}
-                for n in neighbors
-            ],
-        }
-
-    if verb in ("imported-by", "imported_by", "in"):
-        token = " ".join(tokens[1:])
-        detail = _find_node_detail(g, token)
-        if not detail:
-            return _not_found(g, token)
-        node_id = detail[0]
-        neighbors = sorted(g.predecessors(node_id))
-        return {
-            "node": node_id,
-            "match": _match_meta(token, detail),
-            "count": len(neighbors),
-            "imported_by": [
-                {"id": n, "name": g.nodes[n].get("name", n), "kind": g.nodes[n].get("kind", "unknown")}
-                for n in neighbors
-            ],
-        }
-
-    if verb == "path":
-        # path <a> -> <b>
-        try:
-            arrow = tokens.index("->")
-            a = " ".join(tokens[1:arrow])
-            b = " ".join(tokens[arrow + 1 :])
-        except ValueError:
-            return {"error": "path query format: path <a> -> <b>"}
-        src_detail = _find_node_detail(g, a)
-        dst_detail = _find_node_detail(g, b)
-        if not src_detail:
-            return _not_found(g, a, label="source")
-        if not dst_detail:
-            return _not_found(g, b, label="target")
-        src, dst = src_detail[0], dst_detail[0]
-        try:
-            p = nx.shortest_path(g, src, dst)
-        except nx.NetworkXNoPath:
-            return {"error": f"no path from {src} to {dst}"}
-        return {
-            "source": src,
-            "target": dst,
-            "match": {"source": _match_meta(a, src_detail), "target": _match_meta(b, dst_detail)},
-            "length": len(p) - 1,
-            "path": [
-                {"id": n, "name": g.nodes[n].get("name", n), "kind": g.nodes[n].get("kind", "unknown")}
-                for n in p
-            ],
-        }
-
-    if verb in ("community-of", "community_of"):
-        token = " ".join(tokens[1:])
-        detail = _find_node_detail(g, token)
-        if not detail:
-            return _not_found(g, token)
-        node_id = detail[0]
-        return {
-            "node": node_id,
-            "match": _match_meta(token, detail),
-            "community": g.nodes[node_id].get("community"),
-            "name": g.nodes[node_id].get("name", node_id),
-        }
-
-    return {"error": f"unknown query verb: {verb}"}
+    spec = _VERB_INDEX.get(verb)
+    if spec is None:
+        return {"error": f"unknown query verb: {verb}"}
+    return spec.handler(g, tokens[1:])
 
 
 def _not_found(g: nx.DiGraph, token: str, *, label: str = "node") -> dict[str, Any]:
