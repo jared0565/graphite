@@ -6,11 +6,14 @@ never break a tool call or a session. The CLI wrapper adds a second catch-all.
 """
 from __future__ import annotations
 
+import json
 import re
 import threading
 from pathlib import Path
 from typing import Any
 
+from . import savings as savings_model
+from . import usage_ledger
 from .config import Config
 from .freshness import check_graph_freshness
 from .graph_io import load_validated_graph_bundle
@@ -148,6 +151,79 @@ def _strict_denial(payload: dict[str, Any], root: Path) -> str | None:
             f'python -m graphite search "{token}" | python -m graphite context <file>. '
             "Literal-text searches scoped to a single file path are always allowed."
         )
+    except Exception:
+        return None
+
+
+MAX_CURSOR_SESSIONS = 20
+
+
+def _entries_between(path: Path, start: int, end: int) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    with open(path, "rb") as handle:
+        handle.seek(start)
+        blob = handle.read(max(0, end - start))
+    for line in blob.decode("utf-8", errors="replace").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def handle_stop(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Turn-end savings summary; silent unless graphite was used this turn."""
+    try:
+        root = _payload_root(payload)
+        session_id = str(payload.get("session_id") or "")
+        if not session_id:
+            return None
+        ledger = usage_ledger.ledger_path(root)
+        ledger_stat = ledger.stat() if ledger.is_file() else None
+        size = ledger_stat.st_size if ledger_stat is not None else 0
+        # Rotation (usage_ledger.record_usage) replaces the file at the same path with a
+        # brand-new one; the new generation can coincidentally match the old byte offset
+        # (e.g. identical repeated entries), so size alone can't detect it. st_ino changes
+        # across the replace even when size doesn't, so it's used as the rotation signal.
+        current_ino = ledger_stat.st_ino if ledger_stat is not None else None
+        cursor = usage_ledger.read_cursor(root)
+        sessions = cursor.get("sessions")
+        if not isinstance(sessions, dict):
+            sessions = {}
+        state = sessions.pop(session_id, None)
+        if not isinstance(state, dict):
+            state = {"offset": 0, "tokens": 0, "seconds": 0.0, "ino": current_ino}
+        offset = state.get("offset", 0)
+        rotated = state.get("ino") != current_ino
+        if not isinstance(offset, int) or offset > size or rotated:
+            offset = 0  # ledger rotated or cursor damaged; resync
+        new_entries = _entries_between(ledger, offset, size) if size > offset else []
+        turn_tokens = 0
+        turn_seconds = 0.0
+        for entry in new_entries:
+            est = savings_model.estimate_entry(entry)
+            turn_tokens += est["tokens_saved"]
+            turn_seconds += est["seconds_saved"]
+        state["offset"] = size
+        state["ino"] = current_ino
+        state["tokens"] = int(state.get("tokens", 0)) + turn_tokens
+        state["seconds"] = float(state.get("seconds", 0.0)) + turn_seconds
+        sessions[session_id] = state  # re-insert -> newest position
+        while len(sessions) > MAX_CURSOR_SESSIONS:
+            sessions.pop(next(iter(sessions)))
+        usage_ledger.write_cursor(root, {"sessions": sessions})
+        if not new_entries or not usage_ledger.savings_display_enabled(root):
+            return None
+        turn_text = savings_model.format_compact(turn_tokens, turn_seconds)
+        session_text = savings_model.format_compact(state["tokens"], state["seconds"])
+        return {
+            "systemMessage": (
+                f"graphite: est. {turn_text} saved this turn "
+                f"(session: {session_text}) [estimates]"
+            )
+        }
     except Exception:
         return None
 

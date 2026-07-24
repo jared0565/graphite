@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from graphite.agent_hooks import handle_pre_tool_use, handle_session_start
+from graphite.agent_hooks import handle_pre_tool_use, handle_session_start, handle_stop
+from graphite.usage_ledger import record_usage, set_savings_display
 
 
 def _payload(root: Path) -> dict:
@@ -205,3 +206,71 @@ def test_capabilities_output_does_not_list_agent_hook(capsys) -> None:
     assert main(["capabilities", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert "agent-hook" not in payload["commands"]
+
+
+def _stop_payload(root: Path, session: str = "s1") -> dict:
+    return {"session_id": session, "cwd": str(root), "hook_event_name": "Stop"}
+
+
+def _use_graphite(root: Path, cmd: str = "context") -> None:
+    record_usage(root, cmd=cmd, wall_ms=50, result={"files": [{"path": "alpha.py"}]})
+
+
+def test_stop_emits_summary_after_usage(built_repo: Path) -> None:
+    _use_graphite(built_repo)
+    out = handle_stop(_stop_payload(built_repo))
+    message = out["systemMessage"]
+    assert message.startswith("graphite: est. ")
+    assert "saved this turn" in message
+    assert "[estimates]" in message
+
+
+def test_stop_silent_with_no_new_usage(built_repo: Path) -> None:
+    _use_graphite(built_repo)
+    assert handle_stop(_stop_payload(built_repo)) is not None  # consumes entries
+    assert handle_stop(_stop_payload(built_repo)) is None  # nothing new this turn
+
+
+def test_stop_session_totals_accumulate(built_repo: Path) -> None:
+    _use_graphite(built_repo)
+    first = handle_stop(_stop_payload(built_repo))["systemMessage"]
+    _use_graphite(built_repo)
+    second = handle_stop(_stop_payload(built_repo))["systemMessage"]
+    assert "session:" in first and "session:" in second
+    assert first.split("session:")[1] != second.split("session:")[1]  # totals grew
+
+
+def test_stop_respects_toggle_but_cursor_still_advances(built_repo: Path) -> None:
+    set_savings_display(built_repo, False)
+    _use_graphite(built_repo)
+    assert handle_stop(_stop_payload(built_repo)) is None
+    set_savings_display(built_repo, True)
+    assert handle_stop(_stop_payload(built_repo)) is None  # toggle-off turn already consumed
+
+
+def test_stop_without_session_id_is_silent(built_repo: Path) -> None:
+    _use_graphite(built_repo)
+    assert handle_stop({"cwd": str(built_repo)}) is None
+
+
+def test_stop_survives_ledger_rotation_between_turns(built_repo: Path, monkeypatch) -> None:
+    from graphite import usage_ledger as ul
+
+    _use_graphite(built_repo)
+    assert handle_stop(_stop_payload(built_repo)) is not None
+    monkeypatch.setattr(ul, "MAX_LEDGER_BYTES", 1)  # force rotation on the next record
+    _use_graphite(built_repo)  # rotates the consumed generation away; fresh file, offset resync
+    assert handle_stop(_stop_payload(built_repo)) is not None
+
+
+def test_stop_prunes_cursor_to_max_sessions(built_repo: Path) -> None:
+    from graphite.agent_hooks import MAX_CURSOR_SESSIONS
+    from graphite.usage_ledger import read_cursor
+
+    for i in range(MAX_CURSOR_SESSIONS + 5):
+        _use_graphite(built_repo)
+        handle_stop(_stop_payload(built_repo, session=f"s{i}"))
+
+    sessions = read_cursor(built_repo)["sessions"]
+    assert len(sessions) == MAX_CURSOR_SESSIONS
+    assert "s0" not in sessions  # oldest pruned
