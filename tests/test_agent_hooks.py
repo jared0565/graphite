@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from graphite.agent_hooks import handle_pre_tool_use, handle_session_start
 
 
@@ -86,4 +88,63 @@ def test_glob_gets_remind_never_deny_even_in_strict(tmp_path: Path) -> None:
     payload = _grep_payload(tmp_path, "target_symbol")
     payload["tool_name"] = "Glob"
     out = handle_pre_tool_use(payload, "strict")
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+
+
+@pytest.fixture()
+def built_repo(tmp_path: Path, monkeypatch) -> Path:
+    from graphite.cli import main
+
+    (tmp_path / "alpha.py").write_text(
+        "def target_symbol():\n    return 1\n\n\ndef other():\n    return target_symbol()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)  # cmd_build writes cfg.output_dir relative to CWD
+    assert main(["build", "."]) == 0
+    return tmp_path
+
+
+def test_strict_denies_cross_file_grep_for_known_symbol(built_repo: Path) -> None:
+    out = handle_pre_tool_use(_grep_payload(built_repo, "target_symbol"), "strict")
+    hook = out["hookSpecificOutput"]
+    assert hook["permissionDecision"] == "deny"
+    reason = hook["permissionDecisionReason"]
+    assert "target_symbol" in reason
+    assert 'query "callers target_symbol"' in reason
+    assert "graphite" in reason
+
+
+def test_strict_allows_unknown_tokens(built_repo: Path) -> None:
+    out = handle_pre_tool_use(_grep_payload(built_repo, "no_such_symbol_here"), "strict")
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+
+
+def test_strict_allows_single_file_scoped_grep(built_repo: Path) -> None:
+    out = handle_pre_tool_use(
+        _grep_payload(built_repo, "target_symbol", path=str(built_repo / "alpha.py")), "strict"
+    )
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+
+
+def test_strict_denies_directory_scoped_grep(built_repo: Path) -> None:
+    # A directory-scoped search is still cross-file; only single-FILE scoping opts out.
+    out = handle_pre_tool_use(
+        _grep_payload(built_repo, "target_symbol", path=str(built_repo)), "strict"
+    )
+    assert out["hookSpecificOutput"].get("permissionDecision") == "deny"
+
+
+def test_strict_allows_literal_patterns_without_identifiers(built_repo: Path) -> None:
+    out = handle_pre_tool_use(_grep_payload(built_repo, "== 42"), "strict")
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+
+
+def test_strict_falls_back_to_remind_on_oversized_graph(built_repo: Path, monkeypatch) -> None:
+    monkeypatch.setattr("graphite.agent_hooks.MAX_HOOK_GRAPH_BYTES", 1)
+    out = handle_pre_tool_use(_grep_payload(built_repo, "target_symbol"), "strict")
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+
+
+def test_remind_mode_never_denies_known_symbols(built_repo: Path) -> None:
+    out = handle_pre_tool_use(_grep_payload(built_repo, "target_symbol"), "remind")
     assert "permissionDecision" not in out["hookSpecificOutput"]
