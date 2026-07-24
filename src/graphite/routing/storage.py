@@ -26,7 +26,7 @@ from .contracts import (
     TaskCategory,
 )
 
-SCHEMA_VERSION: Final = "7"
+SCHEMA_VERSION: Final = "8"
 BUSY_TIMEOUT_MS: Final = 2_000
 DEFAULT_RECOVERY_PAGE_SIZE: Final = 50
 MAX_RECOVERY_PAGE_SIZE: Final = 100
@@ -166,6 +166,7 @@ def _translate_database_error(exc: sqlite3.Error) -> StorageError:
         "lifecycle_snapshot_binding_immutable",
         "lifecycle_approval_binding_immutable",
         "lifecycle_attempt_binding_immutable",
+        "lifecycle_binding_carry_immutable",
     ):
         if code in message:
             return StorageError(code)
@@ -594,16 +595,6 @@ _SCHEMA = (
     BEFORE UPDATE ON lifecycle_approval_bindings BEGIN
         SELECT RAISE(ABORT, 'lifecycle_approval_binding_immutable');
     END""",
-    """CREATE TRIGGER IF NOT EXISTS lifecycle_approval_binding_insert_guard
-    BEFORE INSERT ON lifecycle_approval_bindings
-    WHEN NOT EXISTS (
-        SELECT 1 FROM lifecycle_snapshot_bindings AS binding
-        WHERE binding.capability_snapshot_digest = NEW.capability_snapshot_digest
-          AND binding.lifecycle_identity_digest = NEW.lifecycle_identity_digest
-    )
-    BEGIN
-        SELECT RAISE(ABORT, 'lifecycle_snapshot_binding_missing');
-    END""",
     """CREATE TRIGGER IF NOT EXISTS lifecycle_approval_binding_delete_guard
     BEFORE DELETE ON lifecycle_approval_bindings BEGIN
         SELECT RAISE(ABORT, 'lifecycle_approval_binding_immutable');
@@ -628,6 +619,46 @@ _SCHEMA = (
     """CREATE TRIGGER IF NOT EXISTS lifecycle_attempt_binding_delete_guard
     BEFORE DELETE ON lifecycle_attempt_bindings BEGIN
         SELECT RAISE(ABORT, 'lifecycle_attempt_binding_immutable');
+    END""",
+    """CREATE TABLE IF NOT EXISTS lifecycle_binding_carries (
+        carry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        capability_snapshot_digest TEXT NOT NULL
+            REFERENCES capability_snapshots(capability_snapshot_digest) ON DELETE RESTRICT,
+        previous_identity_digest TEXT NOT NULL CHECK(
+            length(previous_identity_digest) = 64
+            AND previous_identity_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        new_identity_digest TEXT NOT NULL CHECK(
+            length(new_identity_digest) = 64
+            AND new_identity_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        lifecycle_event_id TEXT NOT NULL CHECK(
+            length(lifecycle_event_id) = 64
+            AND lifecycle_event_id NOT GLOB '*[^0-9a-f]*'
+        ),
+        carried_at INTEGER NOT NULL CHECK(carried_at >= 0)
+    )""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_binding_carry_update_guard
+    BEFORE UPDATE ON lifecycle_binding_carries BEGIN
+        SELECT RAISE(ABORT, 'lifecycle_binding_carry_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_binding_carry_delete_guard
+    BEFORE DELETE ON lifecycle_binding_carries BEGIN
+        SELECT RAISE(ABORT, 'lifecycle_binding_carry_immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_approval_binding_insert_guard_v8
+    BEFORE INSERT ON lifecycle_approval_bindings
+    WHEN NOT EXISTS (
+        SELECT 1 FROM lifecycle_snapshot_bindings AS binding
+        WHERE binding.capability_snapshot_digest = NEW.capability_snapshot_digest
+          AND binding.lifecycle_identity_digest = NEW.lifecycle_identity_digest
+    ) AND NOT EXISTS (
+        SELECT 1 FROM lifecycle_binding_carries AS carry
+        WHERE carry.capability_snapshot_digest = NEW.capability_snapshot_digest
+          AND carry.new_identity_digest = NEW.lifecycle_identity_digest
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'lifecycle_snapshot_binding_missing');
     END""",
     """CREATE TRIGGER IF NOT EXISTS cli_attempt_identity_update_guard
     BEFORE UPDATE OF approval_id, task_id, decision_id, worktree_id, provider,
@@ -844,6 +875,12 @@ class RepositoryStore:
     def _pre_v7_backup_marker_path(self, source_version: str) -> Path:
         return self.path.parent / "backups" / f"events-schema-v{source_version}-pre-v7.sha256.json"
 
+    def _pre_v8_backup_path(self, source_version: str) -> Path:
+        return self.path.parent / "backups" / f"events-schema-v{source_version}-pre-v8.sqlite3"
+
+    def _pre_v8_backup_marker_path(self, source_version: str) -> Path:
+        return self.path.parent / "backups" / f"events-schema-v{source_version}-pre-v8.sha256.json"
+
     def _connect(self) -> sqlite3.Connection:
         try:
             connection = sqlite3.connect(
@@ -864,6 +901,7 @@ class RepositoryStore:
         _validate_database_file(self.path)
         self._migrate_pre_v6_provider_widening()
         self._migrate_v6_to_v7()
+        self._migrate_v7_to_v8()
         connection: sqlite3.Connection | None = None
         try:
             connection = self._connect()
@@ -873,7 +911,7 @@ class RepositoryStore:
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()
             if existing_version is not None and existing_version[0] not in {
-                "1", "2", "3", "4", "5", "6", SCHEMA_VERSION
+                "1", "2", "3", "4", "5", "6", "7", SCHEMA_VERSION
             }:
                 raise StorageError("storage_schema_unsupported")
             if existing_version is not None and existing_version[0] == SCHEMA_VERSION:
@@ -1251,6 +1289,43 @@ class RepositoryStore:
         except sqlite3.Error as exc:
             if connection is not None and connection.in_transaction:
                 connection.execute("ROLLBACK")
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def _migrate_v7_to_v8(self) -> None:
+        """Add the carry table era: swap the approval insert guard (schema v7->v8)."""
+        if not self.path.exists():
+            return
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                self.path,
+                timeout=self.busy_timeout_ms / 1_000,
+                isolation_level=None,
+            )
+            try:
+                version = connection.execute(
+                    "SELECT value FROM schema_meta WHERE key='schema_version'"
+                ).fetchone()
+            except sqlite3.Error:
+                return
+            if version is None or version[0] != "7":
+                return
+            self._create_schema_backup(
+                source_version=version[0],
+                backup=self._pre_v8_backup_path(version[0]),
+                marker=self._pre_v8_backup_marker_path(version[0]),
+            )
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DROP TRIGGER IF EXISTS lifecycle_approval_binding_insert_guard"
+            )
+            connection.commit()
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
             raise _translate_database_error(exc) from exc
         finally:
             if connection is not None:
@@ -3352,6 +3427,22 @@ class RepositoryStore:
             authority_id = _identifier(authority_id, "authority_id_invalid")
         try:
             with self._connect() as connection:
+                if authority_kind == "capability_snapshot":
+                    row = connection.execute(
+                        """SELECT COALESCE(
+                            (SELECT carry.new_identity_digest
+                             FROM lifecycle_binding_carries AS carry
+                             WHERE carry.capability_snapshot_digest = ?
+                             ORDER BY carry.carry_id DESC LIMIT 1),
+                            (SELECT binding.lifecycle_identity_digest
+                             FROM lifecycle_snapshot_bindings AS binding
+                             WHERE binding.capability_snapshot_digest = ?)
+                        )""",
+                        (authority_id, authority_id),
+                    ).fetchone()
+                    if row is None or row[0] is None:
+                        return None
+                    return str(row[0])
                 row = connection.execute(
                     f"SELECT lifecycle_identity_digest FROM {table} WHERE {key_column}=?",
                     (authority_id,),
@@ -3566,6 +3657,66 @@ class RepositoryStore:
             ).fetchone()
         return None if row is None else str(row[0])
 
+    def carry_forward_snapshot_bindings(
+        self,
+        *,
+        previous_identity_digest: str,
+        new_identity_digest: str,
+        lifecycle_event_id: str,
+        carried_at: int,
+    ) -> tuple[str, ...]:
+        for value in (previous_identity_digest, new_identity_digest, lifecycle_event_id):
+            if not isinstance(value, str) or not _HEX_64.fullmatch(value):
+                raise ValueError("lifecycle_identity_digest_invalid")
+        if previous_identity_digest == new_identity_digest:
+            raise ValueError("lifecycle_identity_digest_invalid")
+        observed = _nonnegative_integer(carried_at, "carried_at_invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """SELECT binding.capability_snapshot_digest
+                FROM lifecycle_snapshot_bindings AS binding
+                JOIN capability_snapshots AS snapshot
+                  ON snapshot.capability_snapshot_digest = binding.capability_snapshot_digest
+                LEFT JOIN (
+                    SELECT capability_snapshot_digest, new_identity_digest,
+                           MAX(carry_id) AS carry_id
+                    FROM lifecycle_binding_carries
+                    GROUP BY capability_snapshot_digest
+                ) AS carry
+                  ON carry.capability_snapshot_digest = binding.capability_snapshot_digest
+                WHERE COALESCE(carry.new_identity_digest, binding.lifecycle_identity_digest) = ?
+                  AND snapshot.expires_at > ?
+                ORDER BY binding.capability_snapshot_digest""",
+                (previous_identity_digest, observed),
+            ).fetchall()
+            carried = tuple(str(row[0]) for row in rows)
+            for digest in carried:
+                connection.execute(
+                    """INSERT INTO lifecycle_binding_carries(
+                        capability_snapshot_digest,previous_identity_digest,
+                        new_identity_digest,lifecycle_event_id,carried_at
+                    ) VALUES (?,?,?,?,?)""",
+                    (
+                        digest,
+                        previous_identity_digest,
+                        new_identity_digest,
+                        lifecycle_event_id,
+                        observed,
+                    ),
+                )
+            connection.commit()
+            return carried
+        except sqlite3.Error as exc:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
+            raise _translate_database_error(exc) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
     def lifecycle_authority_targets(
         self, lifecycle_identity_digest: str
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -3576,8 +3727,19 @@ class RepositoryStore:
                 snapshots = tuple(
                     str(row[0])
                     for row in connection.execute(
-                        "SELECT capability_snapshot_digest FROM lifecycle_snapshot_bindings "
-                        "WHERE lifecycle_identity_digest=? ORDER BY capability_snapshot_digest",
+                        """SELECT binding.capability_snapshot_digest
+                        FROM lifecycle_snapshot_bindings AS binding
+                        LEFT JOIN (
+                            SELECT capability_snapshot_digest, new_identity_digest,
+                                   MAX(carry_id) AS carry_id
+                            FROM lifecycle_binding_carries
+                            GROUP BY capability_snapshot_digest
+                        ) AS carry
+                          ON carry.capability_snapshot_digest = binding.capability_snapshot_digest
+                        WHERE COALESCE(
+                            carry.new_identity_digest, binding.lifecycle_identity_digest
+                        ) = ?
+                        ORDER BY binding.capability_snapshot_digest""",
                         (lifecycle_identity_digest,),
                     ).fetchall()
                 )
