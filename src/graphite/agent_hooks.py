@@ -70,3 +70,29 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
         }
     except Exception:
         return None
+
+
+PRE_TOOL_REMINDER = (
+    "graph-first: this repo's graphite graph answers relationship questions. For who-calls / "
+    "who-reads / data-flow / blast-radius / where-defined questions, use python -m graphite "
+    'context <file> | impact <file> | query "..." instead of grepping or globbing across '
+    "files. Literal text and filename searches are fine. Falling back after an insufficient "
+    "graph answer is allowed - say so when you do."
+)
+
+
+def handle_pre_tool_use(payload: dict[str, Any], mode: str) -> dict[str, Any] | None:
+    try:
+        if payload.get("tool_name") not in ("Grep", "Glob"):
+            return None
+        root = _payload_root(payload)
+        if not (root / "graph-out" / "graph.json").is_file():
+            return None
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": PRE_TOOL_REMINDER,
+            }
+        }
+    except Exception:
+        return None

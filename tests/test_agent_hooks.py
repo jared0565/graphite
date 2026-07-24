@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from graphite.agent_hooks import handle_session_start
+from graphite.agent_hooks import handle_pre_tool_use, handle_session_start
 
 
 def _payload(root: Path) -> dict:
@@ -43,3 +43,47 @@ def test_session_start_bad_cwd_fails_open(tmp_path: Path) -> None:
     # Nonexistent cwd must not raise; missing graph messaging is acceptable.
     out = handle_session_start({"cwd": str(tmp_path / "nope")})
     assert out is None or "graphite-first" in out["hookSpecificOutput"]["additionalContext"]
+
+
+def _grep_payload(root: Path, pattern: str, **tool_input) -> dict:
+    return {
+        "session_id": "s1",
+        "cwd": str(root),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Grep",
+        "tool_input": {"pattern": pattern, **tool_input},
+    }
+
+
+def _with_graph(tmp_path: Path) -> Path:
+    (tmp_path / "graph-out").mkdir(exist_ok=True)
+    (tmp_path / "graph-out" / "graph.json").write_text("{}", encoding="utf-8")
+    return tmp_path
+
+
+def test_remind_emits_context_when_graph_present(tmp_path: Path) -> None:
+    _with_graph(tmp_path)
+    out = handle_pre_tool_use(_grep_payload(tmp_path, "anything"), "remind")
+    hook = out["hookSpecificOutput"]
+    assert hook["hookEventName"] == "PreToolUse"
+    assert "permissionDecision" not in hook
+    assert "graph-first" in hook["additionalContext"]
+
+
+def test_remind_silent_without_graph(tmp_path: Path) -> None:
+    assert handle_pre_tool_use(_grep_payload(tmp_path, "anything"), "remind") is None
+
+
+def test_remind_ignores_other_tools(tmp_path: Path) -> None:
+    _with_graph(tmp_path)
+    payload = _grep_payload(tmp_path, "x")
+    payload["tool_name"] = "Read"
+    assert handle_pre_tool_use(payload, "remind") is None
+
+
+def test_glob_gets_remind_never_deny_even_in_strict(tmp_path: Path) -> None:
+    _with_graph(tmp_path)
+    payload = _grep_payload(tmp_path, "target_symbol")
+    payload["tool_name"] = "Glob"
+    out = handle_pre_tool_use(payload, "strict")
+    assert "permissionDecision" not in out["hookSpecificOutput"]
