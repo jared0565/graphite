@@ -173,6 +173,19 @@ def _entries_between(path: Path, start: int, end: int) -> list[dict[str, Any]]:
     return entries
 
 
+def _cursor_number(value: Any, cast: type) -> Any:
+    """Coerce a possibly-corrupted cursor field; non-numeric (or bool) -> 0.
+
+    A raw ``int(...)``/``float(...)`` on a corrupted (e.g. hand-edited or
+    concurrently-truncated) cursor field would raise before ``write_cursor``
+    runs, permanently stalling the session (offset never advances, same
+    failure repeats every turn). Guarding here lets the cursor self-heal.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return cast(0)
+    return cast(value)
+
+
 def handle_stop(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Turn-end savings summary; silent unless graphite was used this turn."""
     try:
@@ -196,7 +209,20 @@ def handle_stop(payload: dict[str, Any]) -> dict[str, Any] | None:
         if not isinstance(state, dict):
             state = {"offset": 0, "tokens": 0, "seconds": 0.0, "ino": current_ino}
         offset = state.get("offset", 0)
-        rotated = state.get("ino") != current_ino
+        stored_ino = state.get("ino")
+        # A stored `ino` that isn't an int (missing key on the older 3-key cursor
+        # schema, or a corrupted value) never counts as rotation, nor does a current
+        # ino of 0/None (filesystem doesn't report inodes) -- both fall back to the
+        # offset-only heuristic below. That's fail-safe: no false resync/overcount
+        # from an absent or unsupported inode, at the cost of not detecting a
+        # same-size rotation on such filesystems (same limitation the size-only
+        # check always had).
+        rotated = (
+            isinstance(stored_ino, int)
+            and not isinstance(stored_ino, bool)
+            and bool(current_ino)
+            and stored_ino != current_ino
+        )
         if not isinstance(offset, int) or offset > size or rotated:
             offset = 0  # ledger rotated or cursor damaged; resync
         new_entries = _entries_between(ledger, offset, size) if size > offset else []
@@ -208,8 +234,8 @@ def handle_stop(payload: dict[str, Any]) -> dict[str, Any] | None:
             turn_seconds += est["seconds_saved"]
         state["offset"] = size
         state["ino"] = current_ino
-        state["tokens"] = int(state.get("tokens", 0)) + turn_tokens
-        state["seconds"] = float(state.get("seconds", 0.0)) + turn_seconds
+        state["tokens"] = _cursor_number(state.get("tokens", 0), int) + turn_tokens
+        state["seconds"] = _cursor_number(state.get("seconds", 0.0), float) + turn_seconds
         sessions[session_id] = state  # re-insert -> newest position
         while len(sessions) > MAX_CURSOR_SESSIONS:
             sessions.pop(next(iter(sessions)))

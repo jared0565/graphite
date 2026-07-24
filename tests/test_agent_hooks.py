@@ -274,3 +274,39 @@ def test_stop_prunes_cursor_to_max_sessions(built_repo: Path) -> None:
     sessions = read_cursor(built_repo)["sessions"]
     assert len(sessions) == MAX_CURSOR_SESSIONS
     assert "s0" not in sessions  # oldest pruned
+
+
+def test_stop_self_heals_corrupted_cursor_tokens(built_repo: Path) -> None:
+    from graphite.usage_ledger import read_cursor, write_cursor
+
+    _use_graphite(built_repo)
+    assert handle_stop(_stop_payload(built_repo)) is not None
+    cursor = read_cursor(built_repo)
+    state = cursor["sessions"]["s1"]
+    old_offset = state["offset"]
+    first_turn_tokens = state["tokens"]  # baseline: one identical turn's worth of tokens
+    state["tokens"] = "not-a-number"  # simulate on-disk corruption
+    write_cursor(built_repo, cursor)
+
+    _use_graphite(built_repo)  # second, identical turn -> same tokens_saved as the first
+    out = handle_stop(_stop_payload(built_repo))
+    assert out is not None  # self-healed rather than permanently stalling
+
+    healed = read_cursor(built_repo)["sessions"]["s1"]
+    assert isinstance(healed["tokens"], int)
+    assert healed["tokens"] == first_turn_tokens  # restarted from 0, not from the corrupt value
+    assert healed["offset"] > old_offset  # cursor still advanced despite the corruption
+
+
+def test_stop_missing_ino_key_falls_back_to_offset_check(built_repo: Path) -> None:
+    from graphite.usage_ledger import read_cursor, write_cursor
+
+    _use_graphite(built_repo)
+    assert handle_stop(_stop_payload(built_repo)) is not None
+    cursor = read_cursor(built_repo)
+    del cursor["sessions"]["s1"]["ino"]  # simulate the older 3-key cursor schema
+    write_cursor(built_repo, cursor)
+
+    # No new usage since the last stop; a missing `ino` must not force a false
+    # resync (which would re-read already-consumed entries and double-count).
+    assert handle_stop(_stop_payload(built_repo)) is None
