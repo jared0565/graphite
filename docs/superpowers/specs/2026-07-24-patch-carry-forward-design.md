@@ -77,6 +77,11 @@ following hold:
 the assessment returns state `ACTIVE` with a new reason code
 `LifecycleReasonCode.PATCH_CARRIED_FORWARD` and probe level `STANDARD`.
 
+Patch-level version downgrades (for example 2.1.32 back to 2.1.31) classify
+as `patch` and carry on the same terms — the policy minimum version and the
+standard probe still gate them; this deliberately supports rolling back a bad
+CLI update without a re-verification round.
+
 Every other path is behavior-identical to today. In particular:
 
 - `patch` observed while the boundary is in any state other than `active`
@@ -168,7 +173,10 @@ source, or raw provider diagnostics anywhere.
 - Store failure mid-carry: each store's transaction is atomic; a failure
   between the two stores leaves carry rows written but the observation
   unrecorded — route authority stays denied and the next observation
-  retries and completes the carry.
+  retries and completes the carry. A heal at a later observation time
+  records its own event; carry rows written before the failure keep the
+  originally computed event id — they still name both identities in full, so
+  the audit chain remains reconstructible.
 - Malformed or unparsable version output: existing probe error paths
   (`probe_version_invalid`), unchanged.
 
@@ -187,10 +195,11 @@ use:
 - Re-binding: unexpired snapshots re-bound via new
   `lifecycle_binding_carries` rows, with expiry always read from the
   immutable snapshot row (never copied); expired snapshots excluded; each
-  carry row records the previous and new identity digests and the justifying
-  event id; snapshot rows byte-unchanged; store-failure fail-closed behavior
-  (induced failure between the two stores leaves carry rows written but the
-  observation unrecorded, healed on the next observation).
+  carry row records the previous and new identity digests, the justifying
+  event id, and the carry time; snapshot rows byte-unchanged;
+  store-failure fail-closed behavior (induced failure between the two
+  stores leaves carry rows written but the observation unrecorded, healed
+  on the next observation).
 - Chaining: two consecutive patches produce a two-link audit chain; a
   subsequent minor bump fail-closes.
 - Storage: schema migration forward and rollback fixtures; append-only

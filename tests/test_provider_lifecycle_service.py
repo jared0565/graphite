@@ -390,6 +390,7 @@ def test_carry_partial_failure_fails_closed_and_heals_on_next_observation(
     assert healed.state is ProviderLifecycleState.ACTIVE
     assert healed.reason is LifecycleReasonCode.PATCH_CARRIED_FORWARD
     assert lifecycle.current_observation(boundary).identity.digest == updated.digest
+    assert healed.carried_snapshots == ()
 
 
 def _route_candidate(**changes: object) -> ApprovedRouteCandidate:

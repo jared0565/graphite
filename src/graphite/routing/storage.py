@@ -1331,11 +1331,6 @@ class RepositoryStore:
                 backup=self._pre_v8_backup_path(version[0]),
                 marker=self._pre_v8_backup_marker_path(version[0]),
             )
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                "DROP TRIGGER IF EXISTS lifecycle_approval_binding_insert_guard"
-            )
-            connection.commit()
         except sqlite3.Error as exc:
             if connection is not None and connection.in_transaction:
                 connection.rollback()
