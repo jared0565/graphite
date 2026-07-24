@@ -38,7 +38,13 @@ def manifest_map(manifest: dict[str, Any]) -> dict[str, str]:
     return {f["rel_path"]: f.get("hash", "") for f in manifest.get("files", []) if "rel_path" in f}
 
 
-def check_graph_freshness(root: Path, cfg: Config, *, max_manifest_bytes: int | None = None) -> dict[str, Any]:
+def check_graph_freshness(
+    root: Path,
+    cfg: Config,
+    *,
+    max_manifest_bytes: int | None = None,
+    ignore_engine: bool = False,
+) -> dict[str, Any]:
     manifest_path = cfg.output_dir / ".graphite_manifest.json"
     if not manifest_path.exists():
         return {"stale": True, "reason": "missing manifest", "manifest": manifest_path.as_posix(), "added": [], "changed": [], "removed": []}
@@ -64,24 +70,25 @@ def check_graph_freshness(root: Path, cfg: Config, *, max_manifest_bytes: int | 
     entries = collect_files(root, cfg)
     if max_manifest_bytes is not None and len(entries) > _DOCTOR_FILE_LIMIT:
         raise FreshnessLimitError("freshness file limit exceeded")
-    try:
-        current_engine = engine_identity(cfg.cache_version)
-    except EngineIdentityError:
-        return {
-            "stale": True,
-            "reason": "engine_identity_unavailable",
-            "added": [],
-            "changed": [],
-            "removed": [],
-        }
-    if previous.get("engine") != current_engine:
-        return {
-            "stale": True,
-            "reason": "engine_changed",
-            "added": [],
-            "changed": [],
-            "removed": [],
-        }
+    if not ignore_engine:
+        try:
+            current_engine = engine_identity(cfg.cache_version)
+        except EngineIdentityError:
+            return {
+                "stale": True,
+                "reason": "engine_identity_unavailable",
+                "added": [],
+                "changed": [],
+                "removed": [],
+            }
+        if previous.get("engine") != current_engine:
+            return {
+                "stale": True,
+                "reason": "engine_changed",
+                "added": [],
+                "changed": [],
+                "removed": [],
+            }
     current = {e.rel_path: e.content_hash for e in entries}
     added = sorted(set(current) - set(old))
     removed = sorted(set(old) - set(current))

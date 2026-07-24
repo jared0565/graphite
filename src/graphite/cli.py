@@ -359,11 +359,16 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     cfg = _config_from_args(args, canonical=True)
-    status = check_graph_freshness(Path(args.path).resolve(), cfg)
+    status = check_graph_freshness(
+        Path(args.path).resolve(), cfg, ignore_engine=args.ignore_engine
+    )
     if args.json:
         print(json.dumps(status, ensure_ascii=False, indent=2))
     elif status["stale"]:
-        print("[graphite] graph is stale")
+        reason = status.get("reason", "source changes")
+        print(f"[graphite] graph is stale ({reason})")
+        if reason == "engine_changed":
+            print("  graphite was updated since this graph was built; rebuild to refresh")
         for key in ("added", "changed", "removed"):
             if status.get(key):
                 print(f"  {key}: {', '.join(status[key])}")
@@ -1631,6 +1636,11 @@ def main(argv: list[str] | None = None) -> int:
     p_check = sub.add_parser("check", help="Check whether graph-out is stale")
     p_check.add_argument("path", help="Repository path")
     p_check.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_check.add_argument(
+        "--ignore-engine",
+        action="store_true",
+        help="Report source drift only; treat graphite engine updates as fresh",
+    )
     p_check.set_defaults(func=cmd_check)
 
     p_doctor = sub.add_parser(

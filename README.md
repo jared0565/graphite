@@ -123,6 +123,8 @@ The machine-wide daemon (`graphite daemon F:\Projects`) auto-discovers any proje
 
 Set `GRAPHITE_PROJECTS_ROOT` to change the default base folder used by `daemon`, `daemon-status`, `daemon-health`, the Windows startup installers, and init/bootstrap daemon-visibility checks (falls back to `F:/Projects` when it exists, else the current directory).
 
+After upgrading graphite itself, restart the daemon: a long-running daemon keeps executing the code it loaded at start, and daemon state is in-memory only, so a restart both loads the new code and rebuilds every supervised graph — clearing `engine_changed` staleness across all managed projects in one pass.
+
 ## Usage
 
 ```bash
@@ -144,8 +146,10 @@ graphite report .
 graphite query "depends-on src/lib/db.ts"
 graphite query "callers calculateCommissionPence"
 
-# Check whether graph-out is current
+# Check whether graph-out is current (names the reason when stale:
+# engine_changed vs source changes; --ignore-engine reports source drift only)
 graphite check .
+graphite check . --ignore-engine
 
 # Suggest files and tests affected by a change
 graphite impact src/lib/db.ts

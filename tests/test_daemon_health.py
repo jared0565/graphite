@@ -276,6 +276,66 @@ def test_daemon_health_text_matches_report_for_recovered_and_empty_error_project
     assert "F:/Projects/recovered" not in text
 
 
+def test_daemon_health_text_top_line_is_unambiguous_ok(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 23, 12, 1, tzinfo=timezone.utc)
+    _write_status(tmp_path, _status("2026-06-23T12:00:30+00:00"))
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(max_status_age_seconds=120, max_project_success_age_seconds=3600),
+        now=now,
+        process_checker=lambda base: {"checked": True, "running": True, "process_count": 1, "processes": []},
+        startup_checker=lambda base, name: {"checked": True, "supported": True, "installed": True},
+    )
+    text = format_health_text(report)
+
+    assert text.splitlines()[0] == "[graphite] daemon health: ok"
+
+
+def test_daemon_health_text_counts_issues_and_groups_repeated_warning_codes(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
+    projects = [_project(f"F:/Projects/p{i}", build_count=0) for i in range(7)]
+    _write_status(tmp_path, _status("2026-06-23T11:59:30+00:00", projects=projects))
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(max_project_success_age_seconds=3600, require_process=False, require_startup=False),
+        now=now,
+    )
+    text = format_health_text(report)
+    warning_count = report["summary"]["warning_count"]
+
+    assert report["status"] == "warning"
+    assert "(ok)" not in text
+    assert "attention required" not in text
+    assert text.splitlines()[0] == (
+        f"[graphite] daemon health: warning ({warning_count} warnings, no errors)"
+    )
+    assert "project_pending_initial_build (7):" in text
+    assert text.count("project has not completed initial build") <= 5
+
+
+def test_daemon_health_text_degraded_top_line_names_counts(tmp_path: Path) -> None:
+    now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
+    projects = [_project("F:/Projects/broken", last_error="boom", failure_count=3)]
+    _write_status(tmp_path, _status("2026-06-23T11:59:30+00:00", projects=projects))
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(max_project_success_age_seconds=3600, require_process=False, require_startup=False),
+        now=now,
+    )
+    text = format_health_text(report)
+    first_line = text.splitlines()[0]
+
+    assert report["status"] == "degraded"
+    assert first_line.startswith("[graphite] daemon health: degraded (")
+    assert "error" in first_line
+    assert "attention required" not in text
+    # A single occurrence of a code keeps the flat one-line form.
+    assert "project_failing: project build failing: F:/Projects/broken" in text
+
+
 def test_daemon_health_keeps_pending_and_stale_classification_independent(tmp_path: Path) -> None:
     now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
     projects = [

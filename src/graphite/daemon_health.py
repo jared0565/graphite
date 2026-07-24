@@ -276,9 +276,47 @@ def check_startup_launcher(base: Path, name: str) -> dict[str, Any]:
     return {"checked": True, "supported": True, **status}
 
 
+_MAX_GROUP_DETAILS = 5
+
+
+def _count_phrase(count: int, noun: str) -> str:
+    return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def _health_head_line(report: dict[str, Any]) -> str:
+    status = _safe_text(report["status"])
+    if report["status"] == "ok":
+        return "[graphite] daemon health: ok"
+    summary = report.get("summary", {})
+    error_count = summary.get("error_count", len(report.get("errors", [])))
+    warning_count = summary.get("warning_count", len(report.get("warnings", [])))
+    if error_count:
+        detail = f"{_count_phrase(error_count, 'error')}, {_count_phrase(warning_count, 'warning')}"
+    else:
+        detail = f"{_count_phrase(warning_count, 'warning')}, no errors"
+    return f"[graphite] daemon health: {status} ({detail})"
+
+
+def _issue_lines(label: str, issues: list[dict[str, Any]]) -> list[str]:
+    lines = [f"{label}:"]
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for issue in issues:
+        groups.setdefault(str(issue.get("code")), []).append(issue)
+    for code, members in groups.items():
+        if len(members) == 1:
+            lines.append(f"  - {_safe_text(code)}: {_safe_text(members[0].get('message'))}")
+            continue
+        lines.append(f"  - {_safe_text(code)} ({len(members)}):")
+        for issue in members[:_MAX_GROUP_DETAILS]:
+            lines.append(f"      {_safe_text(issue.get('message'))}")
+        if len(members) > _MAX_GROUP_DETAILS:
+            lines.append(f"      ... {len(members) - _MAX_GROUP_DETAILS} more")
+    return lines
+
+
 def format_health_text(report: dict[str, Any]) -> str:
     lines = [
-        f"[graphite] daemon health: {_safe_text(report['status'])} ({'ok' if report['ok'] else 'attention required'})",
+        _health_head_line(report),
         f"  base: {_safe_text(report['base_path'])}",
         f"  status file: {_safe_text(report['status_path'])}",
     ]
@@ -297,13 +335,9 @@ def format_health_text(report: dict[str, Any]) -> str:
     if startup.get("checked"):
         lines.append(f"  startup installed: {startup.get('installed')}")
     if report["errors"]:
-        lines.append("Errors:")
-        for issue in report["errors"][:20]:
-            lines.append(f"  - {_safe_text(issue['code'])}: {_safe_text(issue['message'])}")
+        lines.extend(_issue_lines("Errors", report["errors"][:20]))
     if report["warnings"]:
-        lines.append("Warnings:")
-        for issue in report["warnings"][:20]:
-            lines.append(f"  - {_safe_text(issue['code'])}: {_safe_text(issue['message'])}")
+        lines.extend(_issue_lines("Warnings", report["warnings"][:20]))
     return "\n".join(lines) + "\n"
 
 

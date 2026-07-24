@@ -721,6 +721,46 @@ def test_check_reports_fresh_and_then_stale_changed_file(tmp_path: Path, monkeyp
     assert "src/app.ts" in stale["changed"]
 
 
+def test_check_names_engine_staleness_reason_without_json(tmp_path: Path, monkeypatch, capsys) -> None:
+    _write(tmp_path / "src" / "app.ts", "export const app = 1;\n")
+    monkeypatch.chdir(tmp_path)
+    assert main(["build", "."]) == 0
+    capsys.readouterr()
+
+    manifest_path = tmp_path / "graph-out" / ".graphite_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["engine"] = "stale-engine-identity"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert main(["check", "."]) == 1
+    out = capsys.readouterr().out
+    assert "graph is stale" in out
+    assert "engine_changed" in out
+
+
+def test_check_ignore_engine_reports_source_drift_only(tmp_path: Path, monkeypatch, capsys) -> None:
+    _write(tmp_path / "src" / "app.ts", "export const app = 1;\n")
+    monkeypatch.chdir(tmp_path)
+    assert main(["build", "."]) == 0
+    capsys.readouterr()
+
+    manifest_path = tmp_path / "graph-out" / ".graphite_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["engine"] = "stale-engine-identity"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    # Engine drift alone is ignored: sources unchanged -> fresh, exit 0.
+    assert main(["check", ".", "--ignore-engine"]) == 0
+    assert "graph is fresh" in capsys.readouterr().out
+
+    # Source drift still fails under --ignore-engine, with the reason named.
+    _write(tmp_path / "src" / "app.ts", "export const app = 2;\n")
+    assert main(["check", ".", "--ignore-engine"]) == 1
+    out = capsys.readouterr().out
+    assert "graph is stale (source changes)" in out
+    assert "src/app.ts" in out
+
+
 def test_impact_suggests_reverse_dependencies_and_likely_tests(tmp_path: Path, monkeypatch, capsys) -> None:
     _write(tmp_path / "src" / "store.ts", "export function readStore() { return 1; }\n")
     _write(tmp_path / "src" / "jobs.ts", "import { readStore } from './store';\nexport function runJob() { return readStore(); }\n")

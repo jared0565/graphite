@@ -5774,7 +5774,7 @@ def test_non_onboarding_parser_paths_run_real_handlers_without_activation(
     def build(_root, _cfg):
         events.append("build")
 
-    def check(_root, _cfg):
+    def check(_root, _cfg, **_kwargs):
         events.append("check")
         return {"stale": False, "added": [], "changed": [], "removed": []}
 
