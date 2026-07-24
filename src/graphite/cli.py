@@ -595,7 +595,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     requested = ["all"] if args.all else (args.platform or [])
     platforms = resolve_platform_selection(requested, interactive=interactive)
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
-    result = init_project(root, platforms=platforms, daemon_base=daemon_base).to_dict()
+    agent_hooks_mode = "strict" if args.strict else ("remind" if args.remind else None)
+    result = init_project(
+        root,
+        platforms=platforms,
+        daemon_base=daemon_base,
+        agent_hooks_mode=agent_hooks_mode,
+        install_agent_hooks=not args.no_agent_hooks,
+    ).to_dict()
     cfg = _project_scoped_config(args, root, canonical=True)
     activation = _activate_typescript_for_onboarding(args, root, cfg)
     build: dict[str, Any] = {"requested": not args.no_build, "ok": None}
@@ -635,6 +642,11 @@ def cmd_init(args: argparse.Namespace) -> int:
         for item in result["platform_files"]:
             action = item.get("action") or ("updated" if item.get("changed") else "already current")
             print(f"  - {item.get('platform')}: {action} ({item.get('path')})")
+        agent_hooks = result["agent_hooks"]
+        print(
+            f"  - agent_hooks: {agent_hooks.get('action')} "
+            f"({agent_hooks.get('path')}, mode={agent_hooks.get('mode')})"
+        )
         allowlist = result["allowlist"]
         if allowlist.get("changed"):
             print(f"  - gitignore allowlist: added {', '.join(allowlist.get('added', []))}")
@@ -1795,6 +1807,10 @@ def main(argv: list[str] | None = None) -> int:
     p_init.add_argument("--no-validate", action="store_true", help="Skip graph validation after init")
     p_init.add_argument("--list-platforms", action="store_true", help="Print supported platform keys and exit")
     p_init.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_init_mode = p_init.add_mutually_exclusive_group()
+    p_init_mode.add_argument("--strict", action="store_true", help="Write strict-mode graphite-first hook wiring (denies provable relationship greps)")
+    p_init_mode.add_argument("--remind", action="store_true", help="Write remind-mode hook wiring (non-blocking reminders; default for first-time wiring)")
+    p_init.add_argument("--no-agent-hooks", action="store_true", help="Skip Claude Code hook wiring in .claude/settings.json")
     p_init.set_defaults(func=cmd_init)
 
     p_bootstrap = sub.add_parser("bootstrap", help="Make a project Graphite-ready and optionally build its graph")

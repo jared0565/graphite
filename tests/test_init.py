@@ -304,3 +304,64 @@ def test_v5_templates_state_graphite_first_contract(tmp_path: Path) -> None:
     assert "Graphite-first is required" in pointer
     assert "literal text and filename lookups" in pointer
     assert "Graphite-first is required" in cursor
+
+
+def test_init_installs_agent_hook_wiring_and_allowlists_it(tmp_path: Path) -> None:
+    _write(tmp_path / ".gitignore", "/*\n!/.gitignore\n")
+
+    result = init_project(tmp_path, platforms=["claude"]).to_dict()
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+
+    assert result["agent_hooks"]["action"] == "created"
+    assert result["agent_hooks"]["mode"] == "remind"
+    commands = [
+        h["command"]
+        for entry in settings["hooks"]["PreToolUse"]
+        for h in entry["hooks"]
+    ]
+    assert "python -m graphite agent-hook pre-tool-use --mode remind" in commands
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert "!/.claude/" in gitignore
+    assert "!/.claude/settings.json" in gitignore
+
+
+def test_init_strict_flag_and_mode_preserved_on_reinit(tmp_path: Path) -> None:
+    first = init_project(tmp_path, platforms=["claude"], agent_hooks_mode="strict").to_dict()
+    second = init_project(tmp_path, platforms=["claude"]).to_dict()
+
+    assert first["agent_hooks"]["mode"] == "strict"
+    assert second["agent_hooks"]["mode"] == "strict"
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    joined = json.dumps(settings)
+    assert "--mode strict" in joined
+    assert "--mode remind" not in joined
+
+
+def test_init_no_agent_hooks_skips_wiring(tmp_path: Path) -> None:
+    result = init_project(tmp_path, platforms=["claude"], install_agent_hooks=False).to_dict()
+
+    assert result["agent_hooks"]["action"] == "skipped"
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_reinit_of_v4_repo_refreshes_docs_and_adds_wiring(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "GRAPHITE.md",
+        "<!-- graphite:managed version=4 -->\nOLD V4 BODY\n<!-- graphite:managed-end -->\n",
+    )
+
+    result = init_project(tmp_path, platforms=["claude"]).to_dict()
+
+    assert result["graphite_doc"]["action"] == "refreshed"
+    assert "Graphite-first is required" in (tmp_path / "GRAPHITE.md").read_text(encoding="utf-8")
+    assert (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_init_cli_strict_flag(tmp_path: Path, capsys) -> None:
+    code = main(
+        ["init", str(tmp_path), "--platform", "claude", "--strict", "--no-build", "--no-validate", "--json"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["agent_hooks"]["mode"] == "strict"

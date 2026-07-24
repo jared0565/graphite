@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, TextIO
 
+from .agent_settings import ensure_claude_settings
 from .bootstrap import ensure_gitignore, daemon_visibility
 from .io import atomic_write_text
 
@@ -153,6 +154,7 @@ class InitResult:
     platform_files: list[dict[str, Any]]
     allowlist: dict[str, Any]
     daemon: dict[str, Any]
+    agent_hooks: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -163,6 +165,7 @@ class InitResult:
             "platform_files": self.platform_files,
             "allowlist": self.allowlist,
             "daemon": self.daemon,
+            "agent_hooks": self.agent_hooks,
         }
 
 
@@ -199,7 +202,14 @@ def resolve_platform_selection(
     return tuple(resolved)
 
 
-def init_project(project_root: Path, *, platforms: Iterable[str], daemon_base: Path | None = None) -> InitResult:
+def init_project(
+    project_root: Path,
+    *,
+    platforms: Iterable[str],
+    daemon_base: Path | None = None,
+    agent_hooks_mode: str | None = None,
+    install_agent_hooks: bool = True,
+) -> InitResult:
     root = project_root.resolve()
     if not root.exists():
         raise FileNotFoundError(root)
@@ -219,6 +229,17 @@ def init_project(project_root: Path, *, platforms: Iterable[str], daemon_base: P
             platform_files.append(ensure_platform_file(root / rel_path, spec=spec))
             instruction_paths.append(rel_path)
 
+    if install_agent_hooks:
+        agent_hooks = ensure_claude_settings(root, mode=agent_hooks_mode)
+        instruction_paths.append(Path(".claude/settings.json"))
+    else:
+        agent_hooks = {
+            "path": str(root / ".claude" / "settings.json"),
+            "changed": False,
+            "action": "skipped",
+            "mode": None,
+        }
+
     allowlist = ensure_gitignore_allowlist(root / ".gitignore", instruction_paths)
     daemon = daemon_visibility(root, daemon_base=daemon_base)
     return InitResult(
@@ -229,6 +250,7 @@ def init_project(project_root: Path, *, platforms: Iterable[str], daemon_base: P
         platform_files=platform_files,
         allowlist=allowlist,
         daemon=daemon,
+        agent_hooks=agent_hooks,
     )
 
 
