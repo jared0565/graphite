@@ -216,6 +216,7 @@ def test_interactive_run_displays_budget_then_prompts_once(
     stdout = _TTY()
     monkeypatch.setattr(cli.sys, "stdin", stdin)
     monkeypatch.setattr(cli.sys, "stdout", stdout)
+    monkeypatch.delenv("CI", raising=False)
     assert cli.main(["route", "run", ".", "--objective", "review"]) == 0
     assert _Service.calls == ["recommend", "prepare", "execute"]
     output = stdout.getvalue()
@@ -322,6 +323,7 @@ def test_interactive_accept_emits_cherry_pickable_result(
     monkeypatch.setattr(cli.sys, "stdin", _TTY("yes\n"))
     stdout = _TTY()
     monkeypatch.setattr(cli.sys, "stdout", stdout)
+    monkeypatch.delenv("CI", raising=False)
     assert cli.main(["route", "accept", ".", "--task-id", "task-1"]) == 0
     assert _Service.calls == ["accept"]
     assert '"commit_id"' in stdout.getvalue()
