@@ -8,12 +8,15 @@ from typing import Any, Callable
 
 import networkx as nx
 
+from .query_plan import make_plan, plan_error
+
 
 _CALL_RELATIONS: frozenset[str] = frozenset({"calls", "references"})
 
 
-def _verb_callers(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
-    token = " ".join(rest)
+def _verb_callers(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
+    del options
+    token = inputs[0]
     detail = _find_node_detail(g, token)
     if not detail:
         return _not_found(g, token)
@@ -26,8 +29,9 @@ def _verb_callers(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
     return {"node": node_id, "match": _match_meta(token, detail), "count": len(callers), "callers": callers}
 
 
-def _verb_calls(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
-    token = " ".join(rest)
+def _verb_calls(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
+    del options
+    token = inputs[0]
     detail = _find_node_detail(g, token)
     if not detail:
         return _not_found(g, token)
@@ -40,22 +44,9 @@ def _verb_calls(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
     return {"node": node_id, "match": _match_meta(token, detail), "count": len(callees), "calls": callees}
 
 
-def _split_arrow(verb: str, rest: list[str]) -> tuple[str, str] | dict[str, Any]:
-    try:
-        arrow = rest.index("->")
-    except ValueError:
-        return {
-            "error": f"{verb} query format: {verb} <a> -> <b>",
-            "error_code": "invalid_query_format",
-        }
-    return " ".join(rest[:arrow]), " ".join(rest[arrow + 1 :])
-
-
-def _verb_reaches(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
-    split = _split_arrow("reaches", rest)
-    if isinstance(split, dict):
-        return split
-    a, b = split
+def _verb_reaches(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
+    del options
+    a, b = inputs
     src_detail = _find_node_detail(g, a)
     dst_detail = _find_node_detail(g, b)
     if not src_detail:
@@ -75,8 +66,8 @@ def _verb_reaches(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
     }
 
 
-def _verb_stats(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
-    del rest
+def _verb_stats(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
+    del inputs, options
     kinds: dict[str, int] = {}
     for _n, data in g.nodes(data=True):
         kind = data.get("kind", "unknown")
@@ -102,8 +93,7 @@ def _verb_stats(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
     }
 
 
-def _neighbor_listing(g: nx.DiGraph, rest: list[str], *, key: str, incoming: bool) -> dict[str, Any]:
-    token = " ".join(rest)
+def _neighbor_listing(g: nx.DiGraph, token: str, *, key: str, incoming: bool) -> dict[str, Any]:
     detail = _find_node_detail(g, token)
     if not detail:
         return _not_found(g, token)
@@ -120,19 +110,19 @@ def _neighbor_listing(g: nx.DiGraph, rest: list[str], *, key: str, incoming: boo
     }
 
 
-def _verb_depends_on(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
-    return _neighbor_listing(g, rest, key="depends_on", incoming=False)
+def _verb_depends_on(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
+    del options
+    return _neighbor_listing(g, inputs[0], key="depends_on", incoming=False)
 
 
-def _verb_imported_by(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
-    return _neighbor_listing(g, rest, key="imported_by", incoming=True)
+def _verb_imported_by(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
+    del options
+    return _neighbor_listing(g, inputs[0], key="imported_by", incoming=True)
 
 
-def _verb_path(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
-    split = _split_arrow("path", rest)
-    if isinstance(split, dict):
-        return split
-    a, b = split
+def _verb_path(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
+    del options
+    a, b = inputs
     src_detail = _find_node_detail(g, a)
     dst_detail = _find_node_detail(g, b)
     if not src_detail:
@@ -156,8 +146,9 @@ def _verb_path(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
     }
 
 
-def _verb_community_of(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
-    token = " ".join(rest)
+def _verb_community_of(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
+    del options
+    token = inputs[0]
     detail = _find_node_detail(g, token)
     if not detail:
         return _not_found(g, token)
@@ -172,50 +163,61 @@ def _verb_community_of(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class QueryVerb:
-    """One dispatchable query verb; the registry drives dispatch, help, and capabilities."""
+    """One dispatchable query verb; the registry drives dispatch, help, plans, and capabilities."""
 
     name: str
     aliases: tuple[str, ...]
     arguments: str
     description: str
-    handler: Callable[[nx.DiGraph, list[str]], dict[str, Any]]
+    handler: Callable[[nx.DiGraph, list[str], dict[str, Any]], dict[str, Any]]
+    roles: tuple[str, ...]
+    limits: tuple[tuple[str, int], ...] = ()
 
 
 QUERY_VERBS: tuple[QueryVerb, ...] = (
     QueryVerb(
         "callers", ("called-by", "called_by"), "<symbol>",
         "Functions that call <symbol> (calls/references in-edges)", _verb_callers,
+        ("node",),
     ),
     QueryVerb(
         "calls", ("callees",), "<symbol>",
         "Functions/symbols that <symbol> calls (calls/references out-edges)", _verb_calls,
+        ("node",),
     ),
     QueryVerb(
         "reaches", (), "<a> -> <b>",
         "Directed path from a to b over call/reference edges only", _verb_reaches,
+        ("source", "target"),
     ),
     QueryVerb(
         "path", (), "<a> -> <b>",
         "Shortest directed path from a to b over all edges", _verb_path,
+        ("source", "target"),
     ),
     QueryVerb(
         "depends-on", ("depends_on", "out"), "<node>",
         "Nodes that <node> directly depends on (out-edges)", _verb_depends_on,
+        ("node",),
     ),
     QueryVerb(
         "imported-by", ("imported_by", "in"), "<node>",
         "Nodes that directly point to <node> (in-edges)", _verb_imported_by,
+        ("node",),
     ),
     QueryVerb(
         "community-of", ("community_of",), "<node>",
         "Cluster/community label for a node", _verb_community_of,
+        ("node",),
     ),
-    QueryVerb("stats", (), "", "Basic graph statistics", _verb_stats),
+    QueryVerb("stats", (), "", "Basic graph statistics", _verb_stats, ()),
 )
 
 _VERB_INDEX: dict[str, QueryVerb] = {
     alias: spec for spec in QUERY_VERBS for alias in (spec.name, *spec.aliases)
 }
+
+_EXPECTED_ROLES: dict[str, tuple[str, ...]] = {spec.name: spec.roles for spec in QUERY_VERBS}
 
 
 def verb_catalog() -> list[dict[str, Any]]:
@@ -231,8 +233,20 @@ def verb_catalog() -> list[dict[str, Any]]:
     ]
 
 
-def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
-    """Answer a simple query string; see QUERY_VERBS for the supported patterns."""
+def _format_error(spec: QueryVerb) -> dict[str, Any]:
+    return {
+        "error": f"{spec.name} query format: {spec.name} {spec.arguments}",
+        "error_code": "invalid_query_format",
+    }
+
+
+def build_plan(q: str) -> dict[str, Any]:
+    """Deterministically translate a query string into a plan document.
+
+    Returns either a plan (see query_plan.PLAN_SCHEMA) or an error dict with a
+    stable error_code; plans never carry an "error" key, so callers distinguish
+    the two by that key alone.
+    """
     tokens = q.strip().lower().split()
     if not tokens:
         return {"error": "empty query", "error_code": "empty_query"}
@@ -249,7 +263,47 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
                 f'Supported verbs: {", ".join(v.name for v in QUERY_VERBS)}',
             ],
         }
-    return spec.handler(g, tokens[1:])
+    rest = tokens[1:]
+    if spec.roles == ():
+        targets: list[tuple[str, str]] = []
+    elif spec.roles == ("node",):
+        token = " ".join(rest)
+        if not token:
+            return _format_error(spec)
+        targets = [("node", token)]
+    else:
+        try:
+            arrow = rest.index("->")
+        except ValueError:
+            return _format_error(spec)
+        a, b = " ".join(rest[:arrow]), " ".join(rest[arrow + 1 :])
+        if not a or not b:
+            return _format_error(spec)
+        targets = [("source", a), ("target", b)]
+    return make_plan(spec.name, targets, dict(spec.limits))
+
+
+def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
+    """Validate a plan against schema v1 and the verb registry, then run it."""
+    reason = plan_error(plan, _EXPECTED_ROLES)
+    if reason is not None:
+        return {"error": f"invalid query plan: {reason}", "error_code": "invalid_plan"}
+    assert isinstance(plan, dict)  # narrowed by plan_error
+    spec = _VERB_INDEX[plan["operation"]]
+    inputs = [target["input"] for target in plan["targets"]]
+    return spec.handler(g, inputs, plan["options"])
+
+
+def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
+    """Answer a simple query string; see QUERY_VERBS for the supported patterns.
+
+    Every query is first translated into a canonical plan (build_plan) and then
+    executed (execute_plan); errors at either stage carry a stable error_code.
+    """
+    plan = build_plan(q)
+    if "error" in plan:
+        return plan
+    return execute_plan(g, plan)
 
 
 DEFAULT_SEARCH_LIMIT = 20
