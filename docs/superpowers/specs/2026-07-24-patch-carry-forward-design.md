@@ -24,9 +24,10 @@ authority forward automatically once a standard non-inference probe passes.
    excluding it costs nothing in availability. `minor` and `major` changes keep
    today's behavior.
 2. **TTL unchanged.** Capability snapshots keep their 24-hour expiry.
-   Carry-forward copies `verified_at` and `expires_at` verbatim and never
-   extends snapshot life. The short TTL is the compensating control: carried
-   authority can never outlive the day its verification ran in.
+   Carry-forward never alters or extends snapshot life — expiry always
+   reads from the original snapshot row. The short TTL is the compensating
+   control: carried authority can never outlive the day its verification
+   ran in.
 3. **Automatic on probe pass.** The carry-forward is recorded the moment the
    observed patch change passes the standard probe; no operator round is
    required for the carry itself. The per-run governance gate is untouched:
@@ -115,13 +116,11 @@ carry.
 
 Each carry row records the previous effective identity digest, the new
 identity digest, the event id of the `patch_carried_forward` lifecycle
-event that justified it, and the carry time. `verified_at` and `expires_at`
-are copied verbatim from the predecessor binding's snapshot. Expired
+event that justified it, and the carry time. Expiry is never copied or
+altered — it always reads from the immutable snapshot row itself. Expired
 snapshots are not re-bound. Snapshot rows are never modified: a snapshot's
 embedded identity remains the binary it was actually verified on, and the
 binding chain is the record of inheritance.
-If the transaction aborts, nothing is recorded; the old observation remains
-current and the next observation cycle retries.
 
 A boundary with no unexpired snapshots still carries forward (the observation
 is recorded and the boundary stays `active` with zero re-bound snapshots);
