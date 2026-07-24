@@ -2,7 +2,10 @@
 
 **Responds to:** `GRAPHITE_QUERY_INTERFACE_RECOMMENDATION.md` (external, prepared 2026-07-23
 against graphite 0.1.0, received from the Medication Reminder project)
-**Status:** Assessment + plan complete; implementation NOT started (awaiting operator approval)
+**Status:** IMPLEMENTED 2026-07-24 — Phases 1, 2, 3, and 5 shipped (Phase 1: cd85a7c and
+ancestors; Phase 2: 56af5c4..a49244c; Phase 3: 7746f3a..b99b26f; Phase 5: ce9678a, 24d63b1).
+Phase 4 remains rejected by design (see D1). Published contract: docs/schemas/ +
+docs/agent-integration.md.
 **Date:** 2026-07-24
 
 ## 1. Codebase-validated current state
