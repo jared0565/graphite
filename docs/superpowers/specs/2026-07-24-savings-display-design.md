@@ -65,8 +65,9 @@ documented dataclass; starting values below, tunable later, always printed by th
   `manual_tokens = grep_rounds * GREP_TOKENS + Σ min(file_bytes / 4, FILE_TOKEN_CAP)`;
   `manual_seconds = grep_rounds * GREP_SECONDS + K * READ_SECONDS`.
 - Graphite's actual cost: `output_bytes / 4` tokens plus measured wall seconds.
-- `savings = max(0, manual − graphite)` — empty answers show zero, big answers show
-  proportionally more.
+- `savings = max(0, manual − graphite)` — floored at zero; a zero-file answer still earns
+  the single grep-round baseline (the query itself replaced at least one manual search
+  round), and bigger answers show proportionally more.
 
 Every displayed figure is labeled *estimated*; `graphite savings report` prints the formula
 and the constants in a methodology footer. Honest and auditable, never oversold.
@@ -114,8 +115,8 @@ v5 + all three hook wirings in a single re-init, followed by global-hook retirem
 
 - Ledger: append shape, rotation at cap, corrupt-line tolerance, stat-failure tolerance,
   never-raises wrapper.
-- Estimator goldens: zero-file answer → zero; K-file scaling; per-file token cap;
-  floor-at-zero when graphite cost exceeds manual estimate.
+- Estimator goldens: zero-file answer → single grep-round baseline (not zero); K-file
+  scaling; per-file token cap; floor-at-zero when graphite cost exceeds manual estimate.
 - Toggle semantics: default ON, off/on/status transitions, report unaffected by toggle.
 - Stop hook: first turn of a session, no-usage turn (silent), multi-call turn, cursor
   advance across turns, rotation-crossing cursor, toggle-off silence, malformed payload →
