@@ -44,7 +44,10 @@ def _split_arrow(verb: str, rest: list[str]) -> tuple[str, str] | dict[str, Any]
     try:
         arrow = rest.index("->")
     except ValueError:
-        return {"error": f"{verb} query format: {verb} <a> -> <b>"}
+        return {
+            "error": f"{verb} query format: {verb} <a> -> <b>",
+            "error_code": "invalid_query_format",
+        }
     return " ".join(rest[:arrow]), " ".join(rest[arrow + 1 :])
 
 
@@ -62,7 +65,7 @@ def _verb_reaches(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
     src, dst = src_detail[0], dst_detail[0]
     p = _restricted_call_path(g, src, dst)
     if p is None:
-        return {"error": f"no call path from {src} to {dst}"}
+        return {"error": f"no call path from {src} to {dst}", "error_code": "no_path"}
     return {
         "source": src,
         "target": dst,
@@ -140,7 +143,7 @@ def _verb_path(g: nx.DiGraph, rest: list[str]) -> dict[str, Any]:
     try:
         p = nx.shortest_path(g, src, dst)
     except nx.NetworkXNoPath:
-        return {"error": f"no path from {src} to {dst}"}
+        return {"error": f"no path from {src} to {dst}", "error_code": "no_path"}
     return {
         "source": src,
         "target": dst,
@@ -232,12 +235,20 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
     """Answer a simple query string; see QUERY_VERBS for the supported patterns."""
     tokens = q.strip().lower().split()
     if not tokens:
-        return {"error": "empty query"}
+        return {"error": "empty query", "error_code": "empty_query"}
 
     verb = tokens[0]
     spec = _VERB_INDEX.get(verb)
     if spec is None:
-        return {"error": f"unknown query verb: {verb}"}
+        return {
+            "error": f"unknown query verb: {verb}",
+            "error_code": "unknown_query_verb",
+            "suggestions": [
+                'Use `graphite search "<symbol, path, or concept>"` to locate nodes',
+                "Run `graphite capabilities --json` to list supported operations",
+                f'Supported verbs: {", ".join(v.name for v in QUERY_VERBS)}',
+            ],
+        }
     return spec.handler(g, tokens[1:])
 
 
@@ -245,6 +256,7 @@ def _not_found(g: nx.DiGraph, token: str, *, label: str = "node") -> dict[str, A
     """Not-found error with close candidates so agents can self-correct."""
     return {
         "error": f"{label} not found: {token}",
+        "error_code": "node_not_found",
         "candidates": _candidates(g, token),
     }
 

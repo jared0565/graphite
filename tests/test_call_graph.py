@@ -203,13 +203,31 @@ def test_query_verb_outputs_are_golden_stable() -> None:
 def test_query_error_outputs_are_golden_stable() -> None:
     g = _golden_graph()
 
-    assert query(g, "") == {"error": "empty query"}
-    assert query(g, "how does pairing work") == {"error": "unknown query verb: how"}
-    assert query(g, "callers zzqx") == {"error": "node not found: zzqx", "candidates": []}
-    assert query(g, "path src_app") == {"error": "path query format: path <a> -> <b>"}
-    assert query(g, "reaches src_app") == {"error": "reaches query format: reaches <a> -> <b>"}
+    assert query(g, "") == {"error": "empty query", "error_code": "empty_query"}
+
+    unknown = query(g, "how does pairing work")
+    assert unknown["error"] == "unknown query verb: how"
+    assert unknown["error_code"] == "unknown_query_verb"
+    assert any("graphite search" in s for s in unknown["suggestions"])
+    assert any("graphite capabilities" in s for s in unknown["suggestions"])
+    assert any("callers" in s for s in unknown["suggestions"])
+
+    assert query(g, "callers zzqx") == {
+        "error": "node not found: zzqx",
+        "error_code": "node_not_found",
+        "candidates": [],
+    }
+    assert query(g, "path src_app") == {
+        "error": "path query format: path <a> -> <b>",
+        "error_code": "invalid_query_format",
+    }
+    assert query(g, "reaches src_app") == {
+        "error": "reaches query format: reaches <a> -> <b>",
+        "error_code": "invalid_query_format",
+    }
     assert query(g, "reaches src_lib -> src_app") == {
-        "error": "no call path from src_lib to src_app"
+        "error": "no call path from src_lib to src_app",
+        "error_code": "no_path",
     }
 
 
