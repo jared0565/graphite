@@ -10,6 +10,7 @@ import sys
 import time
 import unicodedata
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -109,7 +110,7 @@ _CANONICAL_COMMANDS = frozenset(
 )
 # Hook endpoints are inference-free like canonical commands but are not part of
 # the agent-facing query surface, so they stay out of `capabilities` output.
-_INFERENCE_FREE_EXTRA_COMMANDS = frozenset({"agent-hook"})
+_INFERENCE_FREE_EXTRA_COMMANDS = frozenset({"agent-hook", "savings"})
 _LLM_GATED_COMMANDS = _CANONICAL_COMMANDS | _INFERENCE_FREE_EXTRA_COMMANDS
 _LEGACY_LLM_ARGUMENTS = (
     "llm_provider",
@@ -809,6 +810,46 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
             f"[graphite] natural language: deterministic grammar via query --natural "
             f"({pattern_count} patterns, no inference)"
         )
+    return 0
+
+
+def cmd_savings(args: argparse.Namespace) -> int:
+    from . import savings as savings_model
+    from . import usage_ledger
+
+    root = Path.cwd()
+    if args.action in ("on", "off"):
+        usage_ledger.set_savings_display(root, args.action == "on")
+    if args.action in ("on", "off", "status"):
+        payload = {"ok": True, "savings_display": usage_ledger.savings_display_enabled(root)}
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            state = "on" if payload["savings_display"] else "off"
+            print(f"[graphite] savings display: {state}")
+        return 0
+
+    entries = list(usage_ledger.iter_entries(root))
+    today = datetime.now().astimezone().date().isoformat()
+    today_entries = [e for e in entries if str(e.get("ts", "")).startswith(today)]
+    payload = {
+        "ok": True,
+        "schema_version": 1,
+        "all_time": savings_model.summarize(entries),
+        "today": savings_model.summarize(today_entries),
+        "savings_display": usage_ledger.savings_display_enabled(root),
+        "methodology": savings_model.methodology(),
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    for label, summary in (("today", payload["today"]), ("all-time", payload["all_time"])):
+        compact = savings_model.format_compact(summary["tokens_saved"], summary["seconds_saved"])
+        print(f"[graphite] {label}: est. {compact} saved across {summary['count']} graphite answers")
+        for cmd_name, bucket in sorted(summary["by_cmd"].items()):
+            bucket_compact = savings_model.format_compact(bucket["tokens_saved"], bucket["seconds_saved"])
+            print(f"  - {cmd_name}: {bucket['count']} calls, est. {bucket_compact}")
+    print(f"[graphite] methodology: {payload['methodology']}")
     return 0
 
 
@@ -1920,6 +1961,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_agent_hook.add_argument("--mode", choices=["remind", "strict"], default="remind", help="pre-tool-use enforcement mode")
     p_agent_hook.set_defaults(func=cmd_agent_hook)
+
+    p_savings = sub.add_parser(
+        "savings",
+        help="Estimated time/token savings from graphite usage in this repo (local estimates; on/off toggles the turn-end display)",
+    )
+    p_savings.add_argument("action", nargs="?", choices=["report", "on", "off", "status"], default="report", help="report (default), or toggle the turn-end display")
+    p_savings.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_savings.set_defaults(func=cmd_savings)
 
     p_impact = sub.add_parser("impact", help="Suggest impacted files and tests for changed files")
     p_impact.add_argument("files", nargs="+", help="Changed file paths or graph node fragments")
