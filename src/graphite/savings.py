@@ -22,16 +22,23 @@ class SavingsModel:
 MODEL = SavingsModel()
 
 
+def _num(value: Any, cast: type) -> Any:
+    """Best-effort numeric coercion; schema-corrupt values count as zero."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return cast(0)
+    return cast(value)
+
+
 def estimate_entry(entry: dict[str, Any], model: SavingsModel = MODEL) -> dict[str, Any]:
     files = entry.get("files") or []
     count = len(files)
     grep_rounds = 1 + count // 10
     manual_tokens = grep_rounds * model.grep_tokens + sum(
-        min(int(f.get("bytes", 0)) // 4, model.file_token_cap) for f in files if isinstance(f, dict)
+        min(_num(f.get("bytes", 0), int) // 4, model.file_token_cap) for f in files if isinstance(f, dict)
     )
     manual_seconds = float(grep_rounds * model.grep_seconds + count * model.read_seconds)
-    cost_tokens = int(entry.get("output_bytes", 0)) // 4
-    cost_seconds = float(entry.get("wall_ms", 0)) / 1000.0
+    cost_tokens = _num(entry.get("output_bytes", 0), int) // 4
+    cost_seconds = _num(entry.get("wall_ms", 0), float) / 1000.0
     return {
         "tokens_saved": max(0, manual_tokens - cost_tokens),
         "seconds_saved": max(0.0, manual_seconds - cost_seconds),

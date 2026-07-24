@@ -31,6 +31,19 @@ def test_estimate_scales_with_files_and_caps_per_file() -> None:
     assert est["seconds_saved"] == 2 * MODEL.grep_seconds + 12 * MODEL.read_seconds
 
 
+def test_estimate_entry_tolerates_schema_corrupt_values() -> None:
+    entry = {
+        "cmd": "context",
+        "wall_ms": "not-a-number",
+        "output_bytes": "nan",
+        "files": [{"path": "a.py", "bytes": "junk"}, {"path": "b.py", "bytes": 8000}],
+    }
+    est = estimate_entry(entry)
+    assert isinstance(est["tokens_saved"], int)
+    assert isinstance(est["seconds_saved"], float)
+    assert est["tokens_saved"] > 0  # the well-formed file still counts
+
+
 def test_estimate_floors_at_zero_when_graphite_cost_exceeds_manual() -> None:
     est = estimate_entry(_entry(files=0, wall_ms=10_000_000, output_bytes=10_000_000))
     assert est["tokens_saved"] == 0
@@ -75,6 +88,20 @@ def test_savings_report_json(tmp_path: Path, capsys, monkeypatch) -> None:
     assert payload["today"]["count"] == 2
     assert "estimate" in payload["methodology"]
     assert payload["savings_display"] is True
+
+
+def test_savings_report_survives_corrupt_entry(tmp_path: Path, capsys, monkeypatch) -> None:
+    import json as j
+
+    monkeypatch.chdir(tmp_path)
+    _seed(tmp_path)
+    ledger = tmp_path / ".graphite" / "local" / "usage.jsonl"
+    with open(ledger, "a", encoding="utf-8") as f:
+        f.write(j.dumps({"cmd": "query", "wall_ms": "x", "output_bytes": "nan", "files": []}) + "\n")
+
+    assert main(["savings", "--json"]) == 0
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["all_time"]["count"] == 3  # corrupt entry counted, zero-credited, never fatal
 
 
 def test_savings_report_human_has_methodology(tmp_path: Path, capsys, monkeypatch) -> None:
