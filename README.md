@@ -119,7 +119,7 @@ python -m graphite init F:/Projects/MyApp        # agent instructions + gitignor
 python -m graphite bootstrap F:/Projects/MyApp   # minimal variant: gitignore + AGENTS.md + build
 ```
 
-The machine-wide daemon (`graphite daemon F:\Projects`) auto-discovers any project with standard markers (`.git`, `package.json`, `pyproject.toml`, `wrangler.toml`, `go.mod`, `Cargo.toml`) and keeps its graph fresh, so `init` is about wiring agent instructions, not registration.
+The machine-wide daemon (`graphite daemon F:\Projects`) auto-discovers any project with standard markers (`.git`, `package.json`, `pyproject.toml`, `wrangler.toml`, `go.mod`, `Cargo.toml`) and keeps its graph fresh, so `init` is about wiring agent instructions, not registration. To exclude a directory (and its whole subtree) from supervision — e.g. a third-party SDK checkout — drop a `.graphite-ignore` file in it; the daemon skips it at the next discovery cycle.
 
 Set `GRAPHITE_PROJECTS_ROOT` to change the default base folder used by `daemon`, `daemon-status`, `daemon-health`, the Windows startup installers, and init/bootstrap daemon-visibility checks (falls back to `F:/Projects` when it exists, else the current directory).
 

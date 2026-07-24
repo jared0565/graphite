@@ -31,6 +31,21 @@ def test_discover_projects_stops_at_project_roots_and_skips_heavy_tool_directori
     assert projects == [tmp_path / "app"]
 
 
+def test_discover_projects_honors_graphite_ignore_marker(tmp_path: Path) -> None:
+    _write(tmp_path / "app" / "package.json", "{}\n")
+    # A third-party checkout (e.g. an SDK) opts out of supervision entirely.
+    _write(tmp_path / "sdk" / ".graphite-ignore", "")
+    _write(tmp_path / "sdk" / "package.json", "{}\n")
+    # The marker prunes the whole subtree, even when the marked directory is
+    # not itself a project root.
+    _write(tmp_path / "vendor-tree" / ".graphite-ignore", "")
+    _write(tmp_path / "vendor-tree" / "nested" / "package.json", "{}\n")
+
+    projects = discover_projects(tmp_path)
+
+    assert projects == [tmp_path / "app"]
+
+
 def test_run_daemon_once_builds_discovered_projects_and_writes_status(tmp_path: Path) -> None:
     project = tmp_path / "alpha"
     _write(project / "package.json", "{}\n")

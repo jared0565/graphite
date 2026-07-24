@@ -17,6 +17,8 @@ from .io import atomic_write_json
 from .provider_observer import ProviderObservationSummary
 from .watch import Snapshot, WatchChange, diff_snapshots, snapshot, wait_for_stable_snapshot
 
+IGNORE_MARKER = ".graphite-ignore"
+
 PROJECT_MARKERS: tuple[str, ...] = (
     ".git",
     "package.json",
@@ -235,6 +237,10 @@ def discover_projects(base: Path, *, max_depth: int = 6, max_projects: int = 128
         ]
 
         if depth > max_depth:
+            dirnames[:] = []
+            continue
+
+        if (current / IGNORE_MARKER).exists():
             dirnames[:] = []
             continue
 
