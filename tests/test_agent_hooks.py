@@ -1,7 +1,6 @@
 """Tests for the Claude Code agent-hook handlers (fail-open by design)."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from graphite.agent_hooks import handle_session_start
