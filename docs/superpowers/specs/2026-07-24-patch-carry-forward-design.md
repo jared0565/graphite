@@ -140,7 +140,7 @@ routing then requires a renewal round exactly as after TTL expiry today.
 ## 8. Chaining and bounds
 
 Consecutive patch updates chain: each step writes its own observation and
-binding rows referencing the immediate predecessor, so the audit trail names
+carry rows referencing the immediate predecessor, so the audit trail names
 every binary in the chain. The chain is bounded by the snapshot TTL — carried
 authority dies at the original `expires_at` no matter how many patches landed.
 No separate chain-length cap is added (YAGNI; the TTL is the bound). A chain
@@ -150,23 +150,25 @@ fail-closes.
 
 ## 9. Storage and audit
 
-The routing store gains the append-only `lifecycle_binding_carries`
-table (schema v7 → v8, with a pre-migration backup and a rollback
-fixture); the approval-binding insert guard is recreated carry-aware.
-`verified_at`/`expires_at` are never copied or altered — expiry always
-reads from the immutable snapshot row itself. Append-only integrity rules are preserved; no
-existing rows are updated or deleted. The carry audit trail is the
-`patch_carried_forward` lifecycle event (provider, runtime kind, old and
-new identity digests, states, policy version, occurred-at) plus one carry
-row per re-bound snapshot referencing that event's id — no secrets,
-prompts, source, or raw provider diagnostics anywhere.
+The routing store gains the append-only `lifecycle_binding_carries` table
+(schema v7 → v8, with a pre-migration backup and a rollback fixture); the
+approval-binding insert guard is recreated carry-aware.
+`verified_at`/`expires_at` are never copied or altered — expiry always reads
+from the immutable snapshot row itself. Append-only integrity rules are
+preserved; no existing rows are updated or deleted. The carry audit trail is
+the `patch_carried_forward` lifecycle event (provider, runtime kind, old and
+new identity digests, states, policy version, occurred-at) plus one carry row
+per re-bound snapshot referencing that event's id — no secrets, prompts,
+source, or raw provider diagnostics anywhere.
 
 ## 10. Error handling
 
 - Probe failure on the new binary: `incompatible` / `probe_failed`, no carry.
 - Version outside policy range: `incompatible` / `policy_range_unsupported`.
-- Store transaction failure: no partial state; old observation stays current;
-  retried on the next observation.
+- Store failure mid-carry: each store's transaction is atomic; a failure
+  between the two stores leaves carry rows written but the observation
+  unrecorded — route authority stays denied and the next observation
+  retries and completes the carry.
 - Malformed or unparsable version output: existing probe error paths
   (`probe_version_invalid`), unchanged.
 
@@ -182,10 +184,13 @@ use:
   `incompatible`.
 - Transitions: `ACTIVE -> ACTIVE` valid only with `PATCH_CARRIED_FORWARD`;
   rejected under any other reason.
-- Re-binding: unexpired snapshots re-bound with `verified_at`/`expires_at`
-  copied verbatim; expired snapshots excluded; predecessor chain and probe
-  receipt digest recorded; snapshot rows byte-unchanged; transaction
-  atomicity (induced failure leaves the store at the prior state).
+- Re-binding: unexpired snapshots re-bound via new
+  `lifecycle_binding_carries` rows, with expiry always read from the
+  immutable snapshot row (never copied); expired snapshots excluded; each
+  carry row records the previous and new identity digests and the justifying
+  event id; snapshot rows byte-unchanged; store-failure fail-closed behavior
+  (induced failure between the two stores leaves carry rows written but the
+  observation unrecorded, healed on the next observation).
 - Chaining: two consecutive patches produce a two-link audit chain; a
   subsequent minor bump fail-closes.
 - Storage: schema migration forward and rollback fixtures; append-only
