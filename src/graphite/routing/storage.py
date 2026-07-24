@@ -930,6 +930,19 @@ class RepositoryStore:
                 self._create_schema_v4_backup()
             for statement in _SCHEMA[1:]:
                 connection.execute(statement)
+            # _migrate_v7_to_v8 only drops this superseded trigger when the
+            # on-disk version is exactly "7" at the moment it runs. Stores
+            # migrating from v6-or-earlier never pass through that check --
+            # _migrate_v6_to_v7 (and the pre-v6 widening) rebuild tables
+            # without stamping schema_version, so it stays at the origin
+            # version until this transaction's INSERT below. Drop it here,
+            # unconditionally and idempotently, so every origin converges on
+            # only the v8 guard (which is a strict superset: same protection
+            # plus carried-identity acceptance) instead of leaving the two
+            # triggers to coexist and the old one to reject valid carries.
+            connection.execute(
+                "DROP TRIGGER IF EXISTS lifecycle_approval_binding_insert_guard"
+            )
             connection.execute(
                 """INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value""",

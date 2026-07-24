@@ -2200,3 +2200,86 @@ def test_v7_store_migrates_to_v8_with_backup_guard_swap_and_carry_table(tmp_path
     assert (
         store.path.parent / "backups" / "events-schema-v7-pre-v8.sqlite3"
     ).exists()
+
+
+def test_v6_origin_store_drops_superseded_guard_and_accepts_carried_approval(
+    tmp_path: Path,
+) -> None:
+    # _migrate_v7_to_v8 only fires (and drops the old approval-insert guard)
+    # when the on-disk schema_version is exactly "7" at the moment it runs.
+    # A store migrating from v6-or-earlier never satisfies that:
+    # _migrate_pre_v6_provider_widening and _migrate_v6_to_v7 rebuild tables
+    # without stamping schema_version themselves, so it stays at the origin
+    # version until initialize()'s own final INSERT. This reconstructs a
+    # genuine pre-Task-2 v6 store -- unlike a fresh store built with the
+    # current _SCHEMA (which never gets the old guard at all), a real v6
+    # store still has it -- to prove initialize() converges on only the v8
+    # guard, and that an approval binding to a carried (new) identity is
+    # accepted end to end afterward.
+    store = _carry_store(tmp_path)
+    old, new = "1" * 64, "2" * 64
+    snapshot = _carry_snapshot(store, old)
+
+    _revert_provider_checks_to_v6(store.path, stamp_version="6")
+    connection = sqlite3.connect(store.path)
+    connection.executescript(
+        "DROP TRIGGER lifecycle_approval_binding_insert_guard_v8;"
+        "CREATE TRIGGER lifecycle_approval_binding_insert_guard "
+        "BEFORE INSERT ON lifecycle_approval_bindings "
+        "WHEN NOT EXISTS ("
+        "  SELECT 1 FROM lifecycle_snapshot_bindings AS binding"
+        "  WHERE binding.capability_snapshot_digest = NEW.capability_snapshot_digest"
+        "    AND binding.lifecycle_identity_digest = NEW.lifecycle_identity_digest"
+        ") BEGIN SELECT RAISE(ABORT, 'lifecycle_snapshot_binding_missing'); END;"
+        "DROP TABLE lifecycle_binding_carries;"
+    )
+    connection.close()
+
+    RepositoryStore(store.root).initialize()
+
+    connection = sqlite3.connect(store.path)
+    try:
+        triggers = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        }
+        version = connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert version == "8"
+    assert "lifecycle_approval_binding_insert_guard_v8" in triggers
+    assert "lifecycle_approval_binding_insert_guard" not in triggers
+
+    carried = store.carry_forward_snapshot_bindings(
+        previous_identity_digest=old,
+        new_identity_digest=new,
+        lifecycle_event_id="c" * 64,
+        carried_at=200,
+    )
+    assert carried == (snapshot.digest,)
+    store.save_approval_record(
+        approval_id="approval-v6-origin",
+        task_id=None,
+        decision_id=None,
+        nonce_hash="3" * 64,
+        manifest_hash="4" * 64,
+        expires_at=999,
+        reserved_tokens=1,
+    )
+    # Would raise lifecycle_snapshot_binding_missing under the old guard,
+    # since (snapshot, new) has no row in lifecycle_snapshot_bindings -- only
+    # in lifecycle_binding_carries.
+    store.save_lifecycle_approval_binding(
+        approval_id="approval-v6-origin",
+        capability_snapshot_digest=snapshot.digest,
+        lifecycle_identity_digest=new,
+        bound_at=201,
+    )
+    assert store.lifecycle_approval_binding_details("approval-v6-origin") == (
+        snapshot.digest,
+        new,
+    )
