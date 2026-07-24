@@ -143,7 +143,12 @@ def test_capabilities_json_lists_registry_kinds_and_limits(capsys) -> None:
     assert verbs["reaches"]["targets"] == ["source", "target"]
     assert verbs["stats"]["targets"] == []
     assert verbs["stats"]["limits"] == {}
-    assert payload["natural_language"] == {"available": False}
+    nl = payload["natural_language"]
+    assert nl["available"] is True
+    assert nl["mode"] == "deterministic-grammar"
+    assert nl["flag"] == "--natural"
+    assert nl["providers"] is False
+    assert {e["intent"] for e in nl["intents"]} >= {"callers", "path", "impact", "tests", "context"}
     assert payload["search"] == {
         "default_limit": DEFAULT_SEARCH_LIMIT,
         "max_limit": MAX_SEARCH_LIMIT,

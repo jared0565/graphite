@@ -40,6 +40,7 @@ from .routing.contracts import Effort
 from .routing.lifecycle_operator import LifecycleOperator, LifecycleOperatorError
 from .routing.service import RoutingService, RoutingServiceError
 from .routing.storage import DEFAULT_RECOVERY_PAGE_SIZE, StorageError
+from .natural_query import answer_natural, natural_catalog, translate_natural
 from .query import (
     DEFAULT_SEARCH_LIMIT,
     MAX_SEARCH_LIMIT,
@@ -683,6 +684,17 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 def cmd_query(args: argparse.Namespace) -> int:
+    if args.natural:
+        translated = translate_natural(args.query)
+        needs_graph = "plan" in translated or (
+            "natural" in translated and translated["natural"]["intent"] == "search"
+        )
+        if args.plan_only or not needs_graph:
+            print(json.dumps(translated, ensure_ascii=False, indent=2))
+            return 0
+        g = _load_graph(Path(args.graph_json), root=Path.cwd())
+        print(json.dumps(answer_natural(g, args.query), ensure_ascii=False, indent=2))
+        return 0
     if args.plan_only:
         print(json.dumps(plan_preview(args.query), ensure_ascii=False, indent=2))
         return 0
@@ -726,7 +738,13 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
             "default_max_results": DEFAULT_MAX_RESULTS,
         },
         "query_plans": {"plan_version": PLAN_VERSION, "flags": ["--plan-only", "--show-plan"]},
-        "natural_language": {"available": False},
+        "natural_language": {
+            "available": True,
+            "mode": "deterministic-grammar",
+            "flag": "--natural",
+            "providers": False,
+            "intents": natural_catalog(),
+        },
         "node_kinds": ["class", "file", "function", "unknown"],
         "edge_relations": ["calls", "contains", "imports", "inherits", "references", "type_references"],
         "limits": {"max_graph_bytes": MAX_GRAPH_BYTES},
@@ -746,7 +764,11 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
             f"max_results {DEFAULT_MAX_RESULTS} (neighbor listings)"
         )
         print(f"[graphite] query plans: v{PLAN_VERSION} (--show-plan, --plan-only)")
-        print("[graphite] natural language: not available")
+        pattern_count = sum(len(entry["templates"]) for entry in natural_catalog())
+        print(
+            f"[graphite] natural language: deterministic grammar via query --natural "
+            f"({pattern_count} patterns, no inference)"
+        )
     return 0
 
 
@@ -1783,7 +1805,9 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="supported verbs:\n"
         + "\n".join(verb_lines)
-        + '\n\nfor free-text lookup use: graphite search "<symbol, path, or concept>"',
+        + '\n\nfor free-text lookup use: graphite search "<symbol, path, or concept>"'
+        + '\nfor questions use: graphite query --natural "who calls X"'
+        + " (fixed deterministic grammar; list it via graphite capabilities --json)",
     )
     p_query.add_argument("query", help="Query string, e.g. 'depends-on db.ts'")
     p_query.add_argument("--graph-json", default="graph-out/graph.json", help="Path to graph.json")
@@ -1794,6 +1818,10 @@ def main(argv: list[str] | None = None) -> int:
     p_query.add_argument(
         "--plan-only", action="store_true",
         help="Validate and print the query plan without loading the graph or executing",
+    )
+    p_query.add_argument(
+        "--natural", action="store_true",
+        help="Interpret the query as a question via a fixed deterministic grammar (no inference; see capabilities)",
     )
     p_query.set_defaults(func=cmd_query)
 

@@ -1,8 +1,11 @@
 """Deterministic grammar-only natural-language query translation."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from graphite.cli import main
 from graphite.graph import build_graph
 from graphite.natural_query import (
     NATURAL_RULES,
@@ -142,6 +145,52 @@ def test_answer_natural_does_not_execute_command_intents() -> None:
     answered = answer_natural(g, "what breaks if I change lib.ts")
     assert answered["suggestion"]["command"] == ["graphite", "impact", "lib.ts"]
     assert "impacted_files" not in answered
+
+
+def test_cli_natural_translates_and_executes(tmp_path, monkeypatch, capsys) -> None:
+    src = tmp_path / "src"
+    src.mkdir(parents=True)
+    (src / "app.ts").write_text(
+        "export function helper() { return 1; }\n"
+        "export function main() { return helper(); }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    assert main(["build", "."]) == 0
+    capsys.readouterr()
+
+    assert main(["query", "who calls helper?", "--natural"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["natural"]["intent"] == "callers"
+    assert payload["plan"]["operation"] == "callers"
+    assert "callers" in payload
+
+    assert main(["query", "something about the helper maybe", "--natural"]) == 0
+    fallback = json.loads(capsys.readouterr().out)
+    assert fallback["natural"]["intent"] == "search"
+    assert fallback["search"]["ok"] is True
+
+
+def test_cli_natural_plan_only_and_suggestions_need_no_graph(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(tmp_path)  # deliberately no graph.json anywhere
+
+    assert main(["query", "who calls helper", "--natural", "--plan-only"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["plan"]["operation"] == "callers"
+    assert payload["natural"]["pattern"] == "who calls <symbol>"
+
+    assert main(["query", "tests for db.ts", "--natural"]) == 0
+    suggestion = json.loads(capsys.readouterr().out)
+    assert suggestion["suggestion"]["command"] == ["graphite", "impact", "db.ts"]
+
+    assert main(["query", "what is this", "--natural"]) == 0
+    err = json.loads(capsys.readouterr().out)
+    assert err["error_code"] == "natural_no_terms"
+
+
+def test_cli_natural_stays_inside_canonical_gate(capsys) -> None:
+    assert main(["--llm", "local", "query", "who calls x", "--natural"]) == 2
+    capsys.readouterr()
 
 
 def test_catalog_matches_rules_and_registry() -> None:

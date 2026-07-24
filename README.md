@@ -156,6 +156,15 @@ graphite query "callers calculateCommissionPence"
 graphite query "reaches handler -> db.write" --show-plan
 graphite query "callers acceptPairing" --plan-only
 
+# Natural-language questions via a FIXED deterministic grammar (no LLM, no
+# network): recognized questions translate to a plan and execute (the matched
+# pattern and plan are included); impact/context/tests questions return the
+# canonical command to run; anything else falls back to ranked search as
+# clarification candidates. The full grammar is listed by capabilities.
+graphite query --natural "who calls acceptPairing?"
+graphite query --natural "what breaks if I change db.ts"
+graphite query --natural "who calls acceptPairing" --plan-only
+
 # Deterministic ranked node search (symbol, path, or concept) and
 # machine-readable capability discovery for agents (verbs, target roles,
 # limits, plan version)
