@@ -22,6 +22,7 @@ from graphite.routing.lifecycle_service import (
 )
 from graphite.routing.lifecycle_storage import LifecycleStore, LifecycleStorageError
 from graphite.routing.profiles import BUNDLED_REQUESTED_PROFILES, create_capability_snapshot, save_capability_snapshot
+from graphite.routing.route_pool import ApprovedRouteCandidate
 from graphite.routing.storage import RepositoryStore
 
 
@@ -389,3 +390,65 @@ def test_carry_partial_failure_fails_closed_and_heals_on_next_observation(
     assert healed.state is ProviderLifecycleState.ACTIVE
     assert healed.reason is LifecycleReasonCode.PATCH_CARRIED_FORWARD
     assert lifecycle.current_observation(boundary).identity.digest == updated.digest
+
+
+def _route_candidate(**changes: object) -> ApprovedRouteCandidate:
+    # Candidate-construction helper copied from tests/test_route_pool.py's `_candidate`
+    # (verbatim field set, verified against ApprovedRouteCandidate in route_pool.py),
+    # adapted to fix the provider/runtime to the CLAUDE_CODE/LOCAL_CLI identity this
+    # test file's `_identity()` uses and to take overrides by keyword only.
+    values: dict[str, object] = {
+        "candidate_id": "candidate-1",
+        "provider": LifecycleProviderId.CLAUDE_CODE,
+        "runtime_kind": RuntimeKind.LOCAL_CLI,
+        "lifecycle_identity_digest": "1" * 64,
+        "capability_snapshot_digest": "2" * 64,
+        "model_identity_digest": "3" * 64,
+        "routing_policy_digest": None,
+        "requested_model": "model-1",
+        "effective_model": "effective-1",
+        "effort": Effort.HIGH,
+        "permission_mode": PermissionMode.READ_ONLY,
+        "risk_ceiling": RiskTier.HIGH,
+        "trust_policy_digest": "a" * 64,
+        "capabilities": ("architecture", "structured-output"),
+        "context_window_tokens": 100_000,
+        "snapshot_expires_at": 500,
+    }
+    values.update(changes)
+    return ApprovedRouteCandidate(**values)
+
+
+def test_route_authority_selects_carried_snapshot_and_rejects_stale_pins(tmp_path: Path) -> None:
+    service, _lifecycle, routing = _service(tmp_path)
+    boundary = "b" * 64
+    identity = _identity()
+    service.observe(boundary_digest=boundary, identity=identity, policy=_policy())
+    snapshot = _snapshot(routing, identity.digest)
+    service.activate(
+        boundary_digest=boundary,
+        lifecycle_identity_digest=identity.digest,
+        capability_snapshot_digest=snapshot.digest,
+        activated_at=102,
+    )
+    updated = replace(identity, version="2.1.215", runtime_digest="e" * 64, observed_at=200)
+    service.observe(boundary_digest=boundary, identity=updated, policy=_policy())
+
+    fresh_candidate = _route_candidate(  # helper copied from tests/test_route_pool.py
+        candidate_id="carried-primary",
+        lifecycle_identity_digest=updated.digest,
+        capability_snapshot_digest=snapshot.digest,
+    )
+    authority = service.route_authority(boundary, fresh_candidate)
+    assert authority.state is ProviderLifecycleState.ACTIVE
+    assert authority.lifecycle_identity_digest == updated.digest
+
+    stale_candidate = _route_candidate(
+        candidate_id="carried-primary",
+        lifecycle_identity_digest=identity.digest,
+        capability_snapshot_digest=snapshot.digest,
+    )
+    from graphite.routing.route_pool import RoutePoolError, _validate_authority
+
+    with pytest.raises(RoutePoolError, match="route_identity_changed"):
+        _validate_authority(stale_candidate, authority, now=210)

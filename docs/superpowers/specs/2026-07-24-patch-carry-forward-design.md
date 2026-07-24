@@ -93,19 +93,33 @@ under any other reason code.
 
 ## 6. Snapshot re-binding
 
-Recording a carry-forward is one atomic store transaction containing:
+Recording a carry-forward is two single-store transactions in a fixed,
+fail-closed order (the bindings live in the routing store and the
+observation in the lifecycle store — separate SQLite databases, so one
+cross-store transaction is not available):
 
-1. the new current observation for the boundary (new identity, state
-   `active`, reason `patch_carried_forward`), and
-2. one new binding row per currently-bound, unexpired capability snapshot of
-   that boundary, re-pointing the snapshot to the new identity digest.
+1. one routing-store transaction inserting one row into the new
+   append-only `lifecycle_binding_carries` table per currently-bound,
+   unexpired capability snapshot of the boundary, re-pointing its
+   effective binding to the new identity digest (the original
+   `lifecycle_snapshot_bindings` row is immutable and is superseded at
+   read time by the latest carry row), followed by invalidation of
+   approvals still pinned to the previous identity; then
+2. one lifecycle-store write recording the `active` → `active`
+   observation with reason `patch_carried_forward`.
 
-Each new binding row records: the predecessor binding it supersedes, a
-carried-forward marker, and the digest of the probe receipt that justified the
-carry. `verified_at` and `expires_at` are copied verbatim from the predecessor
-binding's snapshot. Expired snapshots are not re-bound. Snapshot rows are
-never modified: a snapshot's embedded identity remains the binary it was
-actually verified on, and the binding chain is the record of inheritance.
+A failure between the two leaves route authority denied (bindings name
+the new identity while the current observation still names the old one)
+and the next observation of the same binary retries and completes the
+carry.
+
+Each carry row records the previous effective identity digest, the new
+identity digest, the event id of the `patch_carried_forward` lifecycle
+event that justified it, and the carry time. `verified_at` and `expires_at`
+are copied verbatim from the predecessor binding's snapshot. Expired
+snapshots are not re-bound. Snapshot rows are never modified: a snapshot's
+embedded identity remains the binary it was actually verified on, and the
+binding chain is the record of inheritance.
 If the transaction aborts, nothing is recorded; the old observation remains
 current and the next observation cycle retries.
 
@@ -137,15 +151,16 @@ fail-closes.
 
 ## 9. Storage and audit
 
-The lifecycle store's binding table gains the predecessor reference, the
-carried-forward marker, and the probe-receipt digest, under the store's
-standard versioned-migration mechanism with a rollback fixture (the
-implementation plan pins the exact schema version numbers after reading
-`lifecycle_storage.py`). Append-only integrity rules are preserved; no
-existing rows are updated or deleted. The carry-forward lifecycle event
-carries: provider, runtime kind, old identity digest, new identity digest,
-old and new versions, probe level, and the count of re-bound snapshots — no
-secrets, prompts, source, or raw provider diagnostics.
+The routing store gains the append-only `lifecycle_binding_carries`
+table (schema v7 → v8, with a pre-migration backup and a rollback
+fixture); the approval-binding insert guard is recreated carry-aware.
+`verified_at`/`expires_at` are never copied or altered — expiry always
+reads from the immutable snapshot row itself. Append-only integrity rules are preserved; no
+existing rows are updated or deleted. The carry audit trail is the
+`patch_carried_forward` lifecycle event (provider, runtime kind, old and
+new identity digests, states, policy version, occurred-at) plus one carry
+row per re-bound snapshot referencing that event's id — no secrets,
+prompts, source, or raw provider diagnostics anywhere.
 
 ## 10. Error handling
 
