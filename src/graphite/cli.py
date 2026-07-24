@@ -607,9 +607,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"[graphite] initialized: {root}")
         print(f"  - platforms: {', '.join(result['platforms'])}")
         doc = result["graphite_doc"]
-        print(f"  - graphite_doc: {'updated' if doc.get('changed') else 'already current'} ({doc.get('path')})")
+        doc_action = doc.get("action") or ("updated" if doc.get("changed") else "already current")
+        print(f"  - graphite_doc: {doc_action} ({doc.get('path')})")
         for item in result["platform_files"]:
-            action = "updated" if item.get("changed") else "already current"
+            action = item.get("action") or ("updated" if item.get("changed") else "already current")
             print(f"  - {item.get('platform')}: {action} ({item.get('path')})")
         allowlist = result["allowlist"]
         if allowlist.get("changed"):

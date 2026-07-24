@@ -77,6 +77,104 @@ def test_graphite_doc_uses_shell_agnostic_invocation(tmp_path: Path) -> None:
     assert "F:\\Projects" not in doc
 
 
+def test_init_writes_versioned_managed_markers_and_is_idempotent(tmp_path: Path) -> None:
+    from graphite.init import DOC_VERSION
+
+    first = init_project(tmp_path, platforms=["claude"]).to_dict()
+    second = init_project(tmp_path, platforms=["claude"]).to_dict()
+
+    begin = f"<!-- graphite:managed version={DOC_VERSION} -->"
+    for rel in ("GRAPHITE.md", "CLAUDE.md"):
+        text = (tmp_path / rel).read_text(encoding="utf-8")
+        assert begin in text
+        assert "<!-- graphite:managed-end -->" in text
+    assert first["graphite_doc"]["changed"] is True
+    assert second["graphite_doc"]["changed"] is False
+    assert second["graphite_doc"]["action"] == "already current"
+    assert second["platform_files"][0]["action"] == "already current"
+
+
+def test_init_refreshes_outdated_managed_region_preserving_surrounding_content(tmp_path: Path) -> None:
+    from graphite.init import DOC_VERSION
+
+    _write(
+        tmp_path / "GRAPHITE.md",
+        "user preamble\n\n"
+        "<!-- graphite:managed version=1 -->\n"
+        "OLD MANAGED BODY\n"
+        "<!-- graphite:managed-end -->\n"
+        "\nuser suffix\n",
+    )
+    result = init_project(tmp_path, platforms=["claude"]).to_dict()
+    text = (tmp_path / "GRAPHITE.md").read_text(encoding="utf-8")
+
+    assert result["graphite_doc"]["changed"] is True
+    assert result["graphite_doc"]["action"] == "refreshed"
+    assert "user preamble" in text
+    assert "user suffix" in text
+    assert "OLD MANAGED BODY" not in text
+    assert f"<!-- graphite:managed version={DOC_VERSION} -->" in text
+    assert "## Required Workflow" in text
+
+
+def test_init_leaves_legacy_unversioned_docs_untouched(tmp_path: Path) -> None:
+    legacy_doc = (
+        "# Graphite Development Context\n\n"
+        "## Required Workflow\n\n"
+        "Hand-curated legacy instructions.\n"
+    )
+    legacy_pointer = (
+        "# Notes\n\nFollow `GRAPHITE.md`; use `graph-out/graph.json` as the shared graph.\n"
+    )
+    _write(tmp_path / "GRAPHITE.md", legacy_doc)
+    _write(tmp_path / "CLAUDE.md", legacy_pointer)
+
+    result = init_project(tmp_path, platforms=["claude"]).to_dict()
+
+    assert result["graphite_doc"]["changed"] is False
+    assert result["graphite_doc"]["action"] == "legacy unversioned"
+    assert result["platform_files"][0]["changed"] is False
+    assert result["platform_files"][0]["action"] == "legacy unversioned"
+    assert (tmp_path / "GRAPHITE.md").read_text(encoding="utf-8") == legacy_doc
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == legacy_pointer
+
+
+def test_init_never_downgrades_or_touches_damaged_managed_regions(tmp_path: Path) -> None:
+    newer = (
+        "<!-- graphite:managed version=999999 -->\n"
+        "FUTURE BODY\n"
+        "<!-- graphite:managed-end -->\n"
+    )
+    damaged = "<!-- graphite:managed version=1 -->\nNO END MARKER\n"
+    _write(tmp_path / "GRAPHITE.md", newer)
+    _write(tmp_path / "CLAUDE.md", damaged)
+
+    result = init_project(tmp_path, platforms=["claude"]).to_dict()
+
+    assert result["graphite_doc"]["changed"] is False
+    assert result["graphite_doc"]["action"] == "newer than tool"
+    assert result["platform_files"][0]["changed"] is False
+    assert result["platform_files"][0]["action"] == "managed markers damaged"
+    assert (tmp_path / "GRAPHITE.md").read_text(encoding="utf-8") == newer
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == damaged
+
+
+def test_template_change_requires_doc_version_bump() -> None:
+    import hashlib
+
+    from graphite import init as init_module
+
+    digest = hashlib.sha256(
+        "\x00".join(
+            [init_module.GRAPHITE_DOC, init_module.SHARED_POINTER, init_module.CURSOR_POINTER]
+        ).encode("utf-8")
+    ).hexdigest()
+    assert (init_module.DOC_VERSION, digest) == (
+        2,
+        "33531a6a9ee54863778adde2ed0e19bc7d9146aaaf4a1ab76a945b11d5a57652",
+    ), "template content changed: bump DOC_VERSION and update this pinned digest"
+
+
 def test_init_cli_json_no_build(tmp_path: Path, capsys) -> None:
     result = main([
         "init",

@@ -1,12 +1,23 @@
 """Interactive project initialization for Graphite-aware AI coding agents."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, TextIO
 
 from .bootstrap import ensure_gitignore, daemon_visibility
 from .io import atomic_write_text
+
+# Bump whenever GRAPHITE_DOC, SHARED_POINTER, or CURSOR_POINTER changes;
+# test_template_change_requires_doc_version_bump pins the pairing. Files
+# written before versioning existed count as version 1 ("legacy unversioned")
+# and are never rewritten automatically.
+DOC_VERSION = 2
+
+MANAGED_BEGIN = f"<!-- graphite:managed version={DOC_VERSION} -->"
+MANAGED_END = "<!-- graphite:managed-end -->"
+_MANAGED_BEGIN_RE = re.compile(r"<!-- graphite:managed version=(\d{1,9}) -->")
 
 GRAPHITE_DOC_HEADER = "# Graphite Development Context"
 GRAPHITE_REQUIRED_WORKFLOW = "## Required Workflow"
@@ -207,32 +218,66 @@ def init_project(project_root: Path, *, platforms: Iterable[str], daemon_base: P
     )
 
 
-def ensure_graphite_doc(path: Path) -> dict[str, Any]:
-    original = path.read_text(encoding="utf-8") if path.exists() else ""
-    if GRAPHITE_DOC_HEADER in original and GRAPHITE_REQUIRED_WORKFLOW in original:
-        return {"path": str(path), "changed": False, "action": "already current"}
+def _managed_block(body: str) -> str:
+    if not body.endswith("\n"):
+        body += "\n"
+    return f"{MANAGED_BEGIN}\n{body}{MANAGED_END}"
+
+
+def _ensure_managed_text(
+    original: str, body: str, *, is_legacy: bool, heading: str = ""
+) -> tuple[str | None, str]:
+    """Return (new_text_or_None, action) for a versioned managed region."""
+    begin = _MANAGED_BEGIN_RE.search(original)
+    if begin is not None:
+        end_index = original.find(MANAGED_END, begin.end())
+        if end_index < 0:
+            return None, "managed markers damaged"
+        version = int(begin.group(1))
+        if version == DOC_VERSION:
+            return None, "already current"
+        if version > DOC_VERSION:
+            return None, "newer than tool"
+        replaced = (
+            original[: begin.start()]
+            + _managed_block(body)
+            + original[end_index + len(MANAGED_END):]
+        )
+        return replaced, "refreshed"
+
+    if is_legacy:
+        # Pre-versioning content, possibly hand-curated; never rewrite it
+        # automatically. Reported so the operator can reconcile and opt in.
+        return None, "legacy unversioned"
 
     if not original.strip():
-        new_text = GRAPHITE_DOC
-    else:
-        new_text = _append_section(original, GRAPHITE_DOC)
-    atomic_write_text(path, new_text)
-    return {"path": str(path), "changed": True, "action": "created" if not original else "updated"}
+        return heading + _managed_block(body) + "\n", "created"
+    return _append_section(original, _managed_block(body)), "updated"
+
+
+def ensure_graphite_doc(path: Path) -> dict[str, Any]:
+    original = path.read_text(encoding="utf-8") if path.exists() else ""
+    new_text, action = _ensure_managed_text(
+        original,
+        GRAPHITE_DOC,
+        is_legacy=GRAPHITE_DOC_HEADER in original and GRAPHITE_REQUIRED_WORKFLOW in original,
+    )
+    if new_text is not None:
+        atomic_write_text(path, new_text)
+    return {"path": str(path), "changed": new_text is not None, "action": action}
 
 
 def ensure_platform_file(path: Path, *, spec: PlatformSpec) -> dict[str, Any]:
     original = path.read_text(encoding="utf-8") if path.exists() else ""
-    marker_present = "GRAPHITE.md" in original and "graph-out/graph.json" in original
-    if marker_present:
-        return {"platform": spec.key, "path": str(path), "changed": False, "action": "already current"}
-
-    if not original.strip():
-        heading = f"# {spec.label} Project Instructions\n\n"
-        new_text = heading + spec.content
-    else:
-        new_text = _append_section(original, spec.content)
-    atomic_write_text(path, new_text)
-    return {"platform": spec.key, "path": str(path), "changed": True, "action": "created" if not original else "updated"}
+    new_text, action = _ensure_managed_text(
+        original,
+        spec.content,
+        is_legacy="GRAPHITE.md" in original and "graph-out/graph.json" in original,
+        heading=f"# {spec.label} Project Instructions\n\n",
+    )
+    if new_text is not None:
+        atomic_write_text(path, new_text)
+    return {"platform": spec.key, "path": str(path), "changed": new_text is not None, "action": action}
 
 
 def ensure_gitignore_allowlist(path: Path, rel_paths: Iterable[Path]) -> dict[str, Any]:
