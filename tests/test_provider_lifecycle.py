@@ -485,3 +485,175 @@ def test_zai_is_remote_https_and_requires_model_digest_and_forbids_routing() -> 
             LifecycleProviderId.ZAI, RuntimeKind.REMOTE_HTTPS, "1.0.0",
             "a" * 64, None, None, ("remote_inference",), "1.0.0", 1_700_000_000,
         )
+
+
+def test_patch_on_active_local_cli_carries_authority_forward() -> None:
+    previous = _identity()
+    current = _identity(
+        version="2.1.216", runtime_digest="b" * 64, observed_at=1_721_433_600
+    )
+
+    assessment = assess_identity_change(
+        previous, current, _policy(), existing_state=ProviderLifecycleState.ACTIVE
+    )
+
+    assert assessment.change is IdentityChange.PATCH
+    assert assessment.state is ProviderLifecycleState.ACTIVE
+    assert assessment.reason is LifecycleReasonCode.PATCH_CARRIED_FORWARD
+    assert assessment.probe_level is CompatibilityProbeLevel.STANDARD
+
+
+def test_hash_only_on_active_boundary_still_requires_verification() -> None:
+    previous = _identity()
+    current = _identity(runtime_digest="b" * 64, observed_at=1_721_433_600)
+
+    assessment = assess_identity_change(
+        previous, current, _policy(), existing_state=ProviderLifecycleState.ACTIVE
+    )
+
+    assert assessment.change is IdentityChange.HASH_ONLY
+    assert assessment.state is ProviderLifecycleState.VERIFICATION_REQUIRED
+    assert assessment.reason is LifecycleReasonCode.HASH_CHANGED
+
+
+def test_patch_on_active_non_local_cli_still_requires_verification() -> None:
+    previous = _identity(
+        provider=LifecycleProviderId.OLLAMA,
+        runtime_kind=RuntimeKind.LOCAL_HTTP,
+        version="0.5.1",
+        model_identity_digest="a" * 64,
+        capabilities=("model-manifest", "version"),
+    )
+    current = _identity(
+        provider=LifecycleProviderId.OLLAMA,
+        runtime_kind=RuntimeKind.LOCAL_HTTP,
+        version="0.5.2",
+        model_identity_digest="a" * 64,
+        observed_at=1_721_433_600,
+        capabilities=("model-manifest", "version"),
+    )
+    # runtime_digest deliberately unchanged: for non-CLI runtimes a digest change
+    # classifies as ENDPOINT (checked before PATCH), which would dodge the gate
+    # this test exists to pin.
+    policy = _policy(
+        provider=LifecycleProviderId.OLLAMA,
+        runtime_kind=RuntimeKind.LOCAL_HTTP,
+        minimum_version="0.1.0",
+        maximum_version_exclusive="1.0.0",
+        required_capabilities=("model-manifest", "version"),
+    )
+
+    assessment = assess_identity_change(
+        previous, current, policy, existing_state=ProviderLifecycleState.ACTIVE
+    )
+
+    assert assessment.change is IdentityChange.PATCH
+    assert assessment.state is ProviderLifecycleState.VERIFICATION_REQUIRED
+    assert assessment.reason is LifecycleReasonCode.PATCH_CHANGED
+
+
+def test_patch_from_verification_required_does_not_resurrect_authority() -> None:
+    previous = _identity()
+    current = _identity(
+        version="2.1.216", runtime_digest="b" * 64, observed_at=1_721_433_600
+    )
+
+    assessment = assess_identity_change(
+        previous,
+        current,
+        _policy(),
+        existing_state=ProviderLifecycleState.VERIFICATION_REQUIRED,
+    )
+
+    assert assessment.state is ProviderLifecycleState.VERIFICATION_REQUIRED
+    assert assessment.reason is LifecycleReasonCode.PATCH_CHANGED
+
+
+def test_patch_with_failed_standard_probe_is_incompatible_not_carried() -> None:
+    previous = _identity()
+    current = _identity(
+        version="2.1.216", runtime_digest="b" * 64, observed_at=1_721_433_600
+    )
+
+    assessment = assess_identity_change(
+        previous,
+        current,
+        _policy(),
+        standard_probe_passed=False,
+        existing_state=ProviderLifecycleState.ACTIVE,
+    )
+
+    assert assessment.state is ProviderLifecycleState.INCOMPATIBLE
+    assert assessment.reason is LifecycleReasonCode.PROBE_FAILED
+
+
+def test_patch_outside_policy_range_is_incompatible_not_carried() -> None:
+    previous = _identity()
+    current = _identity(
+        version="2.1.216", runtime_digest="b" * 64, observed_at=1_721_433_600
+    )
+    policy = _policy(maximum_version_exclusive="2.1.216")
+
+    assessment = assess_identity_change(
+        previous, current, policy, existing_state=ProviderLifecycleState.ACTIVE
+    )
+
+    assert assessment.state is ProviderLifecycleState.INCOMPATIBLE
+    assert assessment.reason is LifecycleReasonCode.POLICY_RANGE_UNSUPPORTED
+
+
+def test_event_active_to_active_identity_change_requires_carry_reason() -> None:
+    ProviderLifecycleEvent(
+        "carry-event-1",
+        LifecycleProviderId.CLAUDE_CODE,
+        RuntimeKind.LOCAL_CLI,
+        "a" * 64,
+        "b" * 64,
+        ProviderLifecycleState.ACTIVE,
+        ProviderLifecycleState.ACTIVE,
+        LifecycleReasonCode.PATCH_CARRIED_FORWARD,
+        "1.0.0",
+        1_721_433_600,
+    )
+    with pytest.raises(ValueError, match="lifecycle_transition_invalid"):
+        ProviderLifecycleEvent(
+            "carry-event-2",
+            LifecycleProviderId.CLAUDE_CODE,
+            RuntimeKind.LOCAL_CLI,
+            "a" * 64,
+            "b" * 64,
+            ProviderLifecycleState.ACTIVE,
+            ProviderLifecycleState.ACTIVE,
+            LifecycleReasonCode.PATCH_CHANGED,
+            "1.0.0",
+            1_721_433_600,
+        )
+
+
+def test_event_carry_reason_is_rejected_outside_active_to_active_change() -> None:
+    with pytest.raises(ValueError, match="lifecycle_transition_invalid"):
+        ProviderLifecycleEvent(
+            "carry-event-3",
+            LifecycleProviderId.CLAUDE_CODE,
+            RuntimeKind.LOCAL_CLI,
+            "a" * 64,
+            "b" * 64,
+            ProviderLifecycleState.VERIFICATION_REQUIRED,
+            ProviderLifecycleState.VERIFICATION_REQUIRED,
+            LifecycleReasonCode.PATCH_CARRIED_FORWARD,
+            "1.0.0",
+            1_721_433_600,
+        )
+    with pytest.raises(ValueError, match="lifecycle_transition_invalid"):
+        ProviderLifecycleEvent(
+            "carry-event-4",
+            LifecycleProviderId.CLAUDE_CODE,
+            RuntimeKind.LOCAL_CLI,
+            "a" * 64,
+            "a" * 64,
+            ProviderLifecycleState.ACTIVE,
+            ProviderLifecycleState.ACTIVE,
+            LifecycleReasonCode.PATCH_CARRIED_FORWARD,
+            "1.0.0",
+            1_721_433_600,
+        )
