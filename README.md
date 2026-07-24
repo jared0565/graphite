@@ -167,9 +167,14 @@ graphite query --natural "who calls acceptPairing" --plan-only
 
 # Deterministic ranked node search (symbol, path, or concept) and
 # machine-readable capability discovery for agents (verbs, target roles,
-# limits, plan version)
+# limits, plan version, natural-language grammar)
 graphite search "acceptPairing"
 graphite capabilities --json
+
+# Integration contract for agents: docs/agent-integration.md walks the
+# discover -> search -> query -> validate workflow; docs/schemas/*.json
+# publishes the plan/result/search/capabilities JSON schemas (kept in
+# lockstep with live outputs by compatibility tests).
 
 # Check whether graph-out is current (names the reason when stale:
 # engine_changed vs source changes; --ignore-engine reports source drift only)
