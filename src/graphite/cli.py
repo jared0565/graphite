@@ -271,6 +271,21 @@ def _load_graph(path: Path, *, root: Path | None = None) -> Any:
     return graph
 
 
+def _record_canonical_usage(cmd: str, result: Any, started: float) -> None:
+    """Best-effort usage recording for the savings display; never fatal."""
+    try:
+        from . import usage_ledger
+
+        usage_ledger.record_usage(
+            Path.cwd(),
+            cmd=cmd,
+            wall_ms=int((time.perf_counter() - started) * 1000),
+            result=result,
+        )
+    except Exception:
+        return
+
+
 def _is_test_file(path: str) -> bool:
     normalized = path.replace("\\", "/")
     return "/tests/" in f"/{normalized}" or normalized.endswith(_TEST_SUFFIXES)
@@ -700,6 +715,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 def cmd_query(args: argparse.Namespace) -> int:
+    started = time.perf_counter()
     if args.natural:
         translated = translate_natural(args.query)
         needs_graph = "plan" in translated or (
@@ -709,7 +725,10 @@ def cmd_query(args: argparse.Namespace) -> int:
             print(json.dumps(translated, ensure_ascii=False, indent=2))
             return 0
         g = _load_graph(Path(args.graph_json), root=Path.cwd())
-        print(json.dumps(answer_natural(g, args.query), ensure_ascii=False, indent=2))
+        result = answer_natural(g, args.query)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if "error" not in result:
+            _record_canonical_usage("query-natural", result, started)
         return 0
     if args.plan_only:
         print(json.dumps(plan_preview(args.query), ensure_ascii=False, indent=2))
@@ -721,10 +740,13 @@ def cmd_query(args: argparse.Namespace) -> int:
         if "error" not in plan:
             result = {**result, "plan": plan}
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if "error" not in result:
+        _record_canonical_usage("query", result, started)
     return 0
 
 
 def cmd_search(args: argparse.Namespace) -> int:
+    started = time.perf_counter()
     g = _load_graph(Path(args.graph_json), root=Path.cwd())
     result = search_graph(g, args.text, limit=args.limit)
     if args.json:
@@ -739,6 +761,8 @@ def cmd_search(args: argparse.Namespace) -> int:
         for item in result["results"]:
             location = f" ({item['source_file']})" if item["source_file"] else ""
             print(f"  - {item['id']} [{item['kind']}, {item['match_type']}]{location}")
+    if result.get("ok"):
+        _record_canonical_usage("search", result, started)
     return 0
 
 
@@ -813,6 +837,7 @@ def cmd_agent_hook(args: argparse.Namespace) -> int:
 
 
 def cmd_impact(args: argparse.Namespace) -> int:
+    started = time.perf_counter()
     g = _load_graph(Path(args.graph_json), root=Path.cwd())
     result = _impact(g, args.files, args.depth)
     if args.json:
@@ -828,6 +853,7 @@ def cmd_impact(args: argparse.Namespace) -> int:
             print("Missing inputs:")
             for item in result["missing"]:
                 print(f"  - {item}")
+    _record_canonical_usage("impact", result, started)
     return 0 if not result["missing"] else 1
 
 
@@ -930,12 +956,14 @@ def cmd_review_changes(args: argparse.Namespace) -> int:
 
 
 def cmd_context(args: argparse.Namespace) -> int:
+    started = time.perf_counter()
     g = _load_graph(Path(args.graph_json), root=Path.cwd())
     result = build_context(g, args.files, depth=args.depth, neighbor_limit=args.neighbor_limit)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print(format_context_markdown(result))
+    _record_canonical_usage("context", result, started)
     return 0 if not result["missing"] else 1
 
 
