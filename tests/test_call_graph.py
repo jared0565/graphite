@@ -97,6 +97,122 @@ def test_arrow_caller_is_a_materialized_function_node(tmp_path: Path) -> None:
     assert nodes[arrow_src]["source_file"] == "src/consumer.ts"
 
 
+def _golden_graph():
+    nodes = [
+        {"id": "src_app", "kind": "file", "name": "app.ts", "source_file": "src/app.ts"},
+        {"id": "src_app_main", "kind": "function", "name": "main", "source_file": "src/app.ts"},
+        {"id": "src_lib", "kind": "file", "name": "lib.ts", "source_file": "src/lib.ts"},
+        {"id": "src_lib_helper", "kind": "function", "name": "helper", "source_file": "src/lib.ts"},
+    ]
+    edges = [
+        {"source": "src_app", "target": "src_lib", "relation": "imports"},
+        {"source": "src_app_main", "target": "src_lib_helper", "relation": "calls"},
+    ]
+    return build_graph(nodes, edges)
+
+
+def test_query_verb_outputs_are_golden_stable() -> None:
+    """Exact-output pins so interface refactors are provably inert."""
+    g = _golden_graph()
+
+    assert query(g, "callers helper") == {
+        "node": "src_lib_helper",
+        "match": {"input": "helper", "node": "src_lib_helper", "type": "name"},
+        "count": 1,
+        "callers": [
+            {"id": "src_app_main", "name": "main", "kind": "function", "source_file": "src/app.ts"}
+        ],
+    }
+    assert query(g, "calls main") == {
+        "node": "src_app_main",
+        "match": {"input": "main", "node": "src_app_main", "type": "name"},
+        "count": 1,
+        "calls": [
+            {"id": "src_lib_helper", "name": "helper", "kind": "function", "source_file": "src/lib.ts"}
+        ],
+    }
+    assert query(g, "depends-on src_app") == {
+        "node": "src_app",
+        "match": {"input": "src_app", "node": "src_app", "type": "exact-id"},
+        "count": 1,
+        "depends_on": [{"id": "src_lib", "name": "lib.ts", "kind": "file"}],
+    }
+    assert query(g, "imported-by src_lib") == {
+        "node": "src_lib",
+        "match": {"input": "src_lib", "node": "src_lib", "type": "exact-id"},
+        "count": 1,
+        "imported_by": [{"id": "src_app", "name": "app.ts", "kind": "file"}],
+    }
+    assert query(g, "reaches main -> helper") == {
+        "source": "src_app_main",
+        "target": "src_lib_helper",
+        "match": {
+            "source": {"input": "main", "node": "src_app_main", "type": "name"},
+            "target": {"input": "helper", "node": "src_lib_helper", "type": "name"},
+        },
+        "length": 1,
+        "path": [
+            {"id": "src_app_main", "name": "main", "kind": "function", "source_file": "src/app.ts"},
+            {"id": "src_lib_helper", "name": "helper", "kind": "function", "source_file": "src/lib.ts"},
+        ],
+    }
+    assert query(g, "path src_app -> src_lib") == {
+        "source": "src_app",
+        "target": "src_lib",
+        "match": {
+            "source": {"input": "src_app", "node": "src_app", "type": "exact-id"},
+            "target": {"input": "src_lib", "node": "src_lib", "type": "exact-id"},
+        },
+        "length": 1,
+        "path": [
+            {"id": "src_app", "name": "app.ts", "kind": "file"},
+            {"id": "src_lib", "name": "lib.ts", "kind": "file"},
+        ],
+    }
+    assert query(g, "community-of src_app") == {
+        "node": "src_app",
+        "match": {"input": "src_app", "node": "src_app", "type": "exact-id"},
+        "community": None,
+        "name": "app.ts",
+    }
+
+    stats = query(g, "stats")
+    density = stats.pop("density")
+    assert density == pytest.approx(2 / 12)
+    assert stats == {
+        "node_count": 4,
+        "edge_count": 2,
+        "community_count": 0,
+        "nodes_by_kind": {"file": 2, "function": 2},
+        "edges_by_relation": {"imports": 1, "calls": 1},
+        "top_incoming": [
+            {"id": "src_lib", "name": "lib.ts", "kind": "file", "source_file": "src/lib.ts", "in_degree": 1},
+            {"id": "src_lib_helper", "name": "helper", "kind": "function", "source_file": "src/lib.ts", "in_degree": 1},
+            {"id": "src_app", "name": "app.ts", "kind": "file", "source_file": "src/app.ts", "in_degree": 0},
+            {"id": "src_app_main", "name": "main", "kind": "function", "source_file": "src/app.ts", "in_degree": 0},
+        ],
+        "top_outgoing": [
+            {"id": "src_app", "name": "app.ts", "kind": "file", "source_file": "src/app.ts", "out_degree": 1},
+            {"id": "src_app_main", "name": "main", "kind": "function", "source_file": "src/app.ts", "out_degree": 1},
+            {"id": "src_lib", "name": "lib.ts", "kind": "file", "source_file": "src/lib.ts", "out_degree": 0},
+            {"id": "src_lib_helper", "name": "helper", "kind": "function", "source_file": "src/lib.ts", "out_degree": 0},
+        ],
+    }
+
+
+def test_query_error_outputs_are_golden_stable() -> None:
+    g = _golden_graph()
+
+    assert query(g, "") == {"error": "empty query"}
+    assert query(g, "how does pairing work") == {"error": "unknown query verb: how"}
+    assert query(g, "callers zzqx") == {"error": "node not found: zzqx", "candidates": []}
+    assert query(g, "path src_app") == {"error": "path query format: path <a> -> <b>"}
+    assert query(g, "reaches src_app") == {"error": "reaches query format: reaches <a> -> <b>"}
+    assert query(g, "reaches src_lib -> src_app") == {
+        "error": "no call path from src_lib to src_app"
+    }
+
+
 def test_call_graph_query_verbs(tmp_path: Path) -> None:
     _ts_fixture(tmp_path)
     result = _extract(tmp_path, "auto")
