@@ -170,8 +170,8 @@ def test_template_change_requires_doc_version_bump() -> None:
         ).encode("utf-8")
     ).hexdigest()
     assert (init_module.DOC_VERSION, digest) == (
-        4,
-        "62fed66e98297a72c52414c7f81234422090652f9de687f014c8e38ab2b23411",
+        5,
+        "4eefd909088976cf489c2f082fc9a084de625b4d872538639292e5404ac70883",
     ), "template content changed: bump DOC_VERSION and update this pinned digest"
 
 
@@ -288,3 +288,19 @@ def test_init_human_guidance_uses_exact_fixed_workflow(tmp_path, capsys, monkeyp
     assert [line for line in output.splitlines() if line.startswith("    ")] == expected
     assert "global install" not in output.lower()
     assert str(tmp_path) not in "\n".join(expected)
+
+
+def test_v5_templates_state_graphite_first_contract(tmp_path: Path) -> None:
+    init_project(tmp_path, platforms=["claude", "cursor"])
+
+    doc = (tmp_path / "GRAPHITE.md").read_text(encoding="utf-8")
+    pointer = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    cursor = (tmp_path / ".cursor" / "rules" / "graphite.mdc").read_text(encoding="utf-8")
+
+    assert "Graphite-first is required" in doc
+    assert "| Question shape | Run first |" in doc
+    assert 'python -m graphite query "callers <symbol>"' in doc
+    assert "say so" in doc  # fallback disclosure rule
+    assert "Graphite-first is required" in pointer
+    assert "literal text and filename lookups" in pointer
+    assert "Graphite-first is required" in cursor

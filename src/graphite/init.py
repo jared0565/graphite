@@ -13,7 +13,7 @@ from .io import atomic_write_text
 # test_template_change_requires_doc_version_bump pins the pairing. Files
 # written before versioning existed count as version 1 ("legacy unversioned")
 # and are never rewritten automatically.
-DOC_VERSION = 4
+DOC_VERSION = 5
 
 MANAGED_BEGIN = f"<!-- graphite:managed version={DOC_VERSION} -->"
 MANAGED_END = "<!-- graphite:managed-end -->"
@@ -28,6 +28,18 @@ Graphite is the shared local code graph for this project. Codex, Claude Code, Ge
 All commands below use `python -m graphite`, which works in every shell and for every agent as long as the Python environment has Graphite installed. A bare `graphite` command is equivalent where the console script is on PATH.
 
 ## Required Workflow
+
+Graphite-first is required, not advisory. Before any cross-file exploration, consult the graph first. Manual search (grep, glob, directory walking) is the fallback, not the default: use it for literal text and filename lookups, or after a Graphite answer proved insufficient — and say so when you fall back.
+
+| Question shape | Run first |
+| --- | --- |
+| Who calls / reads / imports this symbol? | `python -m graphite query "callers <symbol>"` |
+| What does this symbol call? | `python -m graphite query "calls <symbol>"` |
+| Where is this symbol defined? | `python -m graphite search "<symbol>"` |
+| What breaks if this file changes? | `python -m graphite impact <file>` |
+| What surrounds this file (callers, tests, neighbors)? | `python -m graphite context <file>` |
+| How is the project structured? | `python -m graphite query "stats"` |
+| Literal string or filename lookup | grep/glob — Graphite not required |
 
 Before non-trivial code changes:
 
@@ -56,6 +68,7 @@ canonical `graph-out` artifacts.
 
 - Treat Graphite as a project map, not as proof of correctness.
 - Always read the source files and tests that Graphite identifies before changing behavior.
+- Graphite-first: prefer graph commands over manual cross-file search; fall back only when the graph answer is insufficient, and say so.
 - If `python -m graphite check .` reports stale output, rebuild before relying on context or impact data.
 - Canonical Graphite operations run locally and never use LLM or network inference.
 - For TypeScript resolver issues, use `python -m graphite --typescript-resolver disabled build .` only as a fallback.
@@ -64,17 +77,17 @@ canonical `graph-out` artifacts.
 SHARED_POINTER_HEADER = "## Shared Graphite Instructions"
 SHARED_POINTER = """## Shared Graphite Instructions
 
-Follow `GRAPHITE.md` before making non-trivial code changes. Use the existing `graph-out/graph.json` as the shared project graph, and do not edit `graph-out/` manually.
+Graphite-first is required in this repo. Follow `GRAPHITE.md` before making non-trivial code changes: for cross-file questions (who-calls, where-defined, impact, data flow, structure) run the Graphite commands first; grep/glob are for literal text and filename lookups only. Fall back to manual search only after a Graphite answer proved insufficient, and say so. Use the existing `graph-out/graph.json` as the shared project graph, and do not edit `graph-out/` manually.
 """
 
 CURSOR_POINTER = """---
-description: Use Graphite project context before non-trivial code changes
+description: Graphite-first project context is required before non-trivial code changes
 alwaysApply: true
 ---
 
 # Graphite Instructions
 
-Follow `GRAPHITE.md` before making non-trivial code changes. Use the existing `graph-out/graph.json` as the shared project graph, and do not edit `graph-out/` manually.
+Graphite-first is required in this repo. Follow `GRAPHITE.md` before making non-trivial code changes: for cross-file questions (who-calls, where-defined, impact, data flow, structure) run the Graphite commands first; grep/glob are for literal text and filename lookups only. Fall back to manual search only after a Graphite answer proved insufficient, and say so. Use the existing `graph-out/graph.json` as the shared project graph, and do not edit `graph-out/` manually.
 """
 
 PLATFORM_ORDER: tuple[str, ...] = (
