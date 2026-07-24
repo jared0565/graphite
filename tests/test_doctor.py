@@ -1756,6 +1756,9 @@ def test_core_deep_probe_rejects_temp_path_outside_os_temp(monkeypatch: pytest.M
     outside.mkdir()
     claimed_temp = tmp_path / "claimed-temp"
     claimed_temp.mkdir()
+    os_temp = tmp_path / "os-temp"
+    os_temp.mkdir()
+    monkeypatch.setattr(probes.tempfile, "gettempdir", lambda: str(os_temp))
     lease = SimpleNamespace(
         path=outside,
         temp_root=claimed_temp,
