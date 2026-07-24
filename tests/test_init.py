@@ -170,8 +170,8 @@ def test_template_change_requires_doc_version_bump() -> None:
         ).encode("utf-8")
     ).hexdigest()
     assert (init_module.DOC_VERSION, digest) == (
-        2,
-        "33531a6a9ee54863778adde2ed0e19bc7d9146aaaf4a1ab76a945b11d5a57652",
+        3,
+        "1b254060737bd71caf4133cd3c5278165da9b15cec043ef9760989a00bd96466",
     ), "template content changed: bump DOC_VERSION and update this pinned digest"
 
 

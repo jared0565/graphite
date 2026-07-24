@@ -13,7 +13,7 @@ from .io import atomic_write_text
 # test_template_change_requires_doc_version_bump pins the pairing. Files
 # written before versioning existed count as version 1 ("legacy unversioned")
 # and are never rewritten automatically.
-DOC_VERSION = 2
+DOC_VERSION = 3
 
 MANAGED_BEGIN = f"<!-- graphite:managed version={DOC_VERSION} -->"
 MANAGED_END = "<!-- graphite:managed-end -->"
@@ -34,7 +34,8 @@ Before non-trivial code changes:
 1. Run `python -m graphite check .`
 2. Run `python -m graphite context <target-file>` before editing important files.
 3. Run `python -m graphite impact <target-file>` before changing shared logic, APIs, data flow, auth, persistence, deployment behavior, or other high-risk paths.
-4. Use `python -m graphite query "stats"` when project structure is unclear.
+4. Use `python -m graphite search "<symbol, path, or concept>"` to locate nodes; use `python -m graphite query "stats"` when project structure is unclear.
+5. Discover supported commands, query verbs, and limits with `python -m graphite capabilities --json` — do not guess query verbs; `query` takes structured verbs, not natural-language questions.
 
 After edits:
 

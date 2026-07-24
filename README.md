@@ -146,6 +146,11 @@ graphite report .
 graphite query "depends-on src/lib/db.ts"
 graphite query "callers calculateCommissionPence"
 
+# Deterministic ranked node search (symbol, path, or concept) and
+# machine-readable capability discovery for agents
+graphite search "acceptPairing"
+graphite capabilities --json
+
 # Check whether graph-out is current (names the reason when stale:
 # engine_changed vs source changes; --ignore-engine reports source drift only)
 graphite check .
