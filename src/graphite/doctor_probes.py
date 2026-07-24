@@ -867,19 +867,11 @@ def _marker_value(name: str) -> str:
     return values[name]
 
 
-def _requirement_applies(raw_requirement: str) -> bool:
-    _, separator, raw_marker = raw_requirement.partition(";")
-    if not separator:
-        return True
-    marker = raw_marker.strip()
-    if re.search(r"\bextra\b", marker):
-        return False
-    while marker.startswith("(") and marker.endswith(")"):
-        marker = marker[1:-1].strip()
+def _marker_comparison_holds(condition: str) -> bool:
     match = re.fullmatch(
         r"(python_version|sys_platform|platform_system|platform_python_implementation)"
         r"\s*(==|!=|<=|>=|<|>)\s*(['\"])([^'\"]+)\3",
-        marker,
+        condition,
     )
     if match is None:
         raise ValueError
@@ -901,6 +893,26 @@ def _requirement_applies(raw_requirement: str) -> bool:
         ">=": actual_value >= expected_value,
     }
     return comparisons[operator]
+
+
+def _requirement_applies(raw_requirement: str) -> bool:
+    _, separator, raw_marker = raw_requirement.partition(";")
+    if not separator:
+        return True
+    marker = raw_marker.strip()
+    if re.search(r"\bextra\b", marker):
+        return False
+    while marker.startswith("(") and marker.endswith(")"):
+        marker = marker[1:-1].strip()
+    # PEP 508 precedence: `and` binds tighter than `or`. Parenthesised
+    # sub-expressions stay unsupported and fail closed via ValueError.
+    return any(
+        all(
+            _marker_comparison_holds(condition.strip())
+            for condition in re.split(r"\s+and\s+", clause)
+        )
+        for clause in re.split(r"\s+or\s+", marker)
+    )
 
 
 def _mcp_distribution_closure(

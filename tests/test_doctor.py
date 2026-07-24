@@ -2538,6 +2538,22 @@ def test_mcp_import_manifest_excludes_arbitrary_pth_added_roots(
     assert str(arbitrary.resolve()) not in json.dumps(manifest)
 
 
+def test_mcp_requirement_marker_evaluates_and_or_compounds() -> None:
+    import graphite.doctor_probes as probes
+
+    applies = probes._requirement_applies
+    assert applies("dep>=1; python_version >= '3.11' and python_version < '3'") is False
+    assert applies("dep>=1; python_version < '3' or python_version >= '3.11'") is True
+    assert applies(
+        "dep>=1; python_version >= '3.11' or python_version >= '3.11' and python_version < '3'"
+    ) is True
+    expected = sys.platform == "win32" and sys.version_info[:2] < (3, 14)
+    assert applies("pywin32>=310; sys_platform == 'win32' and python_version < '3.14'") is expected
+    assert applies("dep>=1; extra == 'test' and sys_platform == 'win32'") is False
+    with pytest.raises(ValueError):
+        applies("dep>=1; (sys_platform == 'win32') and python_version < '3.14'")
+
+
 def test_mcp_deep_probe_rejects_user_site_dependency_shadow_without_execution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
