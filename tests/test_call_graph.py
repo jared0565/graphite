@@ -116,34 +116,51 @@ def test_query_verb_outputs_are_golden_stable() -> None:
     g = _golden_graph()
 
     assert query(g, "callers helper") == {
+        "schema_version": 1,
         "node": "src_lib_helper",
         "match": {"input": "helper", "node": "src_lib_helper", "type": "name"},
         "count": 1,
         "callers": [
             {"id": "src_app_main", "name": "main", "kind": "function", "source_file": "src/app.ts"}
         ],
+        "resolution": [
+            {"role": "node", "input": "helper", "node": "src_lib_helper", "type": "name"}
+        ],
     }
     assert query(g, "calls main") == {
+        "schema_version": 1,
         "node": "src_app_main",
         "match": {"input": "main", "node": "src_app_main", "type": "name"},
         "count": 1,
         "calls": [
             {"id": "src_lib_helper", "name": "helper", "kind": "function", "source_file": "src/lib.ts"}
         ],
+        "resolution": [
+            {"role": "node", "input": "main", "node": "src_app_main", "type": "name"}
+        ],
     }
     assert query(g, "depends-on src_app") == {
+        "schema_version": 1,
         "node": "src_app",
         "match": {"input": "src_app", "node": "src_app", "type": "exact-id"},
         "count": 1,
         "depends_on": [{"id": "src_lib", "name": "lib.ts", "kind": "file"}],
+        "resolution": [
+            {"role": "node", "input": "src_app", "node": "src_app", "type": "exact-id"}
+        ],
     }
     assert query(g, "imported-by src_lib") == {
+        "schema_version": 1,
         "node": "src_lib",
         "match": {"input": "src_lib", "node": "src_lib", "type": "exact-id"},
         "count": 1,
         "imported_by": [{"id": "src_app", "name": "app.ts", "kind": "file"}],
+        "resolution": [
+            {"role": "node", "input": "src_lib", "node": "src_lib", "type": "exact-id"}
+        ],
     }
     assert query(g, "reaches main -> helper") == {
+        "schema_version": 1,
         "source": "src_app_main",
         "target": "src_lib_helper",
         "match": {
@@ -155,8 +172,13 @@ def test_query_verb_outputs_are_golden_stable() -> None:
             {"id": "src_app_main", "name": "main", "kind": "function", "source_file": "src/app.ts"},
             {"id": "src_lib_helper", "name": "helper", "kind": "function", "source_file": "src/lib.ts"},
         ],
+        "resolution": [
+            {"role": "source", "input": "main", "node": "src_app_main", "type": "name"},
+            {"role": "target", "input": "helper", "node": "src_lib_helper", "type": "name"},
+        ],
     }
     assert query(g, "path src_app -> src_lib") == {
+        "schema_version": 1,
         "source": "src_app",
         "target": "src_lib",
         "match": {
@@ -168,18 +190,28 @@ def test_query_verb_outputs_are_golden_stable() -> None:
             {"id": "src_app", "name": "app.ts", "kind": "file"},
             {"id": "src_lib", "name": "lib.ts", "kind": "file"},
         ],
+        "resolution": [
+            {"role": "source", "input": "src_app", "node": "src_app", "type": "exact-id"},
+            {"role": "target", "input": "src_lib", "node": "src_lib", "type": "exact-id"},
+        ],
     }
     assert query(g, "community-of src_app") == {
+        "schema_version": 1,
         "node": "src_app",
         "match": {"input": "src_app", "node": "src_app", "type": "exact-id"},
         "community": None,
         "name": "app.ts",
+        "resolution": [
+            {"role": "node", "input": "src_app", "node": "src_app", "type": "exact-id"}
+        ],
     }
 
     stats = query(g, "stats")
     density = stats.pop("density")
     assert density == pytest.approx(2 / 12)
     assert stats == {
+        "schema_version": 1,
+        "resolution": [],
         "node_count": 4,
         "edge_count": 2,
         "community_count": 0,
@@ -203,7 +235,11 @@ def test_query_verb_outputs_are_golden_stable() -> None:
 def test_query_error_outputs_are_golden_stable() -> None:
     g = _golden_graph()
 
-    assert query(g, "") == {"error": "empty query", "error_code": "empty_query"}
+    assert query(g, "") == {
+        "schema_version": 1,
+        "error": "empty query",
+        "error_code": "empty_query",
+    }
 
     unknown = query(g, "how does pairing work")
     assert unknown["error"] == "unknown query verb: how"
@@ -213,19 +249,23 @@ def test_query_error_outputs_are_golden_stable() -> None:
     assert any("callers" in s for s in unknown["suggestions"])
 
     assert query(g, "callers zzqx") == {
+        "schema_version": 1,
         "error": "node not found: zzqx",
         "error_code": "node_not_found",
         "candidates": [],
     }
     assert query(g, "path src_app") == {
+        "schema_version": 1,
         "error": "path query format: path <a> -> <b>",
         "error_code": "invalid_query_format",
     }
     assert query(g, "reaches src_app") == {
+        "schema_version": 1,
         "error": "reaches query format: reaches <a> -> <b>",
         "error_code": "invalid_query_format",
     }
     assert query(g, "reaches src_lib -> src_app") == {
+        "schema_version": 1,
         "error": "no call path from src_lib to src_app",
         "error_code": "no_path",
     }

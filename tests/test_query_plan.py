@@ -131,6 +131,27 @@ def test_execute_plan_validates_before_dispatch() -> None:
     assert ok["node"] == "src_lib_helper"
 
 
+def test_query_results_carry_schema_version_and_resolution() -> None:
+    g = _graph()
+
+    out = query(g, "callers helper")
+    assert out["schema_version"] == 1
+    assert out["resolution"] == [
+        {"role": "node", "input": "helper", "node": "src_lib_helper", "type": "name"}
+    ]
+
+    arrow = query(g, "reaches main -> helper")
+    assert [entry["role"] for entry in arrow["resolution"]] == ["source", "target"]
+    assert arrow["resolution"][0]["node"] == "src_app_main"
+
+    assert query(g, "stats")["resolution"] == []
+
+    for q in ("", "nonsense verb", "callers zzqx", "path a"):
+        result = query(g, q)
+        assert result["schema_version"] == 1, q
+        assert "resolution" not in result, q
+
+
 def test_query_via_plan_matches_direct_execution() -> None:
     g = _graph()
     for q in ("callers helper", "reaches main -> helper", "stats", "community-of src_app"):

@@ -283,26 +283,51 @@ def build_plan(q: str) -> dict[str, Any]:
     return make_plan(spec.name, targets, dict(spec.limits))
 
 
+RESULT_SCHEMA_VERSION = 1
+
+
+def _resolution(spec: QueryVerb, result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Uniform per-target resolution listing, aligned with the plan's target roles."""
+    if spec.roles == ("node",):
+        return [{"role": "node", **result["match"]}]
+    if spec.roles == ("source", "target"):
+        return [
+            {"role": "source", **result["match"]["source"]},
+            {"role": "target", **result["match"]["target"]},
+        ]
+    return []
+
+
 def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
     """Validate a plan against schema v1 and the verb registry, then run it."""
     reason = plan_error(plan, _EXPECTED_ROLES)
     if reason is not None:
-        return {"error": f"invalid query plan: {reason}", "error_code": "invalid_plan"}
+        return {
+            "schema_version": RESULT_SCHEMA_VERSION,
+            "error": f"invalid query plan: {reason}",
+            "error_code": "invalid_plan",
+        }
     assert isinstance(plan, dict)  # narrowed by plan_error
     spec = _VERB_INDEX[plan["operation"]]
     inputs = [target["input"] for target in plan["targets"]]
-    return spec.handler(g, inputs, plan["options"])
+    result = spec.handler(g, inputs, plan["options"])
+    envelope = {"schema_version": RESULT_SCHEMA_VERSION, **result}
+    if "error" not in result:
+        envelope["resolution"] = _resolution(spec, result)
+    return envelope
 
 
 def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
     """Answer a simple query string; see QUERY_VERBS for the supported patterns.
 
     Every query is first translated into a canonical plan (build_plan) and then
-    executed (execute_plan); errors at either stage carry a stable error_code.
+    executed (execute_plan); errors at either stage carry a stable error_code,
+    and every response carries schema_version (successes also carry a uniform
+    per-target resolution listing).
     """
     plan = build_plan(q)
     if "error" in plan:
-        return plan
+        return {"schema_version": RESULT_SCHEMA_VERSION, **plan}
     return execute_plan(g, plan)
 
 
