@@ -321,8 +321,11 @@ def test_init_installs_agent_hook_wiring_and_allowlists_it(tmp_path: Path) -> No
     ]
     assert "python -m graphite agent-hook pre-tool-use --mode remind" in commands
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
-    assert "!/.claude/" in gitignore
-    assert "!/.claude/settings.json" in gitignore
+    lines = gitignore.splitlines()
+    assert "!/.claude/" in lines
+    assert "/.claude/*" in lines
+    assert "!/.claude/settings.json" in lines
+    assert lines.index("!/.claude/") < lines.index("/.claude/*") < lines.index("!/.claude/settings.json")
 
 
 def test_init_strict_flag_and_mode_preserved_on_reinit(tmp_path: Path) -> None:

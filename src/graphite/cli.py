@@ -789,17 +789,22 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
 
 
 def cmd_agent_hook(args: argparse.Namespace) -> int:
-    from .agent_hooks import handle_pre_tool_use, handle_session_start
-
     try:
+        from .agent_hooks import handle_pre_tool_use, handle_session_start
+
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
         if not isinstance(payload, dict):
             return 0
         if args.event == "session-start":
             out = handle_session_start(payload)
-        else:
+        elif args.event == "pre-tool-use":
             out = handle_pre_tool_use(payload, args.mode)
+        else:
+            # Unknown event (e.g. from a newer package's committed wiring
+            # outliving this install): no-op rather than misrouting to
+            # pre-tool-use.
+            return 0
         if out is not None:
             print(json.dumps(out, ensure_ascii=False))
     except Exception:
@@ -1879,7 +1884,10 @@ def main(argv: list[str] | None = None) -> int:
         "agent-hook",
         help="Claude Code hook endpoint for graphite-first enforcement (reads hook JSON on stdin; always exits 0)",
     )
-    p_agent_hook.add_argument("event", choices=["session-start", "pre-tool-use"], help="Hook event to handle")
+    p_agent_hook.add_argument(
+        "event",
+        help="Hook event to handle (known: session-start, pre-tool-use; unknown events no-op)",
+    )
     p_agent_hook.add_argument("--mode", choices=["remind", "strict"], default="remind", help="pre-tool-use enforcement mode")
     p_agent_hook.set_defaults(func=cmd_agent_hook)
 

@@ -118,3 +118,16 @@ def test_malformed_json_is_never_touched(tmp_path: Path) -> None:
     assert result["changed"] is False
     assert result["action"] == "malformed settings"
     assert path.read_text(encoding="utf-8") == "{not json"
+
+
+def test_non_dict_hooks_value_is_a_noop(tmp_path: Path) -> None:
+    path = tmp_path / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    original_bytes = json.dumps({"hooks": ["not", "a", "dict"], "other": "preserved"}).encode("utf-8")
+    path.write_bytes(original_bytes)
+
+    result = ensure_claude_settings(tmp_path)
+
+    assert result["action"] == "malformed settings"
+    assert result["changed"] is False
+    assert path.read_bytes() == original_bytes

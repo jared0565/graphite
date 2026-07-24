@@ -193,6 +193,12 @@ def test_cli_agent_hook_rejects_llm_flags(monkeypatch, capsys) -> None:
     assert main(["--llm", "cloud", "agent-hook", "session-start"]) == 2
 
 
+def test_cli_unknown_event_is_a_silent_noop(monkeypatch, capsys) -> None:
+    code, out = _run_cli_hook(monkeypatch, capsys, ["agent-hook", "stop"], {})
+    assert code == 0
+    assert out == ""
+
+
 def test_capabilities_output_does_not_list_agent_hook(capsys) -> None:
     from graphite.cli import main
 

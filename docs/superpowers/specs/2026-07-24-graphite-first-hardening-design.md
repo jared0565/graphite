@@ -127,6 +127,10 @@ Rules:
    `~/.claude/settings.json` (operator approves the edit; the script file may stay on disk).
    After per-repo wiring exists, the global hook is pure duplication — it only ever fired in
    repos with a built graph.
+3. Ordering constraint: upgrade the graphite package on a machine *before* re-initing repos
+   there. Committed wiring invokes `agent-hook` unconditionally; a pre-hardening package has
+   no such subcommand, so the fail-open hook design never engages — argparse itself fails with
+   exit 2, which blocks the tool call instead of no-op'ing.
 
 ## Error handling
 

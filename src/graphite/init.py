@@ -389,6 +389,13 @@ def _allowlist_patterns(rel: Path) -> list[str]:
     parts = rel.parts
     if not parts:
         return []
+    if parts[0] == ".claude":
+        # .claude/ can hold settings.local.json (machine-local permissions,
+        # possibly secrets). A bare "!/.claude/" un-ignore in a default-deny
+        # gitignore would expose everything under the directory, not just
+        # settings.json. Sandwich: un-ignore the dir, re-ignore its contents,
+        # then un-ignore only the committed settings file.
+        return ["!/.claude/", "/.claude/*", "!/.claude/settings.json"]
     patterns: list[str] = []
     if len(parts) > 1:
         current: list[str] = []

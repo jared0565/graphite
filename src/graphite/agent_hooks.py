@@ -107,7 +107,7 @@ def _graph_symbol(root: Path, tokens: list[str]) -> tuple[str, str] | None:
     graph_path = root / "graph-out" / "graph.json"
     if not graph_path.is_file() or graph_path.stat().st_size > MAX_HOOK_GRAPH_BYTES:
         return None
-    _, graph = load_validated_graph_bundle(graph_path, root=root)
+    _, graph = load_validated_graph_bundle(graph_path, root=root, max_bytes=MAX_HOOK_GRAPH_BYTES)
     lowered = {token.lower(): token for token in tokens}
     for node_id, data in graph.nodes(data=True):
         node_lower = node_id.lower()

@@ -82,6 +82,10 @@ def ensure_claude_settings(root: Path, *, mode: str | None = None) -> dict[str, 
         return {"path": str(path), "changed": False, "action": "malformed settings", "mode": resolved}
 
     hooks_value = original.get("hooks")
+    if "hooks" in original and not isinstance(hooks_value, dict):
+        # A non-dict "hooks" value is foreign malformed content we must not
+        # silently overwrite with {} — treat it like unparseable JSON: no-op.
+        return {"path": str(path), "changed": False, "action": "malformed settings", "mode": resolved}
     hooks = dict(hooks_value) if isinstance(hooks_value, dict) else {}
     desired = {
         "PreToolUse": {
