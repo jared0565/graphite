@@ -195,7 +195,7 @@ def test_cli_agent_hook_rejects_llm_flags(monkeypatch, capsys) -> None:
 
 
 def test_cli_unknown_event_is_a_silent_noop(monkeypatch, capsys) -> None:
-    code, out = _run_cli_hook(monkeypatch, capsys, ["agent-hook", "stop"], {})
+    code, out = _run_cli_hook(monkeypatch, capsys, ["agent-hook", "future-event"], {})
     assert code == 0
     assert out == ""
 
@@ -310,3 +310,12 @@ def test_stop_missing_ino_key_falls_back_to_offset_check(built_repo: Path) -> No
     # No new usage since the last stop; a missing `ino` must not force a false
     # resync (which would re-read already-consumed entries and double-count).
     assert handle_stop(_stop_payload(built_repo)) is None
+
+
+def test_cli_stop_event_emits_summary(built_repo, monkeypatch, capsys) -> None:
+    _use_graphite(built_repo)
+    code, out = _run_cli_hook(
+        monkeypatch, capsys, ["agent-hook", "stop"], _stop_payload(built_repo)
+    )
+    assert code == 0
+    assert json.loads(out)["systemMessage"].startswith("graphite: est. ")

@@ -368,3 +368,10 @@ def test_init_cli_strict_flag(tmp_path: Path, capsys) -> None:
 
     assert code == 0
     assert payload["agent_hooks"]["mode"] == "strict"
+
+
+def test_init_wires_stop_hook(tmp_path: Path) -> None:
+    init_project(tmp_path, platforms=["claude"])
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    commands = [h["command"] for entry in settings["hooks"]["Stop"] for h in entry["hooks"]]
+    assert commands == ["python -m graphite agent-hook stop"]

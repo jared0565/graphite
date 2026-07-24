@@ -814,7 +814,7 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
 
 def cmd_agent_hook(args: argparse.Namespace) -> int:
     try:
-        from .agent_hooks import handle_pre_tool_use, handle_session_start
+        from .agent_hooks import handle_pre_tool_use, handle_session_start, handle_stop
 
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
@@ -824,6 +824,8 @@ def cmd_agent_hook(args: argparse.Namespace) -> int:
             out = handle_session_start(payload)
         elif args.event == "pre-tool-use":
             out = handle_pre_tool_use(payload, args.mode)
+        elif args.event == "stop":
+            out = handle_stop(payload)
         else:
             # Unknown event (e.g. from a newer package's committed wiring
             # outliving this install): no-op rather than misrouting to
@@ -1914,7 +1916,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_agent_hook.add_argument(
         "event",
-        help="Hook event to handle (known: session-start, pre-tool-use; unknown events no-op)",
+        help="Hook event to handle (known: session-start, pre-tool-use, stop; unknown events no-op)",
     )
     p_agent_hook.add_argument("--mode", choices=["remind", "strict"], default="remind", help="pre-tool-use enforcement mode")
     p_agent_hook.set_defaults(func=cmd_agent_hook)

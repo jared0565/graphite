@@ -17,6 +17,7 @@ HOOK_COMMAND_PREFIX = "python -m graphite agent-hook"
 DEFAULT_MODE = "remind"
 _MODES = ("remind", "strict")
 _SESSION_START_COMMAND = f"{HOOK_COMMAND_PREFIX} session-start"
+_STOP_COMMAND = f"{HOOK_COMMAND_PREFIX} stop"
 
 
 def _pre_tool_use_command(mode: str) -> str:
@@ -94,6 +95,9 @@ def ensure_claude_settings(root: Path, *, mode: str | None = None) -> dict[str, 
         },
         "SessionStart": {
             "hooks": [{"type": "command", "command": _SESSION_START_COMMAND}],
+        },
+        "Stop": {
+            "hooks": [{"type": "command", "command": _STOP_COMMAND}],
         },
     }
     changed = False

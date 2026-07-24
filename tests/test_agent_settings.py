@@ -61,8 +61,9 @@ def test_preserves_foreign_settings_and_hooks(tmp_path: Path) -> None:
 
     assert settings["model"] == "opus"
     assert "echo custom" in _commands(settings, "PreToolUse")
-    assert _commands(settings, "Stop") == ["echo bye"]
     assert any(c.startswith("python -m graphite agent-hook pre-tool-use") for c in _commands(settings, "PreToolUse"))
+    assert "echo bye" in _commands(settings, "Stop")
+    assert "python -m graphite agent-hook stop" in _commands(settings, "Stop")
 
 
 def test_replaces_stale_graphite_entries_on_reinit(tmp_path: Path) -> None:
@@ -131,3 +132,40 @@ def test_non_dict_hooks_value_is_a_noop(tmp_path: Path) -> None:
     assert result["action"] == "malformed settings"
     assert result["changed"] is False
     assert path.read_bytes() == original_bytes
+
+
+def test_fresh_install_wires_stop_hook(tmp_path: Path) -> None:
+    ensure_claude_settings(tmp_path)
+    settings = _settings(tmp_path)
+    assert _commands(settings, "Stop") == ["python -m graphite agent-hook stop"]
+
+
+def test_spec_a_shaped_settings_gain_stop_on_reinit(tmp_path: Path) -> None:
+    path = tmp_path / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Grep|Glob",
+                            "hooks": [{"type": "command", "command": "python -m graphite agent-hook pre-tool-use --mode strict"}],
+                        }
+                    ],
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "python -m graphite agent-hook session-start"}]}
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = ensure_claude_settings(tmp_path)
+    settings = _settings(tmp_path)
+
+    assert result["changed"] is True
+    assert result["mode"] == "strict"  # preserved across the upgrade
+    assert _commands(settings, "Stop") == ["python -m graphite agent-hook stop"]
+    assert "--mode strict" in _commands(settings, "PreToolUse")[0]
