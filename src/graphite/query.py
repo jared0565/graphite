@@ -252,6 +252,69 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
     return spec.handler(g, tokens[1:])
 
 
+DEFAULT_SEARCH_LIMIT = 20
+MAX_SEARCH_LIMIT = 100
+# Deterministic precedence tiers; index = rank, lower is better.
+_SEARCH_MATCH_TYPES = ("exact-id", "name", "path-suffix", "id-substring", "name-substring", "tokens")
+
+
+def search_graph(g: nx.DiGraph, text: str, limit: int = DEFAULT_SEARCH_LIMIT) -> dict[str, Any]:
+    """Deterministic ranked node search by id, name, path, or concept tokens."""
+    raw = text.strip()
+    token = raw.lower().strip("`")
+    if not token:
+        return {
+            "ok": False,
+            "schema_version": 1,
+            "error": "empty search",
+            "error_code": "empty_search",
+        }
+    limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
+    normalized_path = token.replace("\\", "/")
+    parts = [p for p in re.split(r"[^a-z0-9]+", token) if len(p) >= 3]
+    best: dict[str, tuple[int, float]] = {}
+
+    def offer(node: str, tier: int, score: float) -> None:
+        current = best.get(node)
+        if current is None or (tier, -score) < (current[0], -current[1]):
+            best[node] = (tier, score)
+
+    for n, data in g.nodes(data=True):
+        node_lower = n.lower()
+        name = data.get("name", "").lower()
+        source = data.get("source_file", "").lower().replace("\\", "/")
+        if node_lower == token:
+            offer(n, 0, 1.0)
+        if name and name == token:
+            offer(n, 1, 1.0)
+        if source and source.endswith(normalized_path):
+            offer(n, 2, 1.0 if data.get("kind") == "file" else 0.9)
+        if token in node_lower and node_lower != token:
+            offer(n, 3, round(len(token) / len(n), 3))
+        if name and token in name and name != token:
+            offer(n, 4, round(len(token) / len(name), 3))
+        if parts:
+            haystack = f"{node_lower} {name} {source}"
+            hits = sum(1 for p in parts if p in haystack)
+            if hits:
+                offer(n, 5, round(hits / len(parts), 3))
+
+    ordered = sorted(best.items(), key=lambda item: (item[1][0], -item[1][1], item[0]))
+    results = [
+        {**_node_view(g, node), "match_type": _SEARCH_MATCH_TYPES[tier], "score": score}
+        for node, (tier, score) in ordered[:limit]
+    ]
+    return {
+        "ok": True,
+        "schema_version": 1,
+        "query": raw,
+        "count": len(results),
+        "total_matches": len(ordered),
+        "truncated": len(ordered) > limit,
+        "results": results,
+    }
+
+
 def _not_found(g: nx.DiGraph, token: str, *, label: str = "node") -> dict[str, Any]:
     """Not-found error with close candidates so agents can self-correct."""
     return {

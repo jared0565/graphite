@@ -29,7 +29,7 @@ from .export.md import to_markdown as export_md
 from .extract.ast import extract_all
 from .freshness import check_graph_freshness
 from .graph import build_graph, graph_to_json
-from .graph_io import GraphReadError, load_validated_graph_bundle
+from .graph_io import MAX_GRAPH_BYTES, GraphReadError, load_validated_graph_bundle
 from .ingest import collect_files
 from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
@@ -40,7 +40,15 @@ from .routing.contracts import Effort
 from .routing.lifecycle_operator import LifecycleOperator, LifecycleOperatorError
 from .routing.service import RoutingService, RoutingServiceError
 from .routing.storage import DEFAULT_RECOVERY_PAGE_SIZE, StorageError
-from .query import _find_node, annotate_communities, query
+from .query import (
+    DEFAULT_SEARCH_LIMIT,
+    MAX_SEARCH_LIMIT,
+    _find_node,
+    annotate_communities,
+    query,
+    search_graph,
+    verb_catalog,
+)
 from .replacement_audit import audit_replacement, format_replacement_audit
 from .review import (
     ReviewError,
@@ -87,6 +95,8 @@ _CANONICAL_COMMANDS = frozenset(
         "check",
         "validate",
         "query",
+        "search",
+        "capabilities",
         "impact",
         "context",
         "watch",
@@ -673,6 +683,50 @@ def cmd_query(args: argparse.Namespace) -> int:
     g = _load_graph(Path(args.graph_json), root=Path.cwd())
     result = query(g, args.query)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    g = _load_graph(Path(args.graph_json), root=Path.cwd())
+    result = search_graph(g, args.text, limit=args.limit)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif not result.get("ok"):
+        print(f"[graphite] search error: {result.get('error')}")
+    elif not result["results"]:
+        print(f"[graphite] no matches for: {result['query']}")
+    else:
+        suffix = " (truncated)" if result["truncated"] else ""
+        print(f"[graphite] {result['count']} match(es) for: {result['query']}{suffix}")
+        for item in result["results"]:
+            location = f" ({item['source_file']})" if item["source_file"] else ""
+            print(f"  - {item['id']} [{item['kind']}, {item['match_type']}]{location}")
+    return 0
+
+
+def cmd_capabilities(args: argparse.Namespace) -> int:
+    payload = {
+        "ok": True,
+        "schema_version": 1,
+        "commands": sorted(_CANONICAL_COMMANDS),
+        "query_verbs": verb_catalog(),
+        "search": {"default_limit": DEFAULT_SEARCH_LIMIT, "max_limit": MAX_SEARCH_LIMIT},
+        "natural_language": {"available": False},
+        "node_kinds": ["class", "file", "function", "unknown"],
+        "edge_relations": ["calls", "contains", "imports", "inherits", "references", "type_references"],
+        "limits": {"max_graph_bytes": MAX_GRAPH_BYTES},
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print("[graphite] canonical commands: " + ", ".join(payload["commands"]))
+        print("[graphite] query verbs:")
+        for verb in payload["query_verbs"]:
+            arguments = f" {verb['arguments']}" if verb["arguments"] else ""
+            aliases = f" (aliases: {', '.join(verb['aliases'])})" if verb["aliases"] else ""
+            print(f"  - {verb['name']}{arguments}{aliases}: {verb['description']}")
+        print(f"[graphite] search: default limit {DEFAULT_SEARCH_LIMIT}, max {MAX_SEARCH_LIMIT}")
+        print("[graphite] natural language: not available")
     return 0
 
 
@@ -1698,10 +1752,33 @@ def main(argv: list[str] | None = None) -> int:
     p_validate.add_argument("--graph-json", default="graph-out/graph.json", help="Path to graph.json")
     p_validate.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_validate.set_defaults(func=cmd_validate)
-    p_query = sub.add_parser("query", help="Query an existing graph.json")
+    verb_lines = []
+    for verb in verb_catalog():
+        arguments = f" {verb['arguments']}" if verb["arguments"] else ""
+        aliases = f" (aliases: {', '.join(verb['aliases'])})" if verb["aliases"] else ""
+        verb_lines.append(f"  {verb['name']}{arguments}{aliases}: {verb['description']}")
+    p_query = sub.add_parser(
+        "query",
+        help="Query an existing graph.json",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="supported verbs:\n"
+        + "\n".join(verb_lines)
+        + '\n\nfor free-text lookup use: graphite search "<symbol, path, or concept>"',
+    )
     p_query.add_argument("query", help="Query string, e.g. 'depends-on db.ts'")
     p_query.add_argument("--graph-json", default="graph-out/graph.json", help="Path to graph.json")
     p_query.set_defaults(func=cmd_query)
+
+    p_search = sub.add_parser("search", help="Deterministic ranked node search by symbol, path, or concept")
+    p_search.add_argument("text", help="Symbol, path, or concept to search for")
+    p_search.add_argument("--graph-json", default="graph-out/graph.json", help="Path to graph.json")
+    p_search.add_argument("--limit", type=int, default=DEFAULT_SEARCH_LIMIT, help="Maximum results")
+    p_search.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_search.set_defaults(func=cmd_search)
+
+    p_capabilities = sub.add_parser("capabilities", help="List supported operations, query verbs, and limits")
+    p_capabilities.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_capabilities.set_defaults(func=cmd_capabilities)
 
     p_impact = sub.add_parser("impact", help="Suggest impacted files and tests for changed files")
     p_impact.add_argument("files", nargs="+", help="Changed file paths or graph node fragments")
