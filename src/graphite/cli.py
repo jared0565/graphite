@@ -813,6 +813,21 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
     return 0
 
 
+def _todays_entries(entries: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+    """Entries whose UTC timestamp falls on `now`'s local calendar day."""
+    selected: list[dict[str, Any]] = []
+    for entry in entries:
+        try:
+            stamp = datetime.fromisoformat(str(entry.get("ts", "")))
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            continue
+        if stamp.astimezone(now.tzinfo).date() == now.date():
+            selected.append(entry)
+    return selected
+
+
 def cmd_savings(args: argparse.Namespace) -> int:
     from . import savings as savings_model
     from . import usage_ledger
@@ -830,8 +845,7 @@ def cmd_savings(args: argparse.Namespace) -> int:
         return 0
 
     entries = list(usage_ledger.iter_entries(root))
-    today = datetime.now().astimezone().date().isoformat()
-    today_entries = [e for e in entries if str(e.get("ts", "")).startswith(today)]
+    today_entries = _todays_entries(entries, datetime.now().astimezone())
     payload = {
         "ok": True,
         "schema_version": 1,

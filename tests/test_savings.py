@@ -118,3 +118,18 @@ def test_capabilities_does_not_list_savings(capsys) -> None:
     assert main(["capabilities", "--json"]) == 0
     payload = _json.loads(capsys.readouterr().out)
     assert "savings" not in payload["commands"]
+
+
+def test_todays_entries_converts_utc_to_local_day() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from graphite.cli import _todays_entries
+
+    tz9 = timezone(timedelta(hours=9))
+    now = datetime(2026, 7, 24, 1, 0, tzinfo=tz9)  # local 2026-07-24, 01:00 (+09:00)
+    inside = {"ts": "2026-07-23T17:00:00+00:00"}   # 02:00 local on the 24th -> counts
+    outside = {"ts": "2026-07-23T14:00:00+00:00"}  # 23:00 local on the 23rd -> excluded
+    naive = {"ts": "2026-07-24T01:00:00"}          # naive -> skipped
+    garbage = {"ts": "not-a-date"}
+
+    assert _todays_entries([inside, outside, naive, garbage], now) == [inside]
