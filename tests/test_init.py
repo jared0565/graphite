@@ -170,8 +170,8 @@ def test_template_change_requires_doc_version_bump() -> None:
         ).encode("utf-8")
     ).hexdigest()
     assert (init_module.DOC_VERSION, digest) == (
-        4,
-        "62fed66e98297a72c52414c7f81234422090652f9de687f014c8e38ab2b23411",
+        5,
+        "4eefd909088976cf489c2f082fc9a084de625b4d872538639292e5404ac70883",
     ), "template content changed: bump DOC_VERSION and update this pinned digest"
 
 
@@ -288,3 +288,90 @@ def test_init_human_guidance_uses_exact_fixed_workflow(tmp_path, capsys, monkeyp
     assert [line for line in output.splitlines() if line.startswith("    ")] == expected
     assert "global install" not in output.lower()
     assert str(tmp_path) not in "\n".join(expected)
+
+
+def test_v5_templates_state_graphite_first_contract(tmp_path: Path) -> None:
+    init_project(tmp_path, platforms=["claude", "cursor"])
+
+    doc = (tmp_path / "GRAPHITE.md").read_text(encoding="utf-8")
+    pointer = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    cursor = (tmp_path / ".cursor" / "rules" / "graphite.mdc").read_text(encoding="utf-8")
+
+    assert "Graphite-first is required" in doc
+    assert "| Question shape | Run first |" in doc
+    assert 'python -m graphite query "callers <symbol>"' in doc
+    assert "say so" in doc  # fallback disclosure rule
+    assert "Graphite-first is required" in pointer
+    assert "literal text and filename lookups" in pointer
+    assert "Graphite-first is required" in cursor
+
+
+def test_init_installs_agent_hook_wiring_and_allowlists_it(tmp_path: Path) -> None:
+    _write(tmp_path / ".gitignore", "/*\n!/.gitignore\n")
+
+    result = init_project(tmp_path, platforms=["claude"]).to_dict()
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+
+    assert result["agent_hooks"]["action"] == "created"
+    assert result["agent_hooks"]["mode"] == "remind"
+    commands = [
+        h["command"]
+        for entry in settings["hooks"]["PreToolUse"]
+        for h in entry["hooks"]
+    ]
+    assert "python -m graphite agent-hook pre-tool-use --mode remind" in commands
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    lines = gitignore.splitlines()
+    assert "!/.claude/" in lines
+    assert "/.claude/*" in lines
+    assert "!/.claude/settings.json" in lines
+    assert lines.index("!/.claude/") < lines.index("/.claude/*") < lines.index("!/.claude/settings.json")
+
+
+def test_init_strict_flag_and_mode_preserved_on_reinit(tmp_path: Path) -> None:
+    first = init_project(tmp_path, platforms=["claude"], agent_hooks_mode="strict").to_dict()
+    second = init_project(tmp_path, platforms=["claude"]).to_dict()
+
+    assert first["agent_hooks"]["mode"] == "strict"
+    assert second["agent_hooks"]["mode"] == "strict"
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    joined = json.dumps(settings)
+    assert "--mode strict" in joined
+    assert "--mode remind" not in joined
+
+
+def test_init_no_agent_hooks_skips_wiring(tmp_path: Path) -> None:
+    result = init_project(tmp_path, platforms=["claude"], install_agent_hooks=False).to_dict()
+
+    assert result["agent_hooks"]["action"] == "skipped"
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_reinit_of_v4_repo_refreshes_docs_and_adds_wiring(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "GRAPHITE.md",
+        "<!-- graphite:managed version=4 -->\nOLD V4 BODY\n<!-- graphite:managed-end -->\n",
+    )
+
+    result = init_project(tmp_path, platforms=["claude"]).to_dict()
+
+    assert result["graphite_doc"]["action"] == "refreshed"
+    assert "Graphite-first is required" in (tmp_path / "GRAPHITE.md").read_text(encoding="utf-8")
+    assert (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_init_cli_strict_flag(tmp_path: Path, capsys) -> None:
+    code = main(
+        ["init", str(tmp_path), "--platform", "claude", "--strict", "--no-build", "--no-validate", "--json"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["agent_hooks"]["mode"] == "strict"
+
+
+def test_init_wires_stop_hook(tmp_path: Path) -> None:
+    init_project(tmp_path, platforms=["claude"])
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    commands = [h["command"] for entry in settings["hooks"]["Stop"] for h in entry["hooks"]]
+    assert commands == ["python -m graphite agent-hook stop"]

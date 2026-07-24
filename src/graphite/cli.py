@@ -10,6 +10,7 @@ import sys
 import time
 import unicodedata
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -107,6 +108,10 @@ _CANONICAL_COMMANDS = frozenset(
         "daemon",
     }
 )
+# Hook endpoints are inference-free like canonical commands but are not part of
+# the agent-facing query surface, so they stay out of `capabilities` output.
+_INFERENCE_FREE_EXTRA_COMMANDS = frozenset({"agent-hook", "savings"})
+_LLM_GATED_COMMANDS = _CANONICAL_COMMANDS | _INFERENCE_FREE_EXTRA_COMMANDS
 _LEGACY_LLM_ARGUMENTS = (
     "llm_provider",
     "llm_model",
@@ -265,6 +270,21 @@ def _load_graph(path: Path, *, root: Path | None = None) -> Any:
     except GraphReadError as exc:
         raise ValueError(f"graph unavailable: {exc.code}") from None
     return graph
+
+
+def _record_canonical_usage(cmd: str, result: Any, started: float) -> None:
+    """Best-effort usage recording for the savings display; never fatal."""
+    try:
+        from . import usage_ledger
+
+        usage_ledger.record_usage(
+            Path.cwd(),
+            cmd=cmd,
+            wall_ms=int((time.perf_counter() - started) * 1000),
+            result=result,
+        )
+    except Exception:
+        return
 
 
 def _is_test_file(path: str) -> bool:
@@ -591,7 +611,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     requested = ["all"] if args.all else (args.platform or [])
     platforms = resolve_platform_selection(requested, interactive=interactive)
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
-    result = init_project(root, platforms=platforms, daemon_base=daemon_base).to_dict()
+    agent_hooks_mode = "strict" if args.strict else ("remind" if args.remind else None)
+    result = init_project(
+        root,
+        platforms=platforms,
+        daemon_base=daemon_base,
+        agent_hooks_mode=agent_hooks_mode,
+        install_agent_hooks=not args.no_agent_hooks,
+    ).to_dict()
     cfg = _project_scoped_config(args, root, canonical=True)
     activation = _activate_typescript_for_onboarding(args, root, cfg)
     build: dict[str, Any] = {"requested": not args.no_build, "ok": None}
@@ -631,6 +658,11 @@ def cmd_init(args: argparse.Namespace) -> int:
         for item in result["platform_files"]:
             action = item.get("action") or ("updated" if item.get("changed") else "already current")
             print(f"  - {item.get('platform')}: {action} ({item.get('path')})")
+        agent_hooks = result["agent_hooks"]
+        print(
+            f"  - agent_hooks: {agent_hooks.get('action')} "
+            f"({agent_hooks.get('path')}, mode={agent_hooks.get('mode')})"
+        )
         allowlist = result["allowlist"]
         if allowlist.get("changed"):
             print(f"  - gitignore allowlist: added {', '.join(allowlist.get('added', []))}")
@@ -684,6 +716,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 def cmd_query(args: argparse.Namespace) -> int:
+    started = time.perf_counter()
     if args.natural:
         translated = translate_natural(args.query)
         needs_graph = "plan" in translated or (
@@ -693,7 +726,10 @@ def cmd_query(args: argparse.Namespace) -> int:
             print(json.dumps(translated, ensure_ascii=False, indent=2))
             return 0
         g = _load_graph(Path(args.graph_json), root=Path.cwd())
-        print(json.dumps(answer_natural(g, args.query), ensure_ascii=False, indent=2))
+        result = answer_natural(g, args.query)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if "error" not in result:
+            _record_canonical_usage("query-natural", result, started)
         return 0
     if args.plan_only:
         print(json.dumps(plan_preview(args.query), ensure_ascii=False, indent=2))
@@ -705,10 +741,13 @@ def cmd_query(args: argparse.Namespace) -> int:
         if "error" not in plan:
             result = {**result, "plan": plan}
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if "error" not in result:
+        _record_canonical_usage("query", result, started)
     return 0
 
 
 def cmd_search(args: argparse.Namespace) -> int:
+    started = time.perf_counter()
     g = _load_graph(Path(args.graph_json), root=Path.cwd())
     result = search_graph(g, args.text, limit=args.limit)
     if args.json:
@@ -723,6 +762,8 @@ def cmd_search(args: argparse.Namespace) -> int:
         for item in result["results"]:
             location = f" ({item['source_file']})" if item["source_file"] else ""
             print(f"  - {item['id']} [{item['kind']}, {item['match_type']}]{location}")
+    if result.get("ok"):
+        _record_canonical_usage("search", result, started)
     return 0
 
 
@@ -772,7 +813,88 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
     return 0
 
 
+def _todays_entries(entries: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+    """Entries whose UTC timestamp falls on `now`'s local calendar day."""
+    selected: list[dict[str, Any]] = []
+    for entry in entries:
+        try:
+            stamp = datetime.fromisoformat(str(entry.get("ts", "")))
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            continue
+        if stamp.astimezone(now.tzinfo).date() == now.date():
+            selected.append(entry)
+    return selected
+
+
+def cmd_savings(args: argparse.Namespace) -> int:
+    from . import savings as savings_model
+    from . import usage_ledger
+
+    root = Path.cwd()
+    if args.action in ("on", "off"):
+        usage_ledger.set_savings_display(root, args.action == "on")
+    if args.action in ("on", "off", "status"):
+        payload = {"ok": True, "savings_display": usage_ledger.savings_display_enabled(root)}
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            state = "on" if payload["savings_display"] else "off"
+            print(f"[graphite] savings display: {state}")
+        return 0
+
+    entries = list(usage_ledger.iter_entries(root))
+    today_entries = _todays_entries(entries, datetime.now().astimezone())
+    payload = {
+        "ok": True,
+        "schema_version": 1,
+        "all_time": savings_model.summarize(entries),
+        "today": savings_model.summarize(today_entries),
+        "savings_display": usage_ledger.savings_display_enabled(root),
+        "methodology": savings_model.methodology(),
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    for label, summary in (("today", payload["today"]), ("all-time", payload["all_time"])):
+        compact = savings_model.format_compact(summary["tokens_saved"], summary["seconds_saved"])
+        print(f"[graphite] {label}: est. {compact} saved across {summary['count']} graphite answers")
+        for cmd_name, bucket in sorted(summary["by_cmd"].items()):
+            bucket_compact = savings_model.format_compact(bucket["tokens_saved"], bucket["seconds_saved"])
+            print(f"  - {cmd_name}: {bucket['count']} calls, est. {bucket_compact}")
+    print(f"[graphite] methodology: {payload['methodology']}")
+    return 0
+
+
+def cmd_agent_hook(args: argparse.Namespace) -> int:
+    try:
+        from .agent_hooks import handle_pre_tool_use, handle_session_start, handle_stop
+
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw.strip() else {}
+        if not isinstance(payload, dict):
+            return 0
+        if args.event == "session-start":
+            out = handle_session_start(payload)
+        elif args.event == "pre-tool-use":
+            out = handle_pre_tool_use(payload, args.mode)
+        elif args.event == "stop":
+            out = handle_stop(payload)
+        else:
+            # Unknown event (e.g. from a newer package's committed wiring
+            # outliving this install): no-op rather than misrouting to
+            # pre-tool-use.
+            return 0
+        if out is not None:
+            print(json.dumps(out, ensure_ascii=False))
+    except Exception:
+        pass  # fail-open: a hook problem must never break a tool call
+    return 0
+
+
 def cmd_impact(args: argparse.Namespace) -> int:
+    started = time.perf_counter()
     g = _load_graph(Path(args.graph_json), root=Path.cwd())
     result = _impact(g, args.files, args.depth)
     if args.json:
@@ -788,6 +910,7 @@ def cmd_impact(args: argparse.Namespace) -> int:
             print("Missing inputs:")
             for item in result["missing"]:
                 print(f"  - {item}")
+    _record_canonical_usage("impact", result, started)
     return 0 if not result["missing"] else 1
 
 
@@ -890,12 +1013,14 @@ def cmd_review_changes(args: argparse.Namespace) -> int:
 
 
 def cmd_context(args: argparse.Namespace) -> int:
+    started = time.perf_counter()
     g = _load_graph(Path(args.graph_json), root=Path.cwd())
     result = build_context(g, args.files, depth=args.depth, neighbor_limit=args.neighbor_limit)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print(format_context_markdown(result))
+    _record_canonical_usage("context", result, started)
     return 0 if not result["missing"] else 1
 
 
@@ -1772,6 +1897,10 @@ def main(argv: list[str] | None = None) -> int:
     p_init.add_argument("--no-validate", action="store_true", help="Skip graph validation after init")
     p_init.add_argument("--list-platforms", action="store_true", help="Print supported platform keys and exit")
     p_init.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_init_mode = p_init.add_mutually_exclusive_group()
+    p_init_mode.add_argument("--strict", action="store_true", help="Write strict-mode graphite-first hook wiring (denies provable relationship greps)")
+    p_init_mode.add_argument("--remind", action="store_true", help="Write remind-mode hook wiring (non-blocking reminders; default for first-time wiring)")
+    p_init.add_argument("--no-agent-hooks", action="store_true", help="Skip Claude Code hook wiring in .claude/settings.json")
     p_init.set_defaults(func=cmd_init)
 
     p_bootstrap = sub.add_parser("bootstrap", help="Make a project Graphite-ready and optionally build its graph")
@@ -1835,6 +1964,25 @@ def main(argv: list[str] | None = None) -> int:
     p_capabilities = sub.add_parser("capabilities", help="List supported operations, query verbs, and limits")
     p_capabilities.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_capabilities.set_defaults(func=cmd_capabilities)
+
+    p_agent_hook = sub.add_parser(
+        "agent-hook",
+        help="Claude Code hook endpoint for graphite-first enforcement (reads hook JSON on stdin; always exits 0)",
+    )
+    p_agent_hook.add_argument(
+        "event",
+        help="Hook event to handle (known: session-start, pre-tool-use, stop; unknown events no-op)",
+    )
+    p_agent_hook.add_argument("--mode", choices=["remind", "strict"], default="remind", help="pre-tool-use enforcement mode")
+    p_agent_hook.set_defaults(func=cmd_agent_hook)
+
+    p_savings = sub.add_parser(
+        "savings",
+        help="Estimated time/token savings from graphite usage in this repo (local estimates; on/off toggles the turn-end display)",
+    )
+    p_savings.add_argument("action", nargs="?", choices=["report", "on", "off", "status"], default="report", help="report (default), or toggle the turn-end display")
+    p_savings.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_savings.set_defaults(func=cmd_savings)
 
     p_impact = sub.add_parser("impact", help="Suggest impacted files and tests for changed files")
     p_impact.add_argument("files", nargs="+", help="Changed file paths or graph node fragments")
@@ -1991,7 +2139,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.command == "doctor" and args.include_llm and not args.deep:
         p_doctor.error("--include-llm requires --deep")
-    if args.command in _CANONICAL_COMMANDS and (
+    if args.command in _LLM_GATED_COMMANDS and (
         getattr(args, "llm", None) not in (None, "none")
         or any(getattr(args, name, None) is not None for name in _LEGACY_LLM_ARGUMENTS)
     ):
