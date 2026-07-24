@@ -49,6 +49,7 @@ from .query import (
     search_graph,
     verb_catalog,
 )
+from .query_plan import DEFAULT_MAX_DEPTH, DEFAULT_MAX_RESULTS
 from .replacement_audit import audit_replacement, format_replacement_audit
 from .review import (
     ReviewError,
@@ -711,6 +712,10 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
         "commands": sorted(_CANONICAL_COMMANDS),
         "query_verbs": verb_catalog(),
         "search": {"default_limit": DEFAULT_SEARCH_LIMIT, "max_limit": MAX_SEARCH_LIMIT},
+        "query_limits": {
+            "default_max_depth": DEFAULT_MAX_DEPTH,
+            "default_max_results": DEFAULT_MAX_RESULTS,
+        },
         "natural_language": {"available": False},
         "node_kinds": ["class", "file", "function", "unknown"],
         "edge_relations": ["calls", "contains", "imports", "inherits", "references", "type_references"],
@@ -726,6 +731,10 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
             aliases = f" (aliases: {', '.join(verb['aliases'])})" if verb["aliases"] else ""
             print(f"  - {verb['name']}{arguments}{aliases}: {verb['description']}")
         print(f"[graphite] search: default limit {DEFAULT_SEARCH_LIMIT}, max {MAX_SEARCH_LIMIT}")
+        print(
+            f"[graphite] query limits: max_depth {DEFAULT_MAX_DEPTH} (path/reaches), "
+            f"max_results {DEFAULT_MAX_RESULTS} (neighbor listings)"
+        )
         print("[graphite] natural language: not available")
     return 0
 

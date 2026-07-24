@@ -35,7 +35,7 @@ def test_build_plan_golden_shapes() -> None:
         "plan_version": 1,
         "operation": "callers",
         "targets": [{"role": "node", "input": "helper"}],
-        "options": {},
+        "options": {"max_results": 200},
         "source": {"mode": "local-graph"},
     }
     assert build_plan("reaches main -> helper") == {
@@ -45,7 +45,7 @@ def test_build_plan_golden_shapes() -> None:
             {"role": "source", "input": "main"},
             {"role": "target", "input": "helper"},
         ],
-        "options": {},
+        "options": {"max_depth": 32},
         "source": {"mode": "local-graph"},
     }
     assert build_plan("stats") == {
@@ -129,6 +129,68 @@ def test_execute_plan_validates_before_dispatch() -> None:
 
     ok = execute_plan(g, build_plan("callers helper"))
     assert ok["node"] == "src_lib_helper"
+
+
+def test_neighbor_listings_cap_results_and_report_truncation() -> None:
+    nodes = [
+        {"id": f"caller_{i}", "kind": "function", "name": f"caller{i}", "source_file": "src/c.ts"}
+        for i in range(3)
+    ]
+    nodes.append({"id": "hub", "kind": "function", "name": "hub", "source_file": "src/hub.ts"})
+    edges = [{"source": f"caller_{i}", "target": "hub", "relation": "calls"} for i in range(3)]
+    g = build_graph(nodes, edges)
+
+    plan = build_plan("callers hub")
+    assert plan["options"] == {"max_results": 200}
+    unbounded = execute_plan(g, plan)
+    assert unbounded["count"] == unbounded["total"] == 3
+    assert unbounded["truncated"] is False
+
+    capped = execute_plan(g, {**plan, "options": {"max_results": 2}})
+    assert capped["count"] == 2 == len(capped["callers"])
+    assert capped["total"] == 3
+    assert capped["truncated"] is True
+    assert capped["limits"] == {"max_results": 2}
+    # deterministic: the cap keeps the first entries of the sorted listing
+    assert [c["id"] for c in capped["callers"]] == ["caller_0", "caller_1"]
+
+    imported = execute_plan(g, {**build_plan("imported-by hub"), "options": {"max_results": 1}})
+    assert imported["count"] == 1
+    assert imported["total"] == 3
+    assert imported["truncated"] is True
+
+
+def test_path_and_reaches_respect_max_depth_and_flag_truncation() -> None:
+    nodes = [
+        {"id": n, "kind": "function", "name": n, "source_file": "src/x.ts"}
+        for n in ("a", "b", "c", "island")
+    ]
+    edges = [
+        {"source": "a", "target": "b", "relation": "calls"},
+        {"source": "b", "target": "c", "relation": "calls"},
+    ]
+    g = build_graph(nodes, edges)
+
+    ok = query(g, "reaches a -> c")
+    assert ok["length"] == 2
+    assert ok["truncated"] is False
+    assert ok["limits"] == {"max_depth": 32}
+
+    shallow = execute_plan(g, {**build_plan("reaches a -> c"), "options": {"max_depth": 1}})
+    assert shallow["error_code"] == "no_path"
+    assert shallow["truncated"] is True
+
+    unreachable = query(g, "reaches c -> a")
+    assert unreachable["error_code"] == "no_path"
+    assert unreachable["truncated"] is False
+
+    p_shallow = execute_plan(g, {**build_plan("path a -> c"), "options": {"max_depth": 1}})
+    assert p_shallow["error_code"] == "no_path"
+    assert p_shallow["truncated"] is True
+
+    isolated = query(g, "path island -> a")
+    assert isolated["error_code"] == "no_path"
+    assert isolated["truncated"] is False
 
 
 def test_query_results_carry_schema_version_and_resolution() -> None:

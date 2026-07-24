@@ -8,44 +8,53 @@ from typing import Any, Callable
 
 import networkx as nx
 
-from .query_plan import make_plan, plan_error
+from .query_plan import DEFAULT_MAX_DEPTH, DEFAULT_MAX_RESULTS, make_plan, plan_error
 
 
 _CALL_RELATIONS: frozenset[str] = frozenset({"calls", "references"})
 
 
-def _verb_callers(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
-    del options
-    token = inputs[0]
+def _capped_edge_listing(
+    g: nx.DiGraph, token: str, options: dict[str, Any], *, key: str, incoming: bool
+) -> dict[str, Any]:
+    """Call/reference in- or out-edge listing, bounded by max_results."""
+    cap = int(options.get("max_results", DEFAULT_MAX_RESULTS))
     detail = _find_node_detail(g, token)
     if not detail:
         return _not_found(g, token)
     node_id = detail[0]
-    callers = [
-        _node_view(g, p)
-        for p in sorted(g.predecessors(node_id))
-        if g[p][node_id].get("relation") in _CALL_RELATIONS
-    ]
-    return {"node": node_id, "match": _match_meta(token, detail), "count": len(callers), "callers": callers}
+    if incoming:
+        full = [
+            p for p in sorted(g.predecessors(node_id))
+            if g[p][node_id].get("relation") in _CALL_RELATIONS
+        ]
+    else:
+        full = [
+            s for s in sorted(g.successors(node_id))
+            if g[node_id][s].get("relation") in _CALL_RELATIONS
+        ]
+    shown = full[:cap]
+    return {
+        "node": node_id,
+        "match": _match_meta(token, detail),
+        "count": len(shown),
+        "total": len(full),
+        "truncated": len(full) > cap,
+        "limits": {"max_results": cap},
+        key: [_node_view(g, n) for n in shown],
+    }
+
+
+def _verb_callers(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
+    return _capped_edge_listing(g, inputs[0], options, key="callers", incoming=True)
 
 
 def _verb_calls(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
-    del options
-    token = inputs[0]
-    detail = _find_node_detail(g, token)
-    if not detail:
-        return _not_found(g, token)
-    node_id = detail[0]
-    callees = [
-        _node_view(g, s)
-        for s in sorted(g.successors(node_id))
-        if g[node_id][s].get("relation") in _CALL_RELATIONS
-    ]
-    return {"node": node_id, "match": _match_meta(token, detail), "count": len(callees), "calls": callees}
+    return _capped_edge_listing(g, inputs[0], options, key="calls", incoming=False)
 
 
 def _verb_reaches(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
-    del options
+    max_depth = int(options.get("max_depth", DEFAULT_MAX_DEPTH))
     a, b = inputs
     src_detail = _find_node_detail(g, a)
     dst_detail = _find_node_detail(g, b)
@@ -54,15 +63,22 @@ def _verb_reaches(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> 
     if not dst_detail:
         return _not_found(g, b, label="target")
     src, dst = src_detail[0], dst_detail[0]
-    p = _restricted_call_path(g, src, dst)
+    p, limited = _bounded_bfs_path(g, src, dst, max_depth, relations=_CALL_RELATIONS)
     if p is None:
-        return {"error": f"no call path from {src} to {dst}", "error_code": "no_path"}
+        return {
+            "error": f"no call path from {src} to {dst}",
+            "error_code": "no_path",
+            "truncated": limited,
+            "limits": {"max_depth": max_depth},
+        }
     return {
         "source": src,
         "target": dst,
         "match": {"source": _match_meta(a, src_detail), "target": _match_meta(b, dst_detail)},
         "length": len(p) - 1,
         "path": [_node_view(g, n) for n in p],
+        "truncated": False,
+        "limits": {"max_depth": max_depth},
     }
 
 
@@ -93,35 +109,40 @@ def _verb_stats(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> di
     }
 
 
-def _neighbor_listing(g: nx.DiGraph, token: str, *, key: str, incoming: bool) -> dict[str, Any]:
+def _neighbor_listing(
+    g: nx.DiGraph, token: str, options: dict[str, Any], *, key: str, incoming: bool
+) -> dict[str, Any]:
+    cap = int(options.get("max_results", DEFAULT_MAX_RESULTS))
     detail = _find_node_detail(g, token)
     if not detail:
         return _not_found(g, token)
     node_id = detail[0]
     neighbors = sorted(g.predecessors(node_id) if incoming else g.successors(node_id))
+    shown = neighbors[:cap]
     return {
         "node": node_id,
         "match": _match_meta(token, detail),
-        "count": len(neighbors),
+        "count": len(shown),
+        "total": len(neighbors),
+        "truncated": len(neighbors) > cap,
+        "limits": {"max_results": cap},
         key: [
             {"id": n, "name": g.nodes[n].get("name", n), "kind": g.nodes[n].get("kind", "unknown")}
-            for n in neighbors
+            for n in shown
         ],
     }
 
 
 def _verb_depends_on(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
-    del options
-    return _neighbor_listing(g, inputs[0], key="depends_on", incoming=False)
+    return _neighbor_listing(g, inputs[0], options, key="depends_on", incoming=False)
 
 
 def _verb_imported_by(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
-    del options
-    return _neighbor_listing(g, inputs[0], key="imported_by", incoming=True)
+    return _neighbor_listing(g, inputs[0], options, key="imported_by", incoming=True)
 
 
 def _verb_path(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
-    del options
+    max_depth = int(options.get("max_depth", DEFAULT_MAX_DEPTH))
     a, b = inputs
     src_detail = _find_node_detail(g, a)
     dst_detail = _find_node_detail(g, b)
@@ -130,10 +151,14 @@ def _verb_path(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dic
     if not dst_detail:
         return _not_found(g, b, label="target")
     src, dst = src_detail[0], dst_detail[0]
-    try:
-        p = nx.shortest_path(g, src, dst)
-    except nx.NetworkXNoPath:
-        return {"error": f"no path from {src} to {dst}", "error_code": "no_path"}
+    p, limited = _bounded_bfs_path(g, src, dst, max_depth, relations=None)
+    if p is None:
+        return {
+            "error": f"no path from {src} to {dst}",
+            "error_code": "no_path",
+            "truncated": limited,
+            "limits": {"max_depth": max_depth},
+        }
     return {
         "source": src,
         "target": dst,
@@ -143,6 +168,8 @@ def _verb_path(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dic
             {"id": n, "name": g.nodes[n].get("name", n), "kind": g.nodes[n].get("kind", "unknown")}
             for n in p
         ],
+        "truncated": False,
+        "limits": {"max_depth": max_depth},
     }
 
 
@@ -178,32 +205,32 @@ QUERY_VERBS: tuple[QueryVerb, ...] = (
     QueryVerb(
         "callers", ("called-by", "called_by"), "<symbol>",
         "Functions that call <symbol> (calls/references in-edges)", _verb_callers,
-        ("node",),
+        ("node",), (("max_results", DEFAULT_MAX_RESULTS),),
     ),
     QueryVerb(
         "calls", ("callees",), "<symbol>",
         "Functions/symbols that <symbol> calls (calls/references out-edges)", _verb_calls,
-        ("node",),
+        ("node",), (("max_results", DEFAULT_MAX_RESULTS),),
     ),
     QueryVerb(
         "reaches", (), "<a> -> <b>",
         "Directed path from a to b over call/reference edges only", _verb_reaches,
-        ("source", "target"),
+        ("source", "target"), (("max_depth", DEFAULT_MAX_DEPTH),),
     ),
     QueryVerb(
         "path", (), "<a> -> <b>",
         "Shortest directed path from a to b over all edges", _verb_path,
-        ("source", "target"),
+        ("source", "target"), (("max_depth", DEFAULT_MAX_DEPTH),),
     ),
     QueryVerb(
         "depends-on", ("depends_on", "out"), "<node>",
         "Nodes that <node> directly depends on (out-edges)", _verb_depends_on,
-        ("node",),
+        ("node",), (("max_results", DEFAULT_MAX_RESULTS),),
     ),
     QueryVerb(
         "imported-by", ("imported_by", "in"), "<node>",
         "Nodes that directly point to <node> (in-edges)", _verb_imported_by,
-        ("node",),
+        ("node",), (("max_results", DEFAULT_MAX_RESULTS),),
     ),
     QueryVerb(
         "community-of", ("community_of",), "<node>",
@@ -228,6 +255,8 @@ def verb_catalog() -> list[dict[str, Any]]:
             "aliases": list(spec.aliases),
             "arguments": spec.arguments,
             "description": spec.description,
+            "targets": list(spec.roles),
+            "limits": dict(spec.limits),
         }
         for spec in QUERY_VERBS
     ]
@@ -481,28 +510,42 @@ def _node_view(g: nx.DiGraph, n: str) -> dict[str, Any]:
     }
 
 
-def _restricted_call_path(g: nx.DiGraph, src: str, dst: str) -> list[str] | None:
-    """Shortest directed path from src to dst following only call/reference edges."""
+def _bounded_bfs_path(
+    g: nx.DiGraph, src: str, dst: str, max_depth: int, *, relations: frozenset[str] | None
+) -> tuple[list[str] | None, bool]:
+    """Shortest directed path from src to dst within max_depth edges.
+
+    Successors are visited in sorted order, so equal-length ties break
+    deterministically. The second value reports whether the depth bound pruned
+    any expansion — True means a longer path may exist beyond the bound, False
+    means absence is proven.
+    """
     if src == dst:
-        return [src]
+        return [src], False
     prev: dict[str, str | None] = {src: None}
+    depth: dict[str, int] = {src: 0}
     queue: deque[str] = deque([src])
+    limited = False
     while queue:
         u = queue.popleft()
         for v in sorted(g.successors(u)):
+            if relations is not None and g[u][v].get("relation") not in relations:
+                continue
             if v in prev:
                 continue
-            if g[u][v].get("relation") not in _CALL_RELATIONS:
+            if depth[u] >= max_depth:
+                limited = True
                 continue
             prev[v] = u
+            depth[v] = depth[u] + 1
             if v == dst:
                 path = [v]
                 while prev[path[-1]] is not None:
                     path.append(prev[path[-1]])  # type: ignore[arg-type]
                 path.reverse()
-                return path
+                return path, False
             queue.append(v)
-    return None
+    return None, limited
 
 
 def annotate_communities(g: nx.DiGraph, partition: dict[str, int]) -> None:

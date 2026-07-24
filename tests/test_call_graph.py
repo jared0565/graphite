@@ -120,6 +120,9 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "node": "src_lib_helper",
         "match": {"input": "helper", "node": "src_lib_helper", "type": "name"},
         "count": 1,
+        "total": 1,
+        "truncated": False,
+        "limits": {"max_results": 200},
         "callers": [
             {"id": "src_app_main", "name": "main", "kind": "function", "source_file": "src/app.ts"}
         ],
@@ -132,6 +135,9 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "node": "src_app_main",
         "match": {"input": "main", "node": "src_app_main", "type": "name"},
         "count": 1,
+        "total": 1,
+        "truncated": False,
+        "limits": {"max_results": 200},
         "calls": [
             {"id": "src_lib_helper", "name": "helper", "kind": "function", "source_file": "src/lib.ts"}
         ],
@@ -144,6 +150,9 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "node": "src_app",
         "match": {"input": "src_app", "node": "src_app", "type": "exact-id"},
         "count": 1,
+        "total": 1,
+        "truncated": False,
+        "limits": {"max_results": 200},
         "depends_on": [{"id": "src_lib", "name": "lib.ts", "kind": "file"}],
         "resolution": [
             {"role": "node", "input": "src_app", "node": "src_app", "type": "exact-id"}
@@ -154,6 +163,9 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "node": "src_lib",
         "match": {"input": "src_lib", "node": "src_lib", "type": "exact-id"},
         "count": 1,
+        "total": 1,
+        "truncated": False,
+        "limits": {"max_results": 200},
         "imported_by": [{"id": "src_app", "name": "app.ts", "kind": "file"}],
         "resolution": [
             {"role": "node", "input": "src_lib", "node": "src_lib", "type": "exact-id"}
@@ -172,6 +184,8 @@ def test_query_verb_outputs_are_golden_stable() -> None:
             {"id": "src_app_main", "name": "main", "kind": "function", "source_file": "src/app.ts"},
             {"id": "src_lib_helper", "name": "helper", "kind": "function", "source_file": "src/lib.ts"},
         ],
+        "truncated": False,
+        "limits": {"max_depth": 32},
         "resolution": [
             {"role": "source", "input": "main", "node": "src_app_main", "type": "name"},
             {"role": "target", "input": "helper", "node": "src_lib_helper", "type": "name"},
@@ -190,6 +204,8 @@ def test_query_verb_outputs_are_golden_stable() -> None:
             {"id": "src_app", "name": "app.ts", "kind": "file"},
             {"id": "src_lib", "name": "lib.ts", "kind": "file"},
         ],
+        "truncated": False,
+        "limits": {"max_depth": 32},
         "resolution": [
             {"role": "source", "input": "src_app", "node": "src_app", "type": "exact-id"},
             {"role": "target", "input": "src_lib", "node": "src_lib", "type": "exact-id"},
@@ -268,6 +284,8 @@ def test_query_error_outputs_are_golden_stable() -> None:
         "schema_version": 1,
         "error": "no call path from src_lib to src_app",
         "error_code": "no_path",
+        "truncated": False,
+        "limits": {"max_depth": 32},
     }
 
 

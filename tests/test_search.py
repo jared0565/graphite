@@ -138,10 +138,19 @@ def test_capabilities_json_lists_registry_kinds_and_limits(capsys) -> None:
     verbs = {v["name"]: v for v in payload["query_verbs"]}
     assert verbs["callers"]["aliases"] == ["called-by", "called_by"]
     assert verbs["stats"]["arguments"] == ""
+    assert verbs["callers"]["limits"] == {"max_results": 200}
+    assert verbs["reaches"]["limits"] == {"max_depth": 32}
+    assert verbs["reaches"]["targets"] == ["source", "target"]
+    assert verbs["stats"]["targets"] == []
+    assert verbs["stats"]["limits"] == {}
     assert payload["natural_language"] == {"available": False}
     assert payload["search"] == {
         "default_limit": DEFAULT_SEARCH_LIMIT,
         "max_limit": MAX_SEARCH_LIMIT,
+    }
+    assert payload["query_limits"] == {
+        "default_max_depth": 32,
+        "default_max_results": 200,
     }
     assert "search" in payload["commands"]
     assert "capabilities" in payload["commands"]
