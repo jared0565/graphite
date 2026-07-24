@@ -45,11 +45,13 @@ from .query import (
     MAX_SEARCH_LIMIT,
     _find_node,
     annotate_communities,
+    build_plan,
+    plan_preview,
     query,
     search_graph,
     verb_catalog,
 )
-from .query_plan import DEFAULT_MAX_DEPTH, DEFAULT_MAX_RESULTS
+from .query_plan import DEFAULT_MAX_DEPTH, DEFAULT_MAX_RESULTS, PLAN_VERSION
 from .replacement_audit import audit_replacement, format_replacement_audit
 from .review import (
     ReviewError,
@@ -681,8 +683,15 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 def cmd_query(args: argparse.Namespace) -> int:
+    if args.plan_only:
+        print(json.dumps(plan_preview(args.query), ensure_ascii=False, indent=2))
+        return 0
     g = _load_graph(Path(args.graph_json), root=Path.cwd())
     result = query(g, args.query)
+    if args.show_plan:
+        plan = build_plan(args.query)
+        if "error" not in plan:
+            result = {**result, "plan": plan}
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
@@ -716,6 +725,7 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
             "default_max_depth": DEFAULT_MAX_DEPTH,
             "default_max_results": DEFAULT_MAX_RESULTS,
         },
+        "query_plans": {"plan_version": PLAN_VERSION, "flags": ["--plan-only", "--show-plan"]},
         "natural_language": {"available": False},
         "node_kinds": ["class", "file", "function", "unknown"],
         "edge_relations": ["calls", "contains", "imports", "inherits", "references", "type_references"],
@@ -735,6 +745,7 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
             f"[graphite] query limits: max_depth {DEFAULT_MAX_DEPTH} (path/reaches), "
             f"max_results {DEFAULT_MAX_RESULTS} (neighbor listings)"
         )
+        print(f"[graphite] query plans: v{PLAN_VERSION} (--show-plan, --plan-only)")
         print("[graphite] natural language: not available")
     return 0
 
@@ -1776,6 +1787,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_query.add_argument("query", help="Query string, e.g. 'depends-on db.ts'")
     p_query.add_argument("--graph-json", default="graph-out/graph.json", help="Path to graph.json")
+    p_query.add_argument(
+        "--show-plan", action="store_true",
+        help="Include the canonical query plan in the JSON output",
+    )
+    p_query.add_argument(
+        "--plan-only", action="store_true",
+        help="Validate and print the query plan without loading the graph or executing",
+    )
     p_query.set_defaults(func=cmd_query)
 
     p_search = sub.add_parser("search", help="Deterministic ranked node search by symbol, path, or concept")

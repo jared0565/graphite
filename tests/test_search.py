@@ -152,6 +152,10 @@ def test_capabilities_json_lists_registry_kinds_and_limits(capsys) -> None:
         "default_max_depth": 32,
         "default_max_results": 200,
     }
+    assert payload["query_plans"] == {
+        "plan_version": 1,
+        "flags": ["--plan-only", "--show-plan"],
+    }
     assert "search" in payload["commands"]
     assert "capabilities" in payload["commands"]
     assert "query" in payload["commands"]

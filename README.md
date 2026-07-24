@@ -140,14 +140,25 @@ graphite report .
 # Query the graph
 # Verbs: depends-on, imported-by, callers, calls, path <a> -> <b>,
 #        reaches <a> -> <b> (call/reference edges only), community-of, stats
-# Responses include `match` metadata (exact-id | name | path-suffix | fuzzy,
-# plus alternates when a token was ambiguous); not-found errors include a
-# `candidates` list of close matches.
+# Responses carry schema_version plus a uniform `resolution` list (how each
+# input resolved: exact-id | name | path-suffix | fuzzy, with alternates when
+# ambiguous); the per-verb `match` metadata remains. Not-found errors include
+# a `candidates` list of close matches.
+# Traversal is bounded with generous defaults (path/reaches max_depth 32;
+# neighbor listings max_results 200) — results report truncated + limits, and
+# a no_path with truncated:true means the bound was hit, not proven absence.
 graphite query "depends-on src/lib/db.ts"
 graphite query "callers calculateCommissionPence"
 
+# Every query is executed through a canonical, inference-free plan (schema v1).
+# --show-plan includes the plan in the result; --plan-only validates and prints
+# the plan without loading the graph (offline syntax check for agents).
+graphite query "reaches handler -> db.write" --show-plan
+graphite query "callers acceptPairing" --plan-only
+
 # Deterministic ranked node search (symbol, path, or concept) and
-# machine-readable capability discovery for agents
+# machine-readable capability discovery for agents (verbs, target roles,
+# limits, plan version)
 graphite search "acceptPairing"
 graphite capabilities --json
 

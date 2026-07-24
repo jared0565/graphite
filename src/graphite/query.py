@@ -346,6 +346,25 @@ def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
     return envelope
 
 
+def plan_preview(q: str) -> dict[str, Any]:
+    """Validated plan document for a query string, or an error dict.
+
+    Needs no graph: this is the `query --plan-only` path, letting agents check
+    query syntax offline before paying for a graph load.
+    """
+    plan = build_plan(q)
+    if "error" in plan:
+        return {"schema_version": RESULT_SCHEMA_VERSION, **plan}
+    reason = plan_error(plan, _EXPECTED_ROLES)
+    if reason is not None:  # defensive: internally built plans always validate
+        return {
+            "schema_version": RESULT_SCHEMA_VERSION,
+            "error": f"invalid query plan: {reason}",
+            "error_code": "invalid_plan",
+        }
+    return plan
+
+
 def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
     """Answer a simple query string; see QUERY_VERBS for the supported patterns.
 

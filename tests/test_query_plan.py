@@ -1,6 +1,9 @@
 """Canonical query plans: schema gate, deterministic construction, validation."""
 from __future__ import annotations
 
+import json
+
+from graphite.cli import main
 from graphite.graph import build_graph
 from graphite.query import QUERY_VERBS, build_plan, execute_plan, query
 from graphite.query_plan import PLAN_SCHEMA, make_plan, plan_error
@@ -218,3 +221,37 @@ def test_query_via_plan_matches_direct_execution() -> None:
     g = _graph()
     for q in ("callers helper", "reaches main -> helper", "stats", "community-of src_app"):
         assert query(g, q) == execute_plan(g, build_plan(q))
+
+
+def test_cli_plan_only_needs_no_graph(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(tmp_path)  # deliberately no graph.json anywhere
+
+    assert main(["query", "callers main", "--plan-only"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["plan_version"] == 1
+    assert payload["operation"] == "callers"
+    assert payload["targets"] == [{"role": "node", "input": "main"}]
+
+    assert main(["query", "reaches a", "--plan-only"]) == 0
+    err = json.loads(capsys.readouterr().out)
+    assert err["error_code"] == "invalid_query_format"
+    assert err["schema_version"] == 1
+
+
+def test_cli_show_plan_includes_plan_in_result(tmp_path, monkeypatch, capsys) -> None:
+    src = tmp_path / "src"
+    src.mkdir(parents=True)
+    (src / "app.ts").write_text("export function main() { return 1; }\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert main(["build", "."]) == 0
+    capsys.readouterr()
+
+    assert main(["query", "callers main", "--show-plan"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["plan"]["operation"] == "callers"
+    assert payload["schema_version"] == 1
+    assert "resolution" in payload
+
+    assert main(["query", "callers main"]) == 0
+    bare = json.loads(capsys.readouterr().out)
+    assert "plan" not in bare
