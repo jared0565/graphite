@@ -107,6 +107,10 @@ _CANONICAL_COMMANDS = frozenset(
         "daemon",
     }
 )
+# Hook endpoints are inference-free like canonical commands but are not part of
+# the agent-facing query surface, so they stay out of `capabilities` output.
+_INFERENCE_FREE_EXTRA_COMMANDS = frozenset({"agent-hook"})
+_LLM_GATED_COMMANDS = _CANONICAL_COMMANDS | _INFERENCE_FREE_EXTRA_COMMANDS
 _LEGACY_LLM_ARGUMENTS = (
     "llm_provider",
     "llm_model",
@@ -769,6 +773,25 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
             f"[graphite] natural language: deterministic grammar via query --natural "
             f"({pattern_count} patterns, no inference)"
         )
+    return 0
+
+
+def cmd_agent_hook(args: argparse.Namespace) -> int:
+    from .agent_hooks import handle_pre_tool_use, handle_session_start
+
+    try:
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw.strip() else {}
+        if not isinstance(payload, dict):
+            return 0
+        if args.event == "session-start":
+            out = handle_session_start(payload)
+        else:
+            out = handle_pre_tool_use(payload, args.mode)
+        if out is not None:
+            print(json.dumps(out, ensure_ascii=False))
+    except Exception:
+        pass  # fail-open: a hook problem must never break a tool call
     return 0
 
 
@@ -1836,6 +1859,14 @@ def main(argv: list[str] | None = None) -> int:
     p_capabilities.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_capabilities.set_defaults(func=cmd_capabilities)
 
+    p_agent_hook = sub.add_parser(
+        "agent-hook",
+        help="Claude Code hook endpoint for graphite-first enforcement (reads hook JSON on stdin; always exits 0)",
+    )
+    p_agent_hook.add_argument("event", choices=["session-start", "pre-tool-use"], help="Hook event to handle")
+    p_agent_hook.add_argument("--mode", choices=["remind", "strict"], default="remind", help="pre-tool-use enforcement mode")
+    p_agent_hook.set_defaults(func=cmd_agent_hook)
+
     p_impact = sub.add_parser("impact", help="Suggest impacted files and tests for changed files")
     p_impact.add_argument("files", nargs="+", help="Changed file paths or graph node fragments")
     p_impact.add_argument("--graph-json", default="graph-out/graph.json", help="Path to graph.json")
@@ -1991,7 +2022,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.command == "doctor" and args.include_llm and not args.deep:
         p_doctor.error("--include-llm requires --deep")
-    if args.command in _CANONICAL_COMMANDS and (
+    if args.command in _LLM_GATED_COMMANDS and (
         getattr(args, "llm", None) not in (None, "none")
         or any(getattr(args, name, None) is not None for name in _LEGACY_LLM_ARGUMENTS)
     ):

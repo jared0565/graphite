@@ -1,6 +1,8 @@
 """Tests for the Claude Code agent-hook handlers (fail-open by design)."""
 from __future__ import annotations
 
+import io
+import json
 from pathlib import Path
 
 import pytest
@@ -148,3 +150,52 @@ def test_strict_falls_back_to_remind_on_oversized_graph(built_repo: Path, monkey
 def test_remind_mode_never_denies_known_symbols(built_repo: Path) -> None:
     out = handle_pre_tool_use(_grep_payload(built_repo, "target_symbol"), "remind")
     assert "permissionDecision" not in out["hookSpecificOutput"]
+
+
+def _run_cli_hook(monkeypatch, capsys, argv: list[str], payload) -> tuple[int, str]:
+    from graphite.cli import main
+
+    raw = payload if isinstance(payload, str) else json.dumps(payload)
+    monkeypatch.setattr("sys.stdin", io.StringIO(raw))
+    code = main(argv)
+    return code, capsys.readouterr().out
+
+
+def test_cli_session_start_emits_hook_json(tmp_path, monkeypatch, capsys) -> None:
+    code, out = _run_cli_hook(
+        monkeypatch, capsys, ["agent-hook", "session-start"], {"cwd": str(tmp_path)}
+    )
+    assert code == 0
+    assert json.loads(out)["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+
+
+def test_cli_pre_tool_use_strict_denies(built_repo, monkeypatch, capsys) -> None:
+    code, out = _run_cli_hook(
+        monkeypatch,
+        capsys,
+        ["agent-hook", "pre-tool-use", "--mode", "strict"],
+        _grep_payload(built_repo, "target_symbol"),
+    )
+    assert code == 0
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_cli_malformed_stdin_fails_open(tmp_path, monkeypatch, capsys) -> None:
+    code, out = _run_cli_hook(monkeypatch, capsys, ["agent-hook", "session-start"], "{not json")
+    assert code == 0
+    assert out == ""
+
+
+def test_cli_agent_hook_rejects_llm_flags(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    from graphite.cli import main
+
+    assert main(["--llm", "cloud", "agent-hook", "session-start"]) == 2
+
+
+def test_capabilities_output_does_not_list_agent_hook(capsys) -> None:
+    from graphite.cli import main
+
+    assert main(["capabilities", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "agent-hook" not in payload["commands"]
