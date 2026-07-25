@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import select
@@ -62,6 +63,8 @@ _CAPACITY_DIAGNOSTICS: Final = {
         b"selected model is at capacity. please try a different model.",
     ),
 }
+QUOTA_MARKERS: Final = ("quota", "rate_limit", "rate limit", "usage_limit", "usage limit")
+_CLAUDE_SUBTYPE_MARKERS: Final = ("quota", "rate", "limit")
 _CLI_PROVIDERS: Final = frozenset({ProviderId.CLAUDE_CODE, ProviderId.CODEX})
 
 
@@ -395,9 +398,46 @@ def _classify_nonzero_failure(
     stdout: bytes,
     stderr: bytes,
 ) -> str:
-    """Return an allowlisted category without decoding or retaining diagnostics."""
+    """Classify one nonzero exit; decodes transiently, returns only an allowlisted category."""
     patterns = _CAPACITY_DIAGNOSTICS[provider]
     for output in (stdout, stderr):
         if any(line.strip() in patterns for line in output.lower().splitlines()):
             return "capacity_unavailable"
+    if _stdout_reports_quota(provider, stdout):
+        return "capacity_unavailable"
     return "provider_process_failure"
+
+
+def _stdout_reports_quota(provider: ProviderId, stdout: bytes) -> bool:
+    """Detect provider-authored quota/rate-limit error events; retains nothing."""
+    try:
+        text = stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if provider is ProviderId.CODEX:
+            if event.get("type") not in {"error", "turn.failed"}:
+                continue
+            serialized = json.dumps(
+                event, ensure_ascii=True, separators=(",", ":")
+            ).lower()
+            if any(marker in serialized for marker in QUOTA_MARKERS):
+                return True
+        elif provider is ProviderId.CLAUDE_CODE:
+            if event.get("type") != "result" or (
+                event.get("subtype") == "success"
+                and event.get("is_error") is False
+            ):
+                continue
+            subtype = str(event.get("subtype", "")).lower()
+            if any(marker in subtype for marker in _CLAUDE_SUBTYPE_MARKERS):
+                return True
+    return False
