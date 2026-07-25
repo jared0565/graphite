@@ -107,7 +107,11 @@ Consumers:
      `{"error", "turn.failed"}` → serialize the event
      (`json.dumps(event, ensure_ascii=True, separators=(",", ":")).lower()`)
      and test whether any marker occurs as a substring of the serialized
-     text — the same method the exit-0 `_failure_code` already uses. These event types are provider-authored
+     text — the same serialize-and-match method the exit-0 `_failure_code`
+     uses, minus its auth-first precedence: at the transport, an auth-shaped
+     error event mentioning a quota marker classifies as capacity.
+     Deliberate (recall wins; a false positive only reaches the second
+     pre-approved candidate). These event types are provider-authored
      error payloads; model-authored text lives in `item.*` events, which are
      never inspected.
    - **Claude** (`provider is ProviderId.CLAUDE_CODE`): event with
@@ -141,6 +145,12 @@ category string is returned. `CliProcessFailureDiagnostics` fields are
 unchanged (hashes only). The docstring is updated to state the retained
 invariant: "decodes transiently; retains and returns only an allowlisted
 category".
+
+Non-provider commands (e.g. `service.py` validation/git invocations run
+through `run_cli_process` under a provider tag) also flow through this
+classifier on nonzero exit; their diagnostics are discarded by those callers
+today, and the classifier must stay exception-total precisely because such
+stdout can be arbitrarily pathological.
 
 ## 6. Design — canonical evidence mapping (exit-0 path + future runners)
 

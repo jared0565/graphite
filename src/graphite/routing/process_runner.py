@@ -419,16 +419,24 @@ def _stdout_reports_quota(provider: ProviderId, stdout: bytes) -> bool:
             continue
         try:
             event = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             continue
         if not isinstance(event, dict):
             continue
+        # Codex error events are provider-authored, so the whole event is
+        # matched; claude error results can embed model text in "result", so
+        # only the provider-authored subtype is matched. Unlike the exit-0
+        # parser there is no auth-first precedence here: recall wins, and a
+        # false positive only reaches the second pre-approved candidate.
         if provider is ProviderId.CODEX:
             if event.get("type") not in {"error", "turn.failed"}:
                 continue
-            serialized = json.dumps(
-                event, ensure_ascii=True, separators=(",", ":")
-            ).lower()
+            try:
+                serialized = json.dumps(
+                    event, ensure_ascii=True, separators=(",", ":")
+                ).lower()
+            except (ValueError, RecursionError):
+                continue
             if any(marker in serialized for marker in QUOTA_MARKERS):
                 return True
         elif provider is ProviderId.CLAUDE_CODE:
