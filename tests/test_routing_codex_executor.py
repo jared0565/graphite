@@ -674,3 +674,29 @@ def test_execution_normalizes_structured_rate_limit_failure(tmp_path: Path) -> N
             permission_mode=PermissionMode.READ_ONLY,
             transport=ScriptedTransport([_result(_jsonl(*events))]),
         )
+
+
+def test_execution_normalizes_usage_limit_failure_as_quota(tmp_path: Path) -> None:
+    executable, workspace, credentials = _paths(tmp_path)
+    events = (
+        {
+            "type": "error",
+            "message": (
+                "You've hit your usage limit. Visit "
+                "https://chatgpt.com/codex/settings/usage to purchase more "
+                "credits or try again at Jul 29th, 2026 9:40 AM."
+            ),
+        },
+    )
+    with pytest.raises(AdapterError, match="^quota$"):
+        execute_codex(
+            executable=executable,
+            workspace=workspace,
+            credential_home=credentials,
+            prompt=b"task",
+            requested_model="gpt-5.6-codex",
+            expected_effective_model="gpt-5.6-codex",
+            effort=Effort.XHIGH,
+            permission_mode=PermissionMode.READ_ONLY,
+            transport=ScriptedTransport([_result(_jsonl(*events))]),
+        )

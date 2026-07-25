@@ -16,6 +16,7 @@ from .contracts import CliIdentity, Effort, PermissionMode, ProviderId
 from .process_runner import (
     CliProcessError,
     CliProcessResult,
+    QUOTA_MARKERS,
     decode_cli_output,
     run_cli_process,
 )
@@ -206,7 +207,7 @@ def _failure_code(event: dict[str, object]) -> str:
     text = json.dumps(event, ensure_ascii=True, separators=(",", ":")).lower()
     if "auth" in text or "login" in text or "unauthorized" in text:
         return "auth_required"
-    if "quota" in text or "rate_limit" in text or "rate limit" in text:
+    if any(marker in text for marker in QUOTA_MARKERS):
         return "quota"
     return "unavailable"
 
