@@ -71,7 +71,7 @@
     "resolution_health": {
       "type": "object",
       "additionalProperties": true,
-      "description": "Measured resolution-health block (schema 1): placeholder_nodes, by_relation, by_language, healthy, threshold. Present on stats/impact/context/relation-verb results from 2026-07-25. Distinct from the top-level `resolution` array above, which is per-target input-match metadata, not graph-wide resolver health."
+      "description": "Measured resolution-health block: placeholder_nodes, by_relation, by_language, healthy, threshold. Present on stats/impact/context/relation-verb results from 2026-07-25. Distinct from the top-level `resolution` array above, which is per-target input-match metadata, not graph-wide resolver health. schema 2: imports cells carry an `external` count; external imports are excluded from ratios."
     },
     "inconclusive": {
       "type": "boolean",
