@@ -14,6 +14,7 @@ from .lifecycle import (
     ProviderLifecycleState,
     RuntimeKind,
 )
+from .process_runner import CliProcessFailureDiagnostics
 
 MAX_ROUTE_CANDIDATES: Final = 2
 MAX_ROUTE_CAPABILITIES: Final = 32
@@ -52,6 +53,18 @@ class SideEffectState(StrEnum):
     NONE = "none"
     OBSERVED = "observed"
     UNKNOWN = "unknown"
+
+
+def failure_category_for_adapter(
+    code: object,
+    diagnostics: CliProcessFailureDiagnostics | None = None,
+) -> str:
+    """Map one adapter failure to an allowlisted route-attempt category."""
+    if isinstance(diagnostics, CliProcessFailureDiagnostics):
+        return diagnostics.failure_category
+    if isinstance(code, str) and code in {"quota", "capacity_unavailable"}:
+        return "capacity_unavailable"
+    return "provider_process_failure"
 
 
 def _identifier(value: object, code: str) -> str:
