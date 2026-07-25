@@ -14,7 +14,7 @@ from graphite.health import (
 
 
 def _graph(nodes, edges):
-    g = nx.MultiDiGraph()
+    g = nx.DiGraph()
     for node_id, kind, source_file in nodes:
         g.add_node(node_id, kind=kind, source_file=source_file)
     for src, dst, relation, source_file in edges:
@@ -43,7 +43,7 @@ def test_bound_and_unbound_edges_counted_per_relation():
         edges=[
             ("f1", "f2", "calls", "a.py"),
             ("f1", "ghost", "calls", "a.py"),
-            ("f1", "ghost", "imports", "a.py"),
+            ("f2", "ghost", "imports", "b.py"),
         ],
     )
     block = resolution_health(g)

@@ -48,7 +48,7 @@ def _cell(bound: int, total: int) -> dict[str, Any]:
     }
 
 
-def resolution_health(g: nx.DiGraph | nx.MultiDiGraph) -> dict[str, Any]:
+def resolution_health(g: nx.DiGraph) -> dict[str, Any]:
     """Measured resolver health: bound-edge ratios per relation and language."""
     node_total = g.number_of_nodes()
     unknown_nodes = sum(
