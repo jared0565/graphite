@@ -788,6 +788,7 @@ def cmd_query(args: argparse.Namespace) -> int:
         result = answer_natural(g, args.query)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if "error" not in result:
+            _record_inconclusive(f"query {args.query}", result)
             _record_canonical_usage("query-natural", result, started)
         return 0
     if args.plan_only:

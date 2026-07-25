@@ -223,3 +223,35 @@ def test_inconclusive_query_records_incident(tmp_path, monkeypatch):
     _record_inconclusive("callers x", {"inconclusive": False})
     entries, _ = read_incident_entries(repo_ledger_dir(tmp_path))
     assert len(entries) == 1  # non-inconclusive results record nothing
+
+
+def test_natural_query_inconclusive_records_incident(tmp_path, monkeypatch):
+    # Same unhealthy-graph idiom as test_health.py's _unhealthy_graph(): a
+    # lonely node plus one unbound call edge elsewhere -> calls ratio 0.0 ->
+    # unhealthy. answer_natural() routes "who calls lonely" through the same
+    # execute_plan()/_attach_resolution() path as the structured "callers"
+    # query, so it comes back with total 0 and inconclusive True.
+    import networkx as nx
+
+    from graphite.cli import main
+
+    g = nx.DiGraph()
+    g.add_node("lonely", kind="function", source_file="a.py")
+    g.add_node("src", kind="function", source_file="a.py")
+    g.add_node("ghost", kind="unknown", source_file=None)
+    g.add_edge("src", "ghost", relation="calls", source_file="a.py")
+
+    import graphite.cli as cli
+
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: g)
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["query", "who calls lonely", "--natural"]) == 0
+
+    entries, _ = read_incident_entries(repo_ledger_dir(tmp_path))
+    query_entries = [e for e in entries if e["class"] == "query"]
+    assert len(query_entries) == 1
+    e = query_entries[0]
+    assert e["code"] == "query_inconclusive"
+    assert e["subject"] == "query who calls lonely"
+    assert "calls 0.0" in e["detail"]
