@@ -6,6 +6,7 @@ from typing import Any
 
 import networkx as nx
 
+from .health import ratio_percent, resolution_health
 from .query import _find_node_detail
 
 _TEST_SUFFIXES = (
@@ -54,6 +55,13 @@ def build_context(
     communities = _community_peers(g, start_nodes, limit=neighbor_limit)
     risk = [_risk_summary(g, node) for node in start_nodes]
 
+    health = resolution_health(g)
+    inconclusive = (
+        not impact["impacted_files"]
+        and not impact["likely_tests"]
+        and not health["healthy"]
+    )
+
     return {
         "metadata": {
             "node_count": g.number_of_nodes(),
@@ -69,6 +77,8 @@ def build_context(
         "impact": impact,
         "communities": communities,
         "risk": risk,
+        "resolution_health": health,
+        "inconclusive": inconclusive,
     }
 
 
@@ -95,9 +105,18 @@ def format_context_markdown(context: dict[str, Any]) -> str:
 
     lines.extend(["", "## Impact"])
     impact = context["impact"]
+    health = context.get("resolution_health") or {}
+    unhealthy = health.get("healthy") is False
     if impact["impacted_files"]:
         lines.append("Impacted files:")
         lines.extend(f"- `{path}`" for path in impact["impacted_files"][:30])
+    elif context.get("inconclusive"):
+        lines.append(
+            "Impacted files: none found — INCONCLUSIVE: only "
+            f"{ratio_percent(health, 'imports')} of import edges and "
+            f"{ratio_percent(health, 'calls')} of call edges resolved in this "
+            "graph; treat as unverified and confirm with grep."
+        )
     else:
         lines.append("Impacted files: none found")
     if impact["likely_tests"]:
@@ -105,7 +124,11 @@ def format_context_markdown(context: dict[str, Any]) -> str:
         lines.extend(f"- `{path}`" for path in impact["likely_tests"][:30])
 
     lines.extend(["", "## Direct Dependents"])
-    _append_neighbor_section(lines, context["direct_dependents"])
+    dependents = context["direct_dependents"]
+    if unhealthy and all(not neighbors for neighbors in dependents.values()):
+        lines.append("no direct dependents found — inconclusive (resolution health low)")
+    else:
+        _append_neighbor_section(lines, dependents)
 
     lines.extend(["", "## Direct Dependencies"])
     _append_neighbor_section(lines, context["direct_dependencies"])

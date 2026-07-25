@@ -153,6 +153,43 @@ def test_remind_mode_never_denies_known_symbols(built_repo: Path) -> None:
     assert "permissionDecision" not in out["hookSpecificOutput"]
 
 
+def _write_analysis(root: Path, healthy: bool) -> None:
+    (root / "graph-out").mkdir(exist_ok=True)
+    (root / "graph-out" / ".graphite_analysis.json").write_text(
+        json.dumps({"resolution_health": {"schema": 1, "healthy": healthy}}), encoding="utf-8"
+    )
+
+
+def test_strict_denial_preserved_when_graph_healthy(built_repo: Path) -> None:
+    _write_analysis(built_repo, healthy=True)
+    result = handle_pre_tool_use(_grep_payload(built_repo, "target_symbol"), mode="strict")
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_strict_denial_suspended_when_graph_unhealthy(built_repo: Path) -> None:
+    _write_analysis(built_repo, healthy=False)
+    result = handle_pre_tool_use(_grep_payload(built_repo, "target_symbol"), mode="strict")
+    output = result["hookSpecificOutput"]
+    assert "permissionDecision" not in output
+    assert "strict denial suspended" in output["additionalContext"]
+
+
+def test_strict_denial_suspended_when_analysis_missing(built_repo: Path) -> None:
+    # built_repo's build step already persists a healthy analysis file; remove it
+    # to genuinely simulate "no persisted analysis" rather than the healthy case.
+    (built_repo / "graph-out" / ".graphite_analysis.json").unlink(missing_ok=True)
+    result = handle_pre_tool_use(_grep_payload(built_repo, "target_symbol"), mode="strict")
+    output = result["hookSpecificOutput"]
+    assert "permissionDecision" not in output
+    assert "strict denial suspended" in output["additionalContext"]
+
+
+def test_strict_denial_suspended_when_analysis_malformed(built_repo: Path) -> None:
+    (built_repo / "graph-out" / ".graphite_analysis.json").write_text("{bad", encoding="utf-8")
+    result = handle_pre_tool_use(_grep_payload(built_repo, "target_symbol"), mode="strict")
+    assert "strict denial suspended" in result["hookSpecificOutput"]["additionalContext"]
+
+
 def _run_cli_hook(monkeypatch, capsys, argv: list[str], payload) -> tuple[int, str]:
     from graphite.cli import main
 

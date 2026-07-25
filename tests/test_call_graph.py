@@ -114,6 +114,8 @@ def _golden_graph():
 def test_query_verb_outputs_are_golden_stable() -> None:
     """Exact-output pins so interface refactors are provably inert."""
     g = _golden_graph()
+    from graphite.health import resolution_health
+    health_block = resolution_health(g)
 
     assert query(g, "callers helper") == {
         "schema_version": 1,
@@ -129,6 +131,8 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "resolution": [
             {"role": "node", "input": "helper", "node": "src_lib_helper", "type": "name"}
         ],
+        "resolution_health": health_block,
+        "inconclusive": False,
     }
     assert query(g, "calls main") == {
         "schema_version": 1,
@@ -144,6 +148,8 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "resolution": [
             {"role": "node", "input": "main", "node": "src_app_main", "type": "name"}
         ],
+        "resolution_health": health_block,
+        "inconclusive": False,
     }
     assert query(g, "depends-on src_app") == {
         "schema_version": 1,
@@ -157,6 +163,8 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "resolution": [
             {"role": "node", "input": "src_app", "node": "src_app", "type": "exact-id"}
         ],
+        "resolution_health": health_block,
+        "inconclusive": False,
     }
     assert query(g, "imported-by src_lib") == {
         "schema_version": 1,
@@ -170,6 +178,8 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "resolution": [
             {"role": "node", "input": "src_lib", "node": "src_lib", "type": "exact-id"}
         ],
+        "resolution_health": health_block,
+        "inconclusive": False,
     }
     assert query(g, "reaches main -> helper") == {
         "schema_version": 1,
@@ -228,6 +238,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
     assert stats == {
         "schema_version": 1,
         "resolution": [],
+        "resolution_health": health_block,
         "node_count": 4,
         "edge_count": 2,
         "community_count": 0,
