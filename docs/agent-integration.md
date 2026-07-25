@@ -165,8 +165,10 @@ every session.
   - `build`: `parse_error`, `read_error`, `worker_error` (extraction failures
     surfaced per-file during `build`/`scan`), `graph_load_failed` (a
     persisted graph bundle failed to load/validate), `artifact_malformed`
-    (`graph-out/.graphite_analysis.json` or another artifact is unreadable
-    or not valid JSON, e.g. surfaced by `check`).
+    (`graph-out/.graphite_analysis.json` or another artifact is not valid
+    JSON / unparseable content, e.g. surfaced by `check`; a merely absent or
+    unreadable artifact stays silent — OSError is not malformation, only
+    ValueError/RecursionError fire this code).
   - `query`: `query_inconclusive` (a structured or `--natural` query
     returned `"inconclusive": true` — see the resolution-health section
     above).
@@ -190,10 +192,16 @@ every session.
   ([incidents.v1](schemas/incidents.v1.schema.json)):
 
 ```bash
-graphite incidents list [path] --json [--all] [--global] [--daemon-base BASE]
-graphite incidents ack <fingerprint> [path] [-m MESSAGE]
-graphite incidents resolve <fingerprint> [path] [-m MESSAGE]
+graphite incidents list [path] --json [--all] [--global] [--daemon-base BASE] [--state-dir DIR]
+graphite incidents ack <fingerprint> [path] [-m MESSAGE] [--global] [--daemon-base BASE] [--state-dir DIR]
+graphite incidents resolve <fingerprint> [path] [-m MESSAGE] [--global] [--daemon-base BASE] [--state-dir DIR]
 ```
+
+  `--global` reads the daemon-wide ledger instead of the current repo's; it
+  resolves from `--state-dir` (a custom daemon `--state-dir`, taking
+  precedence) or else `--daemon-base`/auto-detected base + `.graphite-daemon`
+  — the same resolution the `daemon`/`daemon-status`/`daemon-health`
+  subcommands use for their own `--state-dir`.
 
   `{"schema_version": 1, "incidents": [...], "skipped": int}`. Each incident
   carries `fingerprint`, `class`, `code`, `subject`, `state`, `first_seen`,

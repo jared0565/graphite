@@ -193,6 +193,13 @@ commands):
   state and class, plus the top 10 open incidents (fingerprint, code,
   subject, count). Reads fail-open; a broken ledger is reported inline as
   `incidents: unreadable (<reason>)`, never fatal to doctor.
+  Shipped narrowing: the doctor summary is state counts only —
+  `"{open} open / {acked} acked"` (plus a `", N corrupt line(s)"` suffix when
+  `skipped` is nonzero) — with the top-10 open lines carrying per-line
+  `fingerprint code subject xcount`, so class is visible per open incident
+  but there is no separate by-class breakdown in doctor output (unlike
+  daemon-health's `by_class` map below); a conscious narrowing from this
+  bullet's original description, not a bug.
 - **Daemon-health** (`daemon_health.py`): the health report gains
   `incidents: {"open": N, "acked": N, "by_class": {...}}` for the global
   ledger plus per-project open counts, following that module's existing

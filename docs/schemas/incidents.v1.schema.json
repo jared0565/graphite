@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://graphite.local/schemas/incidents.v1.schema.json",
+  "$id": "https://github.com/jared0565/graphite/docs/schemas/incidents.v1.schema.json",
   "title": "graphite incidents list --json envelope (v1)",
   "type": "object",
   "required": ["schema_version", "incidents", "skipped"],

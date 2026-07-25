@@ -170,8 +170,8 @@ def test_template_change_requires_doc_version_bump() -> None:
         ).encode("utf-8")
     ).hexdigest()
     assert (init_module.DOC_VERSION, digest) == (
-        7,
-        "34f378bdb31a73d1f092e99ab5122ab95fb59d5983f7dbb6f7e027b505d91ab3",
+        8,
+        "1f9f313ef7a4661eee39bd930a68faf780edb8661cd0677bc33971e230bde9cb",
     ), "template content changed: bump DOC_VERSION and update this pinned digest"
 
 
@@ -377,10 +377,10 @@ def test_init_wires_stop_hook(tmp_path: Path) -> None:
     assert commands == ["python -m graphite agent-hook stop"]
 
 
-def test_doc_version_is_7_and_template_documents_incidents():
+def test_doc_version_is_8_and_template_documents_incidents():
     from graphite import init as graphite_init
 
-    assert graphite_init.DOC_VERSION == 7
+    assert graphite_init.DOC_VERSION == 8
     template = graphite_init.GRAPHITE_DOC
     assert "resolution-health" in template
     assert "INCONCLUSIVE" in template
