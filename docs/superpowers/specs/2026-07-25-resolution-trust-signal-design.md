@@ -33,6 +33,13 @@ could not bind".
 
 ## 2. Operator decisions (2026-07-25)
 
+**Amendment (2026-07-25, during Task 3):** the health block's key is
+`resolution_health` on EVERY surface (query envelope, stats, impact, context,
+check --json, persisted `analysis.resolution_health`). The originally spec'd
+name `resolution` collides with the published query-result v1 contract's
+existing per-target input-match `resolution` field, which stays untouched.
+Operator-approved rename; additive-only promise preserved.
+
 | # | Decision | Choice |
 |---|----------|--------|
 | 1 | Inconclusive threshold | Bound-edge ratio `< 0.8` → inconclusive (empty results) / "may be incomplete" (non-empty) |
@@ -114,7 +121,7 @@ Rules (all normative):
 ## 5. Build persistence
 
 `analyze(g)` (in `analyze.py`) gains a top-level key
-`"resolution": resolution_health(g)`. Because `_report` (cli.py) writes the
+`"resolution_health": resolution_health(g)`. Because `_report` (cli.py) writes the
 analysis into both `.graphite_analysis.json` and the exported `graph.json`
 bundle, the signal lands automatically in:
 
@@ -135,7 +142,7 @@ next to JSON load.
 
 ### 6.1 `stats`
 
-`_verb_stats` (query.py) adds `"resolution": resolution_health(g)` to its
+`_verb_stats` (query.py) adds `"resolution_health": resolution_health(g)` to its
 result. Human rendering of stats (where applicable) is unchanged except the
 JSON now carries the block.
 
@@ -144,7 +151,7 @@ JSON now carries the block.
 JSON result gains:
 
 ```json
-"resolution": { ...full health block... },
+"resolution_health": { ...full health block... },
 "inconclusive": true | false
 ```
 
@@ -187,9 +194,9 @@ distinguishable.
 ### 6.5 `check --json`
 
 `cmd_check` reads `graph-out/.graphite_analysis.json` (never the full
-graph.json — check must stay fast), extracts `analysis["resolution"]`, and
-adds it to the JSON output as `"resolution"`. Missing file, unreadable JSON,
-or absent key → `"resolution": null`. Human (non-json) output unchanged.
+graph.json — check must stay fast), extracts `analysis["resolution_health"]`, and
+adds it to the JSON output as `"resolution_health"`. Missing file, unreadable JSON,
+or absent key → `"resolution_health": null`. Human (non-json) output unchanged.
 
 ## 7. Strict-hook health gate
 

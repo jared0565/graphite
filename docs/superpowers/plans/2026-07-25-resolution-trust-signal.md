@@ -158,7 +158,7 @@ def test_persisted_resolution_reads_block(tmp_path):
     out = tmp_path / "graph-out"
     out.mkdir()
     (out / ".graphite_analysis.json").write_text(
-        json.dumps({"resolution": {"schema": 1, "healthy": False}}), encoding="utf-8"
+        json.dumps({"resolution_health": {"schema": 1, "healthy": False}}), encoding="utf-8"
     )
     block = persisted_resolution(tmp_path)
     assert block == {"schema": 1, "healthy": False}
@@ -173,7 +173,7 @@ def test_persisted_resolution_fails_open(tmp_path):
     assert persisted_resolution(tmp_path) is None  # malformed
     (out / ".graphite_analysis.json").write_text(json.dumps({"other": 1}), encoding="utf-8")
     assert persisted_resolution(tmp_path) is None  # key absent
-    (out / ".graphite_analysis.json").write_text(json.dumps({"resolution": "nope"}), encoding="utf-8")
+    (out / ".graphite_analysis.json").write_text(json.dumps({"resolution_health": "nope"}), encoding="utf-8")
     assert persisted_resolution(tmp_path) is None  # wrong type
 ```
 
@@ -301,7 +301,7 @@ def persisted_resolution(root: Path) -> dict[str, Any] | None:
         return None
     if not isinstance(data, dict):
         return None
-    block = data.get("resolution")
+    block = data.get("resolution_health")
     return block if isinstance(block, dict) else None
 ```
 
@@ -343,10 +343,10 @@ def test_analyze_includes_resolution_block():
         edges=[("f1", "ghost", "calls", "a.py")],
     )
     result = analyze(g)
-    assert result["resolution"]["by_relation"]["calls"] == {
+    assert result["resolution_health"]["by_relation"]["calls"] == {
         "total": 1, "bound": 0, "ratio": 0.0,
     }
-    assert result["resolution"]["healthy"] is False
+    assert result["resolution_health"]["healthy"] is False
 
 
 def test_build_persists_resolution_in_artifacts(tmp_path, monkeypatch):
@@ -362,12 +362,12 @@ def test_build_persists_resolution_in_artifacts(tmp_path, monkeypatch):
     analysis = json.loads(
         (tmp_path / "graph-out" / ".graphite_analysis.json").read_text(encoding="utf-8")
     )
-    assert analysis["resolution"]["schema"] == 1
+    assert analysis["resolution_health"]["schema"] == 1
     bundle = json.loads(
         (tmp_path / "graph-out" / "graph.json").read_text(encoding="utf-8")
     )
-    assert bundle["analysis"]["resolution"]["schema"] == 1
-    assert persisted_resolution(tmp_path) == analysis["resolution"]
+    assert bundle["analysis"]["resolution_health"]["schema"] == 1
+    assert persisted_resolution(tmp_path) == analysis["resolution_health"]
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -391,7 +391,7 @@ and in `analyze()` change the return to:
         "surprising_connections": surprising_connections(g, top_n),
         "cycles": list(nx.simple_cycles(project_subgraph))[:top_n],
         "top_files_by_links": top_files_by_links(g, top_n),
-        "resolution": resolution_health(g),
+        "resolution_health": resolution_health(g),
     }
 ```
 
@@ -444,7 +444,7 @@ def test_stats_includes_resolution():
     from graphite.query import query
 
     result = query(_unhealthy_graph(), "stats")
-    assert result["resolution"]["healthy"] is False
+    assert result["resolution_health"]["healthy"] is False
 
 
 def test_callers_empty_on_unhealthy_graph_is_inconclusive():
@@ -453,7 +453,7 @@ def test_callers_empty_on_unhealthy_graph_is_inconclusive():
     result = query(_unhealthy_graph(), "callers lonely")
     assert result["total"] == 0
     assert result["inconclusive"] is True
-    assert result["resolution"]["healthy"] is False
+    assert result["resolution_health"]["healthy"] is False
 
 
 def test_callers_empty_on_healthy_graph_is_conclusive():
@@ -499,7 +499,7 @@ Add the helper directly above `_capped_edge_listing`:
 def _attach_resolution(result: dict[str, Any], g: nx.DiGraph) -> dict[str, Any]:
     """Trust signal + honest-empty marker for relation listings (spec 2026-07-25)."""
     health = resolution_health(g)
-    result["resolution"] = health
+    result["resolution_health"] = health
     result["inconclusive"] = result.get("total", 0) == 0 and not health["healthy"]
     return result
 ```
@@ -523,7 +523,7 @@ In `_neighbor_listing`, wrap its successful return dict the same way (same patte
 In `_verb_stats`, add to the returned dict:
 
 ```python
-        "resolution": resolution_health(g),
+        "resolution_health": resolution_health(g),
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -563,7 +563,7 @@ def test_impact_json_inconclusive_on_unhealthy_graph():
     result = _impact(g, ["lonely"], depth=2)
     assert result["impacted_files"] == [] and result["likely_tests"] == []
     assert result["inconclusive"] is True
-    assert result["resolution"]["healthy"] is False
+    assert result["resolution_health"]["healthy"] is False
 
 
 def test_impact_json_conclusive_on_healthy_graph():
@@ -639,12 +639,12 @@ def test_cmd_check_json_resolution_passthrough(tmp_path, capsys, monkeypatch):
     out_dir = tmp_path / "graph-out"
     out_dir.mkdir()
     (out_dir / ".graphite_analysis.json").write_text(
-        json.dumps({"resolution": {"schema": 1, "healthy": True}}), encoding="utf-8"
+        json.dumps({"resolution_health": {"schema": 1, "healthy": True}}), encoding="utf-8"
     )
     args = argparse.Namespace(path=str(tmp_path), json=True, ignore_engine=False)
     cli.cmd_check(args)
     payload = json.loads(capsys.readouterr().out)
-    assert payload["resolution"] == {"schema": 1, "healthy": True}
+    assert payload["resolution_health"] == {"schema": 1, "healthy": True}
 
 
 def test_cmd_check_json_resolution_null_when_absent(tmp_path, capsys, monkeypatch):
@@ -658,7 +658,7 @@ def test_cmd_check_json_resolution_null_when_absent(tmp_path, capsys, monkeypatc
     args = argparse.Namespace(path=str(tmp_path), json=True, ignore_engine=False)
     cli.cmd_check(args)
     payload = json.loads(capsys.readouterr().out)
-    assert payload["resolution"] is None
+    assert payload["resolution_health"] is None
 ```
 
 NOTE for the implementer: if `cmd_check`/`cmd_impact` argument namespaces carry more attributes than shown (e.g. config args consumed by `_config_from_args`), add the minimal extra `Namespace` attributes the real functions read — assertions stay as written.
@@ -687,7 +687,7 @@ In `_impact`, before the final return, compute the health block and extend the r
         "depth": depth,
         "impacted_files": sorted(impacted_files),
         "likely_tests": sorted(likely_tests),
-        "resolution": health,
+        "resolution_health": health,
         "inconclusive": not impacted_files and not likely_tests and not health["healthy"],
     }
 ```
@@ -696,7 +696,7 @@ In `cmd_impact`, replace the non-JSON branch with:
 
 ```python
     else:
-        health = result["resolution"]
+        health = result["resolution_health"]
         if result["inconclusive"]:
             print(
                 "Impacted files: none found — INCONCLUSIVE: only "
@@ -728,7 +728,7 @@ In `cmd_check`, in the `args.json` branch, add the persisted block before printi
 
 ```python
     if args.json:
-        status["resolution"] = persisted_resolution(Path(args.path).resolve())
+        status["resolution_health"] = persisted_resolution(Path(args.path).resolve())
         print(json.dumps(status, ensure_ascii=False, indent=2))
 ```
 
@@ -780,7 +780,7 @@ def test_context_marks_inconclusive_on_unhealthy_graph():
     from graphite.context import build_context, format_context_markdown
 
     context = build_context(_trust_graph(healthy=False), ["lonely"])
-    assert context["resolution"]["healthy"] is False
+    assert context["resolution_health"]["healthy"] is False
     assert context["inconclusive"] is True
     text = format_context_markdown(context)
     assert "INCONCLUSIVE" in text
@@ -825,7 +825,7 @@ In `build_context`, after `impact = _reverse_impact(...)` and before the return,
 and add to the returned dict:
 
 ```python
-        "resolution": health,
+        "resolution_health": health,
         "inconclusive": inconclusive,
 ```
 
@@ -834,7 +834,7 @@ In `format_context_markdown`, replace the Impact section body with:
 ```python
     lines.extend(["", "## Impact"])
     impact = context["impact"]
-    health = context.get("resolution") or {}
+    health = context.get("resolution_health") or {}
     unhealthy = health.get("healthy") is False
     if impact["impacted_files"]:
         lines.append("Impacted files:")
@@ -901,7 +901,7 @@ def _write_analysis(root, healthy):
 
     (root / "graph-out").mkdir(exist_ok=True)
     (root / "graph-out" / ".graphite_analysis.json").write_text(
-        _json.dumps({"resolution": {"schema": 1, "healthy": healthy}}), encoding="utf-8"
+        _json.dumps({"resolution_health": {"schema": 1, "healthy": healthy}}), encoding="utf-8"
     )
 
 
@@ -1048,7 +1048,7 @@ Every graph carries a measured resolver-health block; consumers must use it
 to distinguish "no results" from "the resolver could not bind".
 
 - Shape (in `stats`, `impact`, `context`, relation-verb JSON, `check --json`,
-  and persisted in `graph.json` under `analysis.resolution` and in
+  and persisted in `graph.json` under `analysis.resolution_health` and in
   `graph-out/.graphite_analysis.json`):
 
 ```json
@@ -1074,13 +1074,13 @@ to distinguish "no results" from "the resolver could not bind".
   answer means "unknown", never "safe"** — fall back to grep and say so.
 - ABSENT block (graphs built before 2026-07-25): treat exactly like
   `inconclusive` on empty results — fail open, never assume health.
-- `check --json` reports `"resolution": null` when no persisted block exists.
+- `check --json` reports `"resolution_health": null` when no persisted block exists.
 ```
 
 In `docs/schemas/query-result.v1.schema.json`, add to the top-level `properties` (alongside the existing optional properties — the schema is `additionalProperties: true`, this documents the fields):
 
 ```json
-"resolution": {
+"resolution_health": {
   "type": "object",
   "description": "Measured resolution-health block (schema 1): placeholder_nodes, by_relation, by_language, healthy, threshold. Present on stats/impact/context/relation-verb results from 2026-07-25."
 },
