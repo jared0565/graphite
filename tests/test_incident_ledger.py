@@ -255,3 +255,57 @@ def test_natural_query_inconclusive_records_incident(tmp_path, monkeypatch):
     assert e["code"] == "query_inconclusive"
     assert e["subject"] == "query who calls lonely"
     assert "calls 0.0" in e["detail"]
+
+
+def _list_json(tmp_path, capsys, **over):
+    import argparse
+
+    from graphite.cli import cmd_incidents_list
+
+    defaults = dict(path=str(tmp_path), json=True, all=False, global_ledger=False, daemon_base=None)
+    defaults.update(over)
+    cmd_incidents_list(argparse.Namespace(**defaults))
+    return json.loads(capsys.readouterr().out)
+
+
+def test_incidents_list_json_envelope(tmp_path, capsys):
+    fp = _record(repo_ledger_dir(tmp_path))
+    payload = _list_json(tmp_path, capsys)
+    assert payload["schema_version"] == 1 and payload["skipped"] == 0
+    assert len(payload["incidents"]) == 1
+    inc = payload["incidents"][0]
+    assert inc["fingerprint"] == fp and inc["state"] == "open" and inc["class"] == "build"
+
+
+def test_incidents_ack_resolve_roundtrip(tmp_path, capsys):
+    import argparse
+
+    from graphite.cli import cmd_incidents_ack, cmd_incidents_resolve
+
+    fp = _record(repo_ledger_dir(tmp_path))
+    base = dict(path=str(tmp_path), fingerprint=fp, message=None, global_ledger=False, daemon_base=None)
+    assert cmd_incidents_ack(argparse.Namespace(**base)) == 0
+    capsys.readouterr()
+    assert _list_json(tmp_path, capsys)["incidents"][0]["state"] == "acked"
+    assert cmd_incidents_resolve(argparse.Namespace(**{**base, "message": "fixed"})) == 0
+    capsys.readouterr()
+    assert _list_json(tmp_path, capsys)["incidents"] == []  # resolved hidden by default
+    assert _list_json(tmp_path, capsys, all=True)["incidents"][0]["state"] == "resolved"
+
+
+def test_incidents_unknown_fingerprint_exits_1(tmp_path, capsys):
+    import argparse
+
+    from graphite.cli import cmd_incidents_ack
+
+    args = argparse.Namespace(path=str(tmp_path), fingerprint="deadbeefdeadbeef", message=None, global_ledger=False, daemon_base=None)
+    assert cmd_incidents_ack(args) == 1
+
+
+def test_incidents_cli_via_main(tmp_path, capsys):
+    from graphite.cli import main
+
+    # The parser is built inside main() (there is no build_parser function),
+    # so registration is proven by invoking the real entry point end-to-end.
+    assert main(["incidents", "list", str(tmp_path)]) == 0
+    assert "no incidents" in capsys.readouterr().out

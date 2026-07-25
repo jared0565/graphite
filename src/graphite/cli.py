@@ -489,6 +489,62 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return int(report["exit_code"])
 
 
+def _incidents_ledger_dir(args: argparse.Namespace) -> Path:
+    if getattr(args, "global_ledger", False):
+        if getattr(args, "daemon_base", None):
+            base = Path(args.daemon_base).resolve()
+        else:
+            base = default_projects_root().resolve()  # same import doctor uses
+        return base / ".graphite-daemon"
+    return repo_ledger_dir(Path(args.path).resolve())
+
+
+def cmd_incidents_list(args: argparse.Namespace) -> int:
+    from .incident_ledger import fold_incidents, read_incident_entries
+
+    entries, skipped = read_incident_entries(_incidents_ledger_dir(args))
+    views = fold_incidents(entries)
+    if not args.all:
+        views = [v for v in views if v.state != "resolved"]
+    if args.json:
+        payload = {
+            "schema_version": 1,
+            "incidents": [v.to_json() for v in views],
+            "skipped": skipped,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    if not views:
+        print("[graphite] no incidents")
+    for v in views:
+        print(f"{v.state:9} {v.fingerprint} {v.klass}/{v.code} {v.subject} x{v.count} last {v.last_seen}")
+    if skipped:
+        print(f"[graphite] skipped {skipped} corrupt line(s)")
+    return 0
+
+
+def _incidents_lifecycle(args: argparse.Namespace, kind: str) -> int:
+    from .incident_ledger import append_lifecycle, fold_incidents, read_incident_entries
+
+    ledger_dir = _incidents_ledger_dir(args)
+    if not append_lifecycle(ledger_dir, args.fingerprint, kind, note=args.message):
+        print(f"[graphite] unknown fingerprint: {args.fingerprint}", file=sys.stderr)
+        return 1
+    entries, _ = read_incident_entries(ledger_dir)
+    for v in fold_incidents(entries):
+        if v.fingerprint == args.fingerprint:
+            print(f"{v.state:9} {v.fingerprint} {v.klass}/{v.code} {v.subject} x{v.count}")
+    return 0
+
+
+def cmd_incidents_ack(args: argparse.Namespace) -> int:
+    return _incidents_lifecycle(args, "ack")
+
+
+def cmd_incidents_resolve(args: argparse.Namespace) -> int:
+    return _incidents_lifecycle(args, "resolve")
+
+
 def _print_overlay_result(payload: dict[str, Any], *, json_mode: bool) -> None:
     if json_mode:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
@@ -1962,6 +2018,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_doctor.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_doctor.set_defaults(func=cmd_doctor)
+
+    p_incidents = sub.add_parser("incidents", help="List and triage recorded incidents")
+    incidents_sub = p_incidents.add_subparsers(dest="incidents_cmd", required=True)
+    p_inc_list = incidents_sub.add_parser("list", help="Folded incident views (open+acked by default)")
+    p_inc_list.add_argument("path", nargs="?", default=".")
+    p_inc_list.add_argument("--json", action="store_true")
+    p_inc_list.add_argument("--all", action="store_true", help="Include resolved incidents")
+    p_inc_list.add_argument("--global", dest="global_ledger", action="store_true", help="Read the daemon-global ledger")
+    p_inc_list.add_argument("--daemon-base", default=None)
+    p_inc_list.set_defaults(func=cmd_incidents_list)
+    for name, handler in (("ack", cmd_incidents_ack), ("resolve", cmd_incidents_resolve)):
+        p_life = incidents_sub.add_parser(name, help=f"{name} an incident by fingerprint")
+        p_life.add_argument("fingerprint")
+        p_life.add_argument("path", nargs="?", default=".")
+        p_life.add_argument("-m", "--message", default=None)
+        p_life.add_argument("--global", dest="global_ledger", action="store_true")
+        p_life.add_argument("--daemon-base", default=None)
+        p_life.set_defaults(func=handler)
 
 
     p_init = sub.add_parser("init", aliases=["Init"], help="Initialize Graphite instructions for AI coding platforms")
