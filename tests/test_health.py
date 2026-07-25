@@ -381,3 +381,11 @@ def test_calls_cells_have_no_external_field():
     block = resolution_health(nx.DiGraph())
     assert "external" not in block["by_relation"]["calls"]
     assert block["by_relation"]["imports"]["external"] == 0
+
+
+def test_neighbor_listing_empty_on_unhealthy_graph_is_inconclusive():
+    from graphite.query import query
+
+    result = query(_unhealthy_graph(), "depends-on lonely")
+    assert result["total"] == 0
+    assert result["inconclusive"] is True

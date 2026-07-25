@@ -122,6 +122,11 @@ def format_context_markdown(context: dict[str, Any]) -> str:
     if impact["likely_tests"]:
         lines.append("Likely tests:")
         lines.extend(f"- `{path}`" for path in impact["likely_tests"][:30])
+    if unhealthy and (impact["impacted_files"] or impact["likely_tests"]):
+        lines.append(
+            f"note: resolution health low (imports {ratio_percent(health, 'imports')}, "
+            f"calls {ratio_percent(health, 'calls')}) — this list may be incomplete."
+        )
 
     lines.extend(["", "## Direct Dependents"])
     dependents = context["direct_dependents"]

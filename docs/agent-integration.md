@@ -132,7 +132,7 @@ to distinguish "no results" from "the resolver could not bind".
   (0.8). Zero-edge relations have `ratio: null` and do not count against health.
 - **schema 2**: imports cells carry an `external` count of imports outside the repo
   (stdlib, pip packages). Ratios count only should-bind-in-repo edges and exclude
-  externals. `external` counts edge nodes with `confidence="EXTERNAL_IMPORT"`.
+  externals. `external` counts edges with `confidence="EXTERNAL_IMPORT"`.
   Ratios over graphs built before this change (schema 1) include externals — when
   reading ratios, branch on `schema` to interpret correctly. Consumers reading
   only `healthy` need no change.
