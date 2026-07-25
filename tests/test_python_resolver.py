@@ -307,3 +307,24 @@ def test_python_methods_tagged_top_level_functions_not(tmp_path):
     by_id = {n["id"]: n for n in result.nodes}
     assert by_id["src_pkg_ledger_record_run"].get("is_method") is True
     assert by_id["src_pkg_tdd_auto_resolve_tdd"].get("is_method") is None
+
+
+def test_end_to_end_build_binds_and_is_healthy(tmp_path, monkeypatch):
+    import json as _json
+
+    _py_fixture(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    from graphite.cli import _build_project
+
+    _build_project(tmp_path, Config(workers=1, cache_dir=tmp_path / ".cache" / "graphite"))
+    bundle = _json.loads((tmp_path / "graph-out" / "graph.json").read_text(encoding="utf-8"))
+    block = bundle["analysis"]["resolution_health"]
+    assert block["schema"] == 2
+    assert block["healthy"] is True
+    assert block["by_relation"]["imports"]["ratio"] == 1.0
+    assert block["by_relation"]["imports"]["external"] >= 1  # json import
+    assert block["by_relation"]["calls"]["ratio"] >= 0.8
+
+
+def test_cache_version_is_v7():
+    assert Config().cache_version == "v7"
