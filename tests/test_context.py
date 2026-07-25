@@ -53,3 +53,37 @@ def test_context_cli_markdown_is_compact_and_human_readable(tmp_path: Path, monk
     assert "## Impact" in output
     assert "## Direct Dependencies" in output
     assert "src/app.ts" in output
+
+
+def _trust_graph(healthy: bool):
+    import networkx as nx
+
+    g = nx.DiGraph()
+    g.add_node("lonely", kind="function", source_file="a.py")
+    g.add_node("src", kind="function", source_file="a.py")
+    target_kind = "function" if healthy else "unknown"
+    g.add_node("tgt", kind=target_kind, source_file="b.py")
+    g.add_edge("src", "tgt", relation="calls", source_file="a.py")
+    return g
+
+
+def test_context_marks_inconclusive_on_unhealthy_graph():
+    from graphite.context import build_context, format_context_markdown
+
+    context = build_context(_trust_graph(healthy=False), ["lonely"])
+    assert context["resolution_health"]["healthy"] is False
+    assert context["inconclusive"] is True
+    text = format_context_markdown(context)
+    assert "INCONCLUSIVE" in text
+    assert "no direct dependents found — inconclusive (resolution health low)" in text
+    assert "Impacted files: none found\n" not in text
+
+
+def test_context_unchanged_on_healthy_graph():
+    from graphite.context import build_context, format_context_markdown
+
+    context = build_context(_trust_graph(healthy=True), ["lonely"])
+    assert context["inconclusive"] is False
+    text = format_context_markdown(context)
+    assert "INCONCLUSIVE" not in text
+    assert "Impacted files: none found" in text
