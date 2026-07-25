@@ -215,8 +215,11 @@ commands):
   self-record.
 - `GRAPHITE.md` managed template: one new item telling agents
   `python -m graphite incidents list` exists and that recurring incidents
-  belong in a governed round, not ad-hoc fixes. `DOC_VERSION` 6 → 7
-  (`init.py:17`); consumer re-init at rollout.
+  belong in a governed round, not ad-hoc fixes. `DOC_VERSION` lands at 8
+  (`init.py:17`): the round bumped 6 → 7, then the final-review style fix
+  to the template item consumed 7 → 8 intra-branch (the init mechanism
+  skips exact-version matches, so any template content change bumps the
+  version; 7 never shipped to a consumer). Consumer re-init at rollout.
 
 ## 9. Governance and error handling
 
@@ -263,7 +266,7 @@ Repo conventions: real files under `tmp_path`, real pipeline, no mocks.
 1. Merge + push per finishing-a-development-branch (operator chooses).
 2. **Daemon restart required** (daemon writer is a daemon-executed surface) —
    operator runs Stop-Process.
-3. Re-init consumer repos for DOC_VERSION 7.
+3. Re-init consumer repos for DOC_VERSION 8.
 4. Live acceptance: (a) seed a deliberately broken file in a scratch repo,
    build, confirm the incident + doctor section + `list`/`ack`/`resolve`
    round-trip; (b) confirm daemon-health shows incident counts after a
