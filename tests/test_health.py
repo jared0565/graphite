@@ -134,3 +134,38 @@ def test_persisted_resolution_fails_open(tmp_path):
     assert persisted_resolution(tmp_path) is None  # key absent
     (out / ".graphite_analysis.json").write_text(json.dumps({"resolution": "nope"}), encoding="utf-8")
     assert persisted_resolution(tmp_path) is None  # wrong type
+
+
+def test_analyze_includes_resolution_block():
+    from graphite.analyze import analyze
+
+    g = _graph(
+        nodes=[("f1", "function", "a.py"), ("ghost", "unknown", None)],
+        edges=[("f1", "ghost", "calls", "a.py")],
+    )
+    result = analyze(g)
+    assert result["resolution"]["by_relation"]["calls"] == {
+        "total": 1, "bound": 0, "ratio": 0.0,
+    }
+    assert result["resolution"]["healthy"] is False
+
+
+def test_build_persists_resolution_in_artifacts(tmp_path, monkeypatch):
+    (tmp_path / "a.py").write_text(
+        "from b import helper\n\ndef f():\n    helper()\n", encoding="utf-8"
+    )
+    (tmp_path / "b.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    from graphite.cli import _build_project
+    from graphite.config import Config
+
+    _build_project(tmp_path, Config())
+    analysis = json.loads(
+        (tmp_path / "graph-out" / ".graphite_analysis.json").read_text(encoding="utf-8")
+    )
+    assert analysis["resolution"]["schema"] == 1
+    bundle = json.loads(
+        (tmp_path / "graph-out" / "graph.json").read_text(encoding="utf-8")
+    )
+    assert bundle["analysis"]["resolution"]["schema"] == 1
+    assert persisted_resolution(tmp_path) == analysis["resolution"]
