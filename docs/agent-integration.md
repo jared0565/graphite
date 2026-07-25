@@ -115,14 +115,14 @@ to distinguish "no results" from "the resolver could not bind".
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "placeholder_nodes": {"total": 4519, "unknown": 2463, "share": 0.545},
   "by_relation": {
     "calls":   {"total": 6631, "bound": 1730, "ratio": 0.261},
-    "imports": {"total": 2047, "bound": 94,   "ratio": 0.046}
+    "imports": {"total": 1920, "bound": 1918, "ratio": 0.999, "external": 127}
   },
   "by_language": {"python": {"calls": {"total": 6631, "bound": 1730, "ratio": 0.261},
-                              "imports": {"total": 2047, "bound": 94, "ratio": 0.046}}},
+                              "imports": {"total": 1920, "bound": 1918, "ratio": 0.999, "external": 127}}},
   "healthy": false,
   "threshold": 0.8
 }
@@ -130,6 +130,23 @@ to distinguish "no results" from "the resolver could not bind".
 
 - `healthy` is `true` iff every non-null `by_relation` ratio is `>= threshold`
   (0.8). Zero-edge relations have `ratio: null` and do not count against health.
+- **schema 2**: imports cells carry an `external` count of imports outside the repo
+  (stdlib, pip packages). Ratios count only should-bind-in-repo edges and exclude
+  externals. `external` counts edges with `confidence="EXTERNAL_IMPORT"`.
+  Ratios over graphs built before this change (schema 1) include externals — when
+  reading ratios, branch on `schema` to interpret correctly. Consumers reading
+  only `healthy` need no change.
+- On a post-resolver-binding graph an unresolved import edge is tagged
+  `EXTERNAL_IMPORT` (and excluded) rather than left unbound, so `imports`
+  `total` tends to converge on `bound` and the ratio trends toward 1.0 by
+  construction (the `0.999` above, not `1.0`, reflects the rare edge whose
+  target module resolved to an in-repo path but that file itself never
+  emitted a node — e.g. it hit a read/parse error during extraction — so the
+  import edge still counts as unbound even though it wasn't external).
+  Because imports is structurally near-saturated on a healthy Python graph,
+  it stops being the signal that tells healthy repos apart from unhealthy
+  ones — the `calls` ratio is the one that still reflects real binding
+  difficulty, and is the discriminating health signal consumers should watch.
 - `impact`, `context`, and the relation verbs (`callers`, `calls`,
   `imported-by`, `depends-on`) additionally return `"inconclusive": true` when
   the result is EMPTY and the graph is unhealthy. **An inconclusive empty

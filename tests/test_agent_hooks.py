@@ -190,6 +190,20 @@ def test_strict_denial_suspended_when_analysis_malformed(built_repo: Path) -> No
     assert "strict denial suspended" in result["hookSpecificOutput"]["additionalContext"]
 
 
+def test_strict_denial_suspended_when_healthy_is_not_bool(built_repo: Path) -> None:
+    # _write_analysis hardcodes schema 1 + a real bool; this arrangement needs a
+    # non-bool "healthy" under schema 2, so it writes the analysis file directly
+    # using the same pattern (built_repo's build step already made graph-out/).
+    (built_repo / "graph-out").mkdir(exist_ok=True)
+    (built_repo / "graph-out" / ".graphite_analysis.json").write_text(
+        json.dumps({"resolution_health": {"schema": 2, "healthy": "true"}}), encoding="utf-8"
+    )
+    result = handle_pre_tool_use(_grep_payload(built_repo, "target_symbol"), mode="strict")
+    output = result["hookSpecificOutput"]
+    assert "permissionDecision" not in output
+    assert "strict denial suspended" in output["additionalContext"]
+
+
 def _run_cli_hook(monkeypatch, capsys, argv: list[str], payload) -> tuple[int, str]:
     from graphite.cli import main
 

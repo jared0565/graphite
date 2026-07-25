@@ -483,7 +483,133 @@ def _call_target_name(node: Any, source: bytes) -> str | None:
     return None
 
 
-def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any) -> ExtractionResult:
+def _python_import_modules(node: Any) -> list[tuple[str, int]]:
+    """(module_dotted, relative_dots) per module imported by this statement.
+
+    import_statement: one entry per dotted_name / aliased_import child.
+    import_from_statement: exactly one entry from the module_name field —
+    imported NAMES are deliberately ignored (they are symbols, not modules).
+    """
+    def _text(n: Any) -> str:
+        return n.text.decode("utf-8", errors="ignore") if n is not None and n.text else ""
+
+    out: list[tuple[str, int]] = []
+    if node.type == "import_statement":
+        for child in node.children:
+            if child.type == "dotted_name":
+                if _text(child):
+                    out.append((_text(child), 0))
+            elif child.type == "aliased_import":
+                name = child.child_by_field_name("name")
+                if _text(name):
+                    out.append((_text(name), 0))
+    elif node.type == "import_from_statement":
+        module = node.child_by_field_name("module_name")
+        if module is None:
+            return out
+        if module.type == "relative_import":
+            dots = 0
+            dotted = ""
+            for child in module.children:
+                if child.type == "import_prefix":
+                    dots = len(_text(child))
+                elif child.type == "dotted_name":
+                    dotted = _text(child)
+            if dots:
+                out.append((dotted, dots))
+        elif module.type == "dotted_name" and _text(module):
+            out.append((_text(module), 0))
+    return out
+
+
+def _collect_python_import_maps(
+    root: Any, rel_path: str, source_index: SourceIndex | None
+) -> tuple[dict[str, str], dict[str, str]]:
+    """(symbol_map: local -> definition node id, alias_map: local -> module file id).
+
+    Walked at ALL depths (Python allows function-local imports). For
+    `from P import name`, `P.name` is tried as a MODULE first (alias), then
+    as a symbol defined in P's file. Unresolvable modules enter neither map.
+    Last binding wins, matching Python shadowing.
+    """
+    symbol_map: dict[str, str] = {}
+    alias_map: dict[str, str] = {}
+    if source_index is None:
+        return symbol_map, alias_map
+
+    def _text(n: Any) -> str:
+        return n.text.decode("utf-8", errors="ignore") if n is not None and n.text else ""
+
+    def visit(node: Any) -> None:
+        if node.type == "import_statement":
+            for child in node.children:
+                if child.type == "dotted_name":
+                    module = _text(child)
+                    if module and "." not in module:
+                        resolved = source_index.resolve_python_module(rel_path, module)
+                        if resolved:
+                            alias_map[module] = _file_node_id(resolved)
+                elif child.type == "aliased_import":
+                    module = _text(child.child_by_field_name("name"))
+                    local = _text(child.child_by_field_name("alias"))
+                    if module and local:
+                        resolved = source_index.resolve_python_module(rel_path, module)
+                        if resolved:
+                            alias_map[local] = _file_node_id(resolved)
+        elif node.type == "import_from_statement":
+            modules = _python_import_modules(node)
+            if modules:
+                base_module, dots = modules[0]
+                module_field = node.child_by_field_name("module_name")
+                for child in node.children:
+                    if module_field is not None and child.id == module_field.id:
+                        # The module_name field's own dotted_name (e.g. `pkg`
+                        # in `from pkg import a`) is ALSO a plain child of
+                        # this statement. Skip it by identity rather than by
+                        # sibling-token sniffing: `prev_sibling in ("import",
+                        # ",")` fails for the first name inside parens
+                        # (`from x import (a, b)` — `a`'s prev_sibling is
+                        # `(`), silently dropping black-style multi-imports.
+                        continue
+                    local = original = None
+                    if child.type == "dotted_name":
+                        original = local = _text(child)
+                    elif child.type == "aliased_import":
+                        original = _text(child.child_by_field_name("name"))
+                        local = _text(child.child_by_field_name("alias"))
+                    if not original or not local or "." in original:
+                        continue
+                    sub = f"{base_module}.{original}" if base_module else original
+                    as_module = source_index.resolve_python_module(rel_path, sub, dots)
+                    if as_module:
+                        alias_map[local] = _file_node_id(as_module)
+                        continue
+                    parent = source_index.resolve_python_module(rel_path, base_module, dots)
+                    if parent:
+                        symbol_map[local] = _make_id(_file_node_id(parent), original)
+        for child in node.children:
+            visit(child)
+
+    visit(root)
+    return symbol_map, alias_map
+
+
+def _python_call_target(func: Any) -> tuple[str | None, str | None, str | None]:
+    """(bare_name, object_name, attribute_name) for a Python call's function node."""
+    def _text(n: Any) -> str | None:
+        return n.text.decode("utf-8", errors="ignore") if n is not None and n.text else None
+
+    if func.type == "identifier":
+        return _text(func), None, None
+    if func.type == "attribute":
+        obj = func.child_by_field_name("object")
+        attr = _text(func.child_by_field_name("attribute"))
+        obj_name = _text(obj) if obj is not None and obj.type == "identifier" else None
+        return None, obj_name, attr
+    return None, None, None
+
+
+def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, source_index: SourceIndex | None = None) -> ExtractionResult:
     result = ExtractionResult()
     root = tree.root_node
 
@@ -491,6 +617,10 @@ def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any) -> Ex
         return (node.start_point[0] + 1) if node.start_point else 1
 
     result.nodes.append(_node(file_id, "file", Path(rel_path).name, rel_path))
+
+    symbol_map, alias_map = _collect_python_import_maps(root, rel_path, source_index)
+
+    class_ids: set[str] = set()
 
     # ``parent_id`` is the nearest named container (for ``contains`` edges);
     # ``scope_id`` is the nearest enclosing function (for ``calls`` attribution).
@@ -500,7 +630,8 @@ def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any) -> Ex
             name = _short_name(name_node.text.decode("utf-8", errors="ignore")) if name_node and name_node.text else None
             if name:
                 mid = _make_id(file_id, name)
-                result.nodes.append(_node(mid, "function", name, rel_path, _line(node)))
+                extra = {"is_method": True} if parent_id in class_ids else None
+                result.nodes.append(_node(mid, "function", name, rel_path, _line(node), extra))
                 if parent_id:
                     result.edges.append(_edge(parent_id, mid, "contains", rel_path, _line(node)))
                 walk_children(node, mid, mid)
@@ -511,6 +642,7 @@ def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any) -> Ex
             name = _short_name(name_node.text.decode("utf-8", errors="ignore")) if name_node and name_node.text else None
             if name:
                 cid = _make_id(file_id, name)
+                class_ids.add(cid)
                 result.nodes.append(_node(cid, "class", name, rel_path, _line(node)))
                 if parent_id:
                     result.edges.append(_edge(parent_id, cid, "contains", rel_path, _line(node)))
@@ -524,23 +656,42 @@ def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any) -> Ex
                 walk_children(node, cid, scope_id)
             else:
                 walk_children(node, parent_id, scope_id)
-        elif node.type == "import_statement" or node.type == "import_from_statement":
-            # Collect module names from dotted_name children.
-            for child in node.children:
-                if child.type == "dotted_name":
-                    mod = child.text.decode("utf-8", errors="ignore") if child.text else None
-                    if mod:
-                        result.edges.append(_edge(file_id, _make_id(mod), "imports", rel_path, _line(node)))
-                elif child.type == "string" and node.type == "import_from_statement":
-                    mod = child.text.decode("utf-8", errors="ignore").strip("'\"")
-                    if mod:
-                        result.edges.append(_edge(file_id, _make_id(mod), "imports", rel_path, _line(node)))
+        elif node.type in ("import_statement", "import_from_statement"):
+            for module, dots in _python_import_modules(node):
+                resolved = (
+                    source_index.resolve_python_module(rel_path, module, dots)
+                    if source_index is not None
+                    else None
+                )
+                if resolved:
+                    result.edges.append(_edge(
+                        file_id, _file_node_id(resolved), "imports", rel_path,
+                        _line(node), confidence="EXACT_IMPORT",
+                    ))
+                else:
+                    result.edges.append(_edge(
+                        file_id, _make_id(module) if module else _make_id("package"),
+                        "imports", rel_path, _line(node), confidence="EXTERNAL_IMPORT",
+                    ))
             walk_children(node, parent_id, scope_id)
         elif node.type == "call":
             func = node.child_by_field_name("function")
-            called = _call_target_name(func, source) if func else None
-            if called and called not in _LANGUAGE_BUILTIN_GLOBALS:
-                result.edges.append(_edge(scope_id, _resolve_call(file_id, called), "calls", rel_path, _line(node)))
+            bare, obj_name, attr = _python_call_target(func) if func is not None else (None, None, None)
+            edge = None
+            if bare and bare not in _LANGUAGE_BUILTIN_GLOBALS:
+                target = symbol_map.get(bare) or _resolve_call(file_id, bare)
+                edge = _edge(scope_id, target, "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+            elif attr:
+                dotted = f"{obj_name}.{attr}" if obj_name else attr
+                if obj_name and obj_name in alias_map:
+                    edge = _edge(scope_id, _make_id(alias_map[obj_name], attr), "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+                elif should_keep_call_target(dotted):
+                    # Unresolved member call: file-scoped phantom now, re-pointed
+                    # (or dropped) by the method-dispatch post-pass via _member.
+                    edge = _edge(scope_id, _resolve_call(file_id, dotted), "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+                    edge["_member"] = attr
+            if edge is not None:
+                result.edges.append(edge)
             walk_children(node, parent_id, scope_id)
         else:
             walk_children(node, parent_id, scope_id)
@@ -580,7 +731,14 @@ def _extract_go(file_id: str, rel_path: str, source: bytes, tree: Any) -> Extrac
         path_node = spec.child_by_field_name("path")
         mod = (_text(path_node) or "").strip("'\"`")
         if mod:
-            result.edges.append(_edge(file_id, _make_id(mod), "imports", rel_path, _line(spec), confidence="EXTERNAL_IMPORT"))
+            # No resolver for Go imports (no package-level resolution, see
+            # docstring above) — default EXTRACTED confidence, not
+            # EXTERNAL_IMPORT. EXTERNAL_IMPORT is reserved for genuinely
+            # external/stdlib modules a resolver *tried and failed* to
+            # resolve (health schema 2 excludes it from imports ratios);
+            # tagging every Go import that way would hide 100% of this
+            # language's phantom cross-file linkage from resolution_health.
+            result.edges.append(_edge(file_id, _make_id(mod), "imports", rel_path, _line(spec)))
 
     def walk(node: Any, parent_id: str | None, scope_id: str) -> None:
         t = node.type
@@ -699,7 +857,11 @@ def _extract_rust(file_id: str, rel_path: str, source: bytes, tree: Any) -> Extr
         elif t == "use_declaration":
             target = _use_target(node)
             if target:
-                result.edges.append(_edge(file_id, _make_id(target), "imports", rel_path, _line(node), confidence="EXTERNAL_IMPORT"))
+                # No resolver for Rust `use` targets — default EXTRACTED
+                # confidence, not EXTERNAL_IMPORT (see matching Go note
+                # above: EXTERNAL_IMPORT means "a resolver tried and
+                # confirmed external", which never happens here).
+                result.edges.append(_edge(file_id, _make_id(target), "imports", rel_path, _line(node)))
         elif t == "call_expression":
             func = node.child_by_field_name("function")
             if func is not None:
@@ -818,8 +980,11 @@ def extract_file(entry: FileEntry, cfg: Config, cache: Cache | None = None, sour
             tree = parser.parse(source)
         except Exception as e:
             return ExtractionResult(error=f"parse_error: {e}")
-        extractor = {"python": _extract_python, "go": _extract_go, "rust": _extract_rust}[entry.language]
-        result = extractor(file_id, rel_path, source, tree)
+        if entry.language == "python":
+            result = _extract_python(file_id, rel_path, source, tree, source_index)
+        else:
+            extractor = {"go": _extract_go, "rust": _extract_rust}[entry.language]
+            result = extractor(file_id, rel_path, source, tree)
     else:
         result = _extract_generic(file_id, rel_path, source, entry.language or "unknown")
 
@@ -944,7 +1109,7 @@ def _merge(results: list[ExtractionResult]) -> ExtractionResult:
     # Resolve `recv.method()` member calls against the global set of class-method
     # definitions. Done here (post-merge, pre-dedup) because it needs every file's
     # methods at once, and because re-pointing can create duplicate edges (e.g.
-    # `a.foo()` and `b.foo()` both -> the real `foo`) that the dedup below absorbs.
+    # `a.foo()` and `b.foo()` both -> the real `foo`) that the dedup below merges.
     all_edges = _resolve_method_dispatch(all_nodes, all_edges)
 
     all_nodes.sort(key=lambda n: (n.get("id", ""), n.get("source_file", "")))
@@ -963,12 +1128,21 @@ def _merge(results: list[ExtractionResult]) -> ExtractionResult:
             e.get("source_location", ""),
         )
     )
-    seen_edges: set[tuple[str, str, str]] = set()
+    # Duplicate (source, target, relation) triples collapse to one edge, but the
+    # duplicate's weight is folded into the survivor rather than discarded — two
+    # distinct call sites reaching the same target (e.g. `tdd.auto_resolve_tdd(...)`
+    # and an aliased `art(...)` both binding to the same def) is a real multiplicity
+    # signal, not noise, and dropping it silently understated call weight for every
+    # language before this fix.
+    seen_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
     for e in all_edges:
         key = (e["source"], e["target"], e["relation"])
-        if key not in seen_edges:
+        survivor = seen_edges.get(key)
+        if survivor is None:
+            seen_edges[key] = e
             merged.edges.append(e)
-            seen_edges.add(key)
+        else:
+            survivor["weight"] = survivor.get("weight", 1.0) + e.get("weight", 1.0)
     return merged
 
 

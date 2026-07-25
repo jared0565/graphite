@@ -24,12 +24,12 @@ def _graph(nodes, edges):
 
 def test_empty_graph_is_healthy_with_null_ratios():
     block = resolution_health(nx.DiGraph())
-    assert block["schema"] == 1
+    assert block["schema"] == 2
     assert block["healthy"] is True
     assert block["threshold"] == RESOLUTION_HEALTHY_RATIO
     assert block["placeholder_nodes"] == {"total": 0, "unknown": 0, "share": None}
     assert block["by_relation"]["calls"] == {"total": 0, "bound": 0, "ratio": None}
-    assert block["by_relation"]["imports"] == {"total": 0, "bound": 0, "ratio": None}
+    assert block["by_relation"]["imports"] == {"total": 0, "bound": 0, "ratio": None, "external": 0}
     assert block["by_language"] == {}
 
 
@@ -48,7 +48,7 @@ def test_bound_and_unbound_edges_counted_per_relation():
     )
     block = resolution_health(g)
     assert block["by_relation"]["calls"] == {"total": 2, "bound": 1, "ratio": 0.5}
-    assert block["by_relation"]["imports"] == {"total": 1, "bound": 0, "ratio": 0.0}
+    assert block["by_relation"]["imports"] == {"total": 1, "bound": 0, "ratio": 0.0, "external": 0}
     assert block["healthy"] is False
     assert block["placeholder_nodes"] == {"total": 3, "unknown": 1, "share": 0.333}
 
@@ -87,7 +87,7 @@ def test_language_attribution_from_edge_source_file():
     block = resolution_health(g)
     assert block["by_language"]["python"]["calls"] == {"total": 1, "bound": 1, "ratio": 1.0}
     assert block["by_language"]["typescript"]["calls"] == {"total": 1, "bound": 0, "ratio": 0.0}
-    assert block["by_language"]["other"]["imports"] == {"total": 1, "bound": 0, "ratio": 0.0}
+    assert block["by_language"]["other"]["imports"] == {"total": 1, "bound": 0, "ratio": 0.0, "external": 0}
     # languages appear only when they carry at least one counted edge
     assert "go" not in block["by_language"]
 
@@ -99,6 +99,7 @@ def test_missing_kind_counts_as_unknown():
     g.add_edge("a", "mystery", relation="calls", source_file="a.py")
     block = resolution_health(g)
     assert block["by_relation"]["calls"] == {"total": 1, "bound": 0, "ratio": 0.0}
+    assert block["by_relation"]["imports"] == {"total": 0, "bound": 0, "ratio": None, "external": 0}
     assert block["placeholder_nodes"]["unknown"] == 1
 
 
@@ -117,10 +118,10 @@ def test_persisted_resolution_reads_block(tmp_path):
     out = tmp_path / "graph-out"
     out.mkdir()
     (out / ".graphite_analysis.json").write_text(
-        json.dumps({"resolution_health": {"schema": 1, "healthy": False}}), encoding="utf-8"
+        json.dumps({"resolution_health": {"schema": 2, "healthy": False}}), encoding="utf-8"
     )
     block = persisted_resolution(tmp_path)
-    assert block == {"schema": 1, "healthy": False}
+    assert block == {"schema": 2, "healthy": False}
 
 
 def test_persisted_resolution_fails_open(tmp_path):
@@ -147,6 +148,9 @@ def test_analyze_includes_resolution_block():
     assert result["resolution_health"]["by_relation"]["calls"] == {
         "total": 1, "bound": 0, "ratio": 0.0,
     }
+    assert result["resolution_health"]["by_relation"]["imports"] == {
+        "total": 0, "bound": 0, "ratio": None, "external": 0,
+    }
     assert result["resolution_health"]["healthy"] is False
 
 
@@ -163,11 +167,11 @@ def test_build_persists_resolution_in_artifacts(tmp_path, monkeypatch):
     analysis = json.loads(
         (tmp_path / "graph-out" / ".graphite_analysis.json").read_text(encoding="utf-8")
     )
-    assert analysis["resolution_health"]["schema"] == 1
+    assert analysis["resolution_health"]["schema"] == 2
     bundle = json.loads(
         (tmp_path / "graph-out" / "graph.json").read_text(encoding="utf-8")
     )
-    assert bundle["analysis"]["resolution_health"]["schema"] == 1
+    assert bundle["analysis"]["resolution_health"]["schema"] == 2
     assert persisted_resolution(tmp_path) == analysis["resolution_health"]
 
 
@@ -323,12 +327,12 @@ def test_cmd_check_json_resolution_passthrough(tmp_path, capsys, monkeypatch):
     out_dir = tmp_path / "graph-out"
     out_dir.mkdir()
     (out_dir / ".graphite_analysis.json").write_text(
-        json.dumps({"resolution_health": {"schema": 1, "healthy": True}}), encoding="utf-8"
+        json.dumps({"resolution_health": {"schema": 2, "healthy": True}}), encoding="utf-8"
     )
     args = argparse.Namespace(path=str(tmp_path), json=True, ignore_engine=False)
     cli.cmd_check(args)
     payload = json.loads(capsys.readouterr().out)
-    assert payload["resolution_health"] == {"schema": 1, "healthy": True}
+    assert payload["resolution_health"] == {"schema": 2, "healthy": True}
 
 
 def test_cmd_check_json_resolution_null_when_absent(tmp_path, capsys, monkeypatch):
@@ -343,3 +347,45 @@ def test_cmd_check_json_resolution_null_when_absent(tmp_path, capsys, monkeypatc
     cli.cmd_check(args)
     payload = json.loads(capsys.readouterr().out)
     assert payload["resolution_health"] is None
+
+
+def test_external_imports_excluded_from_ratio():
+    g = nx.DiGraph()
+    g.add_node("f", kind="file", source_file="a.py")
+    g.add_node("dep", kind="file", source_file="b.py")
+    g.add_node("pathlib", kind="unknown")
+    g.add_edge("f", "dep", relation="imports", source_file="a.py", confidence="EXACT_IMPORT")
+    g.add_edge("f", "pathlib", relation="imports", source_file="a.py", confidence="EXTERNAL_IMPORT")
+    block = resolution_health(g)
+    assert block["schema"] == 2
+    assert block["by_relation"]["imports"] == {
+        "total": 1, "bound": 1, "ratio": 1.0, "external": 1,
+    }
+    assert block["healthy"] is True
+    assert block["by_language"]["python"]["imports"]["external"] == 1
+
+
+def test_untagged_import_edges_still_count():
+    g = nx.DiGraph()
+    g.add_node("f", kind="file", source_file="a.py")
+    g.add_node("ghost", kind="unknown")
+    g.add_edge("f", "ghost", relation="imports", source_file="a.py")  # no confidence
+    block = resolution_health(g)
+    assert block["by_relation"]["imports"] == {
+        "total": 1, "bound": 0, "ratio": 0.0, "external": 0,
+    }
+    assert block["healthy"] is False
+
+
+def test_calls_cells_have_no_external_field():
+    block = resolution_health(nx.DiGraph())
+    assert "external" not in block["by_relation"]["calls"]
+    assert block["by_relation"]["imports"]["external"] == 0
+
+
+def test_neighbor_listing_empty_on_unhealthy_graph_is_inconclusive():
+    from graphite.query import query
+
+    result = query(_unhealthy_graph(), "depends-on lonely")
+    assert result["total"] == 0
+    assert result["inconclusive"] is True

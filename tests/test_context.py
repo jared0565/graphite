@@ -87,3 +87,30 @@ def test_context_unchanged_on_healthy_graph():
     text = format_context_markdown(context)
     assert "INCONCLUSIVE" not in text
     assert "Impacted files: none found" in text
+
+
+def test_context_notes_incomplete_when_nonempty_but_unhealthy():
+    import networkx as nx
+
+    from graphite.context import build_context, format_context_markdown
+
+    g = nx.DiGraph()
+    g.add_node("caller_file", kind="file", source_file="caller.py")
+    g.add_node("target_file", kind="file", source_file="target.py")
+    g.add_node("ghost", kind="unknown")
+    g.add_edge("caller_file", "target_file", relation="imports", source_file="caller.py")
+    g.add_edge("caller_file", "ghost", relation="calls", source_file="caller.py")
+    context = build_context(g, ["target_file"])
+    text = format_context_markdown(context)
+    assert "may be incomplete" in text
+    assert "INCONCLUSIVE" not in text
+
+
+def test_context_carries_full_health_block():
+    import networkx as nx
+
+    from graphite.context import build_context
+
+    context = build_context(nx.DiGraph(), [])
+    block = context["resolution_health"]
+    assert set(block) >= {"schema", "placeholder_nodes", "by_relation", "by_language", "healthy", "threshold"}

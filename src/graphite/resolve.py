@@ -133,6 +133,39 @@ class SourceIndex:
         """Compiler-discovered export/dynamic-import edges for a file."""
         return self.typescript.supplemental_edges(rel_path)
 
+    def resolve_python_module(
+        self, importer_rel_path: str, module: str, relative_dots: int = 0
+    ) -> str | None:
+        """Lexically resolve a Python module path to a repo rel_path, else None.
+
+        Absolute: roots "" then "src"; relative: anchored at the importer's
+        directory, one level up per dot beyond the first. Purely repo-relative:
+        no sys.path, so a repo file shadowing a stdlib name wins.
+        """
+        parts = [p for p in module.split(".") if p] if module else []
+        candidates: list[str] = []
+        if relative_dots > 0:
+            anchor = PurePosixPath(importer_rel_path).parent
+            for _ in range(relative_dots - 1):
+                anchor = anchor.parent
+            base = anchor.joinpath(*parts).as_posix() if parts else anchor.as_posix()
+            if parts:
+                candidates.extend(_python_module_candidates(base))
+            else:
+                candidates.append(posixpath.normpath(f"{base}/__init__.py"))
+        else:
+            if not parts:
+                return None
+            joined = "/".join(parts)
+            for root in ("", "src"):
+                base = f"{root}/{joined}" if root else joined
+                candidates.extend(_python_module_candidates(base))
+        for candidate in candidates:
+            normalized = posixpath.normpath(candidate).lstrip("./")
+            if normalized in self.rel_paths:
+                return normalized
+        return None
+
 
 def should_keep_call_target(called: str) -> bool:
     """Drop common built-in/member calls that create graph noise."""
@@ -180,6 +213,13 @@ def _candidate_paths(base: PurePosixPath) -> list[str]:
     out.extend(f"{base_str}{ext}" for ext in _TS_EXTENSIONS)
     out.extend(f"{base_str}/{name}" for name in _INDEX_NAMES)
     return out
+
+
+def _python_module_candidates(base: str) -> list[str]:
+    normalized = posixpath.normpath(base)
+    if normalized in (".", ""):
+        return ["__init__.py"]
+    return [f"{normalized}.py", f"{normalized}/__init__.py"]
 
 
 def _load_workspace_packages(
