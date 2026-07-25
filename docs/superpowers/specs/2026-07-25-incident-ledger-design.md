@@ -47,11 +47,12 @@ New module `src/graphite/incident_ledger.py` (sibling of `usage_ledger.py`,
 same conventions).
 
 **Paths.**
-- Per-repo: `local_dir(root)/incidents.jsonl` → `.graphite/incidents.jsonl`
-  (reuse `usage_ledger.local_dir`). Rotation: at `MAX_LEDGER_BYTES`
-  (5 MB, same constant semantics) via `os.replace` to
-  `.graphite/incidents.rotated.jsonl`; readers read rotated generation first,
-  then current (mirror `usage_ledger.iter_entries`).
+- Per-repo ledger at `local_dir(root)/incidents.jsonl` → `.graphite/local/incidents.jsonl`
+  with rotation to `incidents.jsonl.1` (matching `usage_ledger`'s actual layout:
+  `usage.jsonl` / `usage.jsonl.1` under `.graphite/local/`). Rotation at
+  `MAX_LEDGER_BYTES` (5 MB, same constant semantics) via `os.replace`;
+  readers read rotated generation first, then current (mirror
+  `usage_ledger.iter_entries`).
 - Daemon-global: `<daemon base>/.graphite-daemon/incidents.jsonl` (same dir as
   `status.json`, `daemon.py:464`), same rotation.
 
