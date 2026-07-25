@@ -155,6 +155,64 @@ to distinguish "no results" from "the resolver could not bind".
   `inconclusive` on empty results — fail open, never assume health.
 - `check --json` reports `"resolution_health": null` when no persisted block exists.
 
+## 8. Incidents
+
+Graphite keeps a durable, machine-local record of its own failures so an
+agent (or a human) can triage them instead of re-discovering the same break
+every session.
+
+- What gets recorded — eight codes across three classes:
+  - `build`: `parse_error`, `read_error`, `worker_error` (extraction failures
+    surfaced per-file during `build`/`scan`), `graph_load_failed` (a
+    persisted graph bundle failed to load/validate), `artifact_malformed`
+    (`graph-out/.graphite_analysis.json` or another artifact is unreadable
+    or not valid JSON, e.g. surfaced by `check`).
+  - `query`: `query_inconclusive` (a structured or `--natural` query
+    returned `"inconclusive": true` — see the resolution-health section
+    above).
+  - `daemon`: `daemon_build_failed` (a daemon-triggered build failed),
+    `provider_probe_failed` (a daemon observer cycle raised).
+- Fingerprint stability: `fingerprint = sha256(f"{class}|{code}|{subject}")[:16]`.
+  It is a function of class/code/subject only — detail text and timestamps
+  never affect it, so the same failure recurring folds into the same
+  incident instead of piling up duplicates.
+- Fold/lifecycle semantics: writes are append-only occurrences plus `ack`/
+  `resolve` lifecycle entries; triage state is computed at read time, never
+  mutated in place.
+  - No lifecycle entry → `open`.
+  - `ack` → `acked`, and it **stays** `acked` across further occurrences of
+    the same fingerprint (an ack means "seen", not "fixed"; new occurrences
+    don't silently reopen it).
+  - `resolve` → `resolved`, unless a strictly newer occurrence exists, in
+    which case the incident **reopens** to `open` (the failure came back
+    after being marked fixed).
+- `incidents list --json` envelope + schema pointer
+  ([incidents.v1](schemas/incidents.v1.schema.json)):
+
+```bash
+graphite incidents list [path] --json [--all] [--global] [--daemon-base BASE]
+graphite incidents ack <fingerprint> [path] [-m MESSAGE]
+graphite incidents resolve <fingerprint> [path] [-m MESSAGE]
+```
+
+  `{"schema_version": 1, "incidents": [...], "skipped": int}`. Each incident
+  carries `fingerprint`, `class`, `code`, `subject`, `state`, `first_seen`,
+  `last_seen`, `count`, `last_detail`, plus a nullable `last_note` (present
+  in output, intentionally outside the schema's `properties`/`required` —
+  it rides under `additionalProperties`). `list` shows `open`+`acked` by
+  default; pass `--all` to include `resolved`. `skipped` counts corrupt
+  ledger lines encountered while reading, never a fatal condition.
+- Recording is fail-open by design: a ledger write failure never breaks the
+  operation being recorded. `doctor` and the daemon-health report both
+  surface open-incident counts as a trust signal, the same way they surface
+  resolution health.
+
+A single incident, or a handful, is routine noise to triage with `ack`/
+`resolve` as part of normal work. A *recurring* incident — the same
+fingerprint reopening after resolution, or a code that keeps showing up
+across builds — is evidence of a real, unaddressed defect and belongs in a
+governed spec round, not an ad-hoc fix squeezed into an unrelated change.
+
 ## Non-goals (governance)
 
 Canonical commands are inference-free by contract: `--llm` flags are rejected

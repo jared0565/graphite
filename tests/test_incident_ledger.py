@@ -440,3 +440,45 @@ def test_daemon_health_includes_incident_counts(tmp_path):
     # idiom and name the file in your report).
     assert report["incidents"]["open"] == 1
     assert report["incidents"]["by_class"] == {"daemon": 1}
+
+
+# CONTROLLER OVERRIDE (task-7): the brief's fixture for this e2e wrote
+# undecodable bytes (b"\xff\xfe\x00broken\x00") and called _build_project().
+# Task 2's probe (see test_extract_all_collects_per_file_errors above and
+# task-2-report.md) proved that fixture cannot produce an incident: tree-sitter
+# parses garbage without erroring, and any NUL byte makes ingest._is_binary
+# drop the file before extract_file() ever runs -- collect_files() never turns
+# it into an entry, so there's nothing for extraction to fail on. The only
+# verifiable extraction-failure fixture is the same collect-then-vanish race
+# test_build_records_extraction_incidents already established: collect real
+# files with _scan(), delete one, then run _build() (the exact two calls
+# _build_project() chains, minus _report() which writes graph-out/ artifacts
+# irrelevant to this roundtrip). bad.py's content below is deliberately valid
+# Python -- the incident comes from the file vanishing between scan and
+# extract, not from its contents.
+def test_e2e_broken_file_to_triage_roundtrip(tmp_path, monkeypatch, capsys):
+    import argparse
+
+    from graphite.cli import _build, _scan, cmd_incidents_ack, cmd_incidents_list
+    from graphite.config import Config
+
+    _write(tmp_path / "src" / "ok.py", "def ok():\n    return 1\n")
+    bad = tmp_path / "src" / "bad.py"
+    _write(bad, "def also_ok():\n    return 2\n")
+    monkeypatch.chdir(tmp_path)
+    args = argparse.Namespace(path=str(tmp_path))
+    cfg = Config(workers=1, cache_dir=tmp_path / ".cache" / "graphite")
+    manifest, entries = _scan(args, cfg)
+    bad.unlink()
+    _build(args, cfg, manifest, entries)
+    capsys.readouterr()
+    cmd_incidents_list(argparse.Namespace(path=str(tmp_path), json=True, all=False, global_ledger=False, daemon_base=None))
+    payload = json.loads(capsys.readouterr().out)
+    open_incidents = [i for i in payload["incidents"] if i["state"] == "open"]
+    assert open_incidents, "build over a vanished file must surface an open incident"
+    fp = open_incidents[0]["fingerprint"]
+    assert cmd_incidents_ack(argparse.Namespace(path=str(tmp_path), fingerprint=fp, message="triaged", global_ledger=False, daemon_base=None)) == 0
+    capsys.readouterr()
+    cmd_incidents_list(argparse.Namespace(path=str(tmp_path), json=True, all=False, global_ledger=False, daemon_base=None))
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["incidents"][0]["state"] == "acked"
