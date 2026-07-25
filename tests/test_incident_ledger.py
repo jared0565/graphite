@@ -402,3 +402,41 @@ def test_observer_cycle_failure_records_incident(tmp_path):
         and e["detail"] == "observer_cycle_failed"
         for e in entries
     )
+
+
+def test_doctor_reports_incidents_section(tmp_path):
+    from graphite.config import Config
+    from graphite.doctor import run_doctor
+
+    _record(repo_ledger_dir(tmp_path), subject="src/broken.py")
+    report = run_doctor(tmp_path, cfg=Config(cache_dir=tmp_path / ".cache"), daemon_base=tmp_path)
+    checks = {c["code"]: c for c in report["checks"]}
+    # ADAPTATION NOTE: read build_report to confirm the report's checks are
+    # dicts under "checks" with a "code" key; adapt access if the shape
+    # differs, keeping the assertions' substance.
+    assert "incidents" in checks
+    assert "1 open" in checks["incidents"]["summary"]
+    assert any("src/broken.py" in line for line in checks["incidents"]["details"]["top_open"])
+
+
+def test_doctor_incidents_ok_when_none(tmp_path):
+    from graphite.config import Config
+    from graphite.doctor import run_doctor
+
+    report = run_doctor(tmp_path, cfg=Config(cache_dir=tmp_path / ".cache"), daemon_base=tmp_path)
+    checks = {c["code"]: c for c in report["checks"]}
+    assert "incidents" in checks and "0 open" in checks["incidents"]["summary"]
+
+
+def test_daemon_health_includes_incident_counts(tmp_path):
+    from graphite.daemon_health import evaluate_daemon_health
+
+    state_dir = tmp_path / ".graphite-daemon"
+    record_incident(state_dir, klass="daemon", code="provider_probe_failed", subject="daemon", detail="x")
+    report = evaluate_daemon_health(tmp_path, state_dir=state_dir)
+    # ADAPTATION NOTE: evaluate_daemon_health may need a status.json to exist;
+    # if it fails hard on a missing status, write the minimal valid status
+    # artifact the way existing daemon_health tests do (copy their fixture
+    # idiom and name the file in your report).
+    assert report["incidents"]["open"] == 1
+    assert report["incidents"]["by_class"] == {"daemon": 1}
