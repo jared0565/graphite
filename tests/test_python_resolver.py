@@ -163,6 +163,72 @@ def _graph_for(tmp_path):
     return build_graph(result.nodes, result.edges)
 
 
+def test_parenthesized_from_import_first_name_binds(tmp_path):
+    # `from pkg.mod import (first_fn, second_fn)` — the FIRST name's
+    # prev_sibling is `(`, not `import`/`,`, which is exactly the case the
+    # old sibling-token guard missed. Both names must bind cross-module.
+    _write(tmp_path / "pkg" / "__init__.py", "")
+    _write(
+        tmp_path / "pkg" / "mod.py",
+        "def first_fn():\n    return 1\n\ndef second_fn():\n    return 2\n",
+    )
+    _write(
+        tmp_path / "consumer.py",
+        "from pkg.mod import (first_fn, second_fn)\n"
+        "\n"
+        "def run():\n"
+        "    first_fn()\n"
+        "    second_fn()\n",
+    )
+    g = _graph_for(tmp_path)
+    assert g.has_edge("consumer_run", "pkg_mod_first_fn")
+    assert g.has_edge("consumer_run", "pkg_mod_second_fn")
+
+
+def test_parenthesized_from_import_multiline_trailing_comma_binds(tmp_path):
+    # Black-style single-name multiline import with a trailing comma:
+    #   from pkg.mod import (
+    #       only_fn,
+    #   )
+    # `only_fn`'s prev_sibling is also `(`, not `import`.
+    _write(tmp_path / "pkg" / "__init__.py", "")
+    _write(tmp_path / "pkg" / "mod.py", "def only_fn():\n    return 1\n")
+    _write(
+        tmp_path / "consumer.py",
+        "from pkg.mod import (\n"
+        "    only_fn,\n"
+        ")\n"
+        "\n"
+        "def run():\n"
+        "    only_fn()\n",
+    )
+    g = _graph_for(tmp_path)
+    assert g.has_edge("consumer_run", "pkg_mod_only_fn")
+
+
+def test_parenthesized_from_import_single_edge_per_module(tmp_path):
+    # Regression guard: a parenthesized multi-name from-import must still
+    # produce exactly ONE `imports` edge for the module (names are not
+    # modules and must not each spawn their own import edge).
+    _write(tmp_path / "pkg" / "__init__.py", "")
+    _write(
+        tmp_path / "pkg" / "mod.py",
+        "def first_fn():\n    return 1\n\ndef second_fn():\n    return 2\n",
+    )
+    _write(
+        tmp_path / "consumer.py",
+        "from pkg.mod import (first_fn, second_fn)\n"
+        "\n"
+        "def run():\n"
+        "    first_fn()\n"
+        "    second_fn()\n",
+    )
+    result = _extract(tmp_path)
+    edges = _import_edges(result, "consumer.py")
+    assert len(edges) == 1
+    assert edges[0]["target"] == "pkg_mod"
+
+
 def test_module_attribute_call_binds_cross_module(tmp_path):
     _py_fixture(tmp_path)
     g = _graph_for(tmp_path)

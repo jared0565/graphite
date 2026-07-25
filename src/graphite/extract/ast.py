@@ -560,10 +560,19 @@ def _collect_python_import_maps(
             modules = _python_import_modules(node)
             if modules:
                 base_module, dots = modules[0]
+                module_field = node.child_by_field_name("module_name")
                 for child in node.children:
+                    if module_field is not None and child.id == module_field.id:
+                        # The module_name field's own dotted_name (e.g. `pkg`
+                        # in `from pkg import a`) is ALSO a plain child of
+                        # this statement. Skip it by identity rather than by
+                        # sibling-token sniffing: `prev_sibling in ("import",
+                        # ",")` fails for the first name inside parens
+                        # (`from x import (a, b)` — `a`'s prev_sibling is
+                        # `(`), silently dropping black-style multi-imports.
+                        continue
                     local = original = None
-                    if child.type == "dotted_name" and child.prev_sibling is not None \
-                            and _text(child.prev_sibling) in ("import", ","):
+                    if child.type == "dotted_name":
                         original = local = _text(child)
                     elif child.type == "aliased_import":
                         original = _text(child.child_by_field_name("name"))
