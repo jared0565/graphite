@@ -309,3 +309,96 @@ def test_incidents_cli_via_main(tmp_path, capsys):
     # so registration is proven by invoking the real entry point end-to-end.
     assert main(["incidents", "list", str(tmp_path)]) == 0
     assert "no incidents" in capsys.readouterr().out
+
+
+# ADAPTATION NOTE (task 5): no existing test file constructs ProjectRuntime,
+# WatchChange, or BuildResult directly — tests/test_daemon.py only builds
+# BuildResult (as the return value of its `fake_build` stubs, e.g. line 58:
+# `BuildResult(success=True, returncode=0, duration_seconds=0.01, stdout="ok")`)
+# and never touches ProjectRuntime/WatchChange at all; those are only ever
+# constructed inside src/graphite/daemon.py itself (ProjectRuntime at line
+# ~537: `ProjectRuntime(root=project, snapshot=snap, needs_initial_build=...)`).
+# The helpers below use the same minimal-real-constructor idiom: ProjectRuntime
+# needs `root` + `snapshot` (Snapshot = dict[str, str], so `{}` is valid and
+# unused by _record_build_result); WatchChange's three fields all default to
+# `()` so the no-arg constructor is already minimal; BuildResult is a frozen
+# dataclass requiring success/returncode/duration_seconds with stdout/stderr/
+# error defaulting to "" / "" / None.
+def _minimal_project_runtime(root: Path):
+    from graphite.daemon import ProjectRuntime
+
+    return ProjectRuntime(root=root, snapshot={})
+
+
+def _minimal_watch_change():
+    from graphite.watch import WatchChange
+
+    return WatchChange()
+
+
+def _failing_build_result(stderr: str):
+    from graphite.daemon import BuildResult
+
+    return BuildResult(success=False, returncode=1, duration_seconds=0.01, stderr=stderr)
+
+
+def _passing_build_result():
+    from graphite.daemon import BuildResult
+
+    return BuildResult(success=True, returncode=0, duration_seconds=0.01)
+
+
+def test_daemon_build_failure_records_incident(tmp_path):
+    from graphite.daemon import _record_build_result
+
+    state = _minimal_project_runtime(tmp_path)
+    change = _minimal_watch_change()
+    result = _failing_build_result("boom: extraction exploded")
+    _record_build_result(state, change, result)
+    entries, _ = read_incident_entries(repo_ledger_dir(tmp_path))
+    assert any(
+        e["class"] == "daemon" and e["code"] == "daemon_build_failed" and "boom" in e["detail"]
+        for e in entries
+    )
+
+
+def test_daemon_build_success_records_nothing(tmp_path):
+    from graphite.daemon import _record_build_result
+
+    state = _minimal_project_runtime(tmp_path)
+    change = _minimal_watch_change()
+    result = _passing_build_result()
+    _record_build_result(state, change, result)
+    entries, _ = read_incident_entries(repo_ledger_dir(tmp_path))
+    assert entries == []
+
+
+def test_observer_cycle_failure_records_incident(tmp_path):
+    # Not in the brief's Step 1 list (which only specified the two build-path
+    # tests above) — added because the task title is "build-cycle +
+    # observer-cycle" and the observer path had zero coverage otherwise.
+    # Drives _ProviderObservationWorker._run() synchronously (no thread: we
+    # never call .start()) with a real DaemonLogger backed by tmp_path, and a
+    # cycle callable that sets worker._stop before raising so the loop body
+    # runs exactly once and _run() returns on its own (stop.wait() sees the
+    # event already set and returns True immediately).
+    from graphite.daemon import DaemonLogger, _ProviderObservationWorker
+
+    logger = DaemonLogger(tmp_path / ".graphite-daemon", 5_000_000)
+    worker = _ProviderObservationWorker(cycle=lambda: None, logger=logger, interval_seconds=0.01)
+
+    def _raising_cycle():
+        worker._stop.set()
+        raise RuntimeError("boom")
+
+    worker._cycle = _raising_cycle
+    worker._run()
+
+    entries, _ = read_incident_entries(logger.state_dir)
+    assert any(
+        e["class"] == "daemon"
+        and e["code"] == "provider_probe_failed"
+        and e["subject"] == "daemon"
+        and e["detail"] == "observer_cycle_failed"
+        for e in entries
+    )
