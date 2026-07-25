@@ -144,6 +144,18 @@ if called and called not in _LANGUAGE_BUILTIN_GLOBALS:
 `a.b` bind via alias map; deeper chains `a.b.c` stash the final attribute as
 `_member` like TS does.)
 
+Amendment (matches the as-implemented code, not the pseudocode above): the
+pseudocode gives `self`/`cls` attribute calls their own arm ahead of the
+noise filter, implying they always get a member-dispatch stash. The shipped
+code instead routes `self.x()` / `cls.x()` through the same
+`should_keep_call_target` noise filter as any other attribute call — a
+noisy-named method (e.g. `self.get()`) emits no edge at all, even though
+`self` unambiguously names the owning class. This is an accepted tradeoff:
+filtering by member name only, with no special case for the unambiguous
+receiver, keeps the noise list a single source of truth and avoids
+phantom/mis-dispatch edges for high-fan-out names, at the cost of dropping
+a small number of legitimately-resolvable self/cls calls.
+
 ## 5. Mechanism 3 — Python member dispatch
 
 - Python `function_definition` nodes whose `parent_id` is a class node get

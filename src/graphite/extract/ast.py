@@ -609,7 +609,7 @@ def _python_call_target(func: Any) -> tuple[str | None, str | None, str | None]:
     return None, None, None
 
 
-def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any, source_index: SourceIndex | None = None) -> ExtractionResult:
+def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, source_index: SourceIndex | None = None) -> ExtractionResult:
     result = ExtractionResult()
     root = tree.root_node
 
@@ -731,7 +731,14 @@ def _extract_go(file_id: str, rel_path: str, source: bytes, tree: Any) -> Extrac
         path_node = spec.child_by_field_name("path")
         mod = (_text(path_node) or "").strip("'\"`")
         if mod:
-            result.edges.append(_edge(file_id, _make_id(mod), "imports", rel_path, _line(spec), confidence="EXTERNAL_IMPORT"))
+            # No resolver for Go imports (no package-level resolution, see
+            # docstring above) — default EXTRACTED confidence, not
+            # EXTERNAL_IMPORT. EXTERNAL_IMPORT is reserved for genuinely
+            # external/stdlib modules a resolver *tried and failed* to
+            # resolve (health schema 2 excludes it from imports ratios);
+            # tagging every Go import that way would hide 100% of this
+            # language's phantom cross-file linkage from resolution_health.
+            result.edges.append(_edge(file_id, _make_id(mod), "imports", rel_path, _line(spec)))
 
     def walk(node: Any, parent_id: str | None, scope_id: str) -> None:
         t = node.type
@@ -850,7 +857,11 @@ def _extract_rust(file_id: str, rel_path: str, source: bytes, tree: Any) -> Extr
         elif t == "use_declaration":
             target = _use_target(node)
             if target:
-                result.edges.append(_edge(file_id, _make_id(target), "imports", rel_path, _line(node), confidence="EXTERNAL_IMPORT"))
+                # No resolver for Rust `use` targets — default EXTRACTED
+                # confidence, not EXTERNAL_IMPORT (see matching Go note
+                # above: EXTERNAL_IMPORT means "a resolver tried and
+                # confirmed external", which never happens here).
+                result.edges.append(_edge(file_id, _make_id(target), "imports", rel_path, _line(node)))
         elif t == "call_expression":
             func = node.child_by_field_name("function")
             if func is not None:
