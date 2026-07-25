@@ -491,6 +491,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def _incidents_ledger_dir(args: argparse.Namespace) -> Path:
     if getattr(args, "global_ledger", False):
+        state_dir = getattr(args, "state_dir", None)
+        if state_dir:
+            return Path(state_dir).resolve()
         if getattr(args, "daemon_base", None):
             base = Path(args.daemon_base).resolve()
         else:
@@ -2027,6 +2030,7 @@ def main(argv: list[str] | None = None) -> int:
     p_inc_list.add_argument("--all", action="store_true", help="Include resolved incidents")
     p_inc_list.add_argument("--global", dest="global_ledger", action="store_true", help="Read the daemon-global ledger")
     p_inc_list.add_argument("--daemon-base", default=None)
+    p_inc_list.add_argument("--state-dir", default=None, help="Daemon state directory (default: <base>/.graphite-daemon)")
     p_inc_list.set_defaults(func=cmd_incidents_list)
     for name, handler in (("ack", cmd_incidents_ack), ("resolve", cmd_incidents_resolve)):
         p_life = incidents_sub.add_parser(name, help=f"{name} an incident by fingerprint")
@@ -2035,6 +2039,7 @@ def main(argv: list[str] | None = None) -> int:
         p_life.add_argument("-m", "--message", default=None)
         p_life.add_argument("--global", dest="global_ledger", action="store_true")
         p_life.add_argument("--daemon-base", default=None)
+        p_life.add_argument("--state-dir", default=None, help="Daemon state directory (default: <base>/.graphite-daemon)")
         p_life.set_defaults(func=handler)
 
 

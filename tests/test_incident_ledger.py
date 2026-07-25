@@ -339,6 +339,25 @@ def test_incidents_unknown_fingerprint_exits_1(tmp_path, capsys):
     assert cmd_incidents_ack(args) == 1
 
 
+def test_incidents_global_with_custom_state_dir(tmp_path, capsys):
+    # A daemon started with `daemon --state-dir <custom>` (cli.py's daemon /
+    # daemon-status / daemon-health parsers already accept this flag) writes
+    # its observer incidents under that custom state dir via logger.state_dir
+    # -- NOT under <daemon-base>/.graphite-daemon. Before this fix,
+    # `_incidents_ledger_dir` only ever resolved the global ledger from
+    # --daemon-base/default_projects_root(), so a custom-state-dir daemon's
+    # incidents were writable but never listable/ack-able. This is also the
+    # --global branch's first automated coverage.
+    from graphite.cli import main
+
+    custom_state_dir = tmp_path / "custom-daemon-state"
+    record_incident(custom_state_dir, klass="daemon", code="daemon_build_failed", subject="proj", detail="boom")
+    assert main(["incidents", "list", "--global", "--state-dir", str(custom_state_dir), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["incidents"]) == 1
+    assert payload["incidents"][0]["code"] == "daemon_build_failed"
+
+
 def test_incidents_cli_via_main(tmp_path, capsys):
     from graphite.cli import main
 
