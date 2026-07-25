@@ -483,7 +483,46 @@ def _call_target_name(node: Any, source: bytes) -> str | None:
     return None
 
 
-def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any) -> ExtractionResult:
+def _python_import_modules(node: Any) -> list[tuple[str, int]]:
+    """(module_dotted, relative_dots) per module imported by this statement.
+
+    import_statement: one entry per dotted_name / aliased_import child.
+    import_from_statement: exactly one entry from the module_name field —
+    imported NAMES are deliberately ignored (they are symbols, not modules).
+    """
+    def _text(n: Any) -> str:
+        return n.text.decode("utf-8", errors="ignore") if n is not None and n.text else ""
+
+    out: list[tuple[str, int]] = []
+    if node.type == "import_statement":
+        for child in node.children:
+            if child.type == "dotted_name":
+                if _text(child):
+                    out.append((_text(child), 0))
+            elif child.type == "aliased_import":
+                name = child.child_by_field_name("name")
+                if _text(name):
+                    out.append((_text(name), 0))
+    elif node.type == "import_from_statement":
+        module = node.child_by_field_name("module_name")
+        if module is None:
+            return out
+        if module.type == "relative_import":
+            dots = 0
+            dotted = ""
+            for child in module.children:
+                if child.type == "import_prefix":
+                    dots = len(_text(child))
+                elif child.type == "dotted_name":
+                    dotted = _text(child)
+            if dots:
+                out.append((dotted, dots))
+        elif module.type == "dotted_name" and _text(module):
+            out.append((_text(module), 0))
+    return out
+
+
+def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any, source_index: SourceIndex | None = None) -> ExtractionResult:
     result = ExtractionResult()
     root = tree.root_node
 
@@ -524,17 +563,23 @@ def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any) -> Ex
                 walk_children(node, cid, scope_id)
             else:
                 walk_children(node, parent_id, scope_id)
-        elif node.type == "import_statement" or node.type == "import_from_statement":
-            # Collect module names from dotted_name children.
-            for child in node.children:
-                if child.type == "dotted_name":
-                    mod = child.text.decode("utf-8", errors="ignore") if child.text else None
-                    if mod:
-                        result.edges.append(_edge(file_id, _make_id(mod), "imports", rel_path, _line(node)))
-                elif child.type == "string" and node.type == "import_from_statement":
-                    mod = child.text.decode("utf-8", errors="ignore").strip("'\"")
-                    if mod:
-                        result.edges.append(_edge(file_id, _make_id(mod), "imports", rel_path, _line(node)))
+        elif node.type in ("import_statement", "import_from_statement"):
+            for module, dots in _python_import_modules(node):
+                resolved = (
+                    source_index.resolve_python_module(rel_path, module, dots)
+                    if source_index is not None
+                    else None
+                )
+                if resolved:
+                    result.edges.append(_edge(
+                        file_id, _file_node_id(resolved), "imports", rel_path,
+                        _line(node), confidence="EXACT_IMPORT",
+                    ))
+                else:
+                    result.edges.append(_edge(
+                        file_id, _make_id(module) if module else _make_id("package"),
+                        "imports", rel_path, _line(node), confidence="EXTERNAL_IMPORT",
+                    ))
             walk_children(node, parent_id, scope_id)
         elif node.type == "call":
             func = node.child_by_field_name("function")
@@ -818,8 +863,11 @@ def extract_file(entry: FileEntry, cfg: Config, cache: Cache | None = None, sour
             tree = parser.parse(source)
         except Exception as e:
             return ExtractionResult(error=f"parse_error: {e}")
-        extractor = {"python": _extract_python, "go": _extract_go, "rust": _extract_rust}[entry.language]
-        result = extractor(file_id, rel_path, source, tree)
+        if entry.language == "python":
+            result = _extract_python(file_id, rel_path, source, tree, source_index)
+        else:
+            extractor = {"go": _extract_go, "rust": _extract_rust}[entry.language]
+            result = extractor(file_id, rel_path, source, tree)
     else:
         result = _extract_generic(file_id, rel_path, source, entry.language or "unknown")
 
