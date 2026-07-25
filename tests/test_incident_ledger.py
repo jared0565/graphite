@@ -116,3 +116,69 @@ def test_sort_order_open_first(tmp_path):
     append_lifecycle(tmp_path, a, "resolve")
     views = fold_incidents(read_incident_entries(tmp_path)[0])
     assert [v.state for v in views] == ["open", "resolved"]
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_extract_all_collects_per_file_errors(tmp_path):
+    from graphite.config import Config
+    from graphite.extract.ast import extract_all
+    from graphite.ingest import collect_files
+
+    _write(tmp_path / "good.py", "def ok():\n    return 1\n")
+    bad = tmp_path / "bad.py"
+    _write(bad, "def broken():\n    return 2\n")
+    cfg = Config(workers=1, cache_dir=tmp_path / ".cache" / "graphite")
+    entries = collect_files(tmp_path, cfg)
+    # PROBE RESULT (see task-2-report.md for the full trace): tree-sitter is
+    # error-tolerant, so neither a syntax error (`def broken(:`) nor invalid
+    # UTF-8 bytes without a NUL (`\xff\xfe`) makes extract_file() raise or
+    # return .error — both parse cleanly. Undecodable bytes WITH a NUL
+    # (`\xff\xfe\x00broken`) never even reach extract_file: ingest.collect_files'
+    # `_is_binary()` treats any NUL byte as binary and drops the file from
+    # `entries` before extraction is attempted. The one input that verifiably
+    # errors at workers=1 (no thread pool to catch stray exceptions) is a
+    # collect-then-vanish race: the file is real at collect_files() time (so it
+    # becomes an entry) and removed before extract_all() opens it, so
+    # extract_file's `open(entry.abs_path, "rb")` raises FileNotFoundError,
+    # which its own try/except turns into a `read_error` ExtractionResult.
+    bad.unlink()
+    result = extract_all(entries, cfg)
+    assert isinstance(result.errors, list)
+    assert result.errors, "expected the vanished file to produce a read_error"
+    err = result.errors[0]
+    assert set(err) == {"code", "subject", "detail"}
+    assert err["subject"] == "bad.py"
+    assert err["code"] == "read_error"
+
+
+def test_build_records_extraction_incidents(tmp_path, monkeypatch):
+    import argparse
+
+    from graphite.cli import _build, _scan
+    from graphite.config import Config
+
+    _write(tmp_path / "src" / "ok.py", "def ok():\n    return 1\n")
+    bad = tmp_path / "src" / "bad.py"
+    _write(bad, "def also_ok():\n    return 2\n")
+    monkeypatch.chdir(tmp_path)
+    cfg = Config(workers=1, cache_dir=tmp_path / ".cache" / "graphite")
+    args = argparse.Namespace(path=str(tmp_path))
+    # Same collect-then-vanish technique as test_extract_all_collects_per_file_errors
+    # (see that test's comment / the task-2 report for the probe trace): _scan()
+    # collects `bad.py` as a real entry, then it is removed before _build() (which
+    # calls extract_all() -> extract_file()) ever opens it, producing a genuine
+    # read_error. _build_project() runs both steps back-to-back with no seam to
+    # inject the deletion, so this calls _scan()/_build() directly — the exact
+    # pair _build_project() wraps — to exercise the incident-recording wiring
+    # added to _build() right after its extract_all() call.
+    manifest, entries = _scan(args, cfg)
+    bad.unlink()
+    _build(args, cfg, manifest, entries)
+    incident_entries, _ = read_incident_entries(repo_ledger_dir(tmp_path))
+    build_entries = [e for e in incident_entries if e["class"] == "build"]
+    assert any(e["subject"].endswith("bad.py") for e in build_entries)
+    assert all(e["code"] in ("parse_error", "read_error", "worker_error") for e in build_entries)

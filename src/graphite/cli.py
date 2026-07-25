@@ -32,6 +32,7 @@ from .freshness import check_graph_freshness
 from .graph import build_graph, graph_to_json
 from .graph_io import MAX_GRAPH_BYTES, GraphReadError, load_validated_graph_bundle
 from .health import persisted_resolution, ratio_percent, resolution_health
+from .incident_ledger import record_incident, repo_ledger_dir
 from .ingest import collect_files
 from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
@@ -198,6 +199,21 @@ def _build(
     cache = Cache(cfg.cache_dir, cfg.cache_version)
     start = time.time()
     extraction = extract_all(entries, cfg, cache)
+    if extraction.errors:
+        _root = Path(args.path).resolve()
+        _seen: set[tuple[str, str]] = set()
+        for err in extraction.errors:
+            key = (err["code"], err["subject"])
+            if key in _seen:
+                continue
+            _seen.add(key)
+            record_incident(
+                repo_ledger_dir(_root),
+                klass="build",
+                code=err["code"],
+                subject=err["subject"],
+                detail=err["detail"],
+            )
     if cfg.verbose:
         print(
             f"[graphite] extracted {len(extraction.nodes)} nodes / {len(extraction.edges)} edges "
