@@ -85,6 +85,43 @@ def test_corrupt_lines_skipped_and_counted(tmp_path):
     assert skipped == 2
 
 
+def test_unreadable_generation_counts_as_skipped_not_zero_incidents(tmp_path):
+    # A ledger FILE that exists but cannot be read (here: a directory sitting
+    # where incidents.jsonl is expected, which is unreadable as a file on
+    # both POSIX (IsADirectoryError) and Windows (PermissionError) -- both
+    # OSError subclasses) must never present as "no incidents". Before the
+    # fix, the outer belt-and-braces `except Exception` in
+    # read_incident_entries swallowed the read_text() failure for the WHOLE
+    # function and returned whatever had accumulated so far -- typically
+    # ([], 0) -- indistinguishable from an empty ledger. The fix guards each
+    # generation's read individually so the failure surfaces as skipped >= 1.
+    path = tmp_path / "incidents.jsonl"
+    path.mkdir(parents=True)  # unreadable-as-a-file directory where the ledger file goes
+    entries, skipped = read_incident_entries(tmp_path)
+    assert entries == []
+    assert skipped >= 1
+
+
+def test_lifecycle_note_truncated_to_fit_line_cap_and_survives_read(tmp_path, monkeypatch):
+    # Mirrors the existing "detail" truncation in _append: a lifecycle note
+    # that overshoots MAX_LINE_BYTES must be truncated the same way, or the
+    # oversized line is written but then permanently skipped on every future
+    # read (append_lifecycle returns True yet the ack/resolve is invisible).
+    import graphite.incident_ledger as il
+
+    monkeypatch.setattr(il, "MAX_LINE_BYTES", 220)
+    fp = _record(tmp_path)
+    assert append_lifecycle(tmp_path, fp, "ack", note="é" * 80) is True  # multi-byte note
+    entries, skipped = read_incident_entries(tmp_path)
+    assert skipped == 0
+    lifecycle = [e for e in entries if e["kind"] == "ack"]
+    assert len(lifecycle) == 1
+    assert lifecycle[0]["fingerprint"] == fp
+    assert len(lifecycle[0]["note"]) < 80  # truncated, but present and readable
+    view = fold_incidents(entries)[0]
+    assert view.state == "acked"
+
+
 def test_rotation_at_cap(tmp_path, monkeypatch):
     import graphite.incident_ledger as il
 

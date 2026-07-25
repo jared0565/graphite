@@ -58,10 +58,13 @@ def _append(ledger_dir: Path, entry: dict[str, Any]) -> None:
         os.replace(path, rotated_ledger_path(ledger_dir))
     line = json.dumps(entry, ensure_ascii=False)
     overshoot = len(line.encode("utf-8")) - MAX_LINE_BYTES
-    if overshoot > 0 and "detail" in entry:
-        detail = str(entry["detail"])
-        entry = {**entry, "detail": detail[: max(0, len(detail) - overshoot)]}
-        line = json.dumps(entry, ensure_ascii=False)
+    if overshoot > 0:
+        for key in ("detail", "note"):
+            if key in entry:
+                text = str(entry[key])
+                entry = {**entry, key: text[: max(0, len(text) - overshoot)]}
+                line = json.dumps(entry, ensure_ascii=False)
+                break
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(line + "\n")
 
@@ -105,14 +108,26 @@ def append_lifecycle(ledger_dir: Path, fingerprint: str, kind: str, note: str | 
 
 
 def read_incident_entries(ledger_dir: Path) -> tuple[list[dict[str, Any]], int]:
-    """(entries, skipped): rotated generation first; corrupt lines counted; never raises."""
+    """(entries, skipped): rotated generation first; corrupt lines counted; never raises.
+
+    Each generation file's read is individually guarded: if a file exists
+    but cannot be read or decoded (permissions, path is a directory, etc.),
+    that generation contributes >=1 to ``skipped`` and reading continues
+    with the next generation, instead of the whole read aborting and
+    silently presenting as "no incidents".
+    """
     entries: list[dict[str, Any]] = []
     skipped = 0
     try:
         for path in (rotated_ledger_path(ledger_dir), ledger_path(ledger_dir)):
-            if not path.exists():
+            try:
+                if not path.exists():
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                skipped += 1
                 continue
-            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            for line in text.splitlines():
                 if not line.strip():
                     continue
                 if len(line.encode("utf-8", errors="replace")) > MAX_LINE_BYTES:

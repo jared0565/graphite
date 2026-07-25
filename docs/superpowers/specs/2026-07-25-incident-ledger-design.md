@@ -221,7 +221,10 @@ commands):
   is event-sourced; rotation moves whole files.
 - **Honest reads:** corrupt lines are skipped AND counted; the skip count is
   visible in `--json` and doctor output. An unreadable ledger is reported as
-  unreadable, never as "no incidents".
+  unreadable, never as "no incidents". The unreadable channel is implemented
+  as the `skipped` count itself, not a separate flag: an unreadable
+  generation file (exists but `read_text` raises — permissions, path is a
+  directory, decode failure) counts as >=1 `skipped`, same as a corrupt line.
 - **Caps:** subject 512, detail/note 2048, line 8 KB, file 5 MB with one
   rotated generation — bounded disk, bounded output.
 
