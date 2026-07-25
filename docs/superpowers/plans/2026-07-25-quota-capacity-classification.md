@@ -1,5 +1,9 @@
 # Quota-as-Capacity Classification Implementation Plan
 
+> **STATUS: IMPLEMENTED** — all 3 tasks + final-review fix wave merged to main
+> as `9704c1e` (2026-07-25, suite 2101/44/0); the spec §9 live acceptance
+> smoke executed and PASSED the same day. Kept for reference only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Quota/rate-limit exhaustion on the claude/codex CLI paths classifies as `capacity_unavailable` on both the nonzero-exit transport path and the exit-0 adapter path, so 2-candidate route pools can advance to their fallback candidate.

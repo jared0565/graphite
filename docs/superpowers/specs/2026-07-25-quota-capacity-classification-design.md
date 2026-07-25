@@ -1,7 +1,7 @@
 # Quota-as-Capacity Classification Design
 
 **Date:** 2026-07-25
-**Status:** Approved (operator design round 2026-07-25)
+**Status:** Implemented — merged to main `9704c1e` 2026-07-25; §9 live acceptance executed and PASSED same day (bundle `71c87c76…`)
 **Depends on:** 2026-07-24-patch-carry-forward-design.md (schema v8, merged `8ff6f4c`); route-pool capacity fallback (route_pool.py / route_pool_execution.py)
 
 ## 1. Problem
@@ -291,6 +291,21 @@ quota-rejected codex attempt (consumes no quota). Governance: displayed
 manifest, operator approval as `Approved: <purpose> bundle <digest>`,
 operator runs the execute script via `!` (the permission classifier blocks
 Claude Code from live-inference python), no inline keys, receipts sanitized.
+
+**Outcome (2026-07-25): PASSED live** — bundle `71c87c76…`, receipt
+`capacity_fallback_smoke_receipt.json` in the harness directory. The real
+codex attempt hit the real quota outage (exit 1, 8.57s, JSONL error events on
+stdout) → transport classified `capacity_unavailable` → mapping honored
+diagnostics precedence → the pool advanced (first live firing of the
+advancement path) → the real claude leg succeeded (`claude-sonnet-5`,
+expected marker). Evidence trail `["capacity_unavailable", "succeeded"]`;
+live stores byte-identical to their pinned baselines. Two operational
+findings en route, both fail-closed as designed: codex `exec` requires a
+git-repo workspace (a bare directory dies sub-second with empty stdout — the
+classifier correctly refused to call that capacity), and pool approval
+consumption checks the repository quota against the store's cumulative
+`budget_ledger` reservations, so harnesses on stores with history must size
+quotas above that total.
 
 ## 10. Out of scope
 
