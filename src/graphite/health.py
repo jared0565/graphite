@@ -112,5 +112,5 @@ def persisted_resolution(root: Path) -> dict[str, Any] | None:
         return None
     if not isinstance(data, dict):
         return None
-    block = data.get("resolution")
+    block = data.get("resolution_health")
     return block if isinstance(block, dict) else None

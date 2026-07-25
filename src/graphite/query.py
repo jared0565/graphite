@@ -18,7 +18,7 @@ _CALL_RELATIONS: frozenset[str] = frozenset({"calls", "references"})
 def _attach_resolution(result: dict[str, Any], g: nx.DiGraph) -> dict[str, Any]:
     """Trust signal + honest-empty marker for relation listings (spec 2026-07-25)."""
     health = resolution_health(g)
-    result["resolution"] = health
+    result["resolution_health"] = health
     result["inconclusive"] = result.get("total", 0) == 0 and not health["healthy"]
     return result
 
@@ -115,7 +115,7 @@ def _verb_stats(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> di
         "edges_by_relation": dict(sorted(relations.items(), key=lambda item: item[1], reverse=True)),
         "top_incoming": [{**_node_view(g, n), "in_degree": d} for n, d in top_in],
         "top_outgoing": [{**_node_view(g, n), "out_degree": d} for n, d in top_out],
-        "resolution": resolution_health(g),
+        "resolution_health": resolution_health(g),
     }
 
 
@@ -352,9 +352,7 @@ def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
     result = spec.handler(g, inputs, plan["options"])
     envelope = {"schema_version": RESULT_SCHEMA_VERSION, **result}
     if "error" not in result:
-        # Preserve health block if already in result (from _attach_resolution or _verb_stats)
-        if "resolution" not in result:
-            envelope["resolution"] = _resolution(spec, result)
+        envelope["resolution"] = _resolution(spec, result)
     return envelope
 
 

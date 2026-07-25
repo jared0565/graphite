@@ -117,7 +117,7 @@ def test_persisted_resolution_reads_block(tmp_path):
     out = tmp_path / "graph-out"
     out.mkdir()
     (out / ".graphite_analysis.json").write_text(
-        json.dumps({"resolution": {"schema": 1, "healthy": False}}), encoding="utf-8"
+        json.dumps({"resolution_health": {"schema": 1, "healthy": False}}), encoding="utf-8"
     )
     block = persisted_resolution(tmp_path)
     assert block == {"schema": 1, "healthy": False}
@@ -132,7 +132,7 @@ def test_persisted_resolution_fails_open(tmp_path):
     assert persisted_resolution(tmp_path) is None  # malformed
     (out / ".graphite_analysis.json").write_text(json.dumps({"other": 1}), encoding="utf-8")
     assert persisted_resolution(tmp_path) is None  # key absent
-    (out / ".graphite_analysis.json").write_text(json.dumps({"resolution": "nope"}), encoding="utf-8")
+    (out / ".graphite_analysis.json").write_text(json.dumps({"resolution_health": "nope"}), encoding="utf-8")
     assert persisted_resolution(tmp_path) is None  # wrong type
 
 
@@ -144,10 +144,10 @@ def test_analyze_includes_resolution_block():
         edges=[("f1", "ghost", "calls", "a.py")],
     )
     result = analyze(g)
-    assert result["resolution"]["by_relation"]["calls"] == {
+    assert result["resolution_health"]["by_relation"]["calls"] == {
         "total": 1, "bound": 0, "ratio": 0.0,
     }
-    assert result["resolution"]["healthy"] is False
+    assert result["resolution_health"]["healthy"] is False
 
 
 def test_build_persists_resolution_in_artifacts(tmp_path, monkeypatch):
@@ -163,12 +163,12 @@ def test_build_persists_resolution_in_artifacts(tmp_path, monkeypatch):
     analysis = json.loads(
         (tmp_path / "graph-out" / ".graphite_analysis.json").read_text(encoding="utf-8")
     )
-    assert analysis["resolution"]["schema"] == 1
+    assert analysis["resolution_health"]["schema"] == 1
     bundle = json.loads(
         (tmp_path / "graph-out" / "graph.json").read_text(encoding="utf-8")
     )
-    assert bundle["analysis"]["resolution"]["schema"] == 1
-    assert persisted_resolution(tmp_path) == analysis["resolution"]
+    assert bundle["analysis"]["resolution_health"]["schema"] == 1
+    assert persisted_resolution(tmp_path) == analysis["resolution_health"]
 
 
 def _unhealthy_graph():
@@ -190,7 +190,7 @@ def test_stats_includes_resolution():
     from graphite.query import query
 
     result = query(_unhealthy_graph(), "stats")
-    assert result["resolution"]["healthy"] is False
+    assert result["resolution_health"]["healthy"] is False
 
 
 def test_callers_empty_on_unhealthy_graph_is_inconclusive():
@@ -199,7 +199,7 @@ def test_callers_empty_on_unhealthy_graph_is_inconclusive():
     result = query(_unhealthy_graph(), "callers lonely")
     assert result["total"] == 0
     assert result["inconclusive"] is True
-    assert result["resolution"]["healthy"] is False
+    assert result["resolution_health"]["healthy"] is False
 
 
 def test_callers_empty_on_healthy_graph_is_conclusive():
@@ -224,3 +224,17 @@ def test_not_found_result_has_no_inconclusive_field():
     result = query(_unhealthy_graph(), "callers does_not_exist_anywhere")
     assert result["error_code"] == "node_not_found"
     assert "inconclusive" not in result
+
+
+def test_query_envelope_keeps_match_resolution_and_health():
+    """The published v1 contract's `resolution` match-metadata list and the new
+    `resolution_health` trust block are additive, not a collision: a successful
+    query result carries both, under their own distinct keys."""
+    from graphite.query import query
+
+    result = query(_unhealthy_graph(), "callers ghost")
+    assert result["resolution"] == [
+        {"role": "node", "input": "ghost", "node": "ghost", "type": "exact-id"}
+    ]
+    assert isinstance(result["resolution_health"], dict)
+    assert result["resolution_health"]["healthy"] is False

@@ -198,20 +198,18 @@ def test_path_and_reaches_respect_max_depth_and_flag_truncation() -> None:
 
 def test_query_results_carry_schema_version_and_resolution() -> None:
     g = _graph()
-    from graphite.health import resolution_health
-    health_block = resolution_health(g)
 
     out = query(g, "callers helper")
     assert out["schema_version"] == 1
-    assert out["resolution"] == health_block
-    assert out["inconclusive"] is False
+    assert out["resolution"] == [
+        {"role": "node", "input": "helper", "node": "src_lib_helper", "type": "name"}
+    ]
 
     arrow = query(g, "reaches main -> helper")
     assert [entry["role"] for entry in arrow["resolution"]] == ["source", "target"]
     assert arrow["resolution"][0]["node"] == "src_app_main"
 
-    stats_out = query(g, "stats")
-    assert stats_out["resolution"] == health_block
+    assert query(g, "stats")["resolution"] == []
 
     for q in ("", "nonsense verb", "callers zzqx", "path a"):
         result = query(g, q)

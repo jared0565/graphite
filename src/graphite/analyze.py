@@ -29,7 +29,7 @@ def analyze(g: nx.DiGraph, top_n: int = 20) -> dict[str, Any]:
         "surprising_connections": surprising_connections(g, top_n),
         "cycles": list(nx.simple_cycles(project_subgraph))[:top_n],
         "top_files_by_links": top_files_by_links(g, top_n),
-        "resolution": resolution_health(g),
+        "resolution_health": resolution_health(g),
     }
 
 
