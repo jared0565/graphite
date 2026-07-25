@@ -169,3 +169,58 @@ def test_build_persists_resolution_in_artifacts(tmp_path, monkeypatch):
     )
     assert bundle["analysis"]["resolution"]["schema"] == 1
     assert persisted_resolution(tmp_path) == analysis["resolution"]
+
+
+def _unhealthy_graph():
+    # lonely + one unbound call edge elsewhere -> calls ratio 0.0 -> unhealthy
+    return _graph(
+        nodes=[("lonely", "function", "a.py"), ("src", "function", "a.py"), ("ghost", "unknown", None)],
+        edges=[("src", "ghost", "calls", "a.py")],
+    )
+
+
+def _healthy_graph():
+    return _graph(
+        nodes=[("lonely", "function", "a.py"), ("src", "function", "a.py"), ("dst", "function", "b.py")],
+        edges=[("src", "dst", "calls", "a.py")],
+    )
+
+
+def test_stats_includes_resolution():
+    from graphite.query import query
+
+    result = query(_unhealthy_graph(), "stats")
+    assert result["resolution"]["healthy"] is False
+
+
+def test_callers_empty_on_unhealthy_graph_is_inconclusive():
+    from graphite.query import query
+
+    result = query(_unhealthy_graph(), "callers lonely")
+    assert result["total"] == 0
+    assert result["inconclusive"] is True
+    assert result["resolution"]["healthy"] is False
+
+
+def test_callers_empty_on_healthy_graph_is_conclusive():
+    from graphite.query import query
+
+    result = query(_healthy_graph(), "callers lonely")
+    assert result["total"] == 0
+    assert result["inconclusive"] is False
+
+
+def test_callers_nonempty_not_inconclusive_even_when_unhealthy():
+    from graphite.query import query
+
+    result = query(_unhealthy_graph(), "imported-by ghost")
+    assert result["total"] >= 1
+    assert result["inconclusive"] is False
+
+
+def test_not_found_result_has_no_inconclusive_field():
+    from graphite.query import query
+
+    result = query(_unhealthy_graph(), "callers does_not_exist_anywhere")
+    assert result["error_code"] == "node_not_found"
+    assert "inconclusive" not in result

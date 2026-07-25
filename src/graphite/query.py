@@ -8,10 +8,19 @@ from typing import Any, Callable
 
 import networkx as nx
 
+from .health import resolution_health
 from .query_plan import DEFAULT_MAX_DEPTH, DEFAULT_MAX_RESULTS, make_plan, plan_error
 
 
 _CALL_RELATIONS: frozenset[str] = frozenset({"calls", "references"})
+
+
+def _attach_resolution(result: dict[str, Any], g: nx.DiGraph) -> dict[str, Any]:
+    """Trust signal + honest-empty marker for relation listings (spec 2026-07-25)."""
+    health = resolution_health(g)
+    result["resolution"] = health
+    result["inconclusive"] = result.get("total", 0) == 0 and not health["healthy"]
+    return result
 
 
 def _capped_edge_listing(
@@ -34,7 +43,7 @@ def _capped_edge_listing(
             if g[node_id][s].get("relation") in _CALL_RELATIONS
         ]
     shown = full[:cap]
-    return {
+    return _attach_resolution({
         "node": node_id,
         "match": _match_meta(token, detail),
         "count": len(shown),
@@ -42,7 +51,7 @@ def _capped_edge_listing(
         "truncated": len(full) > cap,
         "limits": {"max_results": cap},
         key: [_node_view(g, n) for n in shown],
-    }
+    }, g)
 
 
 def _verb_callers(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
@@ -106,6 +115,7 @@ def _verb_stats(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> di
         "edges_by_relation": dict(sorted(relations.items(), key=lambda item: item[1], reverse=True)),
         "top_incoming": [{**_node_view(g, n), "in_degree": d} for n, d in top_in],
         "top_outgoing": [{**_node_view(g, n), "out_degree": d} for n, d in top_out],
+        "resolution": resolution_health(g),
     }
 
 
@@ -119,7 +129,7 @@ def _neighbor_listing(
     node_id = detail[0]
     neighbors = sorted(g.predecessors(node_id) if incoming else g.successors(node_id))
     shown = neighbors[:cap]
-    return {
+    return _attach_resolution({
         "node": node_id,
         "match": _match_meta(token, detail),
         "count": len(shown),
@@ -130,7 +140,7 @@ def _neighbor_listing(
             {"id": n, "name": g.nodes[n].get("name", n), "kind": g.nodes[n].get("kind", "unknown")}
             for n in shown
         ],
-    }
+    }, g)
 
 
 def _verb_depends_on(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dict[str, Any]:
@@ -342,7 +352,9 @@ def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
     result = spec.handler(g, inputs, plan["options"])
     envelope = {"schema_version": RESULT_SCHEMA_VERSION, **result}
     if "error" not in result:
-        envelope["resolution"] = _resolution(spec, result)
+        # Preserve health block if already in result (from _attach_resolution or _verb_stats)
+        if "resolution" not in result:
+            envelope["resolution"] = _resolution(spec, result)
     return envelope
 
 
@@ -460,7 +472,7 @@ def _candidates(g: nx.DiGraph, token: str, limit: int = 5) -> list[dict[str, Any
     scored: list[tuple[int, str]] = []
     for n in g.nodes():
         haystack = " ".join(
-            (n, g.nodes[n].get("name", ""), g.nodes[n].get("source_file", ""))
+            (n, g.nodes[n].get("name", "") or "", g.nodes[n].get("source_file", "") or "")
         ).lower().replace("\\", "/")
         score = sum(1 for p in parts if p in haystack)
         if score:

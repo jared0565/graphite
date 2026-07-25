@@ -114,6 +114,8 @@ def _golden_graph():
 def test_query_verb_outputs_are_golden_stable() -> None:
     """Exact-output pins so interface refactors are provably inert."""
     g = _golden_graph()
+    from graphite.health import resolution_health
+    health_block = resolution_health(g)
 
     assert query(g, "callers helper") == {
         "schema_version": 1,
@@ -126,9 +128,8 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "callers": [
             {"id": "src_app_main", "name": "main", "kind": "function", "source_file": "src/app.ts"}
         ],
-        "resolution": [
-            {"role": "node", "input": "helper", "node": "src_lib_helper", "type": "name"}
-        ],
+        "resolution": health_block,
+        "inconclusive": False,
     }
     assert query(g, "calls main") == {
         "schema_version": 1,
@@ -141,9 +142,8 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "calls": [
             {"id": "src_lib_helper", "name": "helper", "kind": "function", "source_file": "src/lib.ts"}
         ],
-        "resolution": [
-            {"role": "node", "input": "main", "node": "src_app_main", "type": "name"}
-        ],
+        "resolution": health_block,
+        "inconclusive": False,
     }
     assert query(g, "depends-on src_app") == {
         "schema_version": 1,
@@ -154,9 +154,8 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "truncated": False,
         "limits": {"max_results": 200},
         "depends_on": [{"id": "src_lib", "name": "lib.ts", "kind": "file"}],
-        "resolution": [
-            {"role": "node", "input": "src_app", "node": "src_app", "type": "exact-id"}
-        ],
+        "resolution": health_block,
+        "inconclusive": False,
     }
     assert query(g, "imported-by src_lib") == {
         "schema_version": 1,
@@ -167,9 +166,8 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "truncated": False,
         "limits": {"max_results": 200},
         "imported_by": [{"id": "src_app", "name": "app.ts", "kind": "file"}],
-        "resolution": [
-            {"role": "node", "input": "src_lib", "node": "src_lib", "type": "exact-id"}
-        ],
+        "resolution": health_block,
+        "inconclusive": False,
     }
     assert query(g, "reaches main -> helper") == {
         "schema_version": 1,
@@ -225,9 +223,11 @@ def test_query_verb_outputs_are_golden_stable() -> None:
     stats = query(g, "stats")
     density = stats.pop("density")
     assert density == pytest.approx(2 / 12)
+    from graphite.health import resolution_health
+    health_block = resolution_health(g)
     assert stats == {
         "schema_version": 1,
-        "resolution": [],
+        "resolution": health_block,
         "node_count": 4,
         "edge_count": 2,
         "community_count": 0,
