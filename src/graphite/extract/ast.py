@@ -522,6 +522,84 @@ def _python_import_modules(node: Any) -> list[tuple[str, int]]:
     return out
 
 
+def _collect_python_import_maps(
+    root: Any, rel_path: str, source_index: SourceIndex | None
+) -> tuple[dict[str, str], dict[str, str]]:
+    """(symbol_map: local -> definition node id, alias_map: local -> module file id).
+
+    Walked at ALL depths (Python allows function-local imports). For
+    `from P import name`, `P.name` is tried as a MODULE first (alias), then
+    as a symbol defined in P's file. Unresolvable modules enter neither map.
+    Last binding wins, matching Python shadowing.
+    """
+    symbol_map: dict[str, str] = {}
+    alias_map: dict[str, str] = {}
+    if source_index is None:
+        return symbol_map, alias_map
+
+    def _text(n: Any) -> str:
+        return n.text.decode("utf-8", errors="ignore") if n is not None and n.text else ""
+
+    def visit(node: Any) -> None:
+        if node.type == "import_statement":
+            for child in node.children:
+                if child.type == "dotted_name":
+                    module = _text(child)
+                    if module and "." not in module:
+                        resolved = source_index.resolve_python_module(rel_path, module)
+                        if resolved:
+                            alias_map[module] = _file_node_id(resolved)
+                elif child.type == "aliased_import":
+                    module = _text(child.child_by_field_name("name"))
+                    local = _text(child.child_by_field_name("alias"))
+                    if module and local:
+                        resolved = source_index.resolve_python_module(rel_path, module)
+                        if resolved:
+                            alias_map[local] = _file_node_id(resolved)
+        elif node.type == "import_from_statement":
+            modules = _python_import_modules(node)
+            if modules:
+                base_module, dots = modules[0]
+                for child in node.children:
+                    local = original = None
+                    if child.type == "dotted_name" and child.prev_sibling is not None \
+                            and _text(child.prev_sibling) in ("import", ","):
+                        original = local = _text(child)
+                    elif child.type == "aliased_import":
+                        original = _text(child.child_by_field_name("name"))
+                        local = _text(child.child_by_field_name("alias"))
+                    if not original or not local or "." in original:
+                        continue
+                    sub = f"{base_module}.{original}" if base_module else original
+                    as_module = source_index.resolve_python_module(rel_path, sub, dots)
+                    if as_module:
+                        alias_map[local] = _file_node_id(as_module)
+                        continue
+                    parent = source_index.resolve_python_module(rel_path, base_module, dots)
+                    if parent:
+                        symbol_map[local] = _make_id(_file_node_id(parent), original)
+        for child in node.children:
+            visit(child)
+
+    visit(root)
+    return symbol_map, alias_map
+
+
+def _python_call_target(func: Any) -> tuple[str | None, str | None, str | None]:
+    """(bare_name, object_name, attribute_name) for a Python call's function node."""
+    def _text(n: Any) -> str | None:
+        return n.text.decode("utf-8", errors="ignore") if n is not None and n.text else None
+
+    if func.type == "identifier":
+        return _text(func), None, None
+    if func.type == "attribute":
+        obj = func.child_by_field_name("object")
+        attr = _text(func.child_by_field_name("attribute"))
+        obj_name = _text(obj) if obj is not None and obj.type == "identifier" else None
+        return None, obj_name, attr
+    return None, None, None
+
+
 def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any, source_index: SourceIndex | None = None) -> ExtractionResult:
     result = ExtractionResult()
     root = tree.root_node
@@ -530,6 +608,8 @@ def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any, sourc
         return (node.start_point[0] + 1) if node.start_point else 1
 
     result.nodes.append(_node(file_id, "file", Path(rel_path).name, rel_path))
+
+    symbol_map, alias_map = _collect_python_import_maps(root, rel_path, source_index)
 
     # ``parent_id`` is the nearest named container (for ``contains`` edges);
     # ``scope_id`` is the nearest enclosing function (for ``calls`` attribution).
@@ -583,9 +663,22 @@ def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any, sourc
             walk_children(node, parent_id, scope_id)
         elif node.type == "call":
             func = node.child_by_field_name("function")
-            called = _call_target_name(func, source) if func else None
-            if called and called not in _LANGUAGE_BUILTIN_GLOBALS:
-                result.edges.append(_edge(scope_id, _resolve_call(file_id, called), "calls", rel_path, _line(node)))
+            bare, obj_name, attr = _python_call_target(func) if func is not None else (None, None, None)
+            edge = None
+            if bare and bare not in _LANGUAGE_BUILTIN_GLOBALS:
+                target = symbol_map.get(bare) or _resolve_call(file_id, bare)
+                edge = _edge(scope_id, target, "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+            elif attr:
+                dotted = f"{obj_name}.{attr}" if obj_name else attr
+                if obj_name and obj_name in alias_map:
+                    edge = _edge(scope_id, _make_id(alias_map[obj_name], attr), "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+                elif should_keep_call_target(dotted):
+                    # Unresolved member call: file-scoped phantom now, re-pointed
+                    # (or dropped) by the method-dispatch post-pass via _member.
+                    edge = _edge(scope_id, _resolve_call(file_id, dotted), "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+                    edge["_member"] = attr
+            if edge is not None:
+                result.edges.append(edge)
             walk_children(node, parent_id, scope_id)
         else:
             walk_children(node, parent_id, scope_id)
@@ -992,7 +1085,7 @@ def _merge(results: list[ExtractionResult]) -> ExtractionResult:
     # Resolve `recv.method()` member calls against the global set of class-method
     # definitions. Done here (post-merge, pre-dedup) because it needs every file's
     # methods at once, and because re-pointing can create duplicate edges (e.g.
-    # `a.foo()` and `b.foo()` both -> the real `foo`) that the dedup below absorbs.
+    # `a.foo()` and `b.foo()` both -> the real `foo`) that the dedup below merges.
     all_edges = _resolve_method_dispatch(all_nodes, all_edges)
 
     all_nodes.sort(key=lambda n: (n.get("id", ""), n.get("source_file", "")))
@@ -1011,12 +1104,21 @@ def _merge(results: list[ExtractionResult]) -> ExtractionResult:
             e.get("source_location", ""),
         )
     )
-    seen_edges: set[tuple[str, str, str]] = set()
+    # Duplicate (source, target, relation) triples collapse to one edge, but the
+    # duplicate's weight is folded into the survivor rather than discarded — two
+    # distinct call sites reaching the same target (e.g. `tdd.auto_resolve_tdd(...)`
+    # and an aliased `art(...)` both binding to the same def) is a real multiplicity
+    # signal, not noise, and dropping it silently understated call weight for every
+    # language before this fix.
+    seen_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
     for e in all_edges:
         key = (e["source"], e["target"], e["relation"])
-        if key not in seen_edges:
+        survivor = seen_edges.get(key)
+        if survivor is None:
+            seen_edges[key] = e
             merged.edges.append(e)
-            seen_edges.add(key)
+        else:
+            survivor["weight"] = survivor.get("weight", 1.0) + e.get("weight", 1.0)
     return merged
 
 

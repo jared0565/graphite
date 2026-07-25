@@ -5,7 +5,9 @@ from pathlib import Path
 
 from graphite.config import Config
 from graphite.extract.ast import extract_all
+from graphite.graph import build_graph
 from graphite.ingest import collect_files
+from graphite.query import query
 from graphite.resolve import SourceIndex
 
 
@@ -154,3 +156,57 @@ def test_import_edge_count_is_one_per_module(tmp_path):
     result = _extract(tmp_path)
     edges = _import_edges(result, "src/pkg/pipeline.py")
     assert len(edges) == 4  # json, pkg, pkg.ledger, .tdd
+
+
+def _graph_for(tmp_path):
+    result = _extract(tmp_path)
+    return build_graph(result.nodes, result.edges)
+
+
+def test_module_attribute_call_binds_cross_module(tmp_path):
+    _py_fixture(tmp_path)
+    g = _graph_for(tmp_path)
+    out = query(g, "callers auto_resolve_tdd")
+    ids = [c["id"] for c in out.get("callers", [])]
+    assert "src_pkg_pipeline_run" in ids  # tdd.auto_resolve_tdd(...) bound
+
+
+def test_from_import_aliased_symbol_call_binds(tmp_path):
+    _py_fixture(tmp_path)
+    g = _graph_for(tmp_path)
+    # run() calls the def twice: tdd.auto_resolve_tdd(...) AND art(...) (alias).
+    # build_graph merges duplicate edges by incrementing weight -> weight >= 2
+    # proves BOTH the module-attr path and the aliased-symbol path bound.
+    edge = g.get_edge_data("src_pkg_pipeline_run", "src_pkg_tdd_auto_resolve_tdd")
+    assert edge is not None and edge.get("weight", 0) >= 2.0
+
+
+def test_class_instantiation_binds_to_class_node(tmp_path):
+    _py_fixture(tmp_path)
+    g = _graph_for(tmp_path)
+    # Ledger() in pipeline.run binds to the class node in ledger.py
+    assert g.has_edge("src_pkg_pipeline_run", "src_pkg_ledger_ledger")
+
+
+def test_same_file_call_binding_unchanged(tmp_path):
+    _write(
+        tmp_path / "solo.py",
+        "def helper():\n    return 1\n\ndef main():\n    return helper()\n",
+    )
+    g = _graph_for(tmp_path)
+    out = query(g, "callers helper")
+    assert [c["id"] for c in out.get("callers", [])] == ["solo_main"]
+
+
+def test_function_local_import_binds(tmp_path):
+    _write(tmp_path / "src" / "pkg" / "__init__.py", "")
+    _write(tmp_path / "src" / "pkg" / "util.py", "def deep():\n    return 1\n")
+    _write(
+        tmp_path / "src" / "pkg" / "lazy.py",
+        "def caller():\n"
+        "    from pkg.util import deep\n"
+        "    return deep()\n",
+    )
+    g = _graph_for(tmp_path)
+    out = query(g, "callers deep")
+    assert "src_pkg_lazy_caller" in [c["id"] for c in out.get("callers", [])]
