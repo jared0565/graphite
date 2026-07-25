@@ -348,6 +348,176 @@ def test_capacity_phrase_embedded_in_other_diagnostic_fails_closed(tmp_path: Pat
     assert caught.value.diagnostics.failure_category == "provider_process_failure"
 
 
+def _classified_category(
+    tmp_path: Path,
+    provider: ProviderId,
+    stdout: bytes,
+    stderr: bytes = b"",
+) -> str:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    credentials = _credential_home(tmp_path)
+
+    def runner(argv: list[str], **kwargs: object) -> ProbeProcessResult:
+        return ProbeProcessResult(1, stdout, stderr, 0.25)
+
+    with pytest.raises(CliProcessError, match="^process_nonzero$") as caught:
+        run_cli_process(
+            argv=(sys.executable, str(FAKE_CLI), "echo"),
+            cwd=workspace,
+            stdin=b"",
+            provider=provider,
+            credential_home=credentials,
+            timeout_seconds=5,
+            runner=runner,
+            source_environment={},
+        )
+    diagnostics = caught.value.diagnostics
+    assert diagnostics is not None
+    return diagnostics.failure_category
+
+
+_CODEX_USAGE_LIMIT_EVENT = (
+    b'{"type":"error","message":"You\'ve hit your usage limit. Visit '
+    b"https://chatgpt.com/codex/settings/usage to purchase more credits or "
+    b'try again at Jul 29th, 2026 9:40 AM."}'
+)
+
+
+def test_codex_usage_limit_error_event_classifies_as_capacity(tmp_path: Path) -> None:
+    assert (
+        _classified_category(tmp_path, ProviderId.CODEX, _CODEX_USAGE_LIMIT_EVENT)
+        == "capacity_unavailable"
+    )
+
+
+def test_codex_turn_failed_rate_limit_classifies_as_capacity(tmp_path: Path) -> None:
+    stdout = b'{"type":"turn.failed","error":{"code":"rate_limit"}}'
+    assert (
+        _classified_category(tmp_path, ProviderId.CODEX, stdout)
+        == "capacity_unavailable"
+    )
+
+
+def test_codex_quota_event_amid_noise_still_classifies(tmp_path: Path) -> None:
+    stdout = (
+        b"WARNING: skills context budget exceeded\n"
+        + _CODEX_USAGE_LIMIT_EVENT
+        + b"\nnot json trailing line"
+    )
+    assert (
+        _classified_category(tmp_path, ProviderId.CODEX, stdout)
+        == "capacity_unavailable"
+    )
+
+
+def test_codex_error_event_without_quota_markers_fails_closed(tmp_path: Path) -> None:
+    stdout = b'{"type":"error","message":"internal server error"}'
+    assert (
+        _classified_category(tmp_path, ProviderId.CODEX, stdout)
+        == "provider_process_failure"
+    )
+
+
+def test_codex_agent_message_with_marker_text_fails_closed(tmp_path: Path) -> None:
+    stdout = (
+        b'{"type":"item.completed","item":{"type":"agent_message",'
+        b'"text":"the api rate limit is 10 requests per minute"}}'
+    )
+    assert (
+        _classified_category(tmp_path, ProviderId.CODEX, stdout)
+        == "provider_process_failure"
+    )
+
+
+def test_codex_quota_event_on_stderr_only_fails_closed(tmp_path: Path) -> None:
+    assert (
+        _classified_category(
+            tmp_path, ProviderId.CODEX, b"", stderr=_CODEX_USAGE_LIMIT_EVENT
+        )
+        == "provider_process_failure"
+    )
+
+
+def test_codex_non_json_stdout_fails_closed(tmp_path: Path) -> None:
+    stdout = b"plain text mentioning usage limit\nsecond line"
+    assert (
+        _classified_category(tmp_path, ProviderId.CODEX, stdout)
+        == "provider_process_failure"
+    )
+
+
+def test_codex_undecodable_stdout_fails_closed(tmp_path: Path) -> None:
+    stdout = b"\xff\xfe" + _CODEX_USAGE_LIMIT_EVENT
+    assert (
+        _classified_category(tmp_path, ProviderId.CODEX, stdout)
+        == "provider_process_failure"
+    )
+
+
+def test_claude_quota_subtype_result_classifies_as_capacity(tmp_path: Path) -> None:
+    stdout = b'{"type":"result","subtype":"error_rate_limit","is_error":true}'
+    assert (
+        _classified_category(tmp_path, ProviderId.CLAUDE_CODE, stdout)
+        == "capacity_unavailable"
+    )
+
+
+def test_claude_marker_only_in_result_text_fails_closed(tmp_path: Path) -> None:
+    stdout = (
+        b'{"type":"result","subtype":"error_during_execution","is_error":true,'
+        b'"result":"I hit a rate limit while calling the api"}'
+    )
+    assert (
+        _classified_category(tmp_path, ProviderId.CLAUDE_CODE, stdout)
+        == "provider_process_failure"
+    )
+
+
+def test_claude_informational_rate_limit_event_fails_closed(tmp_path: Path) -> None:
+    stdout = b'{"type":"rate_limit_event","rate_limit":{"status":"warning"}}'
+    assert (
+        _classified_category(tmp_path, ProviderId.CLAUDE_CODE, stdout)
+        == "provider_process_failure"
+    )
+
+
+def test_claude_success_result_never_classifies_as_capacity(tmp_path: Path) -> None:
+    stdout = b'{"type":"result","subtype":"success","is_error":false}'
+    assert (
+        _classified_category(tmp_path, ProviderId.CLAUDE_CODE, stdout)
+        == "provider_process_failure"
+    )
+
+
+def test_codex_hostile_json_line_does_not_abort_scan(tmp_path: Path) -> None:
+    huge_integer_line = b"9" * 5000
+    stdout = huge_integer_line + b"\n" + _CODEX_USAGE_LIMIT_EVENT
+    assert (
+        _classified_category(tmp_path, ProviderId.CODEX, stdout)
+        == "capacity_unavailable"
+    )
+
+
+def test_codex_deeply_nested_json_line_does_not_abort_scan(tmp_path: Path) -> None:
+    nested_line = b"[" * 100_000
+    stdout = nested_line + b"\n" + _CODEX_USAGE_LIMIT_EVENT
+    assert (
+        _classified_category(tmp_path, ProviderId.CODEX, stdout)
+        == "capacity_unavailable"
+    )
+
+
+def test_codex_usage_limit_underscore_marker_classifies_as_capacity(
+    tmp_path: Path,
+) -> None:
+    stdout = b'{"type":"turn.failed","error":{"code":"usage_limit_reached"}}'
+    assert (
+        _classified_category(tmp_path, ProviderId.CODEX, stdout)
+        == "capacity_unavailable"
+    )
+
+
 def test_cancellation_and_invalid_utf8_fail_closed(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

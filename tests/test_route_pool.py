@@ -21,6 +21,7 @@ from graphite.routing.route_pool import (
     RouteAuthority,
     RoutePoolError,
     SideEffectState,
+    failure_category_for_adapter,
     select_route,
 )
 from graphite.routing.route_pool_execution import (
@@ -29,6 +30,7 @@ from graphite.routing.route_pool_execution import (
     RouteExecutionResult,
     execute_approved_route_pool,
 )
+from graphite.routing.process_runner import CliProcessFailureDiagnostics
 from graphite.routing.storage import RepositoryStore
 
 
@@ -471,6 +473,97 @@ def test_coordinator_automatically_selects_cross_provider_capacity_fallback(
     ]
     assert all("output" not in item.to_dict() for item in persisted)
     assert store.approval_status(pool.approval_id) == "consumed"
+
+
+def _process_diagnostics(category: str) -> CliProcessFailureDiagnostics:
+    return CliProcessFailureDiagnostics(
+        exit_classification="nonzero_exit",
+        exit_code=1,
+        duration_seconds=5.6,
+        stdout_sha256="a" * 64,
+        stderr_sha256="b" * 64,
+        failure_category=category,
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("quota", "capacity_unavailable"),
+        ("capacity_unavailable", "capacity_unavailable"),
+        ("auth_required", "provider_process_failure"),
+        ("timeout", "provider_process_failure"),
+        ("unavailable", "provider_process_failure"),
+        ("model_mismatch", "provider_process_failure"),
+        (None, "provider_process_failure"),
+        (7, "provider_process_failure"),
+    ],
+)
+def test_failure_category_for_adapter_maps_codes(
+    code: object, expected: str
+) -> None:
+    assert failure_category_for_adapter(code) == expected
+
+
+def test_failure_category_for_adapter_prefers_transport_diagnostics() -> None:
+    assert (
+        failure_category_for_adapter(
+            "unavailable", _process_diagnostics("capacity_unavailable")
+        )
+        == "capacity_unavailable"
+    )
+    assert (
+        failure_category_for_adapter(
+            "quota", _process_diagnostics("provider_process_failure")
+        )
+        == "provider_process_failure"
+    )
+
+
+def test_coordinator_advances_on_adapter_quota_mapped_category(
+    tmp_path: Path,
+) -> None:
+    _store, approval_authority = _approval_authority(tmp_path)
+    pool = _pool()
+    signed = approval_authority.issue(pool)
+    persisted: list[RouteExecutionEvidence] = []
+
+    def runner(selection) -> RouteExecutionResult:
+        if selection.attempt_ordinal == 1:
+            raise RouteAttemptFailure(
+                _capacity_attempt(
+                    pool,
+                    failure_category=failure_category_for_adapter("quota"),
+                )
+            )
+        return RouteExecutionResult(
+            candidate_id=selection.candidate.candidate_id,
+            candidate_digest=selection.candidate.digest,
+            attempt_ordinal=2,
+            output="fallback output",
+            input_tokens=1_000,
+            output_tokens=100,
+            duration_ms=5_000,
+            cost_microunits=None,
+        )
+
+    result = execute_approved_route_pool(
+        pool=pool,
+        signed_approval=signed,
+        approval_authority=approval_authority,
+        authority_loader=lambda: _authorities(pool),
+        runner=runner,
+        evidence_sink=persisted.append,
+        repository_quota_tokens=30_000,
+        machine_quota_tokens=30_000,
+        now=lambda: 150,
+    )
+
+    assert result.attempt_ordinal == 2
+    assert [item.outcome_category for item in persisted] == [
+        "capacity_unavailable",
+        "succeeded",
+    ]
 
 
 def test_coordinator_never_falls_back_after_side_effect_or_unknown_failure(
