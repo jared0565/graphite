@@ -17,6 +17,7 @@ from . import usage_ledger
 from .config import Config
 from .freshness import check_graph_freshness
 from .graph_io import load_validated_graph_bundle
+from .health import persisted_resolution
 
 SESSION_CONTRACT = (
     "graphite-first: this repo uses a shared code graph. For cross-file questions "
@@ -83,6 +84,11 @@ PRE_TOOL_REMINDER = (
     'context <file> | impact <file> | query "..." instead of grepping or globbing across '
     "files. Literal text and filename searches are fine. Falling back after an insufficient "
     "graph answer is allowed - say so when you do."
+)
+
+STRICT_SUSPENSION_NOTE = (
+    " (strict denial suspended: graph resolution health is low or unknown — "
+    "grep fallback allowed.)"
 )
 
 MAX_HOOK_GRAPH_BYTES = 32 * 1024 * 1024
@@ -264,11 +270,19 @@ def handle_pre_tool_use(payload: dict[str, Any], mode: str) -> dict[str, Any] | 
         if mode == "strict" and payload.get("tool_name") == "Grep":
             denial = _strict_denial(payload, root)
             if denial is not None:
+                health = persisted_resolution(root)
+                if isinstance(health, dict) and health.get("healthy") is True:
+                    return {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": denial,
+                        }
+                    }
                 return {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": denial,
+                        "additionalContext": PRE_TOOL_REMINDER + STRICT_SUSPENSION_NOTE,
                     }
                 }
         return {
