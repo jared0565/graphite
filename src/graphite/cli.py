@@ -285,6 +285,13 @@ def _load_graph(path: Path, *, root: Path | None = None) -> Any:
     try:
         _, graph = load_validated_graph_bundle(path, root=selected_root)
     except GraphReadError as exc:
+        record_incident(
+            repo_ledger_dir(selected_root),
+            klass="build",
+            code="graph_load_failed",
+            subject="graph-out/graph.json",
+            detail=str(exc.code),
+        )
         raise ValueError(f"graph unavailable: {exc.code}") from None
     return graph
 
@@ -299,6 +306,29 @@ def _record_canonical_usage(cmd: str, result: Any, started: float) -> None:
             cmd=cmd,
             wall_ms=int((time.perf_counter() - started) * 1000),
             result=result,
+        )
+    except Exception:
+        return
+
+
+def _record_inconclusive(subject: str, result: Any) -> None:
+    """Best-effort incident capture for inconclusive answers; never fatal."""
+    try:
+        if not (isinstance(result, dict) and result.get("inconclusive") is True):
+            return
+        health = result.get("resolution_health") or {}
+        by_rel = health.get("by_relation") or {}
+
+        def _ratio(rel: str) -> Any:
+            cell = by_rel.get(rel) or {}
+            return cell.get("ratio")
+
+        record_incident(
+            repo_ledger_dir(Path.cwd()),
+            klass="query",
+            code="query_inconclusive",
+            subject=subject,
+            detail=f"imports {_ratio('imports')}, calls {_ratio('calls')}, healthy {health.get('healthy')}",
         )
     except Exception:
         return
@@ -413,11 +443,19 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     cfg = _config_from_args(args, canonical=True)
-    status = check_graph_freshness(
-        Path(args.path).resolve(), cfg, ignore_engine=args.ignore_engine
-    )
+    root = Path(args.path).resolve()
+    status = check_graph_freshness(root, cfg, ignore_engine=args.ignore_engine)
     if args.json:
-        status["resolution_health"] = persisted_resolution(Path(args.path).resolve())
+        status["resolution_health"] = persisted_resolution(
+            root,
+            on_error=lambda exc: record_incident(
+                repo_ledger_dir(root),
+                klass="build",
+                code="artifact_malformed",
+                subject=".graphite_analysis.json",
+                detail=str(exc),
+            ),
+        )
         print(json.dumps(status, ensure_ascii=False, indent=2))
     elif status["stale"]:
         reason = status.get("reason", "source changes")
@@ -763,6 +801,7 @@ def cmd_query(args: argparse.Namespace) -> int:
             result = {**result, "plan": plan}
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if "error" not in result:
+        _record_inconclusive(f"query {args.query}", result)
         _record_canonical_usage("query", result, started)
     return 0
 
@@ -945,6 +984,7 @@ def cmd_impact(args: argparse.Namespace) -> int:
             print("Missing inputs:")
             for item in result["missing"]:
                 print(f"  - {item}")
+    _record_inconclusive("impact " + ",".join(args.files), result)
     _record_canonical_usage("impact", result, started)
     return 0 if not result["missing"] else 1
 
@@ -1055,6 +1095,7 @@ def cmd_context(args: argparse.Namespace) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print(format_context_markdown(result))
+    _record_inconclusive("context " + ",".join(args.files), result)
     _record_canonical_usage("context", result, started)
     return 0 if not result["missing"] else 1
 

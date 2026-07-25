@@ -182,3 +182,44 @@ def test_build_records_extraction_incidents(tmp_path, monkeypatch):
     build_entries = [e for e in incident_entries if e["class"] == "build"]
     assert any(e["subject"].endswith("bad.py") for e in build_entries)
     assert all(e["code"] in ("parse_error", "read_error", "worker_error") for e in build_entries)
+
+
+def test_check_records_artifact_malformed(tmp_path, capsys):
+    import argparse
+
+    from graphite.cli import cmd_check
+
+    out = tmp_path / "graph-out"
+    out.mkdir(parents=True)
+    (out / ".graphite_analysis.json").write_text("{not valid json", encoding="utf-8")
+    # cmd_check reads args.path, args.ignore_engine (via check_graph_freshness),
+    # and args.json; ignore_engine defaults to False per the --ignore-engine
+    # parser flag (action="store_true").
+    args = argparse.Namespace(path=str(tmp_path), json=True, ignore_engine=False)
+    cmd_check(args)
+    capsys.readouterr()
+    entries, _ = read_incident_entries(repo_ledger_dir(tmp_path))
+    assert any(e["code"] == "artifact_malformed" for e in entries)
+
+
+def test_inconclusive_query_records_incident(tmp_path, monkeypatch):
+    from graphite.cli import _record_inconclusive
+
+    monkeypatch.chdir(tmp_path)
+    result = {
+        "inconclusive": True,
+        "resolution_health": {
+            "healthy": False,
+            "by_relation": {"imports": {"ratio": 0.05}, "calls": {"ratio": 0.26}},
+        },
+    }
+    _record_inconclusive("callers auto_resolve_tdd", result)
+    entries, _ = read_incident_entries(repo_ledger_dir(tmp_path))
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["class"] == "query" and e["code"] == "query_inconclusive"
+    assert e["subject"] == "callers auto_resolve_tdd"
+    assert "0.05" in e["detail"] and "0.26" in e["detail"]
+    _record_inconclusive("callers x", {"inconclusive": False})
+    entries, _ = read_incident_entries(repo_ledger_dir(tmp_path))
+    assert len(entries) == 1  # non-inconclusive results record nothing

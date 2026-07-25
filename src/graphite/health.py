@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path, PurePosixPath
-from typing import Any, Final
+from typing import Any, Callable, Final
 
 import networkx as nx
 
@@ -108,14 +108,27 @@ def ratio_percent(block: dict[str, Any], relation: str) -> str:
     return f"{ratio * 100:.1f}%"
 
 
-def persisted_resolution(root: Path) -> dict[str, Any] | None:
-    """Fail-open read of the persisted block from graph-out/.graphite_analysis.json."""
+def persisted_resolution(
+    root: Path, on_error: Callable[[Exception], None] | None = None
+) -> dict[str, Any] | None:
+    """Fail-open read of the persisted block from graph-out/.graphite_analysis.json.
+
+    ``on_error`` fires only for MALFORMED content (ValueError/RecursionError) —
+    absence or unreadability is not malformation and stays silent.
+    """
     path = root / "graph-out" / ".graphite_analysis.json"
     try:
         if not path.is_file() or path.stat().st_size > _MAX_ANALYSIS_BYTES:
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError):
+    except OSError:
+        return None
+    except (ValueError, RecursionError) as exc:
+        if on_error is not None:
+            try:
+                on_error(exc)
+            except Exception:
+                pass
         return None
     if not isinstance(data, dict):
         return None

@@ -389,3 +389,22 @@ def test_neighbor_listing_empty_on_unhealthy_graph_is_inconclusive():
     result = query(_unhealthy_graph(), "depends-on lonely")
     assert result["total"] == 0
     assert result["inconclusive"] is True
+
+
+def test_persisted_resolution_on_error_fires_for_malformed(tmp_path):
+    from graphite.health import persisted_resolution
+
+    out = tmp_path / "graph-out"
+    out.mkdir()
+    (out / ".graphite_analysis.json").write_text("{not valid json", encoding="utf-8")
+    seen: list[Exception] = []
+    assert persisted_resolution(tmp_path, on_error=seen.append) is None
+    assert len(seen) == 1 and isinstance(seen[0], ValueError)
+
+
+def test_persisted_resolution_on_error_silent_for_missing(tmp_path):
+    from graphite.health import persisted_resolution
+
+    seen: list[Exception] = []
+    assert persisted_resolution(tmp_path, on_error=seen.append) is None
+    assert seen == []

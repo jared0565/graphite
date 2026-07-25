@@ -18,6 +18,7 @@ from .config import Config
 from .freshness import check_graph_freshness
 from .graph_io import load_validated_graph_bundle
 from .health import persisted_resolution
+from .incident_ledger import record_incident, repo_ledger_dir
 
 SESSION_CONTRACT = (
     "graphite-first: this repo uses a shared code graph. For cross-file questions "
@@ -270,7 +271,16 @@ def handle_pre_tool_use(payload: dict[str, Any], mode: str) -> dict[str, Any] | 
         if mode == "strict" and payload.get("tool_name") == "Grep":
             denial = _strict_denial(payload, root)
             if denial is not None:
-                health = persisted_resolution(root)
+                health = persisted_resolution(
+                    root,
+                    on_error=lambda exc: record_incident(
+                        repo_ledger_dir(root),
+                        klass="build",
+                        code="artifact_malformed",
+                        subject=".graphite_analysis.json",
+                        detail=str(exc),
+                    ),
+                )
                 if isinstance(health, dict) and health.get("healthy") is True:
                     return {
                         "hookSpecificOutput": {
