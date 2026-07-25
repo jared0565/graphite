@@ -611,6 +611,8 @@ def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any, sourc
 
     symbol_map, alias_map = _collect_python_import_maps(root, rel_path, source_index)
 
+    class_ids: set[str] = set()
+
     # ``parent_id`` is the nearest named container (for ``contains`` edges);
     # ``scope_id`` is the nearest enclosing function (for ``calls`` attribution).
     def walk(node: Any, parent_id: str | None, scope_id: str) -> None:
@@ -619,7 +621,8 @@ def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any, sourc
             name = _short_name(name_node.text.decode("utf-8", errors="ignore")) if name_node and name_node.text else None
             if name:
                 mid = _make_id(file_id, name)
-                result.nodes.append(_node(mid, "function", name, rel_path, _line(node)))
+                extra = {"is_method": True} if parent_id in class_ids else None
+                result.nodes.append(_node(mid, "function", name, rel_path, _line(node), extra))
                 if parent_id:
                     result.edges.append(_edge(parent_id, mid, "contains", rel_path, _line(node)))
                 walk_children(node, mid, mid)
@@ -630,6 +633,7 @@ def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any, sourc
             name = _short_name(name_node.text.decode("utf-8", errors="ignore")) if name_node and name_node.text else None
             if name:
                 cid = _make_id(file_id, name)
+                class_ids.add(cid)
                 result.nodes.append(_node(cid, "class", name, rel_path, _line(node)))
                 if parent_id:
                     result.edges.append(_edge(parent_id, cid, "contains", rel_path, _line(node)))

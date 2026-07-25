@@ -252,3 +252,58 @@ def test_function_local_import_binds(tmp_path):
     g = _graph_for(tmp_path)
     out = query(g, "callers deep")
     assert "src_pkg_lazy_caller" in [c["id"] for c in out.get("callers", [])]
+
+
+def test_instance_method_call_binds_via_dispatch(tmp_path):
+    _py_fixture(tmp_path)
+    g = _graph_for(tmp_path)
+    out = query(g, "callers record_run")
+    assert "src_pkg_pipeline_run" in [c["id"] for c in out.get("callers", [])]
+
+
+def test_self_call_binds_to_own_class_method(tmp_path):
+    _write(
+        tmp_path / "svc.py",
+        "class Svc:\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+        "    def run(self):\n"
+        "        return self.helper()\n",
+    )
+    g = _graph_for(tmp_path)
+    out = query(g, "callers helper")
+    assert "svc_run" in [c["id"] for c in out.get("callers", [])]
+
+
+def test_unresolved_member_phantom_dropped(tmp_path):
+    _write(
+        tmp_path / "ext.py",
+        "def go(conn):\n"
+        "    return conn.execute_special_thing()\n",
+    )
+    result = _extract(tmp_path)
+    g = build_graph(result.nodes, result.edges)
+    # no method named execute_special_thing exists -> edge dropped, no phantom node
+    assert not any("execute_special_thing" in n for n in g.nodes())
+
+
+def test_noisy_member_calls_still_filtered(tmp_path):
+    _write(
+        tmp_path / "noise.py",
+        "def go(items):\n"
+        "    items.append(1)\n"
+        "    return items\n",
+    )
+    result = _extract(tmp_path)
+    assert not any(
+        e.get("relation") == "calls" and "append" in e.get("target", "")
+        for e in result.edges
+    )
+
+
+def test_python_methods_tagged_top_level_functions_not(tmp_path):
+    _py_fixture(tmp_path)
+    result = _extract(tmp_path)
+    by_id = {n["id"]: n for n in result.nodes}
+    assert by_id["src_pkg_ledger_record_run"].get("is_method") is True
+    assert by_id["src_pkg_tdd_auto_resolve_tdd"].get("is_method") is None
