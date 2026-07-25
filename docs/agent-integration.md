@@ -104,6 +104,40 @@ which is why every deliberately open object in the published files carries
 every verb, every error shape, natural-language answers, search, and
 capabilities are validated against them in CI.
 
+## 7. Resolution health (trust signal)
+
+Every graph carries a measured resolver-health block; consumers must use it
+to distinguish "no results" from "the resolver could not bind".
+
+- Shape (in `stats`, `impact`, `context`, relation-verb JSON, `check --json`,
+  and persisted in `graph.json` under `analysis.resolution_health` and in
+  `graph-out/.graphite_analysis.json`):
+
+```json
+{
+  "schema": 1,
+  "placeholder_nodes": {"total": 4519, "unknown": 2463, "share": 0.545},
+  "by_relation": {
+    "calls":   {"total": 6631, "bound": 1730, "ratio": 0.261},
+    "imports": {"total": 2047, "bound": 94,   "ratio": 0.046}
+  },
+  "by_language": {"python": {"calls": {"total": 6631, "bound": 1730, "ratio": 0.261},
+                              "imports": {"total": 2047, "bound": 94, "ratio": 0.046}}},
+  "healthy": false,
+  "threshold": 0.8
+}
+```
+
+- `healthy` is `true` iff every non-null `by_relation` ratio is `>= threshold`
+  (0.8). Zero-edge relations have `ratio: null` and do not count against health.
+- `impact`, `context`, and the relation verbs (`callers`, `calls`,
+  `imported-by`, `depends-on`) additionally return `"inconclusive": true` when
+  the result is EMPTY and the graph is unhealthy. **An inconclusive empty
+  answer means "unknown", never "safe"** — fall back to grep and say so.
+- ABSENT block (graphs built before 2026-07-25): treat exactly like
+  `inconclusive` on empty results — fail open, never assume health.
+- `check --json` reports `"resolution_health": null` when no persisted block exists.
+
 ## Non-goals (governance)
 
 Canonical commands are inference-free by contract: `--llm` flags are rejected

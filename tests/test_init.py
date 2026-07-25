@@ -170,8 +170,8 @@ def test_template_change_requires_doc_version_bump() -> None:
         ).encode("utf-8")
     ).hexdigest()
     assert (init_module.DOC_VERSION, digest) == (
-        5,
-        "4eefd909088976cf489c2f082fc9a084de625b4d872538639292e5404ac70883",
+        6,
+        "d2e6407a5b4f8c98c2e78c9c943af1c753d77b3d14e371e968a1a20530e15ccc",
     ), "template content changed: bump DOC_VERSION and update this pinned digest"
 
 
@@ -375,3 +375,13 @@ def test_init_wires_stop_hook(tmp_path: Path) -> None:
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
     commands = [h["command"] for entry in settings["hooks"]["Stop"] for h in entry["hooks"]]
     assert commands == ["python -m graphite agent-hook stop"]
+
+
+def test_doc_version_is_6_and_template_documents_resolution_health():
+    from graphite import init as graphite_init
+
+    assert graphite_init.DOC_VERSION == 6
+    template = graphite_init.GRAPHITE_DOC
+    assert "resolution-health" in template
+    assert "INCONCLUSIVE" in template
+    assert '"inconclusive": true' in template

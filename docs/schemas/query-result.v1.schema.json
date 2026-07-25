@@ -67,6 +67,15 @@
         "reason": {"type": "string"}
       }
     },
-    "search": {"type": "object", "additionalProperties": true}
+    "search": {"type": "object", "additionalProperties": true},
+    "resolution_health": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Measured resolution-health block (schema 1): placeholder_nodes, by_relation, by_language, healthy, threshold. Present on stats/impact/context/relation-verb results from 2026-07-25. Distinct from the top-level `resolution` array above, which is per-target input-match metadata, not graph-wide resolver health."
+    },
+    "inconclusive": {
+      "type": "boolean",
+      "description": "True when the result is empty AND the graph's resolution health is below threshold — treat as unknown, not as 'no dependents'."
+    }
   }
 }
