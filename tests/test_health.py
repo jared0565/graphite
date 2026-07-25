@@ -238,3 +238,108 @@ def test_query_envelope_keeps_match_resolution_and_health():
     ]
     assert isinstance(result["resolution_health"], dict)
     assert result["resolution_health"]["healthy"] is False
+
+
+def test_impact_json_inconclusive_on_unhealthy_graph():
+    from graphite.cli import _impact
+
+    g = _unhealthy_graph()
+    result = _impact(g, ["lonely"], depth=2)
+    assert result["impacted_files"] == [] and result["likely_tests"] == []
+    assert result["inconclusive"] is True
+    assert result["resolution_health"]["healthy"] is False
+
+
+def test_impact_json_conclusive_on_healthy_graph():
+    from graphite.cli import _impact
+
+    result = _impact(_healthy_graph(), ["lonely"], depth=2)
+    assert result["inconclusive"] is False
+
+
+def test_cmd_impact_human_inconclusive_line(capsys, monkeypatch):
+    import argparse
+
+    from graphite import cli
+
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: _unhealthy_graph())
+    monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    args = argparse.Namespace(graph_json="graph-out/graph.json", files=["lonely"], depth=2, json=False)
+    cli.cmd_impact(args)
+    out = capsys.readouterr().out
+    assert "INCONCLUSIVE" in out
+    assert "confirm with grep" in out
+    assert "Impacted files:\n" not in out  # empty listings are replaced, not printed
+
+
+def test_cmd_impact_human_note_when_nonempty_but_unhealthy(capsys, monkeypatch):
+    import argparse
+
+    from graphite import cli
+
+    g = _graph(
+        nodes=[
+            ("caller_file", "file", "caller.py"),
+            ("target_file", "file", "target.py"),
+            ("ghost", "unknown", None),
+        ],
+        edges=[
+            ("caller_file", "target_file", "imports", "caller.py"),
+            ("caller_file", "ghost", "calls", "caller.py"),
+        ],
+    )
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: g)
+    monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    args = argparse.Namespace(graph_json="graph-out/graph.json", files=["target_file"], depth=2, json=False)
+    cli.cmd_impact(args)
+    out = capsys.readouterr().out
+    assert "caller.py" in out
+    assert "may be incomplete" in out
+    assert "INCONCLUSIVE" not in out
+
+
+def test_cmd_impact_human_unchanged_on_healthy_graph(capsys, monkeypatch):
+    import argparse
+
+    from graphite import cli
+
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: _healthy_graph())
+    monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    args = argparse.Namespace(graph_json="graph-out/graph.json", files=["lonely"], depth=2, json=False)
+    cli.cmd_impact(args)
+    out = capsys.readouterr().out
+    assert "Impacted files:" in out
+    assert "INCONCLUSIVE" not in out and "may be incomplete" not in out
+
+
+def test_cmd_check_json_resolution_passthrough(tmp_path, capsys, monkeypatch):
+    import argparse
+
+    from graphite import cli
+
+    monkeypatch.setattr(
+        cli, "check_graph_freshness", lambda *a, **k: {"stale": False}
+    )
+    out_dir = tmp_path / "graph-out"
+    out_dir.mkdir()
+    (out_dir / ".graphite_analysis.json").write_text(
+        json.dumps({"resolution_health": {"schema": 1, "healthy": True}}), encoding="utf-8"
+    )
+    args = argparse.Namespace(path=str(tmp_path), json=True, ignore_engine=False)
+    cli.cmd_check(args)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["resolution_health"] == {"schema": 1, "healthy": True}
+
+
+def test_cmd_check_json_resolution_null_when_absent(tmp_path, capsys, monkeypatch):
+    import argparse
+
+    from graphite import cli
+
+    monkeypatch.setattr(
+        cli, "check_graph_freshness", lambda *a, **k: {"stale": False}
+    )
+    args = argparse.Namespace(path=str(tmp_path), json=True, ignore_engine=False)
+    cli.cmd_check(args)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["resolution_health"] is None

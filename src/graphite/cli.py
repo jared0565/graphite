@@ -31,6 +31,7 @@ from .extract.ast import extract_all
 from .freshness import check_graph_freshness
 from .graph import build_graph, graph_to_json
 from .graph_io import MAX_GRAPH_BYTES, GraphReadError, load_validated_graph_bundle
+from .health import persisted_resolution, ratio_percent, resolution_health
 from .ingest import collect_files
 from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
@@ -327,6 +328,7 @@ def _impact(g: Any, changes: list[str], depth: int) -> dict[str, Any]:
         elif node not in start_nodes:
             impacted_files.add(sf)
 
+    health = resolution_health(g)
     return {
         "changed": changes,
         "matched_nodes": sorted(start_nodes),
@@ -334,6 +336,8 @@ def _impact(g: Any, changes: list[str], depth: int) -> dict[str, Any]:
         "depth": depth,
         "impacted_files": sorted(impacted_files),
         "likely_tests": sorted(likely_tests),
+        "resolution_health": health,
+        "inconclusive": not impacted_files and not likely_tests and not health["healthy"],
     }
 
 
@@ -397,6 +401,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         Path(args.path).resolve(), cfg, ignore_engine=args.ignore_engine
     )
     if args.json:
+        status["resolution_health"] = persisted_resolution(Path(args.path).resolve())
         print(json.dumps(status, ensure_ascii=False, indent=2))
     elif status["stale"]:
         reason = status.get("reason", "source changes")
@@ -900,12 +905,26 @@ def cmd_impact(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
-        print("Impacted files:")
-        for path in result["impacted_files"]:
-            print(f"  - {path}")
-        print("Likely tests:")
-        for path in result["likely_tests"]:
-            print(f"  - {path}")
+        health = result["resolution_health"]
+        if result["inconclusive"]:
+            print(
+                "Impacted files: none found — INCONCLUSIVE: only "
+                f"{ratio_percent(health, 'imports')} of import edges and "
+                f"{ratio_percent(health, 'calls')} of call edges resolved in this "
+                "graph; treat as unverified and confirm with grep."
+            )
+        else:
+            print("Impacted files:")
+            for path in result["impacted_files"]:
+                print(f"  - {path}")
+            print("Likely tests:")
+            for path in result["likely_tests"]:
+                print(f"  - {path}")
+            if not health["healthy"] and (result["impacted_files"] or result["likely_tests"]):
+                print(
+                    f"note: resolution health low (imports {ratio_percent(health, 'imports')}, "
+                    f"calls {ratio_percent(health, 'calls')}) — this list may be incomplete."
+                )
         if result["missing"]:
             print("Missing inputs:")
             for item in result["missing"]:
