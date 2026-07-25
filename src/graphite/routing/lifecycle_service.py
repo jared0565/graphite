@@ -10,6 +10,7 @@ from .contracts import Effort, PublicRecord
 from .lifecycle import (
     IdentityChange,
     LifecycleReasonCode,
+    ProviderCompatibilityAssessment,
     ProviderCompatibilityPolicy,
     ProviderLifecycleEvent,
     ProviderLifecycleState,
@@ -37,10 +38,11 @@ class LifecycleObservationResult(PublicRecord):
     reason: LifecycleReasonCode
     invalidated_snapshots: tuple[str, ...]
     invalidated_approvals: tuple[str, ...]
+    carried_snapshots: tuple[str, ...]
 
     _public_fields: ClassVar[tuple[str, ...]] = (
         "lifecycle_identity_digest", "change", "state", "reason",
-        "invalidated_snapshots", "invalidated_approvals",
+        "invalidated_snapshots", "invalidated_approvals", "carried_snapshots",
     )
 
 
@@ -291,6 +293,61 @@ class ProviderLifecycleService:
             raise LifecycleServiceError("lifecycle_persistence_failed")
         return current
 
+    def _carry_forward(
+        self,
+        boundary_digest: str,
+        identity: ProviderRuntimeIdentity,
+        previous: CurrentLifecycleObservation,
+        assessment: ProviderCompatibilityAssessment,
+    ) -> LifecycleObservationResult:
+        if previous.identity is None:
+            raise LifecycleServiceError("lifecycle_observation_invalid")
+        event = _event(
+            boundary_digest,
+            identity,
+            previous,
+            ProviderLifecycleState.ACTIVE,
+            LifecycleReasonCode.PATCH_CARRIED_FORWARD,
+            identity.observed_at,
+        )
+        try:
+            carried = self.routing_store.carry_forward_snapshot_bindings(
+                previous_identity_digest=previous.identity.digest,
+                new_identity_digest=identity.digest,
+                lifecycle_event_id=event.event_id,
+                carried_at=identity.observed_at,
+            )
+            invalidated_approvals = self.routing_store.invalidate_lifecycle_approvals(
+                previous.identity.digest
+            )
+            self.lifecycle_store.record_invalidations(
+                boundary_digest=boundary_digest,
+                previous_identity_digest=previous.identity.digest,
+                current_identity_digest=identity.digest,
+                capability_snapshot_digests=(),
+                approval_ids=invalidated_approvals,
+                reason=LifecycleReasonCode.PATCH_CARRIED_FORWARD,
+                invalidated_at=identity.observed_at,
+            )
+        except (StorageError, LifecycleStorageError, ValueError):
+            raise LifecycleServiceError("lifecycle_carry_forward_failed") from None
+        try:
+            self.lifecycle_store.record_transition(boundary_digest, identity, event)
+            current = self.lifecycle_store.current_observation(boundary_digest)
+        except (LifecycleStorageError, ValueError):
+            raise LifecycleServiceError("lifecycle_persistence_failed") from None
+        if current is None:
+            raise LifecycleServiceError("lifecycle_persistence_failed")
+        return LifecycleObservationResult(
+            identity.digest,
+            assessment.change,
+            current.state,
+            assessment.reason,
+            (),
+            invalidated_approvals,
+            carried,
+        )
+
     def observe(
         self,
         *, boundary_digest: str, identity: ProviderRuntimeIdentity,
@@ -335,6 +392,8 @@ class ProviderLifecycleService:
             reason = assessment.reason
             if previous.state is ProviderLifecycleState.INCOMPATIBLE and assessment.state is ProviderLifecycleState.VERIFICATION_REQUIRED:
                 reason = LifecycleReasonCode.POLICY_PROMOTED
+            if reason is LifecycleReasonCode.PATCH_CARRIED_FORWARD:
+                return self._carry_forward(boundary_digest, identity, previous, assessment)
             current = self._record(boundary_digest, identity, previous, assessment.state, reason, identity.observed_at)
             change = assessment.change
 
@@ -363,7 +422,7 @@ class ProviderLifecycleService:
                 )
             except (StorageError, LifecycleStorageError, ValueError):
                 raise LifecycleServiceError("lifecycle_invalidation_failed") from None
-        return LifecycleObservationResult(identity.digest, change, current.state, assessment.reason, invalidated_snapshots, invalidated_approvals)
+        return LifecycleObservationResult(identity.digest, change, current.state, assessment.reason, invalidated_snapshots, invalidated_approvals, ())
 
     def mark_unavailable(
         self,

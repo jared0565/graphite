@@ -88,6 +88,7 @@ class LifecycleReasonCode(StrEnum):
     COMPATIBILITY_CONFIRMED = "compatibility_confirmed"
     VERIFICATION_ACCEPTED = "verification_accepted"
     POLICY_PROMOTED = "policy_promoted"
+    PATCH_CARRIED_FORWARD = "patch_carried_forward"
 
 
 _PROVIDER_RUNTIME_KINDS = {
@@ -363,9 +364,16 @@ class ProviderCompatibilityAssessment(PublicRecord):
             _enum(self.probe_level, CompatibilityProbeLevel, code="probe_level_invalid"),
         )
         if self.state is ProviderLifecycleState.ACTIVE and not (
-            self.change is IdentityChange.UNCHANGED
-            and self.reason is LifecycleReasonCode.IDENTITY_UNCHANGED
-            and self.probe_level is CompatibilityProbeLevel.NONE
+            (
+                self.change is IdentityChange.UNCHANGED
+                and self.reason is LifecycleReasonCode.IDENTITY_UNCHANGED
+                and self.probe_level is CompatibilityProbeLevel.NONE
+            )
+            or (
+                self.change is IdentityChange.PATCH
+                and self.reason is LifecycleReasonCode.PATCH_CARRIED_FORWARD
+                and self.probe_level is CompatibilityProbeLevel.STANDARD
+            )
         ):
             raise ValueError("assessment_authority_invalid")
 
@@ -544,6 +552,17 @@ def assess_identity_change(
             LifecycleReasonCode.PROBE_FAILED,
             probe_level,
         )
+    if (
+        change is IdentityChange.PATCH
+        and current.runtime_kind is RuntimeKind.LOCAL_CLI
+        and existing is ProviderLifecycleState.ACTIVE
+    ):
+        return ProviderCompatibilityAssessment(
+            change,
+            ProviderLifecycleState.ACTIVE,
+            LifecycleReasonCode.PATCH_CARRIED_FORWARD,
+            probe_level,
+        )
     return ProviderCompatibilityAssessment(
         change,
         ProviderLifecycleState.VERIFICATION_REQUIRED,
@@ -679,9 +698,19 @@ class ProviderLifecycleEvent(PublicRecord):
                 reason is LifecycleReasonCode.IDENTITY_UNCHANGED
             ):
                 raise ValueError("lifecycle_transition_invalid")
-            if not identity_unchanged and reason not in set(_CHANGE_REASONS.values()):
-                raise ValueError("lifecycle_transition_invalid")
+            if not identity_unchanged:
+                if current_state is ProviderLifecycleState.ACTIVE:
+                    if reason is not LifecycleReasonCode.PATCH_CARRIED_FORWARD:
+                        raise ValueError("lifecycle_transition_invalid")
+                elif reason not in set(_CHANGE_REASONS.values()):
+                    raise ValueError("lifecycle_transition_invalid")
         elif current_state not in _VALID_TRANSITIONS[previous_state]:
+            raise ValueError("lifecycle_transition_invalid")
+        if reason is LifecycleReasonCode.PATCH_CARRIED_FORWARD and not (
+            previous_state is ProviderLifecycleState.ACTIVE
+            and current_state is ProviderLifecycleState.ACTIVE
+            and previous_digest != current_digest
+        ):
             raise ValueError("lifecycle_transition_invalid")
         if (
             current_state is ProviderLifecycleState.ACTIVE

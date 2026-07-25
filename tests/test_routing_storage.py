@@ -12,8 +12,21 @@ from pathlib import Path
 
 import pytest
 
-from graphite.routing.contracts import Effort, ExecutionOutcome, ExecutionReceipt
+from graphite.routing.contracts import (
+    CliIdentity,
+    Effort,
+    ExecutionOutcome,
+    ExecutionReceipt,
+    PermissionMode,
+    ProviderId,
+    RiskTier,
+)
 from graphite.routing.policy import CliLearnedPolicy, sign_cli_policy
+from graphite.routing.profiles import (
+    BUNDLED_REQUESTED_PROFILES,
+    create_capability_snapshot,
+    save_capability_snapshot,
+)
 from graphite.routing.storage import (
     AggregateRecord,
     AggregateStore,
@@ -144,7 +157,7 @@ def test_schema_migration_is_idempotent_and_enables_safety_pragmas(tmp_path: Pat
         "execution_attempts",
         "execution_receipts",
     } <= tables
-    assert version == "7"
+    assert version == "8"
     assert attempt_columns["max_input_tokens"] == 1
     assert attempt_columns["max_output_tokens"] == 1
     assert attempt_columns["expected_prompt_hash"] == 1
@@ -278,7 +291,7 @@ def test_v3_to_current_creates_verified_backup_and_quarantines_live_ollama_attem
     with sqlite3.connect(store.path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("7",)
+        ).fetchone() == ("8",)
         assert connection.execute(
             "SELECT status,failure_reason FROM execution_attempts "
             "WHERE attempt_id='attempt-legacy'"
@@ -345,7 +358,7 @@ def test_v3_v4_rollback_drill_restores_verified_backup_for_old_reader(
     with sqlite3.connect(preserved_v5) as v5_reader:
         assert v5_reader.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("7",)
+        ).fetchone() == ("8",)
 
 
 def test_v3_migration_fails_closed_while_another_writer_holds_lock(tmp_path: Path) -> None:
@@ -453,7 +466,7 @@ def test_v4_to_current_creates_verified_backup_and_leaves_history_unbound(
     with sqlite3.connect(store.path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("7",)
+        ).fetchone() == ("8",)
     assert store.lifecycle_identity_binding(
         authority_kind="capability_snapshot", authority_id="4" * 64
     ) is None
@@ -484,7 +497,7 @@ def test_committed_v4_fixture_migrates_to_current_without_granting_authority(
     with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("7",)
+        ).fetchone() == ("8",)
 
 
 def test_v4_v5_rollback_drill_restores_verified_v4_backup(tmp_path: Path) -> None:
@@ -747,7 +760,7 @@ def test_partial_core_schema_requires_rollback_or_forward_repair(tmp_path: Path)
     with sqlite3.connect(store.path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("7",)
+        ).fetchone() == ("8",)
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_links'"
         ).fetchone() is None
@@ -1034,7 +1047,7 @@ def test_v1_database_migrates_to_v2_without_losing_rows(tmp_path: Path) -> None:
         }
         foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
-    assert version == "7"
+    assert version == "8"
     assert after == before
     expected_attempt_fields = []
     for legacy in before_attempts:
@@ -1213,7 +1226,7 @@ def test_v2_digestless_recovery_is_quarantined_without_fabrication(tmp_path: Pat
     with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("7",)
+        ).fetchone() == ("8",)
         rows = connection.execute(
             "SELECT attempt_id,status,failure_reason,inventory_digest "
             "FROM execution_attempts ORDER BY attempt_id"
@@ -1812,7 +1825,7 @@ def test_v5_store_with_legacy_provider_check_migrates_preserving_rows(
         version = connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()[0]
-        assert version == "7"
+        assert version == "8"
         for table in ("capability_snapshots", "cli_execution_attempts"):
             sql = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
@@ -1854,7 +1867,7 @@ def test_migrated_store_reinitializes_idempotently(tmp_path: Path) -> None:
     try:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("7",)
+        ).fetchone() == ("8",)
         assert connection.execute(
             "SELECT COUNT(*) FROM capability_snapshots"
         ).fetchone() == (1,)
@@ -1864,14 +1877,14 @@ def test_migrated_store_reinitializes_idempotently(tmp_path: Path) -> None:
 
 def test_v6_stamped_store_with_narrow_check_fails_closed(tmp_path: Path) -> None:
     # NB: the "v6" in the name is historical; this stamps the CURRENT schema
-    # version ("7") with a narrowed provider CHECK to assert that opening a
+    # version ("8") with a narrowed provider CHECK to assert that opening a
     # current-version store whose DDL lost 'openrouter'/'zai' fails closed
     # (_validate_v6_schema, the current-version validator, raises).
     root = tmp_path / "project"
     root.mkdir()
     store = RepositoryStore(root)
     store.initialize()
-    _narrow_provider_checks(store.path, stamp_version="7")
+    _narrow_provider_checks(store.path, stamp_version="8")
     with pytest.raises(StorageError, match="^storage_rollback_required$"):
         RepositoryStore(root).initialize()
 
@@ -1883,12 +1896,12 @@ def test_v6_store_migrates_to_v7_and_admits_zai(tmp_path):
     (root / ".graphite" / "routing").mkdir(parents=True)
     store = RepositoryStore(root)          # fresh -> should be at SCHEMA_VERSION
     store.initialize()
-    assert SCHEMA_VERSION == "7"
+    assert SCHEMA_VERSION == "8"
     db = root / ".graphite" / "routing" / "events.sqlite3"
     con = sqlite3.connect(db)
     try:
         sv = con.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
-        assert sv == "7"
+        assert sv == "8"
         ddl = con.execute(
             "SELECT sql FROM sqlite_master WHERE name='capability_snapshots'").fetchone()[0]
         assert "'zai'" in ddl
@@ -1905,7 +1918,7 @@ def test_v6_store_with_rows_rebuilds_to_v7_preserving_rows_and_admitting_zai(
     root = tmp_path / "project"
     root.mkdir()
     store = RepositoryStore(root)
-    store.initialize()  # fresh -> current v7; both DDLs already carry 'zai'
+    store.initialize()  # fresh -> current v8; both DDLs already carry 'zai'
 
     # Seed a claude-code snapshot row (valid under BOTH the old v6 CHECK and the
     # widened v7 CHECK) so the rebuild has a real row to carry through.
@@ -1959,7 +1972,7 @@ def test_v6_store_with_rows_rebuilds_to_v7_preserving_rows_and_admitting_zai(
     try:
         assert verify.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone() == ("7",)
+        ).fetchone() == ("8",)
         # Seeded row survived copy->drop->recreate->insert (row preservation).
         assert verify.execute(
             "SELECT capability_snapshot_digest FROM capability_snapshots "
@@ -1977,3 +1990,296 @@ def test_v6_store_with_rows_rebuilds_to_v7_preserving_rows_and_admitting_zai(
         assert verify.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     finally:
         verify.close()
+
+
+def _carry_store(tmp_path):
+    root = tmp_path / "carry-repo"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    return store
+
+
+def _carry_snapshot(store, lifecycle_digest, *, verified_at=101, ttl_seconds=3_600):
+    snapshot = create_capability_snapshot(
+        requested=BUNDLED_REQUESTED_PROFILES["claude-code/sonnet"],
+        identity=CliIdentity(ProviderId.CLAUDE_CODE, "a" * 64, "2.1.214", "1.0.0"),
+        effective_model="claude-sonnet-5",
+        effort=Effort.HIGH,
+        capabilities=("code", "reasoning"),
+        context_window_tokens=200_000,
+        risk_ceiling=RiskTier.MEDIUM,
+        permission_mode=PermissionMode.READ_ONLY,
+        verified_at=verified_at,
+        ttl_seconds=ttl_seconds,
+    )
+    save_capability_snapshot(store, snapshot)
+    store.save_lifecycle_snapshot_binding(
+        capability_snapshot_digest=snapshot.digest,
+        lifecycle_identity_digest=lifecycle_digest,
+        bound_at=verified_at,
+    )
+    return snapshot
+
+
+def test_carry_forward_rebinds_unexpired_snapshots_and_resolution_follows(tmp_path):
+    store = _carry_store(tmp_path)
+    old, new = "1" * 64, "2" * 64
+    snapshot = _carry_snapshot(store, old)
+
+    carried = store.carry_forward_snapshot_bindings(
+        previous_identity_digest=old,
+        new_identity_digest=new,
+        lifecycle_event_id="c" * 64,
+        carried_at=200,
+    )
+
+    assert carried == (snapshot.digest,)
+    assert (
+        store.lifecycle_identity_binding(
+            authority_kind="capability_snapshot", authority_id=snapshot.digest
+        )
+        == new
+    )
+    assert store.lifecycle_authority_targets(new)[0] == (snapshot.digest,)
+    assert store.lifecycle_authority_targets(old)[0] == ()
+
+
+def test_carry_forward_excludes_expired_snapshots_and_is_retry_idempotent(tmp_path):
+    store = _carry_store(tmp_path)
+    old, new = "1" * 64, "2" * 64
+    # ttl_seconds=60 is MIN_SNAPSHOT_TTL_SECONDS (profiles.py); a smaller value
+    # raises ProfileError before this test can even exercise the carry table.
+    snapshot = _carry_snapshot(store, old, verified_at=101, ttl_seconds=60)  # expires 161
+
+    first = store.carry_forward_snapshot_bindings(
+        previous_identity_digest=old,
+        new_identity_digest=new,
+        lifecycle_event_id="c" * 64,
+        carried_at=200,
+    )
+    second = store.carry_forward_snapshot_bindings(
+        previous_identity_digest=old,
+        new_identity_digest=new,
+        lifecycle_event_id="d" * 64,
+        carried_at=201,
+    )
+
+    assert first == ()
+    assert second == ()
+    # Never carried: the expired snapshot keeps its original (old) binding.
+    assert (
+        store.lifecycle_identity_binding(
+            authority_kind="capability_snapshot", authority_id=snapshot.digest
+        )
+        == old
+    )
+
+
+def test_carry_chain_latest_carry_wins_and_supports_downgrade_revisit(tmp_path):
+    store = _carry_store(tmp_path)
+    first, second = "1" * 64, "2" * 64
+    snapshot = _carry_snapshot(store, first)
+
+    store.carry_forward_snapshot_bindings(
+        previous_identity_digest=first,
+        new_identity_digest=second,
+        lifecycle_event_id="c" * 64,
+        carried_at=200,
+    )
+    store.carry_forward_snapshot_bindings(
+        previous_identity_digest=second,
+        new_identity_digest=first,
+        lifecycle_event_id="d" * 64,
+        carried_at=201,
+    )
+
+    assert (
+        store.lifecycle_identity_binding(
+            authority_kind="capability_snapshot", authority_id=snapshot.digest
+        )
+        == first
+    )
+    assert store.lifecycle_authority_targets(first)[0] == (snapshot.digest,)
+
+
+def test_carry_rows_are_append_only(tmp_path):
+    store = _carry_store(tmp_path)
+    old, new = "1" * 64, "2" * 64
+    _carry_snapshot(store, old)
+    store.carry_forward_snapshot_bindings(
+        previous_identity_digest=old,
+        new_identity_digest=new,
+        lifecycle_event_id="c" * 64,
+        carried_at=200,
+    )
+
+    connection = sqlite3.connect(store.path)
+    try:
+        with pytest.raises(sqlite3.DatabaseError, match="lifecycle_binding_carry_immutable"):
+            connection.execute("DELETE FROM lifecycle_binding_carries")
+        with pytest.raises(sqlite3.DatabaseError, match="lifecycle_binding_carry_immutable"):
+            connection.execute("UPDATE lifecycle_binding_carries SET carried_at = 999")
+    finally:
+        connection.close()
+
+
+def test_approval_binding_guard_accepts_carried_identity(tmp_path):
+    store = _carry_store(tmp_path)
+    old, new = "1" * 64, "2" * 64
+    snapshot = _carry_snapshot(store, old)
+    store.carry_forward_snapshot_bindings(
+        previous_identity_digest=old,
+        new_identity_digest=new,
+        lifecycle_event_id="c" * 64,
+        carried_at=200,
+    )
+    store.save_approval_record(
+        approval_id="approval-carried",
+        task_id=None,
+        decision_id=None,
+        nonce_hash="1" * 64,
+        manifest_hash="2" * 64,
+        expires_at=999,
+        reserved_tokens=1,
+    )
+
+    store.save_lifecycle_approval_binding(
+        approval_id="approval-carried",
+        capability_snapshot_digest=snapshot.digest,
+        lifecycle_identity_digest=new,
+        bound_at=201,
+    )
+
+    assert store.lifecycle_approval_binding_details("approval-carried") == (
+        snapshot.digest,
+        new,
+    )
+
+
+def test_v7_store_migrates_to_v8_with_backup_guard_swap_and_carry_table(tmp_path):
+    store = _carry_store(tmp_path)
+    connection = sqlite3.connect(store.path)
+    connection.executescript(
+        "DROP TRIGGER lifecycle_approval_binding_insert_guard_v8;"
+        "CREATE TRIGGER lifecycle_approval_binding_insert_guard "
+        "BEFORE INSERT ON lifecycle_approval_bindings "
+        "WHEN NOT EXISTS ("
+        "  SELECT 1 FROM lifecycle_snapshot_bindings AS binding"
+        "  WHERE binding.capability_snapshot_digest = NEW.capability_snapshot_digest"
+        "    AND binding.lifecycle_identity_digest = NEW.lifecycle_identity_digest"
+        ") BEGIN SELECT RAISE(ABORT, 'lifecycle_snapshot_binding_missing'); END;"
+        "DROP TABLE lifecycle_binding_carries;"
+        "UPDATE schema_meta SET value='7' WHERE key='schema_version';"
+    )
+    connection.close()
+
+    migrated = RepositoryStore(store.root)
+    migrated.initialize()
+
+    connection = sqlite3.connect(store.path)
+    try:
+        names = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table','trigger')"
+            )
+        }
+        version = connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert version == "8"
+    assert "lifecycle_binding_carries" in names
+    assert "lifecycle_approval_binding_insert_guard_v8" in names
+    assert "lifecycle_approval_binding_insert_guard" not in names
+    # Mirrors the established v7 backup-naming pattern (_pre_v7_backup_path ->
+    # events-schema-v{source}-pre-v7.sqlite3), applied to v8 with source
+    # version "7" (the only version _migrate_v7_to_v8 acts on).
+    assert (
+        store.path.parent / "backups" / "events-schema-v7-pre-v8.sqlite3"
+    ).exists()
+
+
+def test_v6_origin_store_drops_superseded_guard_and_accepts_carried_approval(
+    tmp_path: Path,
+) -> None:
+    # _migrate_v7_to_v8 only fires (and drops the old approval-insert guard)
+    # when the on-disk schema_version is exactly "7" at the moment it runs.
+    # A store migrating from v6-or-earlier never satisfies that:
+    # _migrate_pre_v6_provider_widening and _migrate_v6_to_v7 rebuild tables
+    # without stamping schema_version themselves, so it stays at the origin
+    # version until initialize()'s own final INSERT. This reconstructs a
+    # genuine pre-Task-2 v6 store -- unlike a fresh store built with the
+    # current _SCHEMA (which never gets the old guard at all), a real v6
+    # store still has it -- to prove initialize() converges on only the v8
+    # guard, and that an approval binding to a carried (new) identity is
+    # accepted end to end afterward.
+    store = _carry_store(tmp_path)
+    old, new = "1" * 64, "2" * 64
+    snapshot = _carry_snapshot(store, old)
+
+    _revert_provider_checks_to_v6(store.path, stamp_version="6")
+    connection = sqlite3.connect(store.path)
+    connection.executescript(
+        "DROP TRIGGER lifecycle_approval_binding_insert_guard_v8;"
+        "CREATE TRIGGER lifecycle_approval_binding_insert_guard "
+        "BEFORE INSERT ON lifecycle_approval_bindings "
+        "WHEN NOT EXISTS ("
+        "  SELECT 1 FROM lifecycle_snapshot_bindings AS binding"
+        "  WHERE binding.capability_snapshot_digest = NEW.capability_snapshot_digest"
+        "    AND binding.lifecycle_identity_digest = NEW.lifecycle_identity_digest"
+        ") BEGIN SELECT RAISE(ABORT, 'lifecycle_snapshot_binding_missing'); END;"
+        "DROP TABLE lifecycle_binding_carries;"
+    )
+    connection.close()
+
+    RepositoryStore(store.root).initialize()
+
+    connection = sqlite3.connect(store.path)
+    try:
+        triggers = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        }
+        version = connection.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert version == "8"
+    assert "lifecycle_approval_binding_insert_guard_v8" in triggers
+    assert "lifecycle_approval_binding_insert_guard" not in triggers
+
+    carried = store.carry_forward_snapshot_bindings(
+        previous_identity_digest=old,
+        new_identity_digest=new,
+        lifecycle_event_id="c" * 64,
+        carried_at=200,
+    )
+    assert carried == (snapshot.digest,)
+    store.save_approval_record(
+        approval_id="approval-v6-origin",
+        task_id=None,
+        decision_id=None,
+        nonce_hash="3" * 64,
+        manifest_hash="4" * 64,
+        expires_at=999,
+        reserved_tokens=1,
+    )
+    # Would raise lifecycle_snapshot_binding_missing under the old guard,
+    # since (snapshot, new) has no row in lifecycle_snapshot_bindings -- only
+    # in lifecycle_binding_carries.
+    store.save_lifecycle_approval_binding(
+        approval_id="approval-v6-origin",
+        capability_snapshot_digest=snapshot.digest,
+        lifecycle_identity_digest=new,
+        bound_at=201,
+    )
+    assert store.lifecycle_approval_binding_details("approval-v6-origin") == (
+        snapshot.digest,
+        new,
+    )

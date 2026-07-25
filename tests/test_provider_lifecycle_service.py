@@ -20,8 +20,9 @@ from graphite.routing.lifecycle_service import (
     ProviderLifecycleService,
     VerificationManifest,
 )
-from graphite.routing.lifecycle_storage import LifecycleStore
+from graphite.routing.lifecycle_storage import LifecycleStore, LifecycleStorageError
 from graphite.routing.profiles import BUNDLED_REQUESTED_PROFILES, create_capability_snapshot, save_capability_snapshot
+from graphite.routing.route_pool import ApprovedRouteCandidate
 from graphite.routing.storage import RepositoryStore
 
 
@@ -92,7 +93,6 @@ def test_first_discovery_stops_at_verification_required_and_activation_is_explic
     ("changes", "expected"),
     [
         ({"runtime_digest": "c" * 64, "observed_at": 200}, IdentityChange.HASH_ONLY),
-        ({"version": "2.1.215", "observed_at": 200}, IdentityChange.PATCH),
         ({"version": "2.2.0", "observed_at": 200}, IdentityChange.MINOR),
         ({"version": "3.0.0", "observed_at": 200}, IdentityChange.MAJOR),
         ({"capabilities": ("credential_health", "structured_output", "tools", "version"), "observed_at": 200}, IdentityChange.CAPABILITY),
@@ -201,3 +201,255 @@ def test_manifest_preparation_is_pure_and_contains_no_prompt_or_credentials(tmp_
     assert manifest.max_attempts == 1
     assert manifest.fallback_enabled is False
     assert manifest.no_resume is manifest.no_substitution is True
+
+
+def test_patch_update_on_active_boundary_carries_authority_forward(tmp_path: Path) -> None:
+    service, lifecycle, routing = _service(tmp_path)
+    boundary = "b" * 64
+    identity = _identity()
+    service.observe(boundary_digest=boundary, identity=identity, policy=_policy())
+    snapshot = _snapshot(routing, identity.digest)
+    service.activate(
+        boundary_digest=boundary,
+        lifecycle_identity_digest=identity.digest,
+        capability_snapshot_digest=snapshot.digest,
+        activated_at=102,
+    )
+    routing.save_approval_record(
+        approval_id="approval-stale", task_id=None, decision_id=None,
+        nonce_hash="1" * 64, manifest_hash="2" * 64, expires_at=999, reserved_tokens=1,
+    )
+    routing.save_lifecycle_approval_binding(
+        approval_id="approval-stale",
+        capability_snapshot_digest=snapshot.digest,
+        lifecycle_identity_digest=identity.digest,
+        bound_at=103,
+    )
+    updated = replace(identity, version="2.1.215", runtime_digest="e" * 64, observed_at=200)
+
+    result = service.observe(boundary_digest=boundary, identity=updated, policy=_policy())
+
+    assert result.state is ProviderLifecycleState.ACTIVE
+    assert result.reason is LifecycleReasonCode.PATCH_CARRIED_FORWARD
+    assert result.change is IdentityChange.PATCH
+    assert result.carried_snapshots == (snapshot.digest,)
+    assert result.invalidated_snapshots == ()
+    assert result.invalidated_approvals == ("approval-stale",)
+    assert (
+        routing.lifecycle_identity_binding(
+            authority_kind="capability_snapshot", authority_id=snapshot.digest
+        )
+        == updated.digest
+    )
+    observation = lifecycle.current_observation(boundary)
+    assert observation.state is ProviderLifecycleState.ACTIVE
+    assert observation.identity.digest == updated.digest
+    events = lifecycle.events(boundary)
+    assert events[-1].reason is LifecycleReasonCode.PATCH_CARRIED_FORWARD
+    assert events[-1].previous_identity_digest == identity.digest
+    assert events[-1].current_identity_digest == updated.digest
+
+
+def test_patch_carry_with_expired_snapshot_keeps_boundary_active_but_carries_nothing(
+    tmp_path: Path,
+) -> None:
+    service, lifecycle, routing = _service(tmp_path)
+    boundary = "b" * 64
+    identity = _identity()
+    service.observe(boundary_digest=boundary, identity=identity, policy=_policy())
+    snapshot = _snapshot(routing, identity.digest)  # ttl 3600, verified 101 -> expires 3701
+    service.activate(
+        boundary_digest=boundary,
+        lifecycle_identity_digest=identity.digest,
+        capability_snapshot_digest=snapshot.digest,
+        activated_at=102,
+    )
+    updated = replace(identity, version="2.1.215", runtime_digest="e" * 64, observed_at=4_000)
+
+    result = service.observe(boundary_digest=boundary, identity=updated, policy=_policy())
+
+    assert result.state is ProviderLifecycleState.ACTIVE
+    assert result.carried_snapshots == ()
+    assert (
+        routing.lifecycle_identity_binding(
+            authority_kind="capability_snapshot", authority_id=snapshot.digest
+        )
+        == identity.digest
+    )
+
+
+def test_consecutive_patch_updates_chain_the_carry(tmp_path: Path) -> None:
+    service, _lifecycle, routing = _service(tmp_path)
+    boundary = "b" * 64
+    identity = _identity()
+    service.observe(boundary_digest=boundary, identity=identity, policy=_policy())
+    snapshot = _snapshot(routing, identity.digest)
+    service.activate(
+        boundary_digest=boundary,
+        lifecycle_identity_digest=identity.digest,
+        capability_snapshot_digest=snapshot.digest,
+        activated_at=102,
+    )
+    second = replace(identity, version="2.1.215", runtime_digest="e" * 64, observed_at=200)
+    third = replace(identity, version="2.1.216", runtime_digest="f" * 64, observed_at=300)
+
+    first_result = service.observe(boundary_digest=boundary, identity=second, policy=_policy())
+    second_result = service.observe(boundary_digest=boundary, identity=third, policy=_policy())
+
+    assert first_result.carried_snapshots == (snapshot.digest,)
+    assert second_result.carried_snapshots == (snapshot.digest,)
+    assert second_result.state is ProviderLifecycleState.ACTIVE
+    assert (
+        routing.lifecycle_identity_binding(
+            authority_kind="capability_snapshot", authority_id=snapshot.digest
+        )
+        == third.digest
+    )
+
+
+def test_minor_drift_after_carry_invalidates_carried_authority(tmp_path: Path) -> None:
+    service, _lifecycle, routing = _service(tmp_path)
+    boundary = "b" * 64
+    identity = _identity()
+    service.observe(boundary_digest=boundary, identity=identity, policy=_policy())
+    snapshot = _snapshot(routing, identity.digest)
+    service.activate(
+        boundary_digest=boundary,
+        lifecycle_identity_digest=identity.digest,
+        capability_snapshot_digest=snapshot.digest,
+        activated_at=102,
+    )
+    patched = replace(identity, version="2.1.215", runtime_digest="e" * 64, observed_at=200)
+    service.observe(boundary_digest=boundary, identity=patched, policy=_policy())
+    minor = replace(identity, version="2.2.0", runtime_digest="f" * 64, observed_at=300)
+
+    result = service.observe(boundary_digest=boundary, identity=minor, policy=_policy())
+
+    assert result.state is ProviderLifecycleState.VERIFICATION_REQUIRED
+    assert result.invalidated_snapshots == (snapshot.digest,)
+    assert result.carried_snapshots == ()
+
+
+def test_patch_on_verification_required_boundary_does_not_carry(tmp_path: Path) -> None:
+    service, _lifecycle, routing = _service(tmp_path)
+    boundary = "b" * 64
+    identity = _identity()
+    service.observe(boundary_digest=boundary, identity=identity, policy=_policy())
+    updated = replace(identity, version="2.1.215", runtime_digest="e" * 64, observed_at=200)
+
+    result = service.observe(boundary_digest=boundary, identity=updated, policy=_policy())
+
+    assert result.state is ProviderLifecycleState.VERIFICATION_REQUIRED
+    assert result.reason is LifecycleReasonCode.PATCH_CHANGED
+    assert result.carried_snapshots == ()
+
+
+def test_carry_partial_failure_fails_closed_and_heals_on_next_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, lifecycle, routing = _service(tmp_path)
+    boundary = "b" * 64
+    identity = _identity()
+    service.observe(boundary_digest=boundary, identity=identity, policy=_policy())
+    snapshot = _snapshot(routing, identity.digest)
+    service.activate(
+        boundary_digest=boundary,
+        lifecycle_identity_digest=identity.digest,
+        capability_snapshot_digest=snapshot.digest,
+        activated_at=102,
+    )
+    updated = replace(identity, version="2.1.215", runtime_digest="e" * 64, observed_at=200)
+    original_record = lifecycle.record_transition
+
+    def _explode(*args: object, **kwargs: object) -> bool:
+        raise LifecycleStorageError("induced_failure")
+
+    monkeypatch.setattr(lifecycle, "record_transition", _explode)
+    with pytest.raises(LifecycleServiceError, match="lifecycle_persistence_failed"):
+        service.observe(boundary_digest=boundary, identity=updated, policy=_policy())
+    monkeypatch.setattr(lifecycle, "record_transition", original_record)
+
+    # Fail-closed while partial: binding moved, observation did not.
+    assert (
+        routing.lifecycle_identity_binding(
+            authority_kind="capability_snapshot", authority_id=snapshot.digest
+        )
+        == updated.digest
+    )
+    assert lifecycle.current_observation(boundary).identity.digest == identity.digest
+    with pytest.raises(LifecycleServiceError, match="lifecycle_binding_missing"):
+        service.require_snapshot_authority(
+            boundary_digest=boundary,
+            lifecycle_identity_digest=identity.digest,
+            capability_snapshot_digest=snapshot.digest,
+            live_identity=identity,
+        )
+
+    healed = service.observe(boundary_digest=boundary, identity=updated, policy=_policy())
+
+    assert healed.state is ProviderLifecycleState.ACTIVE
+    assert healed.reason is LifecycleReasonCode.PATCH_CARRIED_FORWARD
+    assert lifecycle.current_observation(boundary).identity.digest == updated.digest
+    assert healed.carried_snapshots == ()
+
+
+def _route_candidate(**changes: object) -> ApprovedRouteCandidate:
+    # Candidate-construction helper copied from tests/test_route_pool.py's `_candidate`
+    # (verbatim field set, verified against ApprovedRouteCandidate in route_pool.py),
+    # adapted to fix the provider/runtime to the CLAUDE_CODE/LOCAL_CLI identity this
+    # test file's `_identity()` uses and to take overrides by keyword only.
+    values: dict[str, object] = {
+        "candidate_id": "candidate-1",
+        "provider": LifecycleProviderId.CLAUDE_CODE,
+        "runtime_kind": RuntimeKind.LOCAL_CLI,
+        "lifecycle_identity_digest": "1" * 64,
+        "capability_snapshot_digest": "2" * 64,
+        "model_identity_digest": "3" * 64,
+        "routing_policy_digest": None,
+        "requested_model": "model-1",
+        "effective_model": "effective-1",
+        "effort": Effort.HIGH,
+        "permission_mode": PermissionMode.READ_ONLY,
+        "risk_ceiling": RiskTier.HIGH,
+        "trust_policy_digest": "a" * 64,
+        "capabilities": ("architecture", "structured-output"),
+        "context_window_tokens": 100_000,
+        "snapshot_expires_at": 500,
+    }
+    values.update(changes)
+    return ApprovedRouteCandidate(**values)
+
+
+def test_route_authority_selects_carried_snapshot_and_rejects_stale_pins(tmp_path: Path) -> None:
+    service, _lifecycle, routing = _service(tmp_path)
+    boundary = "b" * 64
+    identity = _identity()
+    service.observe(boundary_digest=boundary, identity=identity, policy=_policy())
+    snapshot = _snapshot(routing, identity.digest)
+    service.activate(
+        boundary_digest=boundary,
+        lifecycle_identity_digest=identity.digest,
+        capability_snapshot_digest=snapshot.digest,
+        activated_at=102,
+    )
+    updated = replace(identity, version="2.1.215", runtime_digest="e" * 64, observed_at=200)
+    service.observe(boundary_digest=boundary, identity=updated, policy=_policy())
+
+    fresh_candidate = _route_candidate(  # helper copied from tests/test_route_pool.py
+        candidate_id="carried-primary",
+        lifecycle_identity_digest=updated.digest,
+        capability_snapshot_digest=snapshot.digest,
+    )
+    authority = service.route_authority(boundary, fresh_candidate)
+    assert authority.state is ProviderLifecycleState.ACTIVE
+    assert authority.lifecycle_identity_digest == updated.digest
+
+    stale_candidate = _route_candidate(
+        candidate_id="carried-primary",
+        lifecycle_identity_digest=identity.digest,
+        capability_snapshot_digest=snapshot.digest,
+    )
+    from graphite.routing.route_pool import RoutePoolError, _validate_authority
+
+    with pytest.raises(RoutePoolError, match="route_identity_changed"):
+        _validate_authority(stale_candidate, authority, now=210)
