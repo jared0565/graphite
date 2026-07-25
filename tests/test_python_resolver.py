@@ -198,6 +198,48 @@ def test_same_file_call_binding_unchanged(tmp_path):
     assert [c["id"] for c in out.get("callers", [])] == ["solo_main"]
 
 
+def test_aliased_dotted_import_binds_cross_module(tmp_path):
+    # `import pkg.ledger as lg` then `lg.scan()` — exercises the
+    # aliased_import child of _collect_python_import_maps's import_statement
+    # branch (dotted module + alias -> alias_map).
+    _write(tmp_path / "src" / "pkg" / "__init__.py", "")
+    _write(
+        tmp_path / "src" / "pkg" / "ledger.py",
+        "class Ledger:\n"
+        "    def record_run(self, run_id):\n"
+        "        return [run_id]\n"
+        "\n"
+        "def scan():\n"
+        "    return None\n",
+    )
+    _write(
+        tmp_path / "src" / "pkg" / "consumer.py",
+        "import pkg.ledger as lg\n"
+        "\n"
+        "def run():\n"
+        "    return lg.scan()\n",
+    )
+    g = _graph_for(tmp_path)
+    assert g.has_edge("src_pkg_consumer_run", "src_pkg_ledger_scan")
+
+
+def test_plain_import_binds_cross_module(tmp_path):
+    # `import flatmod` (non-dotted, no alias) then `flatmod.func()` —
+    # exercises the dotted_name child of _collect_python_import_maps's
+    # import_statement branch (non-dotted module -> alias_map keyed by
+    # its own name).
+    _write(tmp_path / "flatmod.py", "def func():\n    return 1\n")
+    _write(
+        tmp_path / "consumer.py",
+        "import flatmod\n"
+        "\n"
+        "def run():\n"
+        "    return flatmod.func()\n",
+    )
+    g = _graph_for(tmp_path)
+    assert g.has_edge("consumer_run", "flatmod_func")
+
+
 def test_function_local_import_binds(tmp_path):
     _write(tmp_path / "src" / "pkg" / "__init__.py", "")
     _write(tmp_path / "src" / "pkg" / "util.py", "def deep():\n    return 1\n")
