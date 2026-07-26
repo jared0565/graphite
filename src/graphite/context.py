@@ -123,16 +123,26 @@ def format_context_markdown(context: dict[str, Any]) -> str:
     impact = context["impact"]
     health = context.get("resolution_health") or {}
     unhealthy = health.get("healthy") is False
+    answer = context.get("answer")
     if impact["impacted_files"]:
         lines.append("Impacted files:")
         lines.extend(f"- `{path}`" for path in impact["impacted_files"][:30])
     elif context.get("inconclusive"):
-        lines.append(
-            "Impacted files: none found — INCONCLUSIVE: only "
-            f"{ratio_percent(health, 'imports')} of import edges and "
-            f"{ratio_percent(health, 'calls')} of call edges resolved in this "
-            "graph; treat as unverified and confirm with grep."
-        )
+        if answer:
+            meaning = answer.get(
+                "empty_meaning", "no impacted files or tests reachable through bound edges"
+            )
+            lines.append(
+                f"Impacted files: none found — INCONCLUSIVE: {meaning}; "
+                "treat as unverified and confirm with grep."
+            )
+        else:
+            lines.append(
+                "Impacted files: none found — INCONCLUSIVE: only "
+                f"{ratio_percent(health, 'imports')} of import edges and "
+                f"{ratio_percent(health, 'calls')} of call edges resolved in this "
+                "graph; treat as unverified and confirm with grep."
+            )
     else:
         lines.append("Impacted files: none found")
     if impact["likely_tests"]:
@@ -144,7 +154,6 @@ def format_context_markdown(context: dict[str, Any]) -> str:
             f"calls {ratio_percent(health, 'calls')}) — this list may be incomplete."
         )
 
-    answer = context.get("answer")
     empty = not impact["impacted_files"] and not impact["likely_tests"]
     if answer:
         degraded = any(
@@ -158,7 +167,9 @@ def format_context_markdown(context: dict[str, Any]) -> str:
                 for relation, langs in sorted(answer.get("health", {}).items())
                 for language in sorted(langs)
             )
-            lines.append(f"answer health: {cells} — {answer['grade'].replace('_', '-')}")
+            grade = answer["grade"].replace("_", "-")
+            line = f"answer health: {cells} — {grade}" if cells else f"answer health: — {grade}"
+            lines.append(line)
             if answer.get("caveats"):
                 lines.append("known limits: " + "; ".join(c["summary"] for c in answer["caveats"]))
 

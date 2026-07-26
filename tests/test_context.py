@@ -77,6 +77,27 @@ def test_context_marks_inconclusive_on_unhealthy_graph():
     assert "INCONCLUSIVE" in text
     assert "no direct dependents found — inconclusive (resolution health low)" in text
     assert "Impacted files: none found\n" not in text
+    # The scoped answer block computes a real meaning here, so the legacy
+    # aggregate-ratio wording must not print (it would self-contradict the
+    # scoped "answer health:" line right below it).
+    assert "% of import edges" not in text
+    assert "no impacted files or tests reachable through bound edges" in text
+    assert "answer health: " in text
+
+
+def test_context_markdown_inconclusive_line_fail_open_aggregate_wording(monkeypatch):
+    """When build_answer_block fails open (returns None), the legacy
+    aggregate-ratio INCONCLUSIVE wording is the only signal available and
+    must still print — and no answer-health lines should appear."""
+    import graphite.context as context_mod
+
+    monkeypatch.setattr(context_mod, "build_answer_block", lambda *a, **k: None)
+    context = context_mod.build_context(_trust_graph(healthy=False), ["lonely"])
+    assert context.get("answer") is None
+    text = context_mod.format_context_markdown(context)
+    assert "INCONCLUSIVE" in text
+    assert "only" in text and "of import edges and" in text and "of call edges resolved in this" in text
+    assert "answer health:" not in text
 
 
 def test_context_unchanged_on_healthy_graph():

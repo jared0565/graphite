@@ -1062,12 +1062,22 @@ def cmd_impact(args: argparse.Namespace) -> int:
     else:
         health = result["resolution_health"]
         if result["inconclusive"]:
-            print(
-                "Impacted files: none found — INCONCLUSIVE: only "
-                f"{ratio_percent(health, 'imports')} of import edges and "
-                f"{ratio_percent(health, 'calls')} of call edges resolved in this "
-                "graph; treat as unverified and confirm with grep."
-            )
+            answer = result.get("answer")
+            if answer:
+                meaning = answer.get(
+                    "empty_meaning", "no impacted files or tests reachable through bound edges"
+                )
+                print(
+                    f"Impacted files: none found — INCONCLUSIVE: {meaning}; "
+                    "treat as unverified and confirm with grep."
+                )
+            else:
+                print(
+                    "Impacted files: none found — INCONCLUSIVE: only "
+                    f"{ratio_percent(health, 'imports')} of import edges and "
+                    f"{ratio_percent(health, 'calls')} of call edges resolved in this "
+                    "graph; treat as unverified and confirm with grep."
+                )
         else:
             if result["impacted_files"] or result["likely_tests"]:
                 print("Impacted files:")

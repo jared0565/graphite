@@ -275,6 +275,33 @@ def test_cmd_impact_human_inconclusive_line(capsys, monkeypatch):
     assert "INCONCLUSIVE" in out
     assert "confirm with grep" in out
     assert "Impacted files:\n" not in out  # empty listings are replaced, not printed
+    # The scoped answer block computes a real meaning here, so the legacy
+    # aggregate-ratio wording (which can self-contradict the scoped "answer
+    # health:" line right below it) must not print.
+    assert "% of import edges" not in out
+    assert "no impacted files or tests reachable through bound edges" in out
+    assert "answer health: " in out
+
+
+def test_cmd_impact_human_inconclusive_line_fail_open_aggregate_wording(capsys, monkeypatch):
+    """When build_answer_block fails open (returns None), the legacy
+    aggregate-ratio INCONCLUSIVE wording is the only signal available and
+    must still print — and no answer-health lines should appear."""
+    import argparse
+
+    from graphite import cli
+
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: _unhealthy_graph())
+    monkeypatch.setattr(cli, "build_answer_block", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_inconclusive", lambda *a, **k: None)
+    args = argparse.Namespace(graph_json="graph-out/graph.json", files=["lonely"], depth=2, json=False)
+    cli.cmd_impact(args)
+    out = capsys.readouterr().out
+    assert "INCONCLUSIVE" in out
+    assert "only" in out and "of import edges and" in out and "of call edges resolved in this" in out
+    assert "confirm with grep" in out
+    assert "answer health:" not in out
 
 
 def test_cmd_impact_human_note_when_nonempty_but_unhealthy(capsys, monkeypatch):
