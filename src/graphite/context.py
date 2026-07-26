@@ -9,11 +9,15 @@ import networkx as nx
 from .answer_contract import (
     GRADE_INCONCLUSIVE,
     build_answer_block,
+    empty_marker,
     is_degraded,
     languages_for_nodes,
 )
 from .health import ratio_percent, resolution_health
+from .listing import listing_lines
 from .query import _find_node_detail
+
+_CONTEXT_LIST_CAP = 30
 
 _TEST_SUFFIXES = (
     ".test.ts",
@@ -133,8 +137,17 @@ def format_context_markdown(context: dict[str, Any]) -> str:
     unhealthy = health.get("healthy") is False
     answer = context.get("answer")
     if impact["impacted_files"]:
-        lines.append("Impacted files:")
-        lines.extend(f"- `{path}`" for path in impact["impacted_files"][:30])
+        marker = empty_marker(answer)
+        lines.extend(
+            listing_lines(
+                impact["impacted_files"],
+                lambda path: f"`{path}`",
+                header="Impacted files:",
+                cap=_CONTEXT_LIST_CAP,
+                indent="",
+                empty=marker,
+            )
+        )
     elif context.get("inconclusive"):
         if answer:
             meaning = answer.get(
@@ -157,9 +170,17 @@ def format_context_markdown(context: dict[str, Any]) -> str:
             lines.append(f"Impacted files: none found — {answer_meaning}")
         else:
             lines.append("Impacted files: none found")
-    if impact["likely_tests"]:
-        lines.append("Likely tests:")
-        lines.extend(f"- `{path}`" for path in impact["likely_tests"][:30])
+    if impact["impacted_files"]:
+        lines.extend(
+            listing_lines(
+                impact["likely_tests"],
+                lambda path: f"`{path}`",
+                header="Likely tests:",
+                cap=_CONTEXT_LIST_CAP,
+                indent="",
+                empty=empty_marker(answer),
+            )
+        )
     if unhealthy and (impact["impacted_files"] or impact["likely_tests"]):
         lines.append(
             f"note: resolution health low (imports {ratio_percent(health, 'imports')}, "

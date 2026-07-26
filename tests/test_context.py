@@ -141,7 +141,11 @@ def test_context_notes_incomplete_when_nonempty_but_unhealthy():
     context = build_context(g, ["target_file"])
     text = format_context_markdown(context)
     assert "may be incomplete" in text
-    assert "INCONCLUSIVE" not in text
+    # The impacted-files half is non-empty and must not be marked/replaced;
+    # its empty sibling (likely_tests) is allowed to carry the grade-aware
+    # INCONCLUSIVE marker now that this round makes it grade-aware (spec §5) --
+    # same precedent as cli.py's test_cmd_impact_human_note_when_nonempty_but_unhealthy.
+    assert "INCONCLUSIVE" not in text.split("Likely tests:")[0]
 
 
 def test_context_carries_full_health_block():
@@ -190,7 +194,11 @@ def test_context_markdown_advisory_line_on_nonempty_degraded():
     context = build_context(g, ["src_a", "t"])
     text = format_context_markdown(context)
     assert "src/b.py" in text
-    assert "INCONCLUSIVE" not in text
+    # The impacted-files half is non-empty and must not be marked/replaced;
+    # its empty sibling (likely_tests) is allowed to carry the grade-aware
+    # INCONCLUSIVE marker now that this round makes it grade-aware (spec §5) --
+    # same precedent as cli.py's test_cmd_impact_human_advisory_line_on_nonempty_degraded.
+    assert "INCONCLUSIVE" not in text.split("Likely tests:")[0]
     assert "answer health: " in text
     assert "advisory" in text
     assert "known limits:" in text
@@ -208,3 +216,84 @@ def test_context_markdown_answer_health_on_empty_or_degraded_not_on_healthy_none
     # edge from "src", so impact is non-empty and the graph is healthy.
     healthy_nonempty = format_context_markdown(build_context(_trust_graph(healthy=True), ["tgt"]))
     assert "answer health:" not in healthy_nonempty
+
+
+HEALTHY_ANSWER = {"grade": "decision_grade", "health": {}, "caveats": []}
+DEGRADED_ANSWER = {
+    "grade": "advisory",
+    "health": {"calls": {"typescript": {"ratio": 0.54, "healthy": False}}},
+    "caveats": [],
+}
+
+
+def _ctx(*, impacted, tests, answer=None, **overrides):
+    """A complete context dict.
+
+    format_context_markdown reads metadata, depth, missing, matched, impact,
+    direct_dependencies, direct_dependents and risk at the top level -- every
+    one of them unguarded. Omitting any raises KeyError, so build the whole
+    shape here rather than per test.
+    """
+    context = {
+        "metadata": {"node_count": 2, "edge_count": 1, "density": 0.5},
+        "inputs": ["src/a.py"],
+        "matched": [],
+        "missing": [],
+        "depth": 2,
+        "direct_dependencies": {},
+        "direct_dependents": {},
+        "impact": {"impacted_files": impacted, "likely_tests": tests, "missing": []},
+        "communities": {},
+        "risk": [],
+        "resolution_health": {"healthy": True},
+        "inconclusive": False,
+    }
+    if answer is not None:
+        context["answer"] = answer
+    context.update(overrides)
+    return context
+
+
+def test_context_marks_the_empty_tests_half():
+    """Markdown sibling of #10: the block is emitted, not omitted."""
+    from graphite.context import format_context_markdown
+
+    text = format_context_markdown(
+        _ctx(impacted=["src/b.py"], tests=[], answer=HEALTHY_ANSWER)
+    )
+
+    assert "Likely tests:\n- none found" in text
+
+
+def test_context_marks_the_empty_tests_half_as_inconclusive_when_degraded():
+    from graphite.context import format_context_markdown
+
+    text = format_context_markdown(
+        _ctx(impacted=["src/b.py"], tests=[], answer=DEGRADED_ANSWER)
+    )
+
+    assert "- none found — INCONCLUSIVE: treat as unverified and confirm with grep" in text
+
+
+def test_context_impacted_files_cap_is_marked():
+    from graphite.context import format_context_markdown
+
+    text = format_context_markdown(
+        _ctx(impacted=[f"src/f{i}.py" for i in range(35)], tests=[], answer=HEALTHY_ANSWER)
+    )
+
+    assert "... 5 more" in text
+
+
+def test_context_both_halves_empty_keeps_the_single_sentence():
+    """Not a bare header and not two blocks -- empty_meaning covers both halves."""
+    from graphite.context import format_context_markdown
+
+    answer = dict(
+        HEALTHY_ANSWER,
+        empty_meaning="no impacted files or tests reachable through bound edges",
+    )
+    text = format_context_markdown(_ctx(impacted=[], tests=[], answer=answer))
+
+    assert "Impacted files: none found — no impacted files or tests reachable" in text
+    assert "Likely tests:" not in text
