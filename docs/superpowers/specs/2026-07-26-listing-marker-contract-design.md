@@ -468,8 +468,13 @@ D9. Site 7 is **removed** from the round rather than shipped (§7.1). The
   `_neighbors` discards the total, so `context --json` is affected too
   (D9, §7.1). Found while planning this round.
 - Sub-answer grading in `answer_contract` (D7, §5).
-- The no-health-cells case of `empty_marker` grading a bare `none found` on
-  zero evidence (§5).
+- **Issue #12** — the no-health-cells case of `empty_marker` grading a bare
+  `none found` on zero evidence (§5). Reproduced live after this round: a
+  TypeScript start node in a graph whose only `calls`/`imports` edges are
+  Python yields `languages: ['typescript']`, `health: {}`,
+  `grade: decision_grade`, and renders `Likely tests:` / `- none found` with
+  no epistemology line. Every gate that catches a doubtful answer keys on
+  *degraded*, and "not measured" is not degraded.
 - `context.py:185-186` aggregate → scoped health gate (D8, §7.1).
 - `export/md.py` markers — five bare headers, four unmarked caps (§7.2).
 - `daemon_health.py:670-671` caps `errors`/`warnings` at
