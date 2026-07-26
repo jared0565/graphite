@@ -48,6 +48,30 @@ def active_caveats() -> list[dict[str, Any]]:
     return [dict(e) for e in CAVEAT_REGISTRY if not e.get("retired_by")]
 
 
+INCONCLUSIVE_EMPTY = "none found — INCONCLUSIVE: treat as unverified and confirm with grep"
+
+
+def is_degraded(block: dict[str, Any] | None) -> bool:
+    """True when any scoped health cell in an answer block is below threshold."""
+    if not block:
+        return False
+    return any(
+        not cell.get("healthy", True)
+        for langs in block.get("health", {}).values()
+        for cell in langs.values()
+    )
+
+
+def empty_marker(block: dict[str, Any] | None) -> str:
+    """Empty-listing text for an answer surface, scoped to the answer's grade.
+
+    A degraded-and-empty listing is `inconclusive` by this contract's own
+    definition, even when the answer as a whole graded `advisory` because its
+    other half was non-empty. See spec §5.
+    """
+    return INCONCLUSIVE_EMPTY if is_degraded(block) else "none found"
+
+
 def languages_for_nodes(g: nx.DiGraph, node_ids: Iterable[str]) -> list[str]:
     """Sorted unique languages of the nodes' source files ('other' dropped)."""
     langs: set[str] = set()

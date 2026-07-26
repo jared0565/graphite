@@ -6,7 +6,12 @@ from typing import Any
 
 import networkx as nx
 
-from .answer_contract import GRADE_INCONCLUSIVE, build_answer_block, languages_for_nodes
+from .answer_contract import (
+    GRADE_INCONCLUSIVE,
+    build_answer_block,
+    is_degraded,
+    languages_for_nodes,
+)
 from .health import ratio_percent, resolution_health
 from .query import _find_node_detail
 
@@ -163,12 +168,7 @@ def format_context_markdown(context: dict[str, Any]) -> str:
 
     empty = not impact["impacted_files"] and not impact["likely_tests"]
     if answer:
-        degraded = any(
-            not cell.get("healthy", True)
-            for langs in answer.get("health", {}).values()
-            for cell in langs.values()
-        )
-        if empty or degraded:
+        if empty or is_degraded(answer):
             cells = ", ".join(
                 f"{relation} ({language}) {langs[language]['ratio']:.2f}"
                 for relation, langs in sorted(answer.get("health", {}).items())

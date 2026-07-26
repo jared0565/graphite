@@ -22,6 +22,7 @@ from .answer_contract import (
     GRADE_INCONCLUSIVE,
     active_caveats,
     build_answer_block,
+    is_degraded,
     languages_for_nodes,
 )
 from .cache import Cache
@@ -1065,15 +1066,14 @@ def cmd_agent_hook(args: argparse.Namespace) -> int:
 
 
 def _answer_lines(block: dict[str, Any] | None, *, empty: bool) -> list[str]:
-    """Human epistemology lines; [] unless empty or a scoped cell is degraded."""
+    """Human epistemology lines; [] unless empty or a scoped cell is degraded.
+
+    Rendered at column 0, matching context.py and the `note:` line, so they
+    cannot be read as entries of the list they follow.
+    """
     if not block:
         return []
-    degraded = any(
-        not cell.get("healthy", True)
-        for langs in block.get("health", {}).values()
-        for cell in langs.values()
-    )
-    if not empty and not degraded:
+    if not empty and not is_degraded(block):
         return []
     cells = ", ".join(
         f"{relation} ({language}) {langs[language]['ratio']:.2f}"
@@ -1081,9 +1081,9 @@ def _answer_lines(block: dict[str, Any] | None, *, empty: bool) -> list[str]:
         for language in sorted(langs)
     )
     grade = block.get("grade", "").replace("_", "-")
-    lines = [f"  answer health: {cells} — {grade}"] if cells else [f"  answer health: — {grade}"]
+    lines = [f"answer health: {cells} — {grade}"] if cells else [f"answer health: — {grade}"]
     if block.get("caveats"):
-        lines.append("  known limits: " + "; ".join(c["summary"] for c in block["caveats"]))
+        lines.append("known limits: " + "; ".join(c["summary"] for c in block["caveats"]))
     return lines
 
 

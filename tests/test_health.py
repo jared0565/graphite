@@ -450,7 +450,7 @@ def test_answer_lines_two_cell_sorted_join_format():
         "caveats": [],
     }
     lines = cli._answer_lines(block, empty=True)
-    assert lines == ["  answer health: calls (python) 0.95, imports (python) 0.80 — decision-grade"]
+    assert lines == ["answer health: calls (python) 0.95, imports (python) 0.80 — decision-grade"]
 
 
 def test_cmd_impact_epistemology_absent_on_healthy_nonempty(capsys, monkeypatch):
@@ -559,3 +559,48 @@ def test_persisted_resolution_on_error_silent_for_missing(tmp_path):
     seen: list[Exception] = []
     assert persisted_resolution(tmp_path, on_error=seen.append) is None
     assert seen == []
+
+
+def test_is_degraded_reads_scoped_cells():
+    from graphite.answer_contract import is_degraded
+
+    assert is_degraded(None) is False
+    assert is_degraded({}) is False
+    assert is_degraded({"health": {}}) is False
+    assert is_degraded(
+        {"health": {"calls": {"python": {"ratio": 0.95, "healthy": True}}}}
+    ) is False
+    assert is_degraded(
+        {"health": {"calls": {"typescript": {"ratio": 0.54, "healthy": False}}}}
+    ) is True
+
+
+def test_empty_marker_is_scoped_to_the_grade():
+    """Spec §5: a bare 'none found' on a degraded answer is an overclaim."""
+    from graphite.answer_contract import empty_marker
+
+    healthy = {"health": {"calls": {"python": {"ratio": 0.95, "healthy": True}}}}
+    degraded = {"health": {"calls": {"typescript": {"ratio": 0.54, "healthy": False}}}}
+
+    assert empty_marker(healthy) == "none found"
+    assert empty_marker(None) == "none found"
+    assert empty_marker(degraded) == (
+        "none found — INCONCLUSIVE: treat as unverified and confirm with grep"
+    )
+
+
+def test_answer_lines_render_at_column_zero():
+    """R3: these lines must not share the two-space list indentation."""
+    from graphite import cli
+
+    block = {
+        "grade": "decision_grade",
+        "health": {
+            "imports": {"python": {"ratio": 0.80, "healthy": True}},
+            "calls": {"python": {"ratio": 0.95, "healthy": True}},
+        },
+        "caveats": [],
+    }
+    lines = cli._answer_lines(block, empty=True)
+    assert lines == ["answer health: calls (python) 0.95, imports (python) 0.80 — decision-grade"]
+    assert not lines[0].startswith(" ")
