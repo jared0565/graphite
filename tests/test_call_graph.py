@@ -132,6 +132,40 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "healthy": True,
         "threshold": 0.8,
     }
+    # Pinned verbatim from actual `answer` output (spec 2026-07-26): the golden
+    # fixture's edges carry no source_file, so resolution_health's by_language
+    # bucket is keyed "other" and the node-seeded "typescript" language never
+    # has a matching health cell -> health is empty but the language-scoped
+    # caveat still fires (relations/languages match on the seed's language,
+    # independent of whether a health cell exists for it).
+    ts_caveat = {
+        "code": "ts-external-calls-unclassified",
+        "summary": "calls to external-package symbols, runtime globals, and destructured locals count as unbound",
+    }
+    answer_calls_only = {
+        "schema": 1,
+        "relations": ["calls"],
+        "languages": ["typescript"],
+        "health": {},
+        "grade": "decision_grade",
+        "caveats": [ts_caveat],
+    }
+    answer_calls_and_imports = {
+        "schema": 1,
+        "relations": ["calls", "imports"],
+        "languages": ["typescript"],
+        "health": {},
+        "grade": "decision_grade",
+        "caveats": [ts_caveat],
+    }
+    answer_imports_only = {
+        "schema": 1,
+        "relations": ["imports"],
+        "languages": ["typescript"],
+        "health": {},
+        "grade": "decision_grade",
+        "caveats": [],
+    }
 
     assert query(g, "callers helper") == {
         "schema_version": 1,
@@ -149,6 +183,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         ],
         "resolution_health": health_block,
         "inconclusive": False,
+        "answer": answer_calls_only,
     }
     assert query(g, "calls main") == {
         "schema_version": 1,
@@ -166,6 +201,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         ],
         "resolution_health": health_block,
         "inconclusive": False,
+        "answer": answer_calls_only,
     }
     assert query(g, "depends-on src_app") == {
         "schema_version": 1,
@@ -175,12 +211,15 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "total": 1,
         "truncated": False,
         "limits": {"max_results": 200},
-        "depends_on": [{"id": "src_lib", "name": "lib.ts", "kind": "file"}],
+        "depends_on": [
+            {"id": "src_lib", "name": "lib.ts", "kind": "file", "source_file": "src/lib.ts"}
+        ],
         "resolution": [
             {"role": "node", "input": "src_app", "node": "src_app", "type": "exact-id"}
         ],
         "resolution_health": health_block,
         "inconclusive": False,
+        "answer": answer_calls_and_imports,
     }
     assert query(g, "imported-by src_lib") == {
         "schema_version": 1,
@@ -190,12 +229,15 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "total": 1,
         "truncated": False,
         "limits": {"max_results": 200},
-        "imported_by": [{"id": "src_app", "name": "app.ts", "kind": "file"}],
+        "imported_by": [
+            {"id": "src_app", "name": "app.ts", "kind": "file", "source_file": "src/app.ts"}
+        ],
         "resolution": [
             {"role": "node", "input": "src_lib", "node": "src_lib", "type": "exact-id"}
         ],
         "resolution_health": health_block,
         "inconclusive": False,
+        "answer": answer_imports_only,
     }
     assert query(g, "reaches main -> helper") == {
         "schema_version": 1,
@@ -216,6 +258,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
             {"role": "source", "input": "main", "node": "src_app_main", "type": "name"},
             {"role": "target", "input": "helper", "node": "src_lib_helper", "type": "name"},
         ],
+        "answer": answer_calls_only,
     }
     assert query(g, "path src_app -> src_lib") == {
         "schema_version": 1,
@@ -236,6 +279,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
             {"role": "source", "input": "src_app", "node": "src_app", "type": "exact-id"},
             {"role": "target", "input": "src_lib", "node": "src_lib", "type": "exact-id"},
         ],
+        "answer": answer_calls_and_imports,
     }
     assert query(g, "community-of src_app") == {
         "schema_version": 1,
@@ -246,6 +290,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "resolution": [
             {"role": "node", "input": "src_app", "node": "src_app", "type": "exact-id"}
         ],
+        "answer": {**answer_calls_and_imports, "empty_meaning": "no community assigned"},
     }
 
     stats = query(g, "stats")
@@ -313,6 +358,22 @@ def test_query_error_outputs_are_golden_stable() -> None:
         "error_code": "no_path",
         "truncated": False,
         "limits": {"max_depth": 32},
+        # no_path carries no resolved seeds, so languages_for_nodes([]) falls
+        # back to every language in resolution_health's by_language ("other",
+        # since this fixture's edges carry no source_file) -> health IS
+        # populated here, unlike the node-seeded verbs above, and no
+        # typescript-only caveat fires.
+        "answer": {
+            "schema": 1,
+            "relations": ["calls"],
+            "languages": ["other"],
+            "health": {
+                "calls": {"other": {"total": 1, "bound": 1, "ratio": 1.0, "healthy": True}}
+            },
+            "grade": "decision_grade",
+            "caveats": [],
+            "empty_meaning": "no call path found within depth",
+        },
     }
 
 
