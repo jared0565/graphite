@@ -95,9 +95,8 @@ def build_answer_block(
         language_set = set(langs)
         caveats = [
             {"code": e["code"], "summary": e["summary"]}
-            for e in CAVEAT_REGISTRY
-            if not e.get("retired_by")
-            and relation_set.intersection(e["relations"])
+            for e in active_caveats()
+            if relation_set.intersection(e["relations"])
             and language_set.intersection(e["languages"])
         ]
         block: dict[str, Any] = {

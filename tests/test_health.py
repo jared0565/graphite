@@ -405,6 +405,54 @@ def test_cmd_impact_prints_epistemology_on_empty(capsys, monkeypatch):
     assert "INCONCLUSIVE" not in out
 
 
+def test_cmd_impact_human_advisory_line_on_nonempty_degraded(capsys, monkeypatch):
+    """Non-empty impact + a degraded scoped cell (via language union across
+    the two queried files) grades advisory, not decision — and the normal
+    impacted-files listing still prints, followed by the epistemology
+    tail."""
+    import argparse
+
+    from graphite import cli
+
+    g = _answer_graph(degraded_ts=True)
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: g)
+    monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_inconclusive", lambda *a, **k: None)
+    args = argparse.Namespace(
+        graph_json="graph-out/graph.json",
+        files=["src/a.py", "src/t.ts"],
+        depth=2,
+        json=False,
+    )
+    cli.cmd_impact(args)
+    out = capsys.readouterr().out
+    assert "Impacted files:" in out
+    assert "src/b.py" in out
+    assert "INCONCLUSIVE" not in out
+    assert "answer health: " in out
+    assert "advisory" in out
+    assert "known limits:" in out
+    # Normal output first, THEN the epistemology tail (not interleaved).
+    assert out.index("src/b.py") < out.index("answer health: ")
+
+
+def test_answer_lines_two_cell_sorted_join_format():
+    """The health-cell join is sorted by (relation, language), independent
+    of dict insertion order."""
+    from graphite import cli
+
+    block = {
+        "grade": "decision_grade",
+        "health": {
+            "imports": {"python": {"ratio": 0.80, "healthy": True}},
+            "calls": {"python": {"ratio": 0.95, "healthy": True}},
+        },
+        "caveats": [],
+    }
+    lines = cli._answer_lines(block, empty=True)
+    assert lines == ["  answer health: calls (python) 0.95, imports (python) 0.80 — decision-grade"]
+
+
 def test_cmd_impact_epistemology_absent_on_healthy_nonempty(capsys, monkeypatch):
     import argparse
 

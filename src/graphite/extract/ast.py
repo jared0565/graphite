@@ -525,10 +525,12 @@ def _python_import_modules(node: Any) -> list[tuple[str, int]]:
 
 def _python_from_import_submodules(
     node: Any, rel_path: str, source_index: SourceIndex | None
-) -> list[Any]:
+) -> list[str]:
     """Resolved submodule paths for `from P import a, b` when a/b are modules.
 
-    Mirrors _collect_python_import_maps' module-first probe (ast.py:583-587)
+    Mirrors _collect_python_import_maps' module-first probe (the
+    `as_module = source_index.resolve_python_module(...)` check tried
+    before the symbol-map fallback, in its import_from_statement branch)
     at the import-EDGE layer: the emission site only ever saw the base
     module, which is how `from aramid import pipeline` bound to the package
     __init__ and hid test files from impact (issue #7).

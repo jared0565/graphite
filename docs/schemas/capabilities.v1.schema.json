@@ -100,6 +100,23 @@
       "type": "object",
       "required": ["max_graph_bytes"],
       "properties": {"max_graph_bytes": {"type": "integer"}}
+    },
+    "answer_contract": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["schema", "grades", "caveats"],
+      "properties": {
+        "schema": {"type": "integer"},
+        "grades": {"type": "array", "items": {"type": "string"}},
+        "caveats": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["code", "relations", "languages", "summary", "since"]
+          }
+        }
+      }
     }
   }
 }

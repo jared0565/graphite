@@ -332,12 +332,30 @@ def _record_inconclusive(subject: str, result: Any) -> None:
             cell = by_rel.get(rel) or {}
             return cell.get("ratio")
 
+        detail = f"imports {_ratio('imports')}, calls {_ratio('calls')}, healthy {health.get('healthy')}"
+        answer = result.get("answer")
+        if isinstance(answer, dict):
+            # The aggregate ratios above can read "healthy True" while a
+            # scoped cell is what actually drove this incident (firescraper
+            # shape); append the scoped grade and degraded cells so the
+            # incident is self-explanatory without cross-referencing.
+            degraded_cells = ", ".join(
+                f"{relation}({language}) {cell['ratio']:.1f}"
+                for relation, langs in sorted(answer.get("health", {}).items())
+                for language, cell in sorted(langs.items())
+                if not cell.get("healthy", True)
+            )
+            grade = answer.get("grade", "")
+            parts = [p for p in (degraded_cells, grade) if p]
+            if parts:
+                detail += ", answer " + " ".join(parts)
+
         record_incident(
             repo_ledger_dir(Path.cwd()),
             klass="query",
             code="query_inconclusive",
             subject=subject,
-            detail=f"imports {_ratio('imports')}, calls {_ratio('calls')}, healthy {health.get('healthy')}",
+            detail=detail,
         )
     except Exception:
         return
@@ -385,13 +403,16 @@ def _impact(g: Any, changes: list[str], depth: int) -> dict[str, Any]:
 
     health = resolution_health(g)
     total = len(impacted_files) + len(likely_tests)
-    block = build_answer_block(
-        g,
-        relations=("calls", "imports"),
-        languages=languages_for_nodes(g, start_nodes),
-        total=total,
-        empty_meaning="no impacted files or tests reachable through bound edges",
-    )
+    try:
+        block = build_answer_block(
+            g,
+            relations=("calls", "imports"),
+            languages=languages_for_nodes(g, start_nodes),
+            total=total,
+            empty_meaning="no impacted files or tests reachable through bound edges",
+        )
+    except Exception:
+        block = None
     inconclusive = (
         block["grade"] == GRADE_INCONCLUSIVE
         if block is not None

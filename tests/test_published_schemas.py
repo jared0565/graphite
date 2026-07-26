@@ -174,3 +174,17 @@ def test_capabilities_carries_answer_contract(capsys) -> None:
     assert contract["grades"] == [GRADE_DECISION, GRADE_ADVISORY, GRADE_INCONCLUSIVE]
     for caveat in contract["caveats"]:
         assert {"code", "relations", "languages", "summary", "since"} <= caveat.keys()
+
+
+def test_capabilities_schema_documents_answer_contract() -> None:
+    """The published schema must not just tolerate `answer_contract` via
+    top-level additionalProperties:true — it must document its shape, and
+    as an OPTIONAL property (not required, so older capability payloads
+    without it still validate)."""
+    schema = _load("capabilities.v1.schema.json")
+    assert "answer_contract" not in schema["required"]
+    prop = schema["properties"]["answer_contract"]
+    assert prop["required"] == ["schema", "grades", "caveats"]
+    assert prop["properties"]["grades"]["items"] == {"type": "string"}
+    caveat_item = prop["properties"]["caveats"]["items"]
+    assert set(caveat_item["required"]) == {"code", "relations", "languages", "summary", "since"}

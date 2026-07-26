@@ -372,18 +372,25 @@ def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
     if not is_error:
         envelope["resolution"] = _resolution(spec, result)
     if spec.relations and (not is_error or result.get("error_code") == "no_path"):
-        seeds = [] if is_error else [entry.get("node") for entry in _resolution(spec, result)]
-        block = build_answer_block(
-            g,
-            relations=spec.relations,
-            languages=languages_for_nodes(g, seeds),
-            total=0 if _is_empty(spec, result) else 1,
-            empty_meaning=spec.empty_meaning or None,
-        )
-        if block is not None:
-            envelope["answer"] = block
-            if "inconclusive" in envelope:
-                envelope["inconclusive"] = block["grade"] == GRADE_INCONCLUSIVE
+        # Fail-open (spec R6): computation performed only to build the
+        # `answer` block — seed derivation, language lookup, the block
+        # itself — must never be able to error the query. On any failure
+        # here the envelope is left exactly as it was before this block.
+        try:
+            seeds = [entry.get("node") for entry in envelope.get("resolution", [])]
+            block = build_answer_block(
+                g,
+                relations=spec.relations,
+                languages=languages_for_nodes(g, seeds),
+                total=0 if _is_empty(spec, result) else 1,
+                empty_meaning=spec.empty_meaning or None,
+            )
+            if block is not None:
+                envelope["answer"] = block
+                if "inconclusive" in envelope:
+                    envelope["inconclusive"] = block["grade"] == GRADE_INCONCLUSIVE
+        except Exception:
+            pass
     return envelope
 
 

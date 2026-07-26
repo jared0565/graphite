@@ -331,3 +331,26 @@ def test_legacy_inconclusive_upgrades_to_scoped(monkeypatch):
     assert result["answer"]["grade"] == "inconclusive"
     assert result["inconclusive"] is True
     assert result["resolution_health"]["healthy"] is True  # aggregate masks; scoped does not
+
+
+def test_execute_plan_fail_open_when_answer_computation_raises(monkeypatch):
+    """spec R6: the whole answer-attach step (seed derivation, language
+    lookup, build_answer_block) must be unable to error the query. On
+    failure the envelope carries no `answer` key and the legacy aggregate
+    `inconclusive` value (from _attach_resolution) stands untouched."""
+    import graphite.query as query_mod
+
+    g = _contract_graph()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("synthetic language-lookup failure")
+
+    monkeypatch.setattr(query_mod, "languages_for_nodes", _boom)
+    result = execute_plan(g, make_plan("callers", [("node", "a_fn")], {}))
+    assert result["total"] == 0
+    assert "answer" not in result
+    # a_fn's only calls edge is bound, so the aggregate graph is healthy ->
+    # the legacy aggregate-derived inconclusive is False, unmodified by the
+    # (never-reached) scoped-grade overwrite.
+    assert result["resolution_health"]["healthy"] is True
+    assert result["inconclusive"] is False

@@ -58,13 +58,16 @@ def build_context(
 
     health = resolution_health(g)
     total = len(impact["impacted_files"]) + len(impact["likely_tests"])
-    block = build_answer_block(
-        g,
-        relations=("calls", "imports"),
-        languages=languages_for_nodes(g, start_nodes),
-        total=total,
-        empty_meaning="no impacted files or tests reachable through bound edges",
-    )
+    try:
+        block = build_answer_block(
+            g,
+            relations=("calls", "imports"),
+            languages=languages_for_nodes(g, start_nodes),
+            total=total,
+            empty_meaning="no impacted files or tests reachable through bound edges",
+        )
+    except Exception:
+        block = None
     inconclusive = (
         block["grade"] == GRADE_INCONCLUSIVE
         if block is not None
@@ -144,7 +147,11 @@ def format_context_markdown(context: dict[str, Any]) -> str:
                 "graph; treat as unverified and confirm with grep."
             )
     else:
-        lines.append("Impacted files: none found")
+        answer_meaning = (answer or {}).get("empty_meaning")
+        if answer_meaning:
+            lines.append(f"Impacted files: none found — {answer_meaning}")
+        else:
+            lines.append("Impacted files: none found")
     if impact["likely_tests"]:
         lines.append("Likely tests:")
         lines.extend(f"- `{path}`" for path in impact["likely_tests"][:30])
