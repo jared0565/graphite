@@ -114,3 +114,23 @@ def test_context_carries_full_health_block():
     context = build_context(nx.DiGraph(), [])
     block = context["resolution_health"]
     assert set(block) >= {"schema", "placeholder_nodes", "by_relation", "by_language", "healthy", "threshold"}
+
+
+def test_context_build_carries_answer_block():
+    from graphite.context import build_context
+
+    context = build_context(_trust_graph(healthy=True), ["lonely"])
+    assert context["answer"]["relations"] == ["calls", "imports"]
+    assert context["answer"]["grade"] == "decision_grade"
+
+
+def test_context_markdown_answer_health_on_empty_or_degraded_not_on_healthy_nonempty():
+    from graphite.context import build_context, format_context_markdown
+
+    degraded_empty = format_context_markdown(build_context(_trust_graph(healthy=False), ["lonely"]))
+    assert "answer health: " in degraded_empty
+
+    # Same fixture, queried from the other end: "tgt" has a bound incoming
+    # edge from "src", so impact is non-empty and the graph is healthy.
+    healthy_nonempty = format_context_markdown(build_context(_trust_graph(healthy=True), ["tgt"]))
+    assert "answer health:" not in healthy_nonempty
