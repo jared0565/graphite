@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import networkx as nx
+
 from graphite.cli import main
 from graphite.graph import build_graph
 from graphite.query import QUERY_VERBS, build_plan, execute_plan, query
@@ -255,3 +257,77 @@ def test_cli_show_plan_includes_plan_in_result(tmp_path, monkeypatch, capsys) ->
     assert main(["query", "callers main"]) == 0
     bare = json.loads(capsys.readouterr().out)
     assert "plan" not in bare
+
+
+def _contract_graph():
+    """Python-healthy graph: one caller -> callee, plus an isolated leaf."""
+    g = nx.DiGraph()
+    g.add_node("a", kind="file", name="a.py", source_file="a.py")
+    g.add_node("b", kind="file", name="b.py", source_file="b.py")
+    g.add_node("a_fn", kind="function", name="fn", source_file="a.py")
+    g.add_node("b_fn", kind="function", name="gn", source_file="b.py")
+    g.add_edge("a", "b", relation="imports", source_file="a.py")
+    g.add_edge("a_fn", "b_fn", relation="calls", source_file="a.py")
+    return g
+
+
+def test_execute_plan_attaches_answer_block():
+    g = _contract_graph()
+    result = execute_plan(g, make_plan("imported-by", [("node", "b")], {}))
+    assert result["answer"]["schema"] == 1
+    assert result["answer"]["relations"] == ["imports"]
+    assert result["answer"]["grade"] == "decision_grade"
+    assert "empty_meaning" not in result["answer"]
+
+
+def test_execute_plan_empty_answer_carries_meaning():
+    g = _contract_graph()
+    result = execute_plan(g, make_plan("callers", [("node", "a_fn")], {}))
+    assert result["total"] == 0
+    assert result["answer"]["empty_meaning"] == "no bound callers found"
+
+
+def test_stats_has_no_answer_block():
+    g = _contract_graph()
+    result = execute_plan(g, make_plan("stats", [], {}))
+    assert "answer" not in result
+
+
+def test_no_path_error_carries_answer_block():
+    g = _contract_graph()
+    result = execute_plan(g, make_plan("reaches", [("source", "b_fn"), ("target", "a_fn")], {}))
+    assert result["error_code"] == "no_path"
+    assert result["answer"]["relations"] == ["calls"]
+    assert result["answer"]["empty_meaning"] == "no call path found within depth"
+
+
+def test_neighbor_listing_entries_carry_source_file():
+    g = _contract_graph()
+    result = execute_plan(g, make_plan("imported-by", [("node", "b")], {}))
+    entry = result["imported_by"][0]
+    assert entry["source_file"] == "a.py"
+    assert set(entry.keys()) == {"id", "name", "kind", "source_file"}
+
+
+def test_legacy_inconclusive_upgrades_to_scoped(monkeypatch):
+    """Empty answer on a degraded scoped cell => inconclusive even if
+    aggregate healthy (firescraper regression, query path)."""
+    g = _contract_graph()
+    # Degrade typescript calls while python stays healthy.
+    g.add_node("t", kind="function", name="t", source_file="t.ts")
+    for i in range(9):
+        ph = f"tsph{i}"
+        g.add_node(ph, kind="unknown")
+        g.add_edge("t", ph, relation="calls", source_file="t.ts")
+    # Enough bound python calls to keep the AGGREGATE ratio >= 0.8
+    # (9 unbound ts + 41 bound py -> calls 41/50 = 0.82): this is the
+    # firescraper shape — aggregate healthy, ts cell degraded.
+    for i in range(40):
+        fn = f"py_fn{i}"
+        g.add_node(fn, kind="function", name=f"f{i}", source_file="a.py")
+        g.add_edge(fn, "b_fn", relation="calls", source_file="a.py")
+    result = execute_plan(g, make_plan("callers", [("node", "t")], {}))
+    assert result["total"] == 0
+    assert result["answer"]["grade"] == "inconclusive"
+    assert result["inconclusive"] is True
+    assert result["resolution_health"]["healthy"] is True  # aggregate masks; scoped does not
