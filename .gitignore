@@ -13,3 +13,6 @@ __pycache__/
 dist/
 .venv/
 .worktrees/
+
+# Subagent-driven-development scratch (ledgers, briefs, review packages)
+.superpowers/
