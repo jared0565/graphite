@@ -57,7 +57,7 @@ inline; every site that does not applies a naked `[:N]` slice at render time.
 | `cli.py:444` watch change | `[:8]` inline | yes — `" ..."` | yes |
 | `review.py:402` | `_bounded_list` → `OUTPUT_TRUNCATED` | yes | yes — `- None` |
 | `daemon_health.py:349` inner | `_MAX_GROUP_DETAILS` | yes — `... N more` | n/a |
-| `context.py:210` neighbors | `[:20]` inline | **no** | yes — `none` / `- none` |
+| `context.py:210` neighbors | `[:20]` inline | **no** — but see §7.1: a *data-layer* cap, issue #11 | yes — `none` / `- none` |
 | `cli.py:1120` impact | — | n/a | **no** (#10) |
 | `cli.py:1344` daemon-status | `[:20]` inline | **no** (#8) | n/a |
 | `cli.py:464/468` watch impact | `[:20]`/`[:30]` inline | **no** | guarded |
@@ -142,7 +142,7 @@ user asked.**
 
 | Kind | Surfaces | Header | Empty marker | Truncation marker |
 |---|---|---|---|---|
-| Answer | `impact`, `context` (impacted / tests / neighbors) | unconditional | yes, grade-aware (§5) | yes |
+| Answer | `impact`, `context` (impacted / tests) | unconditional within the listing branch | yes, grade-aware (§5) | yes |
 | Count-in-summary | `daemon-status`, `validate` | none — the summary line states the count | n/a | yes |
 | Conditional report | watch impact, `daemon-health` errors/warnings | only when non-empty | n/a | yes |
 
@@ -230,23 +230,52 @@ matching and are indentation-agnostic.
 | 4 | `cli.py:462` `_print_watch_impact` | Conditional | caps 20/30 → markers; guards retained |
 | 5 | `context.py:132` | Answer | impacted cap 30 → marker |
 | 6 | `context.py:157` | Answer | tests cap 30 → marker; **empty case now rendered** (markdown sibling of #10) |
-| 7 | `context.py:210` | Answer | neighbors cap 20 → marker **only**; empty handling unchanged (see 7.2) |
+| ~~7~~ | ~~`context.py:210`~~ | — | **Removed from this round — issue #11** (§7.1). The numbering keeps its gap so cross-references stay stable. |
 | 8 | `daemon_health.py:374/376` | Conditional | outer caps 20 → markers; inner marker at :349 unchanged |
 | 9 | `cli.py:1084` `_answer_lines` | — | column 0 (§6) |
 
-### 7.1 Neighbour sections: truncation marker only
+### 7.1 Neighbour sections: removed from this round (issue #11)
 
-Site 7 is Answer-kind, but its empty handling is **not** changed. It already
-emits empty markers (`none`, `  - none` at `context.py:203/208`) and already
-has an inconclusive path for the dependents case
-(`context.py:185-186`: "no direct dependents found — inconclusive
-(resolution health low)"). Only the unmarked `[:20]` cap is a defect.
+Site 7 was originally specified as "add a truncation marker to
+`context.py:210`". Implementation planning showed that is the wrong fix for
+the wrong defect, so it is **removed** rather than shipped as something that
+would not work.
 
-That existing inconclusive path keys off the **aggregate** `unhealthy` flag,
-not the scoped answer block — the pattern this project's doctrine warns can
-lie. Bringing it onto the scoped grade is a genuine improvement and a
-genuine scope increase; it is recorded here as a follow-up rather than
-folded in silently.
+`build_context` already caps neighbours at the data layer: `_neighbors`
+(`context.py:201-203`) does `ids[:limit]` with `limit=neighbor_limit`, and
+discards `len(ids)`. The render-site `[:20]` therefore sits on top of an
+already-capped list. Two consequences, both measured live on this repo's own
+graph:
+
+```
+graphite context src/graphite/cli.py --neighbor-limit 50 --json
+  direct_dependencies 50, direct_dependents 30
+graphite context src/graphite/cli.py --neighbor-limit 50
+  Direct Dependencies 20, Direct Dependents 20 — no marker
+```
+
+1. At the default `neighbor_limit=20` the render slice can never drop
+   anything: it is dead code, and a marker there would never fire.
+2. Above the default it **silently overrides the user's explicit
+   `--neighbor-limit`** (`cli.py:2282`), which is strictly worse than the
+   defects this round fixes.
+
+A render marker cannot repair either one. It would compute its count from
+data that was already cut — printing `... 30 more` when the user asked for
+50 and the payload holds 50 — and the true dropped count is known only to
+`_neighbors`, which throws it away. The fix requires carrying a total and a
+truncation signal in the **context result payload**, which R6 forbids here.
+`context --json` is affected too, so this is not even a human-output defect.
+
+Filed as issue #11 for a round that can change the result dict.
+`direct_dependents` / `direct_dependencies` appear in no file under
+`docs/schemas/`, so no published schema version is at stake.
+
+The neighbour section's existing empty markers (`none`, `  - none` at
+`context.py:203/208`) and its inconclusive path (`context.py:185-186`) stay
+exactly as they are. That path keys off the **aggregate** `unhealthy` flag
+rather than the scoped answer block — the pattern this project's doctrine
+warns can lie — and remains a separate follow-up (D8).
 
 ### 7.2 Deliberately untouched
 
@@ -290,12 +319,12 @@ Unit tests, `tests/test_listing.py`:
 - custom `indent`, custom `empty`, `more_hint` appended
 - truncation line carries no `- ` bullet (R3)
 
-Surface table test, `tests/test_listing_surfaces.py`: the eight listing call
-sites (1–8; site 9 is not a listing and is covered by the epistemology tests
-below), each with its declared kind and an over-cap input. Asserts every
-surface emits a line matching `\.\.\. \d+ more`, and that Answer-kind
-surfaces emit their header even when the list is empty. A new surface must
-be added to this table to pass.
+Surface table test, `tests/test_listing_surfaces.py`: the seven listing call
+sites — 1–6 and 8, each with its declared kind and an over-cap input. Site 7
+is removed (§7.1); site 9 is not a listing and is covered by the epistemology
+tests below. Asserts every surface emits a line matching `\.\.\. \d+ more`,
+and that Answer-kind surfaces emit their header even when the list is empty.
+A new surface must be added to this table to pass.
 
 Answer-surface epistemology tests (extend `tests/test_health.py`,
 `tests/test_context.py`):
@@ -353,9 +382,19 @@ D7. Sub-answer grading in the answer contract is out of scope; §5
 D8. The neighbour sections' existing inconclusive path keys off aggregate
     `unhealthy` rather than the scoped grade (§7.1). Left as-is; moving it
     onto the scoped grade is a follow-up, not a silent rider.
+D9. Site 7 is **removed** from the round rather than shipped (§7.1). The
+    marker it was specified to add would never fire at the default
+    `neighbor_limit`, and above the default the real defect is that the
+    render cap overrides the user's flag — repairable only by changing the
+    result payload, which R6 forbids. Shipping a marker that cannot fire
+    would have been the round's own failure mode: output that looks
+    complete and is not. Issue #11.
 
 ## 12. Follow-ups this round deliberately does not take
 
+- **Issue #11** — `context` neighbour cap overrides `--neighbor-limit`, and
+  `_neighbors` discards the total, so `context --json` is affected too
+  (D9, §7.1). Found while planning this round.
 - Sub-answer grading in `answer_contract` (D7, §5).
 - `context.py:185-186` aggregate → scoped health gate (D8, §7.1).
 - `export/md.py` markers — five bare headers, four unmarked caps (§7.2).
