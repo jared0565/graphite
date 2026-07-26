@@ -170,7 +170,7 @@ def format_context_markdown(context: dict[str, Any]) -> str:
             lines.append(f"Impacted files: none found — {answer_meaning}")
         else:
             lines.append("Impacted files: none found")
-    if impact["impacted_files"]:
+    if impact["impacted_files"] or impact["likely_tests"]:
         lines.extend(
             listing_lines(
                 impact["likely_tests"],

@@ -297,3 +297,24 @@ def test_context_both_halves_empty_keeps_the_single_sentence():
 
     assert "Impacted files: none found — no impacted files or tests reachable" in text
     assert "Likely tests:" not in text
+
+
+def test_context_marks_the_tests_half_when_impacted_files_is_empty():
+    """Regression found in self-review: the brief's literal Step 5 guard
+    (`if impact["impacted_files"]:`) drops a genuinely non-empty likely_tests
+    list whenever impacted_files is empty -- the default shape for a leaf
+    module whose only predecessor is its own test file (see
+    _reverse_impact: a test-file source lands in likely_tests before the
+    `elif node not in start_nodes` check that populates impacted_files).
+    cli.py's cmd_impact guards this correctly with `or`
+    (`if result["impacted_files"] or result["likely_tests"]:`); context.py
+    must match that guard for the "cmd_impact behaves identically" claim in
+    the brief to actually hold."""
+    from graphite.context import format_context_markdown
+
+    text = format_context_markdown(
+        _ctx(impacted=[], tests=["src/app.test.ts"], answer=HEALTHY_ANSWER)
+    )
+
+    assert "Likely tests:\n- `src/app.test.ts`" in text
+    assert "Impacted files: none found" in text
