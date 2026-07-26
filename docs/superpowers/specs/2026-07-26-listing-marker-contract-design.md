@@ -123,8 +123,9 @@ that wants silence on empty cannot accidentally leave a header behind.
 Count-in-summary and conditional-report surfaces (§4) all pass it.
 
 The function is pure and total: it prints nothing, raises nothing, and
-returns a list. `cli.py` prints the lines; `context.py` and
-`daemon_health.py` extend their line lists with them. Parameterisation is
+returns a list. `cli.py` prints the lines; `context.py` extends its line
+lists with them. `daemon_health.py` does not call `listing_lines` at all —
+it implements its marker locally (§7 row 8). Parameterisation is
 required because the surfaces genuinely differ — `context.py` renders
 `- \`path\`` at column 0, `cli.py` renders `  - path`, `daemon-status`
 renders `  - {root} | builds=…`.
@@ -147,7 +148,8 @@ user asked.**
 
 | Kind | Surfaces | Header | Empty marker | Truncation marker |
 |---|---|---|---|---|
-| Answer | `impact`, `context` (impacted / tests) | unconditional within the listing branch | yes, grade-aware (§5) | yes |
+| Answer | `impact` | unconditional within the listing branch | yes, grade-aware (§5) | n/a — `cmd_impact` passes no `cap` at all (§1.1); nothing to truncate |
+| Answer | `context` (impacted / tests) | unconditional within the listing branch | yes, grade-aware (§5) | yes — cap 30 |
 | Count-in-summary | `daemon-status`, `validate` | none — the summary line states the count | n/a | yes |
 | Conditional report | watch impact, `daemon-health` errors/warnings | only when non-empty | n/a | yes |
 
@@ -214,6 +216,24 @@ answer contract has no sub-answer granularity — it cannot grade
 in the renderer. A contract-level fix (per-list grading) is a candidate
 follow-up ticket, out of scope for a renderer-only round.
 
+A second, distinct gap sits underneath the first. `empty_marker` (via
+`is_degraded`) returns the bare `none found` whenever no scoped health cell
+in the block is degraded — and that condition is also true when the
+block's `health` dict has **no cells at all**. Verified live: a `.ts` start
+node queried in a graph whose only `calls`/`imports` edges are Python
+produces `languages: ['typescript']`, `health: {}`, `grade:
+decision_grade`, rendering `Likely tests:` / `- none found` with no
+epistemology line and no `note:` line — a trustworthy-absence claim resting
+on zero health evidence for that language. This is inherited
+`answer_contract` v1 behaviour, not something this round introduces: the
+documented "no health cell → `decision_grade` on zero evidence" weakness
+(D7 territory, same as the sub-answer-granularity gap above). The remedy is
+out of this round's renderer-only scope — `listing_lines` and
+`empty_marker` can only act on the health data the contract hands them.
+Noted here because on this exact path the round's own effect is to convert
+output that was previously visibly incomplete (a bare header, or an
+unmarked empty list) into a confident, well-formed claim.
+
 ## 6. Indentation fix (R3)
 
 `_answer_lines` (`cli.py:1084-1086`) moves from two-space indent to column
@@ -242,7 +262,7 @@ matching and are indentation-agnostic.
 | 5 | `context.py:132` | Answer | impacted cap 30 → marker |
 | 6 | `context.py:157` | Answer | tests cap 30 → marker; **empty case now rendered** (markdown sibling of #10) |
 | ~~7~~ | ~~`context.py:210`~~ | — | **Removed from this round — issue #11** (§7.1). The numbering keeps its gap so cross-references stay stable. |
-| 8 | `daemon_health.py:374/376` | Conditional | outer caps 20 → markers; inner marker at :349 unchanged. Implements the marker locally rather than through `listing_lines`, because its body is grouped by issue code rather than being a flat list; the surface table test (§9) covers it. |
+| 8 | `daemon_health.py:374/376` | Conditional | outer caps 20 → markers; inner marker at :349 unchanged. Implements the marker locally rather than through `listing_lines`, because its body is grouped by issue code rather than being a flat list. `SURFACES` in `tests/test_listing_surfaces.py` declares this as a surface (`daemon_health._issue_lines`, with an expected `listing_lines` call count of zero — it makes none); the marker itself is tested in `tests/test_daemon_health.py`; and the AST reconciliation that ties §9's surface table to real call sites explicitly does not, and cannot, reach a hand-rolled marker. |
 | 9 | `cli.py:1084` `_answer_lines` | — | column 0 (§6) |
 
 ### 7.1 Neighbour sections: removed from this round (issue #11)
@@ -330,12 +350,26 @@ Unit tests, `tests/test_listing.py`:
 - custom `indent`, custom `empty`, `more_hint` appended
 - truncation line carries no `- ` bullet (R3)
 
-Surface table test, `tests/test_listing_surfaces.py`: the seven listing call
-sites — 1–6 and 8, each with its declared kind and an over-cap input. Site 7
-is removed (§7.1); site 9 is not a listing and is covered by the epistemology
-tests below. Asserts every surface emits a line matching `\.\.\. \d+ more`,
-and that Answer-kind surfaces emit their header even when the list is empty.
-A new surface must be added to this table to pass.
+Surface table test, `tests/test_listing_surfaces.py`: `SURFACES` names the
+seven listing surfaces — 1–6 and 8, each with its declared kind. Site 7 is
+removed (§7.1); site 9 is not a listing and is covered by the epistemology
+tests below. `test_listing_lines_marker_shape_is_uniform` and
+`test_answer_surfaces_emit_their_header_when_empty` assert the marker shape
+and the empty-header behaviour by calling `listing_lines()` directly — they
+exercise the function's own contract, not any surface's call site. Of the
+seven, only `context.likely_tests` (site 6) is driven through its own
+renderer with a real over-cap input, in
+`test_context_likely_tests_cap_is_marked`, which calls
+`format_context_markdown` directly. `cmd_impact` (site 1) cannot be tested
+this way at all: it passes no `cap` to `listing_lines` (§1.1, §4), so it has
+no over-cap input to give. The remaining sites (2–5, 8) have their markers
+tested where they are implemented — `tests/test_daemon_health.py` and
+`tests/test_reliability.py` — not in this file. What this file does assert
+mechanically is `test_every_listing_lines_call_site_is_accounted_for`: an
+AST walk over `src/graphite` reconciling the real `listing_lines()` call
+count against `SURFACES`, so an added or removed call site with no matching
+row fails the suite. That reconciliation is what makes "a new surface must
+be added to this table to pass" true.
 
 Answer-surface epistemology tests (extend `tests/test_health.py`,
 `tests/test_context.py`):
@@ -347,8 +381,14 @@ Answer-surface epistemology tests (extend `tests/test_health.py`,
   `none found` and the test fails.
 - `_answer_lines` output starts at column 0 (updates `test_health.py:453`)
 
-Regression fixture: the FireScraper shape from §1 — 2 impacted, 0 tests,
-`typescript.calls` degraded — rendered end to end and asserted line by line.
+Regression fixture:
+`test_impact_empty_tests_half_is_marked_inconclusive_when_degraded`
+(`tests/test_health.py`) — the FireScraper shape from §1 (impacted
+non-empty, tests empty, `typescript.calls` degraded; concretely one
+impacted file, `src/b.py`) run end to end through `cmd_impact`. It asserts
+one substring — the `- none found — INCONCLUSIVE: …` marker line — is
+present in the captured output, not a line-by-line comparison of the
+rendered block.
 
 ## 10. Acceptance
 
@@ -407,5 +447,13 @@ D9. Site 7 is **removed** from the round rather than shipped (§7.1). The
   `_neighbors` discards the total, so `context --json` is affected too
   (D9, §7.1). Found while planning this round.
 - Sub-answer grading in `answer_contract` (D7, §5).
+- The no-health-cells case of `empty_marker` grading a bare `none found` on
+  zero evidence (§5).
 - `context.py:185-186` aggregate → scoped health gate (D8, §7.1).
 - `export/md.py` markers — five bare headers, four unmarked caps (§7.2).
+- `daemon_health.py:670-671` caps `errors`/`warnings` at
+  `_MAX_REPORT_ISSUES` (100) before `error_count`/`warning_count` are
+  computed from the capped lists — issues beyond 100 vanish from the
+  summary with no trace. A data-layer cap in the same class as issue #11
+  (§7.1), which this round removed site 7 for rather than ship a marker
+  that could not repair it.
