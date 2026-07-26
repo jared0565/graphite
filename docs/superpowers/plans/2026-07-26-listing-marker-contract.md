@@ -227,9 +227,14 @@ git commit -m "feat(listing): contract module for bounded human-output lists"
 
 **Interfaces:**
 - Consumes: nothing from Task 1.
-- Produces: `answer_contract.is_degraded(block: dict[str, Any] | None) -> bool`. Task 3 and Task 6 both use it.
+- Produces, all in `answer_contract`:
+  - `is_degraded(block: dict[str, Any] | None) -> bool`
+  - `INCONCLUSIVE_EMPTY: str` — the grade-aware empty-listing suffix
+  - `empty_marker(block: dict[str, Any] | None) -> str`
 
-**Why this is its own task.** The degraded-cell test is currently written out twice — `cli.py:1071-1075` and `context.py:166-170` — and Task 3 would add a third copy. Extracting it first means the grade-aware empty marker has one definition of "degraded" to depend on.
+  Tasks 3 and 6 import `empty_marker`; nothing else needs the other two.
+
+**Why this is its own task.** The degraded-cell test is currently written out twice — `cli.py:1071-1075` and `context.py:166-170` — and the later tasks would add more copies. `answer_contract` is the right home for all three: both renderers already import from it, and it keeps the §5 overclaim guard's wording in exactly one place, where it cannot drift in one file only. `context` must not import `cli` (the dependency runs the other way), so a shared third module is the only single-definition option.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -248,6 +253,20 @@ def test_is_degraded_reads_scoped_cells():
     assert is_degraded(
         {"health": {"calls": {"typescript": {"ratio": 0.54, "healthy": False}}}}
     ) is True
+
+
+def test_empty_marker_is_scoped_to_the_grade():
+    """Spec §5: a bare 'none found' on a degraded answer is an overclaim."""
+    from graphite.answer_contract import empty_marker
+
+    healthy = {"health": {"calls": {"python": {"ratio": 0.95, "healthy": True}}}}
+    degraded = {"health": {"calls": {"typescript": {"ratio": 0.54, "healthy": False}}}}
+
+    assert empty_marker(healthy) == "none found"
+    assert empty_marker(None) == "none found"
+    assert empty_marker(degraded) == (
+        "none found — INCONCLUSIVE: treat as unverified and confirm with grep"
+    )
 
 
 def test_answer_lines_render_at_column_zero():
@@ -286,11 +305,14 @@ to:
 Run: `python -m pytest tests/test_health.py -k "is_degraded or column_zero or sorted" -v; echo "rc=$?"`
 Expected: non-zero. `ImportError: cannot import name 'is_degraded'`, and the indent assertions fail on the two-space prefix.
 
-- [ ] **Step 4: Add `is_degraded` to `answer_contract.py`**
+- [ ] **Step 4: Add the three shared helpers to `answer_contract.py`**
 
 Insert after `active_caveats()` (currently ends at line 48):
 
 ```python
+INCONCLUSIVE_EMPTY = "none found — INCONCLUSIVE: treat as unverified and confirm with grep"
+
+
 def is_degraded(block: dict[str, Any] | None) -> bool:
     """True when any scoped health cell in an answer block is below threshold."""
     if not block:
@@ -300,7 +322,19 @@ def is_degraded(block: dict[str, Any] | None) -> bool:
         for langs in block.get("health", {}).values()
         for cell in langs.values()
     )
+
+
+def empty_marker(block: dict[str, Any] | None) -> str:
+    """Empty-listing text for an answer surface, scoped to the answer's grade.
+
+    A degraded-and-empty listing is `inconclusive` by this contract's own
+    definition, even when the answer as a whole graded `advisory` because its
+    other half was non-empty. See spec §5.
+    """
+    return INCONCLUSIVE_EMPTY if is_degraded(block) else "none found"
 ```
+
+Both renderers import `empty_marker` from here rather than defining twins: `context` cannot import `cli`, and the §5 wording must not be able to drift in one file only.
 
 - [ ] **Step 5: Rewrite `_answer_lines` in `cli.py`**
 
@@ -375,8 +409,8 @@ git commit -m "fix(answer): epistemology lines at column 0; extract is_degraded"
 - Test: `tests/test_health.py`
 
 **Interfaces:**
-- Consumes: `listing_lines` (Task 1), `is_degraded` (Task 2).
-- Produces: `cli._empty_marker(block: dict[str, Any] | None) -> str`, private to `cli.py`. Task 6 defines a same-named twin in `context.py` rather than importing this one — `context` must not import `cli`, the dependency runs the other way. Both are three lines over the shared `is_degraded`.
+- Consumes: `listing_lines` (Task 1), `empty_marker` (Task 2).
+- Produces: nothing later tasks depend on.
 
 **Why the marker is grade-aware.** `cli.py:405` computes `total = len(impacted_files) + len(likely_tests)`, so an answer with 2 impacted files and 0 tests grades `advisory`, not `inconclusive` — even when the scoped cells are degraded. The `likely_tests` half is nonetheless empty *and* degraded, which is the contract's definition of inconclusive. A bare `none found` there would claim a trustworthy absence the graph did not earn. This is spec §5.
 
@@ -446,23 +480,9 @@ def test_impact_never_prints_a_bare_header(capsys, monkeypatch):
 Run: `python -m pytest tests/test_health.py -k "empty_tests_half or bare_header" -v; echo "rc=$?"`
 Expected: non-zero. The `Likely tests:` header currently has no body line.
 
-- [ ] **Step 3: Add the empty-marker helper to `cli.py`**
+- [ ] **Step 3: Import the shared helper**
 
-Insert immediately above `_answer_lines` (currently line 1067):
-
-```python
-_INCONCLUSIVE_EMPTY = "none found — INCONCLUSIVE: treat as unverified and confirm with grep"
-
-
-def _empty_marker(block: dict[str, Any] | None) -> str:
-    """Empty-listing text for an answer surface, scoped to the answer's grade.
-
-    A degraded-and-empty listing is `inconclusive` by the answer contract's own
-    definition, even when the answer as a whole graded `advisory` because its
-    other half was non-empty. See spec §5.
-    """
-    return _INCONCLUSIVE_EMPTY if is_degraded(block) else "none found"
-```
+Add `empty_marker` to `cli.py`'s existing `answer_contract` import (the line that already brings in `build_answer_block`, `languages_for_nodes`, and — from Task 2 — `is_degraded`). Do **not** define a local copy; Task 2 put it in `answer_contract` precisely so the §5 wording exists once.
 
 - [ ] **Step 4: Rewrite the listing branch of `cmd_impact`**
 
@@ -482,7 +502,7 @@ with:
 
 ```python
             if result["impacted_files"] or result["likely_tests"]:
-                marker = _empty_marker(result.get("answer"))
+                marker = empty_marker(result.get("answer"))
                 for line in listing_lines(
                     result["impacted_files"], header="Impacted files:", empty=marker
                 ):
@@ -918,7 +938,7 @@ git commit -m "fix(cli,daemon-health): truncation markers on conditional reports
 1. `context.py` renders list items at **column 0** with backticks — `- \`path\`` — so every call passes `indent=""`. The marker lands at column 0 too.
 2. The `Likely tests:` header becomes unconditional **only inside the listing branch**, i.e. when `impact["impacted_files"]` is non-empty. When *both* lists are empty the existing single sentence stands: its `empty_meaning` is already "no impacted files **or tests** reachable through bound edges", which answers both halves, and `cmd_impact` behaves identically. Diverging here would be a bug, not a fix.
 
-`context.py` defines its own `_empty_marker` rather than importing `cli`'s: `context` must not import `cli` (the dependency runs the other way). Both are three lines over the same shared `is_degraded`.
+`context.py` imports `empty_marker` from `answer_contract` (Task 2). Do **not** define a local copy — `context` cannot import `cli`, and a twin would let the §5 wording drift in one file only.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1011,21 +1031,15 @@ def test_context_both_halves_empty_keeps_the_single_sentence():
 Run: `python -m pytest tests/test_context.py -k "marks_the_empty or cap_is_marked or both_halves" -v; echo "rc=$?"`
 Expected: non-zero — the `Likely tests:` block is omitted today and no markers are printed.
 
-- [ ] **Step 3: Add constants and the empty-marker helper to `context.py`**
+- [ ] **Step 3: Add the cap constant and imports to `context.py`**
 
 Near the top of `context.py`, beside the existing module constants:
 
 ```python
 _CONTEXT_LIST_CAP = 30
-_INCONCLUSIVE_EMPTY = "none found — INCONCLUSIVE: treat as unverified and confirm with grep"
-
-
-def _empty_marker(block: dict[str, Any] | None) -> str:
-    """Empty-listing text for an answer surface, scoped to the answer's grade."""
-    return _INCONCLUSIVE_EMPTY if is_degraded(block) else "none found"
 ```
 
-Add `from .listing import listing_lines` to the imports.
+Add `from .listing import listing_lines` to the imports, and add `empty_marker` to the existing `answer_contract` import (which Task 2 already extended with `is_degraded`).
 
 - [ ] **Step 4: Rewrite the impacted-files listing**
 
@@ -1041,7 +1055,7 @@ with:
 
 ```python
     if impact["impacted_files"]:
-        marker = _empty_marker(answer)
+        marker = empty_marker(answer)
         lines.extend(
             listing_lines(
                 impact["impacted_files"],
@@ -1075,7 +1089,7 @@ with:
                 header="Likely tests:",
                 cap=_CONTEXT_LIST_CAP,
                 indent="",
-                empty=_empty_marker(answer),
+                empty=empty_marker(answer),
             )
         )
 ```
@@ -1157,6 +1171,24 @@ SURFACES = [
 def test_every_surface_declares_a_known_kind():
     assert {kind for _, kind in SURFACES} <= {"ANSWER", "COUNT_IN_SUMMARY", "CONDITIONAL"}
     assert len(SURFACES) == len({name for name, _ in SURFACES})
+
+
+def test_named_render_entrypoints_still_exist():
+    """Guards against a rename silently emptying the table above.
+
+    Only the rows that name a real module attribute are checked; the
+    context.* rows name listing sites inside format_context_markdown, which
+    has no per-site attribute to resolve.
+    """
+    for module, attribute in [
+        (cli, "cmd_impact"),
+        (cli, "cmd_daemon_status"),
+        (cli, "cmd_validate"),
+        (cli, "_print_watch_impact"),
+        (context, "format_context_markdown"),
+        (daemon_health, "_issue_lines"),
+    ]:
+        assert callable(getattr(module, attribute)), f"{module.__name__}.{attribute}"
 
 
 def test_caps_are_named_constants_not_inline_slices():
