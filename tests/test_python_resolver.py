@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from graphite.config import Config
-from graphite.extract.ast import extract_all
+from graphite.extract.ast import _file_node_id, extract_all
 from graphite.graph import build_graph
 from graphite.ingest import collect_files
 from graphite.query import query
@@ -156,6 +156,100 @@ def test_import_edge_count_is_one_per_module(tmp_path):
     result = _extract(tmp_path)
     edges = _import_edges(result, "src/pkg/pipeline.py")
     assert len(edges) == 4  # json, pkg, pkg.ledger, .tdd
+
+
+def _submodule_fixture(tmp_path: Path) -> None:
+    """Shared fixture for the from-package-submodule idiom table (spec §9).
+
+    pkg/__init__.py          (empty)
+    pkg/pipeline.py          (def run(): ...)
+    pkg/runners/__init__.py  (empty)
+    pkg/runners/tests.py     (def go(): ...)
+    """
+    _write(tmp_path / "pkg" / "__init__.py", "")
+    _write(tmp_path / "pkg" / "pipeline.py", "def run():\n    return 1\n")
+    _write(tmp_path / "pkg" / "runners" / "__init__.py", "")
+    _write(tmp_path / "pkg" / "runners" / "tests.py", "def go():\n    return 1\n")
+
+
+def test_from_import_submodule_binds_both_package_and_submodule(tmp_path):
+    # idiom 1: `from pkg import pipeline` — this is issue #7 in miniature
+    # (`from aramid import pipeline` bound to the package __init__ ONLY).
+    # Both the kept base-module edge AND the new submodule edge must exist.
+    _submodule_fixture(tmp_path)
+    _write(tmp_path / "consumer.py", "from pkg import pipeline\n")
+    result = _extract(tmp_path)
+    edges = _import_edges(result, "consumer.py")
+    by_target = {(e["target"], e["confidence"]) for e in edges}
+    assert (_file_node_id("pkg/__init__.py"), "EXACT_IMPORT") in by_target
+    assert (_file_node_id("pkg/pipeline.py"), "EXACT_IMPORT") in by_target
+
+
+def test_from_import_multiple_names_bind_each_submodule(tmp_path):
+    # idiom 2: `from pkg import pipeline, runners` — two submodules, both
+    # bind alongside the kept package edge.
+    _submodule_fixture(tmp_path)
+    _write(tmp_path / "consumer.py", "from pkg import pipeline, runners\n")
+    result = _extract(tmp_path)
+    edges = _import_edges(result, "consumer.py")
+    by_target = {(e["target"], e["confidence"]) for e in edges}
+    assert (_file_node_id("pkg/__init__.py"), "EXACT_IMPORT") in by_target
+    assert (_file_node_id("pkg/pipeline.py"), "EXACT_IMPORT") in by_target
+    assert (_file_node_id("pkg/runners/__init__.py"), "EXACT_IMPORT") in by_target
+
+
+def test_from_dotted_import_aliased_submodule_binds(tmp_path):
+    # idiom 3: `from pkg.runners import tests as t` — dotted base module PLUS
+    # an aliased submodule name; both the base (pkg/runners/__init__.py) and
+    # the resolved submodule (pkg/runners/tests.py) bind.
+    _submodule_fixture(tmp_path)
+    _write(tmp_path / "consumer.py", "from pkg.runners import tests as t\n")
+    result = _extract(tmp_path)
+    edges = _import_edges(result, "consumer.py")
+    by_target = {(e["target"], e["confidence"]) for e in edges}
+    assert (_file_node_id("pkg/runners/__init__.py"), "EXACT_IMPORT") in by_target
+    assert (_file_node_id("pkg/runners/tests.py"), "EXACT_IMPORT") in by_target
+
+
+def test_relative_bare_from_import_binds_submodule(tmp_path):
+    # idiom 4: `from . import pipeline` from a sibling file INSIDE the
+    # package (bare relative, no dotted module name) — must resolve the
+    # package __init__ AND the sibling submodule.
+    _submodule_fixture(tmp_path)
+    _write(tmp_path / "pkg" / "sibling_user.py", "from . import pipeline\n")
+    result = _extract(tmp_path)
+    edges = _import_edges(result, "pkg/sibling_user.py")
+    by_target = {(e["target"], e["confidence"]) for e in edges}
+    assert (_file_node_id("pkg/__init__.py"), "EXACT_IMPORT") in by_target
+    assert (_file_node_id("pkg/pipeline.py"), "EXACT_IMPORT") in by_target
+
+
+def test_parenthesized_from_import_submodules_bind(tmp_path):
+    # idiom 5: parenthesized form of idiom 2 — must not regress the
+    # sibling-token trap already fixed for the call-binding path (the first
+    # name inside parens has prev_sibling `(`, not `import`/`,`).
+    _submodule_fixture(tmp_path)
+    _write(tmp_path / "consumer.py", "from pkg import (pipeline, runners)\n")
+    result = _extract(tmp_path)
+    edges = _import_edges(result, "consumer.py")
+    by_target = {(e["target"], e["confidence"]) for e in edges}
+    assert (_file_node_id("pkg/__init__.py"), "EXACT_IMPORT") in by_target
+    assert (_file_node_id("pkg/pipeline.py"), "EXACT_IMPORT") in by_target
+    assert (_file_node_id("pkg/runners/__init__.py"), "EXACT_IMPORT") in by_target
+
+
+def test_from_import_symbol_only_edge_unchanged(tmp_path):
+    # idiom 6: `from pkg.pipeline import run` imports a SYMBOL (a function),
+    # not a submodule — `pkg.pipeline.run` does not resolve to a file, so no
+    # new edge is added; count is unchanged vs today (one edge, to the
+    # module file only).
+    _submodule_fixture(tmp_path)
+    _write(tmp_path / "consumer.py", "from pkg.pipeline import run\n")
+    result = _extract(tmp_path)
+    edges = _import_edges(result, "consumer.py")
+    assert len(edges) == 1
+    assert edges[0]["target"] == _file_node_id("pkg/pipeline.py")
+    assert edges[0]["confidence"] == "EXACT_IMPORT"
 
 
 def _graph_for(tmp_path):
@@ -392,5 +486,20 @@ def test_end_to_end_build_binds_and_is_healthy(tmp_path, monkeypatch):
     assert block["by_relation"]["calls"]["ratio"] >= 0.8
 
 
-def test_cache_version_is_v7():
-    assert Config().cache_version == "v7"
+def test_impact_finds_test_via_from_package_submodule_import(tmp_path):
+    # End-to-end regression for issue #7: `from pkg import pipeline` in a
+    # test file used to bind ONLY to pkg's __init__.py, so `impact`'s
+    # predecessor walk from pkg/pipeline.py never reached the test file.
+    # With the fix, the submodule edge lets impact find it directly.
+    from graphite import cli
+
+    _write(tmp_path / "pkg" / "__init__.py", "")
+    _write(tmp_path / "pkg" / "pipeline.py", "def run():\n    return 1\n")
+    _write(tmp_path / "tests" / "test_consumer.py", "from pkg import pipeline\n")
+    g = _graph_for(tmp_path)
+    result = cli._impact(g, ["pkg/pipeline.py"], 2)
+    assert "tests/test_consumer.py" in result["likely_tests"]
+
+
+def test_cache_version_is_v8():
+    assert Config().cache_version == "v8"

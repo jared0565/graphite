@@ -15,6 +15,15 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .analyze import analyze
+from .answer_contract import (
+    ANSWER_SCHEMA,
+    GRADE_ADVISORY,
+    GRADE_DECISION,
+    GRADE_INCONCLUSIVE,
+    active_caveats,
+    build_answer_block,
+    languages_for_nodes,
+)
 from .cache import Cache
 from .bootstrap import bootstrap_project
 from .cluster import detect_communities
@@ -323,12 +332,30 @@ def _record_inconclusive(subject: str, result: Any) -> None:
             cell = by_rel.get(rel) or {}
             return cell.get("ratio")
 
+        detail = f"imports {_ratio('imports')}, calls {_ratio('calls')}, healthy {health.get('healthy')}"
+        answer = result.get("answer")
+        if isinstance(answer, dict):
+            # The aggregate ratios above can read "healthy True" while a
+            # scoped cell is what actually drove this incident (firescraper
+            # shape); append the scoped grade and degraded cells so the
+            # incident is self-explanatory without cross-referencing.
+            degraded_cells = ", ".join(
+                f"{relation}({language}) {cell['ratio']:.1f}"
+                for relation, langs in sorted(answer.get("health", {}).items())
+                for language, cell in sorted(langs.items())
+                if not cell.get("healthy", True)
+            )
+            grade = answer.get("grade", "")
+            parts = [p for p in (degraded_cells, grade) if p]
+            if parts:
+                detail += ", answer " + " ".join(parts)
+
         record_incident(
             repo_ledger_dir(Path.cwd()),
             klass="query",
             code="query_inconclusive",
             subject=subject,
-            detail=f"imports {_ratio('imports')}, calls {_ratio('calls')}, healthy {health.get('healthy')}",
+            detail=detail,
         )
     except Exception:
         return
@@ -375,7 +402,23 @@ def _impact(g: Any, changes: list[str], depth: int) -> dict[str, Any]:
             impacted_files.add(sf)
 
     health = resolution_health(g)
-    return {
+    total = len(impacted_files) + len(likely_tests)
+    try:
+        block = build_answer_block(
+            g,
+            relations=("calls", "imports"),
+            languages=languages_for_nodes(g, start_nodes),
+            total=total,
+            empty_meaning="no impacted files or tests reachable through bound edges",
+        )
+    except Exception:
+        block = None
+    inconclusive = (
+        block["grade"] == GRADE_INCONCLUSIVE
+        if block is not None
+        else (not impacted_files and not likely_tests and not health["healthy"])
+    )
+    result = {
         "changed": changes,
         "matched_nodes": sorted(start_nodes),
         "missing": missing,
@@ -383,8 +426,11 @@ def _impact(g: Any, changes: list[str], depth: int) -> dict[str, Any]:
         "impacted_files": sorted(impacted_files),
         "likely_tests": sorted(likely_tests),
         "resolution_health": health,
-        "inconclusive": not impacted_files and not likely_tests and not health["healthy"],
+        "inconclusive": inconclusive,
     }
+    if block is not None:
+        result["answer"] = block
+    return result
 
 
 def _print_watch_change(change: WatchChange) -> None:
@@ -893,6 +939,11 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
         "schema_version": 1,
         "commands": sorted(_CANONICAL_COMMANDS),
         "query_verbs": verb_catalog(),
+        "answer_contract": {
+            "schema": ANSWER_SCHEMA,
+            "grades": [GRADE_DECISION, GRADE_ADVISORY, GRADE_INCONCLUSIVE],
+            "caveats": active_caveats(),
+        },
         "search": {"default_limit": DEFAULT_SEARCH_LIMIT, "max_limit": MAX_SEARCH_LIMIT},
         "query_limits": {
             "default_max_depth": DEFAULT_MAX_DEPTH,
@@ -1013,6 +1064,29 @@ def cmd_agent_hook(args: argparse.Namespace) -> int:
     return 0
 
 
+def _answer_lines(block: dict[str, Any] | None, *, empty: bool) -> list[str]:
+    """Human epistemology lines; [] unless empty or a scoped cell is degraded."""
+    if not block:
+        return []
+    degraded = any(
+        not cell.get("healthy", True)
+        for langs in block.get("health", {}).values()
+        for cell in langs.values()
+    )
+    if not empty and not degraded:
+        return []
+    cells = ", ".join(
+        f"{relation} ({language}) {langs[language]['ratio']:.2f}"
+        for relation, langs in sorted(block.get("health", {}).items())
+        for language in sorted(langs)
+    )
+    grade = block.get("grade", "").replace("_", "-")
+    lines = [f"  answer health: {cells} — {grade}"] if cells else [f"  answer health: — {grade}"]
+    if block.get("caveats"):
+        lines.append("  known limits: " + "; ".join(c["summary"] for c in block["caveats"]))
+    return lines
+
+
 def cmd_impact(args: argparse.Namespace) -> int:
     started = time.perf_counter()
     g = _load_graph(Path(args.graph_json), root=Path.cwd())
@@ -1022,24 +1096,43 @@ def cmd_impact(args: argparse.Namespace) -> int:
     else:
         health = result["resolution_health"]
         if result["inconclusive"]:
-            print(
-                "Impacted files: none found — INCONCLUSIVE: only "
-                f"{ratio_percent(health, 'imports')} of import edges and "
-                f"{ratio_percent(health, 'calls')} of call edges resolved in this "
-                "graph; treat as unverified and confirm with grep."
-            )
+            answer = result.get("answer")
+            if answer:
+                meaning = answer.get(
+                    "empty_meaning", "no impacted files or tests reachable through bound edges"
+                )
+                print(
+                    f"Impacted files: none found — INCONCLUSIVE: {meaning}; "
+                    "treat as unverified and confirm with grep."
+                )
+            else:
+                print(
+                    "Impacted files: none found — INCONCLUSIVE: only "
+                    f"{ratio_percent(health, 'imports')} of import edges and "
+                    f"{ratio_percent(health, 'calls')} of call edges resolved in this "
+                    "graph; treat as unverified and confirm with grep."
+                )
         else:
-            print("Impacted files:")
-            for path in result["impacted_files"]:
-                print(f"  - {path}")
-            print("Likely tests:")
-            for path in result["likely_tests"]:
-                print(f"  - {path}")
+            if result["impacted_files"] or result["likely_tests"]:
+                print("Impacted files:")
+                for path in result["impacted_files"]:
+                    print(f"  - {path}")
+                print("Likely tests:")
+                for path in result["likely_tests"]:
+                    print(f"  - {path}")
+            else:
+                meaning = (result.get("answer") or {}).get(
+                    "empty_meaning", "none found"
+                )
+                print(f"Impacted files: none found — {meaning}")
             if not health["healthy"] and (result["impacted_files"] or result["likely_tests"]):
                 print(
                     f"note: resolution health low (imports {ratio_percent(health, 'imports')}, "
                     f"calls {ratio_percent(health, 'calls')}) — this list may be incomplete."
                 )
+        empty = not result["impacted_files"] and not result["likely_tests"]
+        for line in _answer_lines(result.get("answer"), empty=empty):
+            print(line)
         if result["missing"]:
             print("Missing inputs:")
             for item in result["missing"]:

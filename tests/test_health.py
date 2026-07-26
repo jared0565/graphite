@@ -275,6 +275,33 @@ def test_cmd_impact_human_inconclusive_line(capsys, monkeypatch):
     assert "INCONCLUSIVE" in out
     assert "confirm with grep" in out
     assert "Impacted files:\n" not in out  # empty listings are replaced, not printed
+    # The scoped answer block computes a real meaning here, so the legacy
+    # aggregate-ratio wording (which can self-contradict the scoped "answer
+    # health:" line right below it) must not print.
+    assert "% of import edges" not in out
+    assert "no impacted files or tests reachable through bound edges" in out
+    assert "answer health: " in out
+
+
+def test_cmd_impact_human_inconclusive_line_fail_open_aggregate_wording(capsys, monkeypatch):
+    """When build_answer_block fails open (returns None), the legacy
+    aggregate-ratio INCONCLUSIVE wording is the only signal available and
+    must still print — and no answer-health lines should appear."""
+    import argparse
+
+    from graphite import cli
+
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: _unhealthy_graph())
+    monkeypatch.setattr(cli, "build_answer_block", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_inconclusive", lambda *a, **k: None)
+    args = argparse.Namespace(graph_json="graph-out/graph.json", files=["lonely"], depth=2, json=False)
+    cli.cmd_impact(args)
+    out = capsys.readouterr().out
+    assert "INCONCLUSIVE" in out
+    assert "only" in out and "of import edges and" in out and "of call edges resolved in this" in out
+    assert "confirm with grep" in out
+    assert "answer health:" not in out
 
 
 def test_cmd_impact_human_note_when_nonempty_but_unhealthy(capsys, monkeypatch):
@@ -317,6 +344,127 @@ def test_cmd_impact_human_unchanged_on_healthy_graph(capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "Impacted files:" in out
     assert "INCONCLUSIVE" not in out and "may be incomplete" not in out
+
+
+def _answer_graph(*, degraded_ts=False):
+    g = nx.DiGraph()
+    g.add_node("src_a", kind="file", name="a.py", source_file="src/a.py")
+    g.add_node("src_b", kind="file", name="b.py", source_file="src/b.py")
+    g.add_edge("src_b", "src_a", relation="imports", source_file="src/b.py")
+    if degraded_ts:
+        g.add_node("t", kind="file", name="t.ts", source_file="src/t.ts")
+        for i in range(9):
+            ph = f"tsph{i}"
+            g.add_node(ph, kind="unknown")
+            g.add_edge("t", ph, relation="calls", source_file="src/t.ts")
+        # Keep the AGGREGATE calls ratio >= 0.8 (41 bound py + 9 unbound ts
+        # = 41/50 = 0.82) so the test proves scoped grading sees what the
+        # aggregate masks (the firescraper shape).
+        g.add_node("py_callee", kind="function", name="callee", source_file="src/a.py")
+        for i in range(41):
+            fn = f"py_fn{i}"
+            g.add_node(fn, kind="function", name=f"f{i}", source_file="src/a.py")
+            g.add_edge(fn, "py_callee", relation="calls", source_file="src/a.py")
+    return g
+
+
+def test_impact_result_carries_answer_block():
+    from graphite import cli
+
+    g = _answer_graph()
+    result = cli._impact(g, ["src/a.py"], 2)
+    assert result["answer"]["relations"] == ["calls", "imports"]
+    assert result["answer"]["grade"] == "decision_grade"
+    assert result["impacted_files"] == ["src/b.py"]
+
+
+def test_impact_inconclusive_upgrades_to_scoped():
+    from graphite import cli
+
+    g = _answer_graph(degraded_ts=True)
+    result = cli._impact(g, ["src/t.ts"], 2)
+    assert result["impacted_files"] == [] and result["likely_tests"] == []
+    assert result["answer"]["grade"] == "inconclusive"
+    assert result["inconclusive"] is True
+    assert result["resolution_health"]["healthy"] is True  # aggregate masks; scoped does not
+
+
+def test_cmd_impact_prints_epistemology_on_empty(capsys, monkeypatch):
+    import argparse
+
+    from graphite import cli
+
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: _answer_graph())
+    monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_inconclusive", lambda *a, **k: None)
+    args = argparse.Namespace(graph_json="graph-out/graph.json", files=["src/b.py"], depth=2, json=False)
+    cli.cmd_impact(args)
+    out = capsys.readouterr().out
+    assert "answer health: " in out
+    assert "decision-grade" in out
+    assert "INCONCLUSIVE" not in out
+
+
+def test_cmd_impact_human_advisory_line_on_nonempty_degraded(capsys, monkeypatch):
+    """Non-empty impact + a degraded scoped cell (via language union across
+    the two queried files) grades advisory, not decision — and the normal
+    impacted-files listing still prints, followed by the epistemology
+    tail."""
+    import argparse
+
+    from graphite import cli
+
+    g = _answer_graph(degraded_ts=True)
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: g)
+    monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_inconclusive", lambda *a, **k: None)
+    args = argparse.Namespace(
+        graph_json="graph-out/graph.json",
+        files=["src/a.py", "src/t.ts"],
+        depth=2,
+        json=False,
+    )
+    cli.cmd_impact(args)
+    out = capsys.readouterr().out
+    assert "Impacted files:" in out
+    assert "src/b.py" in out
+    assert "INCONCLUSIVE" not in out
+    assert "answer health: " in out
+    assert "advisory" in out
+    assert "known limits:" in out
+    # Normal output first, THEN the epistemology tail (not interleaved).
+    assert out.index("src/b.py") < out.index("answer health: ")
+
+
+def test_answer_lines_two_cell_sorted_join_format():
+    """The health-cell join is sorted by (relation, language), independent
+    of dict insertion order."""
+    from graphite import cli
+
+    block = {
+        "grade": "decision_grade",
+        "health": {
+            "imports": {"python": {"ratio": 0.80, "healthy": True}},
+            "calls": {"python": {"ratio": 0.95, "healthy": True}},
+        },
+        "caveats": [],
+    }
+    lines = cli._answer_lines(block, empty=True)
+    assert lines == ["  answer health: calls (python) 0.95, imports (python) 0.80 — decision-grade"]
+
+
+def test_cmd_impact_epistemology_absent_on_healthy_nonempty(capsys, monkeypatch):
+    import argparse
+
+    from graphite import cli
+
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: _answer_graph())
+    monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_inconclusive", lambda *a, **k: None)
+    args = argparse.Namespace(graph_json="graph-out/graph.json", files=["src/a.py"], depth=2, json=False)
+    cli.cmd_impact(args)
+    out = capsys.readouterr().out
+    assert "answer health:" not in out
 
 
 def test_cmd_check_json_resolution_passthrough(tmp_path, capsys, monkeypatch):

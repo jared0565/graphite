@@ -155,6 +155,29 @@ to distinguish "no results" from "the resolver could not bind".
   `inconclusive` on empty results — fail open, never assume health.
 - `check --json` reports `"resolution_health": null` when no persisted block exists.
 
+## The answer block: acting on graph answers
+
+Every query/impact/context answer carries `answer` — trust scoped to what
+this answer actually walked, not the whole graph:
+
+- `grade: "decision_grade"` — every relation×language cell this answer used
+  is healthy. A non-empty result is decision-grade evidence; an EMPTY
+  result is a trustworthy absence (subject to `caveats`).
+- `grade: "advisory"` — a used cell is below threshold and the result is
+  non-empty. Treat the list as incomplete: verify with grep and say so.
+- `grade: "inconclusive"` — a used cell is below threshold and the result
+  is empty. Unknown, not safe. The legacy `inconclusive` boolean mirrors
+  this grade (its derivation is scoped since answer-contract v1; it used
+  to consult only the aggregate `healthy`).
+- `caveats` — known blindspot classes applying to this answer's
+  relations×languages, from `capabilities.answer_contract.caveats`. They
+  apply even at decision_grade.
+- `empty_meaning` — what an empty primary result asserts ("no bound
+  callers found"): a measurement statement, not proof of absence.
+
+The block may be absent (fail-open); treat absence as "no scoped signal —
+fall back to resolution_health".
+
 ## 8. Incidents
 
 Graphite keeps a durable, machine-local record of its own failures so an

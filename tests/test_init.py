@@ -170,8 +170,8 @@ def test_template_change_requires_doc_version_bump() -> None:
         ).encode("utf-8")
     ).hexdigest()
     assert (init_module.DOC_VERSION, digest) == (
-        8,
-        "1f9f313ef7a4661eee39bd930a68faf780edb8661cd0677bc33971e230bde9cb",
+        9,
+        "acdcc1d1ddba3837b714a91e35eecffbcd4a37bc62284cd1a0dd67c011130ccd",
     ), "template content changed: bump DOC_VERSION and update this pinned digest"
 
 
@@ -377,13 +377,15 @@ def test_init_wires_stop_hook(tmp_path: Path) -> None:
     assert commands == ["python -m graphite agent-hook stop"]
 
 
-def test_doc_version_is_8_and_template_documents_incidents():
+def test_doc_version_is_9_and_template_documents_answer_contract():
     from graphite import init as graphite_init
 
-    assert graphite_init.DOC_VERSION == 8
+    assert graphite_init.DOC_VERSION == 9
     template = graphite_init.GRAPHITE_DOC
-    assert "resolution-health" in template
-    assert "INCONCLUSIVE" in template
+    assert "decision_grade" in template
+    assert "advisory" in template
+    assert "inconclusive" in template
     assert '"inconclusive": true' in template
+    assert "caveats" in template
     assert "python -m graphite incidents list" in template
     assert "recurring incidents belong in a governed round" in template

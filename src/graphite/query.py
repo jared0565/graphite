@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 import networkx as nx
 
+from .answer_contract import GRADE_INCONCLUSIVE, build_answer_block, languages_for_nodes
 from .health import resolution_health
 from .query_plan import DEFAULT_MAX_DEPTH, DEFAULT_MAX_RESULTS, make_plan, plan_error
 
@@ -136,10 +137,7 @@ def _neighbor_listing(
         "total": len(neighbors),
         "truncated": len(neighbors) > cap,
         "limits": {"max_results": cap},
-        key: [
-            {"id": n, "name": g.nodes[n].get("name", n), "kind": g.nodes[n].get("kind", "unknown")}
-            for n in shown
-        ],
+        key: [_node_view(g, n) for n in shown],
     }, g)
 
 
@@ -209,6 +207,8 @@ class QueryVerb:
     handler: Callable[[nx.DiGraph, list[str], dict[str, Any]], dict[str, Any]]
     roles: tuple[str, ...]
     limits: tuple[tuple[str, int], ...] = ()
+    relations: tuple[str, ...] = ()
+    empty_meaning: str = ""
 
 
 QUERY_VERBS: tuple[QueryVerb, ...] = (
@@ -216,36 +216,43 @@ QUERY_VERBS: tuple[QueryVerb, ...] = (
         "callers", ("called-by", "called_by"), "<symbol>",
         "Functions that call <symbol> (calls/references in-edges)", _verb_callers,
         ("node",), (("max_results", DEFAULT_MAX_RESULTS),),
+        relations=("calls",), empty_meaning="no bound callers found",
     ),
     QueryVerb(
         "calls", ("callees",), "<symbol>",
         "Functions/symbols that <symbol> calls (calls/references out-edges)", _verb_calls,
         ("node",), (("max_results", DEFAULT_MAX_RESULTS),),
+        relations=("calls",), empty_meaning="no bound callees found",
     ),
     QueryVerb(
         "reaches", (), "<a> -> <b>",
         "Directed path from a to b over call/reference edges only", _verb_reaches,
         ("source", "target"), (("max_depth", DEFAULT_MAX_DEPTH),),
+        relations=("calls",), empty_meaning="no call path found within depth",
     ),
     QueryVerb(
         "path", (), "<a> -> <b>",
         "Shortest directed path from a to b over all edges", _verb_path,
         ("source", "target"), (("max_depth", DEFAULT_MAX_DEPTH),),
+        relations=("calls", "imports"), empty_meaning="no path found within depth",
     ),
     QueryVerb(
         "depends-on", ("depends_on", "out"), "<node>",
         "Nodes that <node> directly depends on (out-edges)", _verb_depends_on,
         ("node",), (("max_results", DEFAULT_MAX_RESULTS),),
+        relations=("calls", "imports"), empty_meaning="no bound dependencies found",
     ),
     QueryVerb(
         "imported-by", ("imported_by", "in"), "<node>",
         "Nodes that directly point to <node> (in-edges)", _verb_imported_by,
         ("node",), (("max_results", DEFAULT_MAX_RESULTS),),
+        relations=("imports",), empty_meaning="no bound importers found",
     ),
     QueryVerb(
         "community-of", ("community_of",), "<node>",
         "Cluster/community label for a node", _verb_community_of,
         ("node",),
+        relations=("calls", "imports"), empty_meaning="no community assigned",
     ),
     QueryVerb("stats", (), "", "Basic graph statistics", _verb_stats, ()),
 )
@@ -337,6 +344,16 @@ def _resolution(spec: QueryVerb, result: dict[str, Any]) -> list[dict[str, Any]]
     return []
 
 
+def _is_empty(spec: QueryVerb, result: dict[str, Any]) -> bool:
+    if result.get("error_code") == "no_path":
+        return True
+    if "total" in result:
+        return result["total"] == 0
+    if spec.name == "community-of":
+        return result.get("community") is None
+    return False
+
+
 def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
     """Validate a plan against schema v1 and the verb registry, then run it."""
     reason = plan_error(plan, _EXPECTED_ROLES)
@@ -351,8 +368,29 @@ def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
     inputs = [target["input"] for target in plan["targets"]]
     result = spec.handler(g, inputs, plan["options"])
     envelope = {"schema_version": RESULT_SCHEMA_VERSION, **result}
-    if "error" not in result:
+    is_error = "error" in result
+    if not is_error:
         envelope["resolution"] = _resolution(spec, result)
+    if spec.relations and (not is_error or result.get("error_code") == "no_path"):
+        # Fail-open (spec R6): computation performed only to build the
+        # `answer` block — seed derivation, language lookup, the block
+        # itself — must never be able to error the query. On any failure
+        # here the envelope is left exactly as it was before this block.
+        try:
+            seeds = [entry.get("node") for entry in envelope.get("resolution", [])]
+            block = build_answer_block(
+                g,
+                relations=spec.relations,
+                languages=languages_for_nodes(g, seeds),
+                total=0 if _is_empty(spec, result) else 1,
+                empty_meaning=spec.empty_meaning or None,
+            )
+            if block is not None:
+                envelope["answer"] = block
+                if "inconclusive" in envelope:
+                    envelope["inconclusive"] = block["grade"] == GRADE_INCONCLUSIVE
+        except Exception:
+            pass
     return envelope
 
 

@@ -6,6 +6,7 @@ from typing import Any
 
 import networkx as nx
 
+from .answer_contract import GRADE_INCONCLUSIVE, build_answer_block, languages_for_nodes
 from .health import ratio_percent, resolution_health
 from .query import _find_node_detail
 
@@ -56,13 +57,28 @@ def build_context(
     risk = [_risk_summary(g, node) for node in start_nodes]
 
     health = resolution_health(g)
+    total = len(impact["impacted_files"]) + len(impact["likely_tests"])
+    try:
+        block = build_answer_block(
+            g,
+            relations=("calls", "imports"),
+            languages=languages_for_nodes(g, start_nodes),
+            total=total,
+            empty_meaning="no impacted files or tests reachable through bound edges",
+        )
+    except Exception:
+        block = None
     inconclusive = (
-        not impact["impacted_files"]
-        and not impact["likely_tests"]
-        and not health["healthy"]
+        block["grade"] == GRADE_INCONCLUSIVE
+        if block is not None
+        else (
+            not impact["impacted_files"]
+            and not impact["likely_tests"]
+            and not health["healthy"]
+        )
     )
 
-    return {
+    result: dict[str, Any] = {
         "metadata": {
             "node_count": g.number_of_nodes(),
             "edge_count": g.number_of_edges(),
@@ -80,6 +96,9 @@ def build_context(
         "resolution_health": health,
         "inconclusive": inconclusive,
     }
+    if block is not None:
+        result["answer"] = block
+    return result
 
 
 def format_context_markdown(context: dict[str, Any]) -> str:
@@ -107,18 +126,32 @@ def format_context_markdown(context: dict[str, Any]) -> str:
     impact = context["impact"]
     health = context.get("resolution_health") or {}
     unhealthy = health.get("healthy") is False
+    answer = context.get("answer")
     if impact["impacted_files"]:
         lines.append("Impacted files:")
         lines.extend(f"- `{path}`" for path in impact["impacted_files"][:30])
     elif context.get("inconclusive"):
-        lines.append(
-            "Impacted files: none found — INCONCLUSIVE: only "
-            f"{ratio_percent(health, 'imports')} of import edges and "
-            f"{ratio_percent(health, 'calls')} of call edges resolved in this "
-            "graph; treat as unverified and confirm with grep."
-        )
+        if answer:
+            meaning = answer.get(
+                "empty_meaning", "no impacted files or tests reachable through bound edges"
+            )
+            lines.append(
+                f"Impacted files: none found — INCONCLUSIVE: {meaning}; "
+                "treat as unverified and confirm with grep."
+            )
+        else:
+            lines.append(
+                "Impacted files: none found — INCONCLUSIVE: only "
+                f"{ratio_percent(health, 'imports')} of import edges and "
+                f"{ratio_percent(health, 'calls')} of call edges resolved in this "
+                "graph; treat as unverified and confirm with grep."
+            )
     else:
-        lines.append("Impacted files: none found")
+        answer_meaning = (answer or {}).get("empty_meaning")
+        if answer_meaning:
+            lines.append(f"Impacted files: none found — {answer_meaning}")
+        else:
+            lines.append("Impacted files: none found")
     if impact["likely_tests"]:
         lines.append("Likely tests:")
         lines.extend(f"- `{path}`" for path in impact["likely_tests"][:30])
@@ -127,6 +160,25 @@ def format_context_markdown(context: dict[str, Any]) -> str:
             f"note: resolution health low (imports {ratio_percent(health, 'imports')}, "
             f"calls {ratio_percent(health, 'calls')}) — this list may be incomplete."
         )
+
+    empty = not impact["impacted_files"] and not impact["likely_tests"]
+    if answer:
+        degraded = any(
+            not cell.get("healthy", True)
+            for langs in answer.get("health", {}).values()
+            for cell in langs.values()
+        )
+        if empty or degraded:
+            cells = ", ".join(
+                f"{relation} ({language}) {langs[language]['ratio']:.2f}"
+                for relation, langs in sorted(answer.get("health", {}).items())
+                for language in sorted(langs)
+            )
+            grade = answer["grade"].replace("_", "-")
+            line = f"answer health: {cells} — {grade}" if cells else f"answer health: — {grade}"
+            lines.append(line)
+            if answer.get("caveats"):
+                lines.append("known limits: " + "; ".join(c["summary"] for c in answer["caveats"]))
 
     lines.extend(["", "## Direct Dependents"])
     dependents = context["direct_dependents"]
