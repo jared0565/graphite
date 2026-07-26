@@ -108,6 +108,8 @@ _TEST_SUFFIXES = (
 _MAX_REVIEW_GRAPH_BYTES = 128 * 1024 * 1024
 _DAEMON_STATUS_PROJECT_CAP = 20
 _VALIDATE_ERROR_CAP = 10
+_WATCH_IMPACTED_CAP = 20
+_WATCH_TESTS_CAP = 30
 _CANONICAL_COMMANDS = frozenset(
     {
         "scan",
@@ -464,14 +466,20 @@ def _print_watch_impact(root: Path, cfg: Config, change: WatchChange, depth: int
         print(f"[graphite] impact skipped: {exc}", file=sys.stderr)
         return
 
-    if result["impacted_files"]:
-        print("[graphite] impacted files:")
-        for path in result["impacted_files"][:20]:
-            print(f"  - {path}")
-    if result["likely_tests"]:
-        print("[graphite] likely tests:")
-        for path in result["likely_tests"][:30]:
-            print(f"  - {path}")
+    for line in listing_lines(
+        result["impacted_files"],
+        header="[graphite] impacted files:",
+        cap=_WATCH_IMPACTED_CAP,
+        empty=None,
+    ):
+        print(line)
+    for line in listing_lines(
+        result["likely_tests"],
+        header="[graphite] likely tests:",
+        cap=_WATCH_TESTS_CAP,
+        empty=None,
+    ):
+        print(line)
 
 
 def cmd_scan(args: argparse.Namespace) -> int:

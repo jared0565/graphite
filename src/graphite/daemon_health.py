@@ -313,6 +313,7 @@ def check_startup_launcher(base: Path, name: str) -> dict[str, Any]:
 
 
 _MAX_GROUP_DETAILS = 5
+_MAX_ISSUE_LINES = 20
 
 
 def _count_phrase(count: int, noun: str) -> str:
@@ -333,10 +334,14 @@ def _health_head_line(report: dict[str, Any]) -> str:
     return f"[graphite] daemon health: {status} ({detail})"
 
 
-def _issue_lines(label: str, issues: list[dict[str, Any]]) -> list[str]:
+def _issue_lines(
+    label: str, issues: list[dict[str, Any]], *, cap: int = _MAX_ISSUE_LINES
+) -> list[str]:
+    shown = issues[:cap]
+    dropped = len(issues) - len(shown)
     lines = [f"{label}:"]
     groups: dict[str, list[dict[str, Any]]] = {}
-    for issue in issues:
+    for issue in shown:
         groups.setdefault(str(issue.get("code")), []).append(issue)
     for code, members in groups.items():
         if len(members) == 1:
@@ -347,6 +352,8 @@ def _issue_lines(label: str, issues: list[dict[str, Any]]) -> list[str]:
             lines.append(f"      {_safe_text(issue.get('message'))}")
         if len(members) > _MAX_GROUP_DETAILS:
             lines.append(f"      ... {len(members) - _MAX_GROUP_DETAILS} more")
+    if dropped > 0:
+        lines.append(f"  ... {dropped} more")
     return lines
 
 
@@ -371,9 +378,9 @@ def format_health_text(report: dict[str, Any]) -> str:
     if startup.get("checked"):
         lines.append(f"  startup installed: {startup.get('installed')}")
     if report["errors"]:
-        lines.extend(_issue_lines("Errors", report["errors"][:20]))
+        lines.extend(_issue_lines("Errors", report["errors"]))
     if report["warnings"]:
-        lines.extend(_issue_lines("Warnings", report["warnings"][:20]))
+        lines.extend(_issue_lines("Warnings", report["warnings"]))
     return "\n".join(lines) + "\n"
 
 

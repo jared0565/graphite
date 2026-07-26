@@ -966,3 +966,64 @@ def test_daemon_status_json_stays_uncapped(capsys, monkeypatch, tmp_path):
     payload = jsonlib.loads(capsys.readouterr().out)
 
     assert len(payload["projects"]) == 32
+
+
+def _watch_cfg(tmp_path):
+    """Config has no `root` field -- the root is a separate argument to
+    _print_watch_impact. Only output_dir matters here, since the function
+    looks for `cfg.output_dir / "graph.json"`."""
+    from graphite.config import Config
+
+    (tmp_path / "graph.json").write_text("{}", encoding="utf-8")
+    return Config(output_dir=tmp_path)
+
+
+def test_watch_impact_marks_truncation(capsys, monkeypatch, tmp_path):
+    from graphite import cli
+
+    result = {
+        "impacted_files": [f"src/f{i}.py" for i in range(25)],
+        "likely_tests": [f"tests/t{i}.py" for i in range(35)],
+    }
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "_impact", lambda *a, **k: result)
+
+    change = cli.WatchChange(added=[], changed=["src/f0.py"], removed=[])
+    cli._print_watch_impact(tmp_path, _watch_cfg(tmp_path), change, 2)
+    out = capsys.readouterr().out
+
+    before, after = out.split("likely tests:")
+    assert "  ... 5 more" in before
+    assert "  ... 5 more" in after
+
+
+def test_watch_impact_stays_silent_on_empty_lists(capsys, monkeypatch, tmp_path):
+    """Conditional report: no header, no marker, nothing at all."""
+    from graphite import cli
+
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "_impact", lambda *a, **k: {"impacted_files": [], "likely_tests": []})
+
+    change = cli.WatchChange(added=[], changed=["src/f0.py"], removed=[])
+    cli._print_watch_impact(tmp_path, _watch_cfg(tmp_path), change, 2)
+
+    assert capsys.readouterr().out == ""
+
+
+def test_daemon_health_outer_cap_is_marked():
+    from graphite.daemon_health import _issue_lines
+
+    issues = [{"code": f"code{i}", "message": f"m{i}"} for i in range(26)]
+    lines = _issue_lines("Errors", issues, cap=20)
+
+    assert lines[0] == "Errors:"
+    assert lines[-1] == "  ... 6 more"
+
+
+def test_daemon_health_under_cap_has_no_marker():
+    from graphite.daemon_health import _issue_lines
+
+    issues = [{"code": f"code{i}", "message": f"m{i}"} for i in range(3)]
+    lines = _issue_lines("Errors", issues, cap=20)
+
+    assert not any("more" in line for line in lines)
