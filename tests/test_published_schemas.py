@@ -6,6 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from graphite.answer_contract import (
+    GRADE_ADVISORY,
+    GRADE_DECISION,
+    GRADE_INCONCLUSIVE,
+)
 from graphite.cli import main
 from graphite.graph import build_graph
 from graphite.natural_query import answer_natural, translate_natural
@@ -138,3 +143,34 @@ def test_incidents_envelope_matches_published_schema(tmp_path, capsys):
     assert main(["incidents", "list", str(tmp_path), "--json", "--all"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert matches_schema(payload, _load("incidents.v1.schema.json")) is True
+
+
+def test_query_result_schema_admits_answer_block() -> None:
+    schema = _load("query-result.v1.schema.json")
+    g = _graph()
+    # WITH: a live query result that carries the answer block validates.
+    with_answer = query(g, "callers helper")
+    assert "answer" in with_answer
+    assert matches_schema(with_answer, schema) is True
+    # WITHOUT: an error result (never carries answer) also validates — the
+    # key is optional, not required.
+    without_answer = query(g, "bogus verb")
+    assert "answer" not in without_answer
+    assert matches_schema(without_answer, schema) is True
+    # The schema must actually CONSTRAIN the block, not just tolerate the
+    # key: an answer missing a required field is rejected. This guards the
+    # new `answer` property itself — top-level additionalProperties:true
+    # would otherwise mask its absence and let this test false-pass.
+    malformed = dict(with_answer)
+    malformed["answer"] = {k: v for k, v in with_answer["answer"].items() if k != "grade"}
+    assert matches_schema(malformed, schema) is False
+
+
+def test_capabilities_carries_answer_contract(capsys) -> None:
+    assert main(["capabilities", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    contract = payload["answer_contract"]
+    assert contract["schema"] == 1
+    assert contract["grades"] == [GRADE_DECISION, GRADE_ADVISORY, GRADE_INCONCLUSIVE]
+    for caveat in contract["caveats"]:
+        assert {"code", "relations", "languages", "summary", "since"} <= caveat.keys()

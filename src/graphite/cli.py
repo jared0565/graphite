@@ -15,7 +15,15 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .analyze import analyze
-from .answer_contract import GRADE_INCONCLUSIVE, build_answer_block, languages_for_nodes
+from .answer_contract import (
+    ANSWER_SCHEMA,
+    GRADE_ADVISORY,
+    GRADE_DECISION,
+    GRADE_INCONCLUSIVE,
+    active_caveats,
+    build_answer_block,
+    languages_for_nodes,
+)
 from .cache import Cache
 from .bootstrap import bootstrap_project
 from .cluster import detect_communities
@@ -910,6 +918,11 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
         "schema_version": 1,
         "commands": sorted(_CANONICAL_COMMANDS),
         "query_verbs": verb_catalog(),
+        "answer_contract": {
+            "schema": ANSWER_SCHEMA,
+            "grades": [GRADE_DECISION, GRADE_ADVISORY, GRADE_INCONCLUSIVE],
+            "caveats": active_caveats(),
+        },
         "search": {"default_limit": DEFAULT_SEARCH_LIMIT, "max_limit": MAX_SEARCH_LIMIT},
         "query_limits": {
             "default_max_depth": DEFAULT_MAX_DEPTH,
