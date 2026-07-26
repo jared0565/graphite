@@ -523,6 +523,47 @@ def _python_import_modules(node: Any) -> list[tuple[str, int]]:
     return out
 
 
+def _python_from_import_submodules(
+    node: Any, rel_path: str, source_index: SourceIndex | None
+) -> list[Any]:
+    """Resolved submodule paths for `from P import a, b` when a/b are modules.
+
+    Mirrors _collect_python_import_maps' module-first probe (ast.py:583-587)
+    at the import-EDGE layer: the emission site only ever saw the base
+    module, which is how `from aramid import pipeline` bound to the package
+    __init__ and hid test files from impact (issue #7).
+    """
+    if node.type != "import_from_statement" or source_index is None:
+        return []
+    modules = _python_import_modules(node)
+    if not modules:
+        return []
+    base_module, dots = modules[0]
+    module_field = node.child_by_field_name("module_name")
+
+    def _text(n: Any) -> str:
+        return n.text.decode("utf-8", errors="ignore") if n is not None and n.text else ""
+
+    out: list[Any] = []
+    for child in node.children:
+        if module_field is not None and child.id == module_field.id:
+            # Identity-skip the module_name's own dotted_name (paren-safe;
+            # see _collect_python_import_maps for the sibling-token trap).
+            continue
+        original = None
+        if child.type == "dotted_name":
+            original = _text(child)
+        elif child.type == "aliased_import":
+            original = _text(child.child_by_field_name("name"))
+        if not original or "." in original:
+            continue
+        sub = f"{base_module}.{original}" if base_module else original
+        resolved = source_index.resolve_python_module(rel_path, sub, dots)
+        if resolved:
+            out.append(resolved)
+    return out
+
+
 def _collect_python_import_maps(
     root: Any, rel_path: str, source_index: SourceIndex | None
 ) -> tuple[dict[str, str], dict[str, str]]:
@@ -674,6 +715,11 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                         file_id, _make_id(module) if module else _make_id("package"),
                         "imports", rel_path, _line(node), confidence="EXTERNAL_IMPORT",
                     ))
+            for sub in _python_from_import_submodules(node, rel_path, source_index):
+                result.edges.append(_edge(
+                    file_id, _file_node_id(sub), "imports", rel_path,
+                    _line(node), confidence="EXACT_IMPORT",
+                ))
             walk_children(node, parent_id, scope_id)
         elif node.type == "call":
             func = node.child_by_field_name("function")
