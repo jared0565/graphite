@@ -106,6 +106,8 @@ _TEST_SUFFIXES = (
 
 # Review graph reads are bounded to prevent untrusted artifacts exhausting memory.
 _MAX_REVIEW_GRAPH_BYTES = 128 * 1024 * 1024
+_DAEMON_STATUS_PROJECT_CAP = 20
+_VALIDATE_ERROR_CAP = 10
 _CANONICAL_COMMANDS = frozenset(
     {
         "scan",
@@ -878,8 +880,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
             )
         else:
             print(f"[graphite] graph invalid ({report['error_count']} errors, {report['warning_count']} warnings)")
-            for issue in report["errors"][:10]:
-                print(f"  - {issue['code']}: {issue['message']} [{issue['path']}]")
+            for line in listing_lines(
+                report["errors"],
+                lambda issue: f"{issue['code']}: {issue['message']} [{issue['path']}]",
+                cap=_VALIDATE_ERROR_CAP,
+                empty=None,
+            ):
+                print(line)
     return 0 if report["ok"] else 1
 
 def cmd_query(args: argparse.Namespace) -> int:
@@ -1346,11 +1353,17 @@ def cmd_daemon_status(args: argparse.Namespace) -> int:
             f"{status.get('pending_projects')} pending)"
         )
         print(f"[graphite] updated: {status.get('updated_at')}")
-        for project in status.get("projects", [])[:20]:
-            print(
-                f"  - {project.get('root')} | builds={project.get('build_count')} "
-                f"failures={project.get('failure_count')} files={project.get('file_count')}"
-            )
+        for line in listing_lines(
+            status.get("projects", []),
+            lambda p: (
+                f"{p.get('root')} | builds={p.get('build_count')} "
+                f"failures={p.get('failure_count')} files={p.get('file_count')}"
+            ),
+            cap=_DAEMON_STATUS_PROJECT_CAP,
+            empty=None,
+            more_hint=" — use --json for the full list",
+        ):
+            print(line)
     return 0
 
 

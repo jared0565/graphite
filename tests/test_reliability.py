@@ -73,6 +73,35 @@ def test_validate_cli_returns_nonzero_for_invalid_graph(tmp_path: Path, capsys) 
     assert "edge_source_unknown" in output
 
 
+def test_validate_cli_truncates_error_list_and_marks_dropped_count(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    import argparse
+
+    from graphite import cli
+
+    graph = tmp_path / "graph.json"
+    atomic_write_json(graph, _valid_bundle())
+
+    report = {
+        "ok": False,
+        "node_count": 2,
+        "edge_count": 1,
+        "warning_count": 0,
+        "error_count": 13,
+        "errors": [{"code": f"c{i}", "message": "m", "path": "p"} for i in range(13)],
+        "warnings": [],
+    }
+    monkeypatch.setattr(cli, "validate_graph_bundle", lambda bundle: report)
+
+    result = cli.cmd_validate(argparse.Namespace(graph_json=str(graph), json=False))
+    output = capsys.readouterr().out
+
+    assert result == 1
+    assert "  ... 3 more" in output
+    assert output.count("m [p]") == 10
+
+
 def test_atomic_write_text_replaces_existing_file_and_removes_temp_files(tmp_path: Path) -> None:
     target = tmp_path / "artifact.txt"
     atomic_write_text(target, "old")

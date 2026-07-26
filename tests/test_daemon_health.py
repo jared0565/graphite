@@ -869,3 +869,100 @@ def test_daemon_health_rejects_provider_lifecycle_payload_that_could_leak(tmp_pa
         for issue in report["errors"]
     )
     assert secret not in serialized
+
+
+def test_daemon_status_marks_truncation_and_points_at_json(capsys, monkeypatch, tmp_path):
+    import argparse
+
+    from graphite import cli
+
+    status = {
+        "status": "ok",
+        "project_count": 32,
+        "failing_projects": 0,
+        "pending_projects": 0,
+        "updated_at": "2026-07-26T00:00:00Z",
+        "projects": [
+            {"root": f"/repo{i}", "build_count": 1, "failure_count": 0, "file_count": 10}
+            for i in range(32)
+        ],
+    }
+    monkeypatch.setattr(cli, "read_daemon_status", lambda *a, **k: status)
+    args = argparse.Namespace(base_path=str(tmp_path), state_dir=None, json=False)
+    cli.cmd_daemon_status(args)
+    out = capsys.readouterr().out
+
+    assert "  ... 12 more — use --json for the full list" in out
+    assert out.count("builds=") == 20
+
+
+def test_daemon_status_truncation_count_reconciles_with_the_header(capsys, monkeypatch, tmp_path):
+    """20 shown + N dropped must equal the count the summary line claims."""
+    import argparse
+    import re
+
+    from graphite import cli
+
+    status = {
+        "status": "ok",
+        "project_count": 27,
+        "failing_projects": 0,
+        "pending_projects": 0,
+        "updated_at": "2026-07-26T00:00:00Z",
+        "projects": [
+            {"root": f"/repo{i}", "build_count": 1, "failure_count": 0, "file_count": 10}
+            for i in range(27)
+        ],
+    }
+    monkeypatch.setattr(cli, "read_daemon_status", lambda *a, **k: status)
+    cli.cmd_daemon_status(argparse.Namespace(base_path=str(tmp_path), state_dir=None, json=False))
+    out = capsys.readouterr().out
+
+    dropped = int(re.search(r"\.\.\. (\d+) more", out).group(1))
+    assert out.count("builds=") + dropped == 27
+
+
+def test_daemon_status_empty_project_list_prints_no_marker(capsys, monkeypatch, tmp_path):
+    """Count-in-summary: the header already says 0; a dangling marker would be noise."""
+    import argparse
+
+    from graphite import cli
+
+    status = {
+        "status": "ok",
+        "project_count": 0,
+        "failing_projects": 0,
+        "pending_projects": 0,
+        "updated_at": "2026-07-26T00:00:00Z",
+        "projects": [],
+    }
+    monkeypatch.setattr(cli, "read_daemon_status", lambda *a, **k: status)
+    cli.cmd_daemon_status(argparse.Namespace(base_path=str(tmp_path), state_dir=None, json=False))
+    out = capsys.readouterr().out
+
+    assert "none found" not in out
+    assert "more" not in out
+
+
+def test_daemon_status_json_stays_uncapped(capsys, monkeypatch, tmp_path):
+    import argparse
+    import json as jsonlib
+
+    from graphite import cli
+
+    status = {
+        "status": "ok",
+        "project_count": 32,
+        "failing_projects": 0,
+        "pending_projects": 0,
+        "updated_at": "2026-07-26T00:00:00Z",
+        "projects": [
+            {"root": f"/repo{i}", "build_count": 1, "failure_count": 0, "file_count": 10}
+            for i in range(32)
+        ],
+    }
+    monkeypatch.setattr(cli, "read_daemon_status", lambda *a, **k: status)
+    cli.cmd_daemon_status(argparse.Namespace(base_path=str(tmp_path), state_dir=None, json=True))
+    payload = jsonlib.loads(capsys.readouterr().out)
+
+    assert len(payload["projects"]) == 32
