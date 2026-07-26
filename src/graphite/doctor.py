@@ -437,8 +437,31 @@ def check_llm_config(cfg: Config) -> DoctorCheck:
     )
 
 
+def _incidents_check(root: Path) -> DoctorCheck:
+    from .incident_ledger import fold_incidents, read_incident_entries, repo_ledger_dir
+
+    entries, skipped = read_incident_entries(repo_ledger_dir(root))
+    views = [v for v in fold_incidents(entries) if v.state != "resolved"]
+    open_views = [v for v in views if v.state == "open"]
+    top = [f"{v.fingerprint} {v.code} {v.subject} x{v.count}" for v in open_views[:10]]
+    summary = f"{len(open_views)} open / {len(views) - len(open_views)} acked"
+    if skipped:
+        summary += f", {skipped} corrupt line(s)"
+    status = "degraded" if open_views else "ready"
+    return DoctorCheck(
+        code="incidents",
+        label="Incident ledger",
+        status=status,
+        summary=summary,
+        details={"top_open": top},
+        remediation=("graphite incidents list", "graphite incidents ack <fingerprint> -m NOTE")
+        if open_views
+        else (),
+    )
+
+
 def _fast_checks(root: Path, cfg: Config, daemon_base: Path | None) -> list[DoctorCheck]:
-    checks: list[tuple[str, str, Callable[[], DoctorCheck]]] = [("python", "Python", check_python), ("git", "Git", lambda: check_git(root)), ("graph", "Graph", lambda: check_graph(root, cfg)), ("daemon", "Daemon", lambda: check_daemon(root, daemon_base or root)), ("mcp", "MCP", check_mcp), ("typescript", "TypeScript", lambda: check_typescript(root)), ("llm", "LLM", lambda: check_llm_config(cfg))]
+    checks: list[tuple[str, str, Callable[[], DoctorCheck]]] = [("python", "Python", check_python), ("git", "Git", lambda: check_git(root)), ("graph", "Graph", lambda: check_graph(root, cfg)), ("daemon", "Daemon", lambda: check_daemon(root, daemon_base or root)), ("mcp", "MCP", check_mcp), ("typescript", "TypeScript", lambda: check_typescript(root)), ("llm", "LLM", lambda: check_llm_config(cfg)), ("incidents", "Incident ledger", lambda: _incidents_check(root))]
     results = []
     for code, label, check in checks:
         try:

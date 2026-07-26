@@ -32,6 +32,7 @@ from .freshness import check_graph_freshness
 from .graph import build_graph, graph_to_json
 from .graph_io import MAX_GRAPH_BYTES, GraphReadError, load_validated_graph_bundle
 from .health import persisted_resolution, ratio_percent, resolution_health
+from .incident_ledger import record_incident, repo_ledger_dir
 from .ingest import collect_files
 from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
@@ -198,6 +199,21 @@ def _build(
     cache = Cache(cfg.cache_dir, cfg.cache_version)
     start = time.time()
     extraction = extract_all(entries, cfg, cache)
+    if extraction.errors:
+        _root = Path(args.path).resolve()
+        _seen: set[tuple[str, str]] = set()
+        for err in extraction.errors:
+            key = (err["code"], err["subject"])
+            if key in _seen:
+                continue
+            _seen.add(key)
+            record_incident(
+                repo_ledger_dir(_root),
+                klass="build",
+                code=err["code"],
+                subject=err["subject"],
+                detail=err["detail"],
+            )
     if cfg.verbose:
         print(
             f"[graphite] extracted {len(extraction.nodes)} nodes / {len(extraction.edges)} edges "
@@ -269,6 +285,13 @@ def _load_graph(path: Path, *, root: Path | None = None) -> Any:
     try:
         _, graph = load_validated_graph_bundle(path, root=selected_root)
     except GraphReadError as exc:
+        record_incident(
+            repo_ledger_dir(selected_root),
+            klass="build",
+            code="graph_load_failed",
+            subject="graph-out/graph.json",
+            detail=str(exc.code),
+        )
         raise ValueError(f"graph unavailable: {exc.code}") from None
     return graph
 
@@ -283,6 +306,29 @@ def _record_canonical_usage(cmd: str, result: Any, started: float) -> None:
             cmd=cmd,
             wall_ms=int((time.perf_counter() - started) * 1000),
             result=result,
+        )
+    except Exception:
+        return
+
+
+def _record_inconclusive(subject: str, result: Any) -> None:
+    """Best-effort incident capture for inconclusive answers; never fatal."""
+    try:
+        if not (isinstance(result, dict) and result.get("inconclusive") is True):
+            return
+        health = result.get("resolution_health") or {}
+        by_rel = health.get("by_relation") or {}
+
+        def _ratio(rel: str) -> Any:
+            cell = by_rel.get(rel) or {}
+            return cell.get("ratio")
+
+        record_incident(
+            repo_ledger_dir(Path.cwd()),
+            klass="query",
+            code="query_inconclusive",
+            subject=subject,
+            detail=f"imports {_ratio('imports')}, calls {_ratio('calls')}, healthy {health.get('healthy')}",
         )
     except Exception:
         return
@@ -397,11 +443,19 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     cfg = _config_from_args(args, canonical=True)
-    status = check_graph_freshness(
-        Path(args.path).resolve(), cfg, ignore_engine=args.ignore_engine
-    )
+    root = Path(args.path).resolve()
+    status = check_graph_freshness(root, cfg, ignore_engine=args.ignore_engine)
     if args.json:
-        status["resolution_health"] = persisted_resolution(Path(args.path).resolve())
+        status["resolution_health"] = persisted_resolution(
+            root,
+            on_error=lambda exc: record_incident(
+                repo_ledger_dir(root),
+                klass="build",
+                code="artifact_malformed",
+                subject=".graphite_analysis.json",
+                detail=str(exc),
+            ),
+        )
         print(json.dumps(status, ensure_ascii=False, indent=2))
     elif status["stale"]:
         reason = status.get("reason", "source changes")
@@ -433,6 +487,65 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print(format_doctor_text(report), end="")
     return int(report["exit_code"])
+
+
+def _incidents_ledger_dir(args: argparse.Namespace) -> Path:
+    if getattr(args, "global_ledger", False):
+        state_dir = getattr(args, "state_dir", None)
+        if state_dir:
+            return Path(state_dir).resolve()
+        if getattr(args, "daemon_base", None):
+            base = Path(args.daemon_base).resolve()
+        else:
+            base = default_projects_root().resolve()  # same import doctor uses
+        return base / ".graphite-daemon"
+    return repo_ledger_dir(Path(args.path).resolve())
+
+
+def cmd_incidents_list(args: argparse.Namespace) -> int:
+    from .incident_ledger import fold_incidents, read_incident_entries
+
+    entries, skipped = read_incident_entries(_incidents_ledger_dir(args))
+    views = fold_incidents(entries)
+    if not args.all:
+        views = [v for v in views if v.state != "resolved"]
+    if args.json:
+        payload = {
+            "schema_version": 1,
+            "incidents": [v.to_json() for v in views],
+            "skipped": skipped,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    if not views:
+        print("[graphite] no incidents")
+    for v in views:
+        print(f"{v.state:9} {v.fingerprint} {v.klass}/{v.code} {v.subject} x{v.count} last {v.last_seen}")
+    if skipped:
+        print(f"[graphite] skipped {skipped} corrupt line(s)")
+    return 0
+
+
+def _incidents_lifecycle(args: argparse.Namespace, kind: str) -> int:
+    from .incident_ledger import append_lifecycle, fold_incidents, read_incident_entries
+
+    ledger_dir = _incidents_ledger_dir(args)
+    if not append_lifecycle(ledger_dir, args.fingerprint, kind, note=args.message):
+        print(f"[graphite] unknown fingerprint: {args.fingerprint}", file=sys.stderr)
+        return 1
+    entries, _ = read_incident_entries(ledger_dir)
+    for v in fold_incidents(entries):
+        if v.fingerprint == args.fingerprint:
+            print(f"{v.state:9} {v.fingerprint} {v.klass}/{v.code} {v.subject} x{v.count}")
+    return 0
+
+
+def cmd_incidents_ack(args: argparse.Namespace) -> int:
+    return _incidents_lifecycle(args, "ack")
+
+
+def cmd_incidents_resolve(args: argparse.Namespace) -> int:
+    return _incidents_lifecycle(args, "resolve")
 
 
 def _print_overlay_result(payload: dict[str, Any], *, json_mode: bool) -> None:
@@ -734,6 +847,7 @@ def cmd_query(args: argparse.Namespace) -> int:
         result = answer_natural(g, args.query)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if "error" not in result:
+            _record_inconclusive(f"query {args.query}", result)
             _record_canonical_usage("query-natural", result, started)
         return 0
     if args.plan_only:
@@ -747,6 +861,7 @@ def cmd_query(args: argparse.Namespace) -> int:
             result = {**result, "plan": plan}
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if "error" not in result:
+        _record_inconclusive(f"query {args.query}", result)
         _record_canonical_usage("query", result, started)
     return 0
 
@@ -929,6 +1044,7 @@ def cmd_impact(args: argparse.Namespace) -> int:
             print("Missing inputs:")
             for item in result["missing"]:
                 print(f"  - {item}")
+    _record_inconclusive("impact " + ",".join(args.files), result)
     _record_canonical_usage("impact", result, started)
     return 0 if not result["missing"] else 1
 
@@ -1039,6 +1155,7 @@ def cmd_context(args: argparse.Namespace) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print(format_context_markdown(result))
+    _record_inconclusive("context " + ",".join(args.files), result)
     _record_canonical_usage("context", result, started)
     return 0 if not result["missing"] else 1
 
@@ -1904,6 +2021,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_doctor.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_doctor.set_defaults(func=cmd_doctor)
+
+    p_incidents = sub.add_parser("incidents", help="List and triage recorded incidents")
+    incidents_sub = p_incidents.add_subparsers(dest="incidents_cmd", required=True)
+    p_inc_list = incidents_sub.add_parser("list", help="Folded incident views (open+acked by default)")
+    p_inc_list.add_argument("path", nargs="?", default=".")
+    p_inc_list.add_argument("--json", action="store_true")
+    p_inc_list.add_argument("--all", action="store_true", help="Include resolved incidents")
+    p_inc_list.add_argument("--global", dest="global_ledger", action="store_true", help="Read the daemon-global ledger")
+    p_inc_list.add_argument("--daemon-base", default=None)
+    p_inc_list.add_argument("--state-dir", default=None, help="Daemon state directory (default: <base>/.graphite-daemon)")
+    p_inc_list.set_defaults(func=cmd_incidents_list)
+    for name, handler in (("ack", cmd_incidents_ack), ("resolve", cmd_incidents_resolve)):
+        p_life = incidents_sub.add_parser(name, help=f"{name} an incident by fingerprint")
+        p_life.add_argument("fingerprint")
+        p_life.add_argument("path", nargs="?", default=".")
+        p_life.add_argument("-m", "--message", default=None)
+        p_life.add_argument("--global", dest="global_ledger", action="store_true")
+        p_life.add_argument("--daemon-base", default=None)
+        p_life.add_argument("--state-dir", default=None, help="Daemon state directory (default: <base>/.graphite-daemon)")
+        p_life.set_defaults(func=handler)
 
 
     p_init = sub.add_parser("init", aliases=["Init"], help="Initialize Graphite instructions for AI coding platforms")

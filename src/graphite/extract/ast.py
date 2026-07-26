@@ -20,6 +20,7 @@ class ExtractionResult:
     nodes: list[dict[str, Any]] = field(default_factory=list)
     edges: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
+    errors: list[dict[str, Any]] = field(default_factory=list)
 
 
 _LANGUAGE_BUILTIN_GLOBALS: frozenset[str] = frozenset({
@@ -1006,26 +1007,42 @@ def _result_from_dict(data: dict[str, Any]) -> ExtractionResult:
     )
 
 
+def _error_record(rel_path: str, error: str) -> dict[str, Any]:
+    code, _, _rest = error.partition(":")
+    return {"code": code.strip() or "extract_error", "subject": rel_path, "detail": error}
+
+
 def extract_all(entries: list[FileEntry], cfg: Config, cache: Cache | None = None) -> ExtractionResult:
     """Extract all files, optionally in parallel."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     results: list[ExtractionResult] = []
+    error_records: list[dict[str, Any]] = []
     source_index = SourceIndex.from_entries(entries, cfg)
     if cfg.workers <= 1:
         for entry in entries:
-            results.append(extract_file(entry, cfg, cache, source_index))
-        return _merge(results)
+            result = extract_file(entry, cfg, cache, source_index)
+            if result.error:
+                error_records.append(_error_record(entry.rel_path, result.error))
+            results.append(result)
+        merged = _merge(results)
+        merged.errors = sorted(error_records, key=lambda r: r["subject"])
+        return merged
 
     with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
         futures = {pool.submit(extract_file, entry, cfg, cache, source_index): entry for entry in entries}
         for future in as_completed(futures):
+            entry = futures[future]
             try:
-                results.append(future.result())
+                result = future.result()
             except Exception as e:
-                entry = futures[future]
-                results.append(ExtractionResult(error=f"worker_error: {entry.rel_path}: {e}", nodes=[], edges=[]))
-    return _merge(results)
+                result = ExtractionResult(error=f"worker_error: {entry.rel_path}: {e}", nodes=[], edges=[])
+            if result.error:
+                error_records.append(_error_record(entry.rel_path, result.error))
+            results.append(result)
+    merged = _merge(results)
+    merged.errors = sorted(error_records, key=lambda r: r["subject"])
+    return merged
 
 
 # Cap on how many same-named class methods one `recv.method()` call may link to.

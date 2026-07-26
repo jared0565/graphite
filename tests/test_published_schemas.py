@@ -20,6 +20,7 @@ _ALL_SCHEMAS = (
     "query-result.v1.schema.json",
     "search-result.v1.schema.json",
     "capabilities.v1.schema.json",
+    "incidents.v1.schema.json",
 )
 
 
@@ -123,3 +124,17 @@ def test_capabilities_output_matches_published_schema(capsys) -> None:
     assert main(["capabilities", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert matches_schema(payload, _load("capabilities.v1.schema.json")) is True
+
+
+def test_incidents_envelope_matches_published_schema(tmp_path, capsys):
+    from graphite.incident_ledger import incident_fingerprint, record_incident, repo_ledger_dir
+
+    record_incident(
+        repo_ledger_dir(tmp_path), klass="build", code="parse_error", subject="src/a.py", detail="boom"
+    )
+    fp = incident_fingerprint("build", "parse_error", "src/a.py")
+    assert main(["incidents", "ack", fp, str(tmp_path), "-m", "known"]) == 0
+    capsys.readouterr()
+    assert main(["incidents", "list", str(tmp_path), "--json", "--all"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert matches_schema(payload, _load("incidents.v1.schema.json")) is True

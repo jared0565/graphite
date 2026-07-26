@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import Config
+from .incident_ledger import record_incident, repo_ledger_dir
 from .io import atomic_write_json
 from .provider_observer import ProviderObservationSummary
 from .watch import Snapshot, WatchChange, diff_snapshots, snapshot, wait_for_stable_snapshot
@@ -413,6 +414,13 @@ class _ProviderObservationWorker:
                     "state_counts": {},
                     "reason_counts": {"observer_cycle_failed": 1},
                 }
+                record_incident(
+                    self._logger.state_dir,
+                    klass="daemon",
+                    code="provider_probe_failed",
+                    subject="daemon",
+                    detail="observer_cycle_failed",
+                )
             with self._lock:
                 self._status = status
             self._logger.event("provider_observation_cycle", **status)
@@ -487,6 +495,13 @@ def _record_build_result(state: ProjectRuntime, change: WatchChange, result: Bui
     else:
         state.failure_count += 1
         state.last_error = result.error or result.stderr or result.stdout or f"build failed with code {result.returncode}"
+        record_incident(
+            repo_ledger_dir(state.root),
+            klass="daemon",
+            code="daemon_build_failed",
+            subject=str(state.root),
+            detail=state.last_error or "build failed",
+        )
 
 
 def run_daemon(

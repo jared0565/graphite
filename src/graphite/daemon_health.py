@@ -89,49 +89,81 @@ def evaluate_daemon_health(
     warnings: list[dict[str, Any]] = []
     status_path = (state_dir or (base / ".graphite-daemon")) / "status.json"
 
+    def _with_incidents(report: dict[str, Any], project_roots: list[str]) -> dict[str, Any]:
+        from .incident_ledger import fold_incidents, read_incident_entries, repo_ledger_dir
+
+        g_entries, _g_skipped = read_incident_entries(status_path.parent)
+        g_views = [v for v in fold_incidents(g_entries) if v.state != "resolved"]
+        by_class: dict[str, int] = {}
+        for v in g_views:
+            if v.state == "open":
+                by_class[v.klass] = by_class.get(v.klass, 0) + 1
+        projects: dict[str, int] = {}
+        for project_root in project_roots[:_MAX_INPUT_PROJECTS]:
+            p_entries, _ = read_incident_entries(repo_ledger_dir(Path(project_root)))
+            open_count = sum(1 for v in fold_incidents(p_entries) if v.state == "open")
+            if open_count:
+                projects[str(project_root)] = open_count
+        report["incidents"] = {
+            "open": sum(1 for v in g_views if v.state == "open"),
+            "acked": sum(1 for v in g_views if v.state == "acked"),
+            "by_class": by_class,
+            "projects": projects,
+        }
+        return report
+
     try:
         raw_status = read_daemon_status(base, state_dir)
     except FileNotFoundError:
-        return _finalize(
-            base,
-            status_path,
-            current_time,
-            status=None,
-            status_age_seconds=None,
-            errors=[{"code": "status_missing", "message": f"daemon status not found: {status_path}"}],
-            warnings=[],
-            process={"checked": False},
-            startup={"checked": False},
-            project_health={"failing": [], "pending": [], "not_built_recently": []},
+        return _with_incidents(
+            _finalize(
+                base,
+                status_path,
+                current_time,
+                status=None,
+                status_age_seconds=None,
+                errors=[{"code": "status_missing", "message": f"daemon status not found: {status_path}"}],
+                warnings=[],
+                process={"checked": False},
+                startup={"checked": False},
+                project_health={"failing": [], "pending": [], "not_built_recently": []},
+            ),
+            [],
         )
     except DaemonStatusTooLargeError:
-        return _finalize(
-            base,
-            status_path,
-            current_time,
-            status=None,
-            status_age_seconds=None,
-            errors=[{
-                "code": "status_too_large",
-                "message": "daemon status exceeds the maximum allowed size",
-            }],
-            warnings=[],
-            process={"checked": False},
-            startup={"checked": False},
-            project_health={"failing": [], "pending": [], "not_built_recently": []},
+        return _with_incidents(
+            _finalize(
+                base,
+                status_path,
+                current_time,
+                status=None,
+                status_age_seconds=None,
+                errors=[{
+                    "code": "status_too_large",
+                    "message": "daemon status exceeds the maximum allowed size",
+                }],
+                warnings=[],
+                process={"checked": False},
+                startup={"checked": False},
+                project_health={"failing": [], "pending": [], "not_built_recently": []},
+            ),
+            [],
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, DaemonStatusInvalidError):
-        return _finalize(
-            base,
-            status_path,
-            current_time,
-            status=None,
-            status_age_seconds=None,
-            errors=[{"code": "status_unreadable", "message": "daemon status is unreadable"}],
-            warnings=[],
-            process={"checked": False},
-            startup={"checked": False},
-            project_health={"failing": [], "pending": [], "not_built_recently": []},
+        return _with_incidents(
+            _finalize(
+                base,
+                status_path,
+                current_time,
+                status=None,
+                status_age_seconds=None,
+                errors=[{"code": "status_unreadable", "message": "daemon status is unreadable"}],
+                warnings=[],
+                process={"checked": False},
+                startup={"checked": False},
+                project_health={"failing": [], "pending": [], "not_built_recently": []},
+            ),
+            [],
         )
 
     status, schema_issues, status_meta = _normalize_status(raw_status)
@@ -211,19 +243,23 @@ def evaluate_daemon_health(
         elif not startup.get("installed"):
             warnings.append({"code": "startup_not_installed", "message": "Graphite startup launcher is not installed"})
 
-    return _finalize(
-        base,
-        status_path,
-        current_time,
-        status=status,
-        status_age_seconds=status_age,
-        errors=errors,
-        warnings=warnings,
-        process=process,
-        startup=startup,
-        project_health=project_health,
-        project_counts=project_counts,
-        status_meta=status_meta,
+    project_roots = [item["root"] for item in status["projects"]]
+    return _with_incidents(
+        _finalize(
+            base,
+            status_path,
+            current_time,
+            status=status,
+            status_age_seconds=status_age,
+            errors=errors,
+            warnings=warnings,
+            process=process,
+            startup=startup,
+            project_health=project_health,
+            project_counts=project_counts,
+            status_meta=status_meta,
+        ),
+        project_roots,
     )
 
 
