@@ -247,9 +247,13 @@ managed doc template**. The only documentation hit repo-wide is the
 historical spec `2026-07-26-honest-answer-contract-design.md:210`.
 `src/graphite/init.py` and `docs/agent-integration.md` are clean, so
 `DOC_VERSION` stays at 9 and no consumer-repo rollout follows (R6). Exactly
-one test asserts the literal indented form — `tests/test_health.py:453` —
-and is updated. The `tests/test_context.py` assertions use substring
-matching and are indentation-agnostic.
+one test asserts the literal indented form —
+`test_answer_lines_two_cell_sorted_join_format` in `tests/test_health.py` —
+and is updated; a dedicated `test_answer_lines_render_at_column_zero` in the
+same file pins the new form. The `tests/test_context.py` assertions use
+substring matching and are indentation-agnostic. (Tests are cited by name,
+not line: this branch's own commits shifted `tests/test_health.py` enough to
+invalidate an earlier line citation here.)
 
 ## 7. Call sites
 
@@ -376,9 +380,15 @@ over-cap input exactly as site 6 is; site 6's only distinction is that its
 test lives in this file. What this file does assert
 mechanically is `test_every_listing_lines_call_site_is_accounted_for`: an
 AST walk over `src/graphite` reconciling the real `listing_lines()` call
-count against `SURFACES`, so an added or removed call site with no matching
-row fails the suite. That reconciliation is what makes "a new surface must
-be added to this table to pass" true.
+count against `SURFACES`, so an added or removed `listing_lines()` call
+site with no matching row fails the suite. That reconciliation is what
+makes "a new **`listing_lines()`-based** surface must be added to this
+table to pass" true. It does not reach a hand-rolled marker: site 8
+(`daemon_health._issue_lines`, §7 row 8) is declared with an expected call
+count of zero for exactly that reason, and a new surface that rolled its
+own marker would likewise contribute zero and pass unnoticed. The test's
+own docstring says so; §4's shorter phrasing of the same guarantee should
+be read with this qualification.
 
 Answer-surface epistemology tests (extend `tests/test_health.py`,
 `tests/test_context.py`):
@@ -388,7 +398,9 @@ Answer-surface epistemology tests (extend `tests/test_health.py`,
 - degraded graph, same shape → `- none found — INCONCLUSIVE: …`. This is
   the §5 falsifier: without the grade-aware branch it renders a bare
   `none found` and the test fails.
-- `_answer_lines` output starts at column 0 (updates `test_health.py:453`)
+- `_answer_lines` output starts at column 0 — `test_health.py`'s
+  `test_answer_lines_render_at_column_zero`, plus the updated
+  `test_answer_lines_two_cell_sorted_join_format`
 
 Regression fixture:
 `test_impact_empty_tests_half_is_marked_inconclusive_when_degraded`
