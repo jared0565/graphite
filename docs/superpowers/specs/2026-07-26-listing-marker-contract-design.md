@@ -356,15 +356,24 @@ removed (§7.1); site 9 is not a listing and is covered by the epistemology
 tests below. `test_listing_lines_marker_shape_is_uniform` and
 `test_answer_surfaces_emit_their_header_when_empty` assert the marker shape
 and the empty-header behaviour by calling `listing_lines()` directly — they
-exercise the function's own contract, not any surface's call site. Of the
-seven, only `context.likely_tests` (site 6) is driven through its own
-renderer with a real over-cap input, in
+exercise the function's own contract, not any surface's call site. Within
+this file, the one surface driven through its own renderer with a real
+over-cap input is `context.likely_tests` (site 6), in
 `test_context_likely_tests_cap_is_marked`, which calls
 `format_context_markdown` directly. `cmd_impact` (site 1) cannot be tested
-this way at all: it passes no `cap` to `listing_lines` (§1.1, §4), so it has
-no over-cap input to give. The remaining sites (2–5, 8) have their markers
-tested where they are implemented — `tests/test_daemon_health.py` and
-`tests/test_reliability.py` — not in this file. What this file does assert
+that way at all: it passes no `cap` to `listing_lines` (§1.1, §4), so it has
+no over-cap input to give. Every other site is marker-tested in its own
+suite rather than here — sites 2, 4 and 8 in `tests/test_daemon_health.py`
+(`test_daemon_status_marks_truncation_and_points_at_json`,
+`test_watch_impact_marks_truncation`,
+`test_daemon_health_outer_cap_is_marked`), site 3 in
+`tests/test_reliability.py`
+(`test_validate_cli_truncates_error_list_and_marks_dropped_count`), and
+site 5 in `tests/test_context.py`
+(`test_context_impacted_files_cap_is_marked`, 35 impacted files against a
+cap of 30). Site 5 is driven through `format_context_markdown` with an
+over-cap input exactly as site 6 is; site 6's only distinction is that its
+test lives in this file. What this file does assert
 mechanically is `test_every_listing_lines_call_site_is_accounted_for`: an
 AST walk over `src/graphite` reconciling the real `listing_lines()` call
 count against `SURFACES`, so an added or removed call site with no matching
