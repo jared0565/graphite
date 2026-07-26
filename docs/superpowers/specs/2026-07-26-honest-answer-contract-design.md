@@ -142,6 +142,11 @@ Field rules:
     non-empty.
   - `inconclusive` — at least one cell degraded AND the primary result
     is empty.
+  - Known posture: when no health cell exists at all for the answer's
+    relations × languages (e.g. zero edges of any declared relation for
+    the in-scope languages), `grade` is `decision_grade` on zero
+    measured evidence — accepted for v1; candidate for a distinct
+    "unmeasured" posture in a future round.
 - `caveats`: registry entries whose relations ∩ `answer.relations` ≠ ∅
   AND languages ∩ `answer.languages` ≠ ∅, projected to `{code, summary}`.
 - `empty_meaning`: present iff the primary result is empty. Wording per
@@ -246,6 +251,14 @@ Healthy non-empty answers: byte-identical output to today.
   vocabulary, and the `inconclusive` derivation refinement.
 - `capabilities`: additive `answer_contract` key:
   `{"schema": 1, "grades": [...], "caveats": [active entries]}`.
+- `docs/schemas/capabilities.v1.schema.json`: additive `answer_contract`
+  property (object, `additionalProperties: true`; `schema`, `grades`,
+  `caveats` required inside it, each caveat entry requiring `code`,
+  `relations`, `languages`, `summary`, `since`). Top-level
+  `answer_contract` is NOT added to the required list — this was
+  omitted from the original plan and caught in final review; the live
+  `capabilities` payload had already changed to carry the key before
+  the schema documented it.
 - `src/graphite/init.py`: `DOC_VERSION` 8 → 9; managed template gains
   the answer-grade guidance for agents.
 - `src/graphite/config.py:32,159`: `cache_version` "v7" → "v8"
@@ -291,9 +304,16 @@ gain `source_file` (`""` for file-less nodes — same sentinel as
 
 ## 11. Error handling
 
-- `build_answer_block` wraps its whole body; any exception → `None`;
-  callers omit the `answer` key and leave legacy fields exactly as
-  today. A dropped block is the only failure mode (R6).
+- Fail-open covers the WHOLE answer-attach step at each of the three
+  seams (query.py `execute_plan`, cli.py `_impact`, context.py
+  `build_context`) — seed derivation and `languages_for_nodes` included,
+  not only `build_answer_block`'s body. `build_answer_block` also wraps
+  its own whole body as a second, inner layer (belt-and-suspenders), but
+  the attach-step try/except at each seam is what makes the guarantee
+  hold: any exception anywhere in the step → the envelope/result is left
+  exactly as it was before the step ran, `answer` key omitted, legacy
+  fields (including the aggregate-derived `inconclusive`) untouched. A
+  dropped block is the only failure mode (R6).
 - Human printers guard on key presence; absence prints today's output.
 - Registry is static data; no I/O anywhere in the contract path.
 - `resolution_health(g)` is already exception-safe on the graphs the
