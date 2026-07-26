@@ -268,6 +268,7 @@ def test_cmd_impact_human_inconclusive_line(capsys, monkeypatch):
 
     monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: _unhealthy_graph())
     monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_inconclusive", lambda *a, **k: None)
     args = argparse.Namespace(graph_json="graph-out/graph.json", files=["lonely"], depth=2, json=False)
     cli.cmd_impact(args)
     out = capsys.readouterr().out
@@ -294,6 +295,7 @@ def test_cmd_impact_human_note_when_nonempty_but_unhealthy(capsys, monkeypatch):
     )
     monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: g)
     monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_inconclusive", lambda *a, **k: None)
     args = argparse.Namespace(graph_json="graph-out/graph.json", files=["target_file"], depth=2, json=False)
     cli.cmd_impact(args)
     out = capsys.readouterr().out
@@ -309,6 +311,7 @@ def test_cmd_impact_human_unchanged_on_healthy_graph(capsys, monkeypatch):
 
     monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: _healthy_graph())
     monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_inconclusive", lambda *a, **k: None)
     args = argparse.Namespace(graph_json="graph-out/graph.json", files=["lonely"], depth=2, json=False)
     cli.cmd_impact(args)
     out = capsys.readouterr().out
