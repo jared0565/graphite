@@ -1,0 +1,115 @@
+"""Answer-scoped confidence contract (spec 2026-07-26).
+
+Every canonical graph answer carries an `answer` block: the relations the
+verb walked, the languages in scope, per-relation per-language health
+cells, a derived grade, applicable caveat codes, and — when the primary
+result is empty — what the emptiness means.
+
+Fail-open: build_answer_block returns None on any internal failure and
+callers omit the key; the block may be dropped, never wrong.
+"""
+from __future__ import annotations
+
+from typing import Any, Iterable, Sequence
+
+import networkx as nx
+
+from .health import RESOLUTION_HEALTHY_RATIO, _edge_language, resolution_health
+
+ANSWER_SCHEMA = 1
+
+GRADE_DECISION = "decision_grade"
+GRADE_ADVISORY = "advisory"
+GRADE_INCONCLUSIVE = "inconclusive"
+
+# Confirmed blindspot classes. Process rule (spec §5): a confirmed class
+# gets an entry the day it is confirmed, decoupled from its fix; fixed
+# classes get retired_by and are never emitted again.
+CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
+    {
+        "code": "python-dynamic-dispatch",
+        "relations": ("calls",),
+        "languages": ("python",),
+        "summary": "dynamically dispatched calls (getattr, decorator rebinding) are not modeled",
+        "since": "2026-07-26",
+    },
+    {
+        "code": "ts-external-calls-unclassified",
+        "relations": ("calls",),
+        "languages": ("typescript", "javascript"),
+        "summary": "calls to external-package symbols, runtime globals, and destructured locals count as unbound",
+        "since": "2026-07-26",
+    },
+)
+
+
+def active_caveats() -> list[dict[str, Any]]:
+    """Registry entries that are live (no retired_by), full published shape."""
+    return [dict(e) for e in CAVEAT_REGISTRY if not e.get("retired_by")]
+
+
+def languages_for_nodes(g: nx.DiGraph, node_ids: Iterable[str]) -> list[str]:
+    """Sorted unique languages of the nodes' source files ('other' dropped)."""
+    langs: set[str] = set()
+    for node_id in node_ids:
+        if node_id is None or node_id not in g:
+            continue
+        language = _edge_language(g.nodes[node_id].get("source_file"))
+        if language != "other":
+            langs.add(language)
+    return sorted(langs)
+
+
+def build_answer_block(
+    g: nx.DiGraph,
+    *,
+    relations: Sequence[str],
+    languages: Sequence[str] | None,
+    total: int,
+    empty_meaning: str | None = None,
+) -> dict[str, Any] | None:
+    """The `answer` block for one graph answer, or None (fail-open)."""
+    try:
+        if not relations:
+            return None
+        health = resolution_health(g)
+        by_language = health.get("by_language") or {}
+        threshold = health.get("threshold", RESOLUTION_HEALTHY_RATIO)
+        langs = sorted(languages) if languages else sorted(by_language)
+        cells: dict[str, dict[str, dict[str, Any]]] = {}
+        degraded = False
+        for relation in relations:
+            for language in langs:
+                cell = (by_language.get(language) or {}).get(relation)
+                if not cell or cell.get("ratio") is None:
+                    continue
+                healthy = cell["ratio"] >= threshold
+                degraded = degraded or not healthy
+                cells.setdefault(relation, {})[language] = {**cell, "healthy": healthy}
+        empty = total == 0
+        if degraded:
+            grade = GRADE_INCONCLUSIVE if empty else GRADE_ADVISORY
+        else:
+            grade = GRADE_DECISION
+        relation_set = set(relations)
+        language_set = set(langs)
+        caveats = [
+            {"code": e["code"], "summary": e["summary"]}
+            for e in CAVEAT_REGISTRY
+            if not e.get("retired_by")
+            and relation_set.intersection(e["relations"])
+            and language_set.intersection(e["languages"])
+        ]
+        block: dict[str, Any] = {
+            "schema": ANSWER_SCHEMA,
+            "relations": sorted(relation_set),
+            "languages": langs,
+            "health": cells,
+            "grade": grade,
+            "caveats": caveats,
+        }
+        if empty and empty_meaning:
+            block["empty_meaning"] = empty_meaning
+        return block
+    except Exception:
+        return None
