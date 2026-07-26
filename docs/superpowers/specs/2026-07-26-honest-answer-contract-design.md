@@ -87,9 +87,11 @@ Wiring (the only call sites):
 - `src/graphite/context.py` impact builder (line ~197) — covers
   `context`.
 
-Human printers updated: `cmd_query` relation-verb rendering, `cmd_impact`
-(cli.py ~1035), `context` markdown (context.py ~122). Exact line format
-in §6, pinned so tests can snapshot it.
+Human printers updated: `cmd_impact` (cli.py ~1035), `context` markdown
+(context.py ~122). `cmd_query` emits pure JSON today and keeps doing so;
+the `answer` block is its entire disclosure. Human epistemology lines
+apply to the surfaces that have human rendering: `impact`, `context`.
+Exact line format in §6, pinned so tests can snapshot it.
 
 `cmd_capabilities` (cli.py:890) gains an `answer_contract` key (§8).
 
@@ -220,7 +222,7 @@ Healthy non-empty answers: byte-identical output to today.
 |---|---|---|
 | `query callers` | calls | via `_attach_resolution` |
 | `query calls` | calls | 〃 |
-| `query reaches` | calls, imports | 〃 |
+| `query reaches` | calls | 〃 |
 | `query path` | calls, imports | 〃 |
 | `query depends-on` | calls, imports | 〃 (also gains `source_file`, R5) |
 | `query imported-by` | imports | 〃 (also gains `source_file`, R5) |
