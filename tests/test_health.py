@@ -328,7 +328,10 @@ def test_cmd_impact_human_note_when_nonempty_but_unhealthy(capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "caller.py" in out
     assert "may be incomplete" in out
-    assert "INCONCLUSIVE" not in out
+    # The impacted-files half is non-empty and must not be marked/replaced;
+    # its empty sibling (likely_tests) is allowed to carry the grade-aware
+    # INCONCLUSIVE marker now that this round makes it grade-aware (spec §5).
+    assert "Impacted files: none found" not in out
 
 
 def test_cmd_impact_human_unchanged_on_healthy_graph(capsys, monkeypatch):
@@ -428,7 +431,10 @@ def test_cmd_impact_human_advisory_line_on_nonempty_degraded(capsys, monkeypatch
     out = capsys.readouterr().out
     assert "Impacted files:" in out
     assert "src/b.py" in out
-    assert "INCONCLUSIVE" not in out
+    # The impacted-files half is non-empty and must not be marked/replaced;
+    # its empty sibling (likely_tests) is allowed to carry the grade-aware
+    # INCONCLUSIVE marker now that this round makes it grade-aware (spec §5).
+    assert "Impacted files: none found" not in out
     assert "answer health: " in out
     assert "advisory" in out
     assert "known limits:" in out
@@ -603,4 +609,69 @@ def test_answer_lines_render_at_column_zero():
     }
     lines = cli._answer_lines(block, empty=True)
     assert lines == ["answer health: calls (python) 0.95, imports (python) 0.80 — decision-grade"]
+
+
+def _impact_args(files=("src/a.py",)):
+    import argparse
+
+    return argparse.Namespace(
+        graph_json="graph-out/graph.json", files=list(files), depth=2, json=False
+    )
+
+
+def test_impact_empty_tests_half_is_marked_on_a_healthy_graph(capsys, monkeypatch):
+    """Partial-empty answer: the header gets a body, and it claims nothing extra."""
+    from graphite import cli
+
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: _answer_graph())
+    monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_inconclusive", lambda *a, **k: None)
+    cli.cmd_impact(_impact_args())
+    out = capsys.readouterr().out
+
+    assert "Likely tests:\n  - none found\n" in out
+    assert "INCONCLUSIVE" not in out
+
+
+def test_impact_empty_tests_half_is_marked_inconclusive_when_degraded(capsys, monkeypatch):
+    """The firescraper shape (spec §5 falsifier): impacted > 0, tests == 0,
+    degraded. Same shape as `_answer_graph(degraded_ts=True)` queried with
+    both `src/a.py` and `src/t.ts` (see
+    test_cmd_impact_human_advisory_line_on_nonempty_degraded): impacted_files
+    == ["src/b.py"], likely_tests == [], grade advisory, typescript calls
+    cell degraded.
+
+    Without the grade-aware branch this renders a bare `- none found`, which
+    asserts an absence the graph did not earn. Note: `files=["src/t.ts"]`
+    alone would grade the whole answer `inconclusive` (both halves empty),
+    routing through cmd_impact's separate top-level inconclusive branch
+    instead of the listing branch this test targets — see
+    test_impact_inconclusive_upgrades_to_scoped.
+    """
+    from graphite import cli
+
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: _answer_graph(degraded_ts=True))
+    monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_inconclusive", lambda *a, **k: None)
+    cli.cmd_impact(_impact_args(files=["src/a.py", "src/t.ts"]))
+    out = capsys.readouterr().out
+
+    assert "- none found — INCONCLUSIVE: treat as unverified and confirm with grep" in out
+
+
+def test_impact_never_prints_a_bare_header(capsys, monkeypatch):
+    """R1, asserted structurally: no header line is the last line or is
+    followed by a line that is not part of its body."""
+    from graphite import cli
+
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: _answer_graph())
+    monkeypatch.setattr(cli, "_record_canonical_usage", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_inconclusive", lambda *a, **k: None)
+    cli.cmd_impact(_impact_args())
+    lines = capsys.readouterr().out.splitlines()
+
+    for index, line in enumerate(lines):
+        if line.endswith(":") and not line.startswith(" "):
+            assert index + 1 < len(lines), f"bare header at end of output: {line!r}"
+            assert lines[index + 1].startswith("  "), f"bare header: {line!r}"
     assert not lines[0].startswith(" ")

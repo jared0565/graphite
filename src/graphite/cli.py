@@ -22,6 +22,7 @@ from .answer_contract import (
     GRADE_INCONCLUSIVE,
     active_caveats,
     build_answer_block,
+    empty_marker,
     is_degraded,
     languages_for_nodes,
 )
@@ -46,6 +47,7 @@ from .incident_ledger import record_incident, repo_ledger_dir
 from .ingest import collect_files
 from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
+from .listing import listing_lines
 from .llm import CANONICAL_ENRICHMENT_MIGRATION_MESSAGE
 from .overlays import OverlayError, OverlayRequest, build_overlay
 from .routing.approval import approval_prompt
@@ -1114,12 +1116,15 @@ def cmd_impact(args: argparse.Namespace) -> int:
                 )
         else:
             if result["impacted_files"] or result["likely_tests"]:
-                print("Impacted files:")
-                for path in result["impacted_files"]:
-                    print(f"  - {path}")
-                print("Likely tests:")
-                for path in result["likely_tests"]:
-                    print(f"  - {path}")
+                marker = empty_marker(result.get("answer"))
+                for line in listing_lines(
+                    result["impacted_files"], header="Impacted files:", empty=marker
+                ):
+                    print(line)
+                for line in listing_lines(
+                    result["likely_tests"], header="Likely tests:", empty=marker
+                ):
+                    print(line)
             else:
                 meaning = (result.get("answer") or {}).get(
                     "empty_meaning", "none found"
