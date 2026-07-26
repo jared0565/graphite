@@ -103,7 +103,7 @@ def listing_lines(
     header: str | None = None,
     cap: int | None = None,
     indent: str = "  ",
-    empty: str = "none found",
+    empty: str | None = "none found",
     more_hint: str | None = None,
 ) -> list[str]:
 ```
@@ -116,6 +116,11 @@ Emitted in order:
 3. `{indent}... {n} more{more_hint}` if `cap` dropped `n > 0` items.
    `more_hint` is appended verbatim, with no separator inserted — the one
    caller supplies its own leading `" — "`.
+
+`empty=None` omits the listing entirely when there is nothing to show —
+header included. This is what makes R1 enforceable by construction: a caller
+that wants silence on empty cannot accidentally leave a header behind.
+Count-in-summary and conditional-report surfaces (§4) all pass it.
 
 The function is pure and total: it prints nothing, raises nothing, and
 returns a list. `cli.py` prints the lines; `context.py` and
@@ -145,6 +150,12 @@ user asked.**
 | Answer | `impact`, `context` (impacted / tests) | unconditional within the listing branch | yes, grade-aware (§5) | yes |
 | Count-in-summary | `daemon-status`, `validate` | none — the summary line states the count | n/a | yes |
 | Conditional report | watch impact, `daemon-health` errors/warnings | only when non-empty | n/a | yes |
+
+"Unconditional" is scoped to the branch that lists results. When *every*
+list in the answer is empty, `impact` and `context` both print one sentence
+whose `empty_meaning` is already "no impacted files or tests reachable
+through bound edges" — that answers both halves, and adding per-half blocks
+there would make the two renderers diverge for no gain.
 
 Rationale per kind. **Answer** surfaces were asked a question and every part
 of the answer must be stated, including the empty parts. **Count-in-summary**
@@ -231,7 +242,7 @@ matching and are indentation-agnostic.
 | 5 | `context.py:132` | Answer | impacted cap 30 → marker |
 | 6 | `context.py:157` | Answer | tests cap 30 → marker; **empty case now rendered** (markdown sibling of #10) |
 | ~~7~~ | ~~`context.py:210`~~ | — | **Removed from this round — issue #11** (§7.1). The numbering keeps its gap so cross-references stay stable. |
-| 8 | `daemon_health.py:374/376` | Conditional | outer caps 20 → markers; inner marker at :349 unchanged |
+| 8 | `daemon_health.py:374/376` | Conditional | outer caps 20 → markers; inner marker at :349 unchanged. Implements the marker locally rather than through `listing_lines`, because its body is grouped by issue code rather than being a flat list; the surface table test (§9) covers it. |
 | 9 | `cli.py:1084` `_answer_lines` | — | column 0 (§6) |
 
 ### 7.1 Neighbour sections: removed from this round (issue #11)
