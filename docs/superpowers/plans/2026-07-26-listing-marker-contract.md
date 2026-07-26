@@ -18,7 +18,8 @@
 - **Truncation wording is `... N more`**, matching the existing precedent at `daemon_health.py:349`. Not "and N more", not "…".
 - **The truncation line carries no `- ` bullet** (spec R3). The empty line does carry one.
 - **Marker indentation matches the list it belongs to** — two spaces in `cli.py`, empty string in `context.py` (which renders at column 0 with backticks).
-- **Run the suite by redirecting to a file and reading `$?` directly.** `python -m pytest > out.txt 2>&1; echo $?` — never `pytest | tail`, which reports the pipe's status and has made failing runs look green.
+- **Run every command in this plan through the Bash tool (Git Bash), not PowerShell.** The commands use POSIX syntax (`$?`, `||`, heredocs). Mixing shells is how the `/tmp` redirect in an earlier draft of this plan silently wrote somewhere Python could not read it back.
+- **Never pipe a test run.** `python -m pytest -q; echo "rc=$?"` — bare, then read the code. `pytest | tail` reports the *pipe's* status and has made failing runs look green. No redirect to a temp file is needed: the pipe is the hazard, not the absence of a file.
 - **Branch:** `feat/listing-marker-contract`, base `9c0d943`. Spec already committed at `9e77e30`.
 
 ---
@@ -136,7 +137,7 @@ def test_custom_empty_string():
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m pytest tests/test_listing.py -v > /tmp/t.txt 2>&1; echo $?`
+Run: `python -m pytest tests/test_listing.py -v; echo "rc=$?"`
 Expected: non-zero. `ModuleNotFoundError: No module named 'graphite.listing'`
 
 - [ ] **Step 3: Write the implementation**
@@ -199,7 +200,7 @@ def listing_lines(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python -m pytest tests/test_listing.py -v > /tmp/t.txt 2>&1; echo $?`
+Run: `python -m pytest tests/test_listing.py -v; echo "rc=$?"`
 Expected: `0`, 13 passed.
 
 - [ ] **Step 5: Lint**
@@ -282,7 +283,7 @@ to:
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `python -m pytest tests/test_health.py -k "is_degraded or column_zero or sorted" -v > /tmp/t.txt 2>&1; echo $?`
+Run: `python -m pytest tests/test_health.py -k "is_degraded or column_zero or sorted" -v; echo "rc=$?"`
 Expected: non-zero. `ImportError: cannot import name 'is_degraded'`, and the indent assertions fail on the two-space prefix.
 
 - [ ] **Step 4: Add `is_degraded` to `answer_contract.py`**
@@ -355,7 +356,7 @@ Add `is_degraded` to `context.py`'s existing `answer_contract` import.
 
 - [ ] **Step 7: Run tests to verify they pass**
 
-Run: `python -m pytest tests/test_health.py tests/test_context.py -v > /tmp/t.txt 2>&1; echo $?`
+Run: `python -m pytest tests/test_health.py tests/test_context.py -v; echo "rc=$?"`
 Expected: `0`.
 
 - [ ] **Step 8: Commit**
@@ -442,7 +443,7 @@ def test_impact_never_prints_a_bare_header(capsys, monkeypatch):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m pytest tests/test_health.py -k "empty_tests_half or bare_header" -v > /tmp/t.txt 2>&1; echo $?`
+Run: `python -m pytest tests/test_health.py -k "empty_tests_half or bare_header" -v; echo "rc=$?"`
 Expected: non-zero. The `Likely tests:` header currently has no body line.
 
 - [ ] **Step 3: Add the empty-marker helper to `cli.py`**
@@ -498,7 +499,7 @@ Note: no `cap` here. `cmd_impact` prints the full lists today and this round doe
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `python -m pytest tests/test_health.py -v > /tmp/t.txt 2>&1; echo $?`
+Run: `python -m pytest tests/test_health.py -v; echo "rc=$?"`
 Expected: `0`.
 
 - [ ] **Step 6: Commit**
@@ -626,7 +627,7 @@ def test_daemon_status_json_stays_uncapped(capsys, monkeypatch, tmp_path):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m pytest tests/test_daemon_health.py -k "daemon_status" -v > /tmp/t.txt 2>&1; echo $?`
+Run: `python -m pytest tests/test_daemon_health.py -k "daemon_status" -v; echo "rc=$?"`
 Expected: non-zero on the truncation tests (no `... N more` is printed today); the JSON test passes already and is a guard.
 
 - [ ] **Step 3: Add the cap constants to `cli.py`**
@@ -689,7 +690,7 @@ with:
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `python -m pytest tests/test_daemon_health.py tests/test_hardening.py -v > /tmp/t.txt 2>&1; echo $?`
+Run: `python -m pytest tests/test_daemon_health.py tests/test_hardening.py -v; echo "rc=$?"`
 Expected: `0`.
 
 - [ ] **Step 7: Commit**
@@ -786,7 +787,7 @@ Note on the first test: the caps differ (20 impacted, 30 tests) but both lists a
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m pytest tests/test_daemon_health.py -k "watch_impact or daemon_health_outer or under_cap" -v > /tmp/t.txt 2>&1; echo $?`
+Run: `python -m pytest tests/test_daemon_health.py -k "watch_impact or daemon_health_outer or under_cap" -v; echo "rc=$?"`
 Expected: non-zero. `_issue_lines` takes no `cap` keyword; watch prints no markers.
 
 - [ ] **Step 3: Add watch cap constants to `cli.py`**
@@ -888,7 +889,7 @@ with:
 
 - [ ] **Step 7: Run tests to verify they pass**
 
-Run: `python -m pytest tests/test_daemon_health.py tests/test_daemon.py -v > /tmp/t.txt 2>&1; echo $?`
+Run: `python -m pytest tests/test_daemon_health.py tests/test_daemon.py -v; echo "rc=$?"`
 Expected: `0`.
 
 - [ ] **Step 8: Commit**
@@ -1007,7 +1008,7 @@ def test_context_both_halves_empty_keeps_the_single_sentence():
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m pytest tests/test_context.py -k "marks_the_empty or cap_is_marked or both_halves" -v > /tmp/t.txt 2>&1; echo $?`
+Run: `python -m pytest tests/test_context.py -k "marks_the_empty or cap_is_marked or both_halves" -v; echo "rc=$?"`
 Expected: non-zero — the `Likely tests:` block is omitted today and no markers are printed.
 
 - [ ] **Step 3: Add constants and the empty-marker helper to `context.py`**
@@ -1086,15 +1087,14 @@ Read the condition carefully: it is `impacted_files`, not `likely_tests`. Inside
 Run:
 
 ```bash
-git diff src/graphite/context.py > /tmp/ctxdiff.txt
-grep -c "_append_neighbor_section\|_neighbors" /tmp/ctxdiff.txt || echo "0 (clean)"
+git diff src/graphite/context.py | grep -c "_append_neighbor_section\|_neighbors" || echo "0 (clean)"
 ```
 
-Expected: `0 (clean)`. If either name appears in the diff, revert that hunk — it belongs to issue #11, not this round. (`grep -c` exits 1 on zero matches, which is why the count is written to a file and the `|| echo` guard is there rather than reading `$?` from a pipe.)
+Expected: `0 (clean)`. If either name appears in the diff, revert that hunk — it belongs to issue #11, not this round. (`grep -c` exits 1 on zero matches, hence the `|| echo` guard; this is the one place a pipe is fine, because the count itself is the result and no exit code is being trusted.)
 
 - [ ] **Step 7: Run tests to verify they pass**
 
-Run: `python -m pytest tests/test_context.py -v > /tmp/t.txt 2>&1; echo $?`
+Run: `python -m pytest tests/test_context.py -v; echo "rc=$?"`
 Expected: `0`.
 
 - [ ] **Step 8: Commit**
@@ -1204,7 +1204,7 @@ def test_non_answer_surfaces_emit_nothing_when_empty():
 
 - [ ] **Step 2: Run the table test**
 
-Run: `python -m pytest tests/test_listing_surfaces.py -v > /tmp/t.txt 2>&1; echo $?`
+Run: `python -m pytest tests/test_listing_surfaces.py -v; echo "rc=$?"`
 Expected: `0`.
 
 - [ ] **Step 3: Lint everything touched**
@@ -1217,18 +1217,23 @@ Expected: no findings. Fix any that appear.
 Run:
 
 ```bash
-python -m pytest > /tmp/suite.txt 2>&1
+python -m pytest -q
 echo "rc=$?"
-tail -5 /tmp/suite.txt
 ```
 
-Expected: `rc=0`. Baseline before this round was 2242 passed / 44 skipped / 0 failed; the new tests raise the pass count. **Do not pipe pytest into `tail`** — `$?` would report `tail`'s status and a failing run would look green.
+Expected: `rc=0`. Baseline before this round was 2242 passed / 44 skipped / 0 failed; the new tests raise the pass count. **Do not pipe pytest into `tail` or `head`** — `$?` would report the pager's status and a failing run would look green. Run it bare and read the summary from the captured output.
 
 - [ ] **Step 5: Truth up the spec against what was built**
 
 Two refinements were made during implementation planning and must be folded back into the design doc, matching this repo's precedent of a `docs(spec): truth-up` commit:
 
-In §3, after the emitted-order list, add:
+In §3, correct the declared signature — it still reads `empty: str = "none found"`, but the implemented type is optional. Change that line to:
+
+```python
+    empty: str | None = "none found",
+```
+
+Then, after the emitted-order list, add:
 
 ```markdown
 `empty=None` omits the listing entirely when there is nothing to show —
@@ -1268,7 +1273,9 @@ Run these against real repos, writing the falsifier down before each run. Spec �
 - [ ] **A1.** `python -m graphite impact src/router.ts` in `F:\Projects\FireScraper` prints `Likely tests:` followed by a marked empty body carrying the `INCONCLUSIVE` suffix, and `answer health:` at column 0. *Falsifier:* a bare header, an indented `answer health:`, or a plain `none found` on this degraded answer.
 - [ ] **A2.** `python -m graphite daemon-status` with more than 20 projects prints `... N more — use --json for the full list`, and N + rows shown equals the project count in the summary line. *Falsifier:* 20 rows and no marker, or an N that does not reconcile.
 - [ ] **A3.** `python -m graphite daemon-status --json` still lists every project. *Falsifier:* the JSON gains a cap.
-- [ ] **A4.** `python -m graphite impact <file>` on a healthy Python repo with an empty tests half prints `- none found` with **no** `INCONCLUSIVE` suffix. *Falsifier:* the suffix appearing on a decision-grade answer.
+- [ ] **A4.** A healthy `decision_grade` answer with an empty tests half prints `- none found` with **no** `INCONCLUSIVE` suffix. *Falsifier:* the suffix appearing on a decision-grade answer.
+
+  **Target must be found before the run, and may not exist live.** A probe of every `src/graphite/*.py` module during planning found no file with `impacted_files == 0 and likely_tests > 0`, and the sampled files all had large test fan-in (29 tests each) — so graphite itself is a poor candidate for the inverse shape too. Procedure: first try `aramid` (healthy Python, `calls` 0.945), sweeping its modules for `impacted > 0, tests == 0` via `impact --json`. If no module has that shape, fall back to the constructed fixture — `_answer_graph()` in `tests/test_health.py` already produces it — and record in the acceptance notes that A4 was met by fixture rather than live, so the evidence is graded honestly.
 - [ ] **A5.** Full suite green, exit code read directly from a redirected run.
 
 ## Follow-ups this round does not take
