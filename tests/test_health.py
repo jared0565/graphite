@@ -332,6 +332,7 @@ def test_cmd_impact_human_note_when_nonempty_but_unhealthy(capsys, monkeypatch):
     # its empty sibling (likely_tests) is allowed to carry the grade-aware
     # INCONCLUSIVE marker now that this round makes it grade-aware (spec §5).
     assert "Impacted files: none found" not in out
+    assert "INCONCLUSIVE" not in out.split("Likely tests:")[0]
 
 
 def test_cmd_impact_human_unchanged_on_healthy_graph(capsys, monkeypatch):
@@ -435,6 +436,7 @@ def test_cmd_impact_human_advisory_line_on_nonempty_degraded(capsys, monkeypatch
     # its empty sibling (likely_tests) is allowed to carry the grade-aware
     # INCONCLUSIVE marker now that this round makes it grade-aware (spec §5).
     assert "Impacted files: none found" not in out
+    assert "INCONCLUSIVE" not in out.split("Likely tests:")[0]
     assert "answer health: " in out
     assert "advisory" in out
     assert "known limits:" in out
@@ -609,6 +611,7 @@ def test_answer_lines_render_at_column_zero():
     }
     lines = cli._answer_lines(block, empty=True)
     assert lines == ["answer health: calls (python) 0.95, imports (python) 0.80 — decision-grade"]
+    assert not lines[0].startswith(" ")
 
 
 def _impact_args(files=("src/a.py",)):
@@ -674,4 +677,3 @@ def test_impact_never_prints_a_bare_header(capsys, monkeypatch):
         if line.endswith(":") and not line.startswith(" "):
             assert index + 1 < len(lines), f"bare header at end of output: {line!r}"
             assert lines[index + 1].startswith("  "), f"bare header: {line!r}"
-    assert not lines[0].startswith(" ")
