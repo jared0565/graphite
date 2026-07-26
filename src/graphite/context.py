@@ -136,7 +136,7 @@ def format_context_markdown(context: dict[str, Any]) -> str:
     health = context.get("resolution_health") or {}
     unhealthy = health.get("healthy") is False
     answer = context.get("answer")
-    if impact["impacted_files"]:
+    if impact["impacted_files"] or impact["likely_tests"]:
         marker = empty_marker(answer)
         lines.extend(
             listing_lines(

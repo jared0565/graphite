@@ -317,4 +317,38 @@ def test_context_marks_the_tests_half_when_impacted_files_is_empty():
     )
 
     assert "Likely tests:\n- `src/app.test.ts`" in text
-    assert "Impacted files: none found" in text
+    # The impacted-files guard now matches the tests-half guard (both use
+    # `or`), so this half enters the listing branch too and gets a marked
+    # empty body -- not the bare single-line sentence.
+    assert "Impacted files:\n- none found" in text
+
+
+def test_context_impacted_files_half_marked_empty_when_only_tests_found():
+    """Mirror of the regression above, and the coordinator's follow-up
+    finding: with the tests-half guard fixed to `or` but the impacted-files
+    guard left as `if impact["impacted_files"]:` alone, this exact shape
+    (impacted empty, tests non-empty) fell into the elif/else chain built
+    for the genuinely-both-empty case and printed a sentence that speaks
+    for BOTH halves (e.g. the `empty_meaning` tail, "no impacted files or
+    tests reachable through bound edges") right above a Likely tests
+    section that lists a real, reachable test -- a self-contradiction.
+    Both guards must agree, matching cli.py's cmd_impact, which wraps both
+    listings in a single `if impacted_files or likely_tests:` and only
+    falls through to its empty_meaning sentence when both are genuinely
+    empty."""
+    from graphite.context import format_context_markdown
+
+    answer = dict(
+        HEALTHY_ANSWER,
+        empty_meaning="no impacted files or tests reachable through bound edges",
+    )
+    text = format_context_markdown(
+        _ctx(impacted=[], tests=["tests/test_a.py"], answer=answer)
+    )
+
+    assert "Impacted files:\n- none found" in text
+    assert "Likely tests:\n- `tests/test_a.py`" in text
+    # The contradictory both-halves sentence must not appear: this half is
+    # genuinely empty and is marked as such, but it must not claim tests
+    # were unreachable too when a test file is listed right below it.
+    assert "no impacted files or tests reachable through bound edges" not in text
