@@ -60,8 +60,14 @@ def build_context(
             missing.append(item)
 
     impact = _reverse_impact(g, start_nodes, depth)
-    direct_dependencies = {node: _neighbors(g, node, outgoing=True, limit=neighbor_limit) for node in start_nodes}
-    direct_dependents = {node: _neighbors(g, node, outgoing=False, limit=neighbor_limit) for node in start_nodes}
+    dependency_pairs = {node: _neighbors(g, node, outgoing=True, limit=neighbor_limit) for node in start_nodes}
+    dependent_pairs = {node: _neighbors(g, node, outgoing=False, limit=neighbor_limit) for node in start_nodes}
+    direct_dependencies = {node: items for node, (items, _) in dependency_pairs.items()}
+    direct_dependents = {node: items for node, (items, _) in dependent_pairs.items()}
+    neighbor_totals = {
+        "direct_dependencies": {node: total for node, (_, total) in dependency_pairs.items()},
+        "direct_dependents": {node: total for node, (_, total) in dependent_pairs.items()},
+    }
     communities = _community_peers(g, start_nodes, limit=neighbor_limit)
     risk = [_risk_summary(g, node) for node in start_nodes]
 
@@ -99,6 +105,7 @@ def build_context(
         "depth": depth,
         "direct_dependencies": direct_dependencies,
         "direct_dependents": direct_dependents,
+        "neighbor_totals": neighbor_totals,
         "impact": impact,
         "communities": communities,
         "risk": risk,
@@ -202,14 +209,16 @@ def format_context_markdown(context: dict[str, Any]) -> str:
                 lines.append("known limits: " + "; ".join(c["summary"] for c in answer["caveats"]))
 
     lines.extend(["", "## Direct Dependents"])
+    # Guarded read: contexts built before neighbor_totals existed still render.
+    totals = context.get("neighbor_totals") or {}
     dependents = context["direct_dependents"]
     if unhealthy and all(not neighbors for neighbors in dependents.values()):
         lines.append("no direct dependents found — inconclusive (resolution health low)")
     else:
-        _append_neighbor_section(lines, dependents)
+        _append_neighbor_section(lines, dependents, totals.get("direct_dependents"))
 
     lines.extend(["", "## Direct Dependencies"])
-    _append_neighbor_section(lines, context["direct_dependencies"])
+    _append_neighbor_section(lines, context["direct_dependencies"], totals.get("direct_dependencies"))
 
     lines.extend(["", "## Risk Signals"])
     for item in context["risk"]:
@@ -219,7 +228,11 @@ def format_context_markdown(context: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _append_neighbor_section(lines: list[str], groups: dict[str, list[dict[str, Any]]]) -> None:
+def _append_neighbor_section(
+    lines: list[str],
+    groups: dict[str, list[dict[str, Any]]],
+    totals: dict[str, int] | None = None,
+) -> None:
     if not groups:
         lines.append("none")
         return
@@ -228,9 +241,14 @@ def _append_neighbor_section(lines: list[str], groups: dict[str, list[dict[str, 
         if not neighbors:
             lines.append("  - none")
             continue
-        for neighbor in neighbors[:20]:
+        # No second cap here: build_context already applied neighbor_limit. A
+        # slice at this layer silently overrode the user's explicit flag (#11).
+        for neighbor in neighbors:
             sf = f" [{neighbor['source_file']}]" if neighbor.get("source_file") else ""
             lines.append(f"  - `{neighbor['id']}` ({neighbor['kind']}){sf}")
+        hidden = (totals or {}).get(node, len(neighbors)) - len(neighbors)
+        if hidden > 0:
+            lines.append(f"  - ... {hidden} more")
 
 
 def _node_summary(g: nx.DiGraph, node: str) -> dict[str, Any]:
@@ -246,9 +264,16 @@ def _node_summary(g: nx.DiGraph, node: str) -> dict[str, Any]:
     }
 
 
-def _neighbors(g: nx.DiGraph, node: str, *, outgoing: bool, limit: int) -> list[dict[str, Any]]:
+def _neighbors(
+    g: nx.DiGraph, node: str, *, outgoing: bool, limit: int
+) -> tuple[list[dict[str, Any]], int]:
+    """Capped neighbour summaries, and the uncapped total they were taken from.
+
+    The total is what lets a consumer tell a complete list from a truncated one;
+    without it a list exactly `limit` long is ambiguous.
+    """
     ids = sorted(g.successors(node) if outgoing else g.predecessors(node))
-    return [_node_summary(g, neighbor) for neighbor in ids[:limit]]
+    return [_node_summary(g, neighbor) for neighbor in ids[:limit]], len(ids)
 
 
 def _reverse_impact(g: nx.DiGraph, start_nodes: list[str], depth: int) -> dict[str, Any]:

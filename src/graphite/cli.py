@@ -10,6 +10,7 @@ import sys
 import time
 import unicodedata
 from collections import deque
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
@@ -1312,6 +1313,28 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _daemon_subcommand_suggestion(base_path: str | None, choices: Iterable[str]) -> str | None:
+    """Suggest `daemon-<x>` when `graphite daemon <x>` was meant as a subcommand.
+
+    `daemon` takes a base path positionally, so the space form silently became a
+    path argument and failed naming a directory the user never typed (#9). The
+    candidate list comes from the live parser, so it cannot drift from the real
+    subcommands. An existing directory always wins: a folder genuinely named
+    `status` stays usable as a base path.
+    """
+    if not base_path:
+        return None
+    candidate = f"daemon-{base_path}"
+    if candidate not in set(choices):
+        return None
+    try:
+        if Path(base_path).is_dir():
+            return None
+    except OSError:
+        pass
+    return candidate
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     cfg = _config_from_args(args, canonical=True)
     base = Path(args.base_path).resolve()
@@ -2414,6 +2437,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.command == "doctor" and args.include_llm and not args.deep:
         p_doctor.error("--include-llm requires --deep")
+    if args.command == "daemon":
+        suggested = _daemon_subcommand_suggestion(getattr(args, "base_path", None), sub.choices)
+        if suggested:
+            print(
+                f"[graphite] error: unknown argument '{args.base_path}' -- "
+                f"did you mean 'graphite {suggested}'?",
+                file=sys.stderr,
+            )
+            return 2
     if args.command in _LLM_GATED_COMMANDS and (
         getattr(args, "llm", None) not in (None, "none")
         or any(getattr(args, name, None) is not None for name in _LEGACY_LLM_ARGUMENTS)

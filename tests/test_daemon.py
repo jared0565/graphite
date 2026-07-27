@@ -278,3 +278,41 @@ def test_daemon_cli_once_builds_project_and_status_can_be_read(tmp_path: Path, c
     assert result == 0
     assert status["project_count"] == 1
     assert status["projects"][0]["build_count"] == 1
+
+
+def test_daemon_space_form_suggests_the_hyphenated_subcommand(tmp_path, monkeypatch, capsys) -> None:
+    """#9: `graphite daemon status` read `status` as a base path.
+
+    The old error named a path the user never typed, which reads as "that
+    directory is missing" rather than "that is not how this is spelled".
+    """
+    monkeypatch.chdir(tmp_path)
+
+    result = main(["daemon", "status"])
+    err = capsys.readouterr().err
+
+    assert result == 2
+    assert "daemon-status" in err
+    assert str(tmp_path / "status") not in err
+
+
+def test_daemon_space_form_suggestion_covers_the_whole_subcommand_family(tmp_path, monkeypatch, capsys) -> None:
+    """The suffix list is derived from the parser, so it cannot drift."""
+    monkeypatch.chdir(tmp_path)
+
+    for suffix in ("health", "startup-status"):
+        result = main(["daemon", suffix])
+        err = capsys.readouterr().err
+        assert result == 2, suffix
+        assert f"daemon-{suffix}" in err, suffix
+
+
+def test_daemon_suggestion_does_not_hijack_a_real_directory(tmp_path, monkeypatch) -> None:
+    """A folder genuinely named `status` must still work as a base path."""
+    from graphite.cli import _daemon_subcommand_suggestion
+
+    (tmp_path / "status").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    assert _daemon_subcommand_suggestion("status", {"daemon-status"}) is None
+    assert _daemon_subcommand_suggestion("health", {"daemon-health"}) == "daemon-health"

@@ -352,3 +352,65 @@ def test_context_impacted_files_half_marked_empty_when_only_tests_found():
     # genuinely empty and is marked as such, but it must not claim tests
     # were unreachable too when a test file is listed right below it.
     assert "no impacted files or tests reachable through bound edges" not in text
+
+
+def _hub_graph(fanout: int):
+    """A hub node with `fanout` dependents and `fanout` dependencies, all bound."""
+    import networkx as nx
+
+    g = nx.DiGraph()
+    g.add_node("hub", kind="function", source_file="hub.py")
+    for i in range(fanout):
+        dependency = f"dep{i:03d}"
+        dependent = f"caller{i:03d}"
+        g.add_node(dependency, kind="function", source_file=f"{dependency}.py")
+        g.add_node(dependent, kind="function", source_file=f"{dependent}.py")
+        g.add_edge("hub", dependency, relation="calls", source_file="hub.py")
+        g.add_edge(dependent, "hub", relation="calls", source_file=f"{dependent}.py")
+    return g
+
+
+def test_context_markdown_honours_neighbor_limit_above_twenty():
+    """#11: a hardcoded render-layer cap silently overrode --neighbor-limit.
+
+    The JSON honoured the flag and the markdown did not, so the same command
+    against the same graph disagreed with itself.
+    """
+    from graphite.context import build_context, format_context_markdown
+
+    context = build_context(_hub_graph(30), ["hub"], neighbor_limit=30)
+    text = format_context_markdown(context)
+
+    missing = [f"dep{i:03d}" for i in range(30) if f"`dep{i:03d}`" not in text]
+    assert not missing, f"markdown dropped {len(missing)} neighbours the flag asked for: {missing[:5]}"
+
+
+def test_context_markdown_marks_truncated_neighbors():
+    """A capped list must say so -- silent truncation reads as completeness."""
+    from graphite.context import build_context, format_context_markdown
+
+    context = build_context(_hub_graph(30), ["hub"], neighbor_limit=5)
+    text = format_context_markdown(context)
+
+    assert "... 25 more" in text
+
+
+def test_context_json_carries_neighbor_totals():
+    """Without the total, a full-length list is indistinguishable from a capped one."""
+    from graphite.context import build_context
+
+    context = build_context(_hub_graph(30), ["hub"], neighbor_limit=5)
+
+    assert len(context["direct_dependencies"]["hub"]) == 5
+    assert context["neighbor_totals"]["direct_dependencies"]["hub"] == 30
+    assert context["neighbor_totals"]["direct_dependents"]["hub"] == 30
+
+
+def test_context_neighbor_totals_absent_marker_when_complete():
+    """No marker when nothing was hidden -- the marker must mean something."""
+    from graphite.context import build_context, format_context_markdown
+
+    context = build_context(_hub_graph(3), ["hub"], neighbor_limit=20)
+    text = format_context_markdown(context)
+
+    assert "more" not in text.split("## Direct Dependencies")[1]
