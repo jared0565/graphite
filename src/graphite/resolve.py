@@ -1,14 +1,31 @@
 """Source resolution helpers for Graphite extraction."""
 from __future__ import annotations
 
+import hashlib
 import json
 import posixpath
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 from .config import Config
 from .ts_bridge import TypeScriptCompilerEdge, TypeScriptCompilerIndex, build_typescript_index
+
+
+@lru_cache(maxsize=8)
+def _rel_path_set_digest(rel_paths: frozenset[str]) -> str:
+    """Short, order-independent digest of a set of repo-relative paths.
+
+    Memoized on the frozenset because it is consulted once per extracted file
+    and the set is fixed for a build; recomputing it per file would be
+    quadratic in the repo size.
+    """
+    digest = hashlib.blake2b(digest_size=8)
+    for rel in sorted(rel_paths):
+        digest.update(rel.encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 _TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 _INDEX_NAMES = tuple(f"index{ext}" for ext in _TS_EXTENSIONS)
@@ -70,6 +87,16 @@ class SourceIndex:
             typescript=ts_index,
             workspace_packages=_load_workspace_packages(root, frozenset(rel_paths)),
         )
+
+    def file_set_digest(self) -> str:
+        """Stable digest of the repo's file set.
+
+        Import resolution runs at extraction time, so a cached extraction
+        embeds conclusions about which sibling modules existed *then*. Folding
+        this into the cache key makes adding or removing a file re-resolve the
+        importers that never changed themselves (#2).
+        """
+        return _rel_path_set_digest(self.rel_paths)
 
     def resolve_ts_import(self, rel_path: str, source_lit: str) -> str | None:
         """Resolve TS/JS imports to a known relative file path when possible."""

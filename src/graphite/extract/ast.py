@@ -125,6 +125,10 @@ def _call_confidence(
     return "LOCAL_CALL"
 
 
+# Languages whose extraction consults the SourceIndex, and whose cached result
+# therefore depends on the repo's file set rather than on file content alone.
+_RESOLVER_LANGUAGES: Final = frozenset({"python", "javascript", "typescript", "tsx", "jsx"})
+
 _MAX_ID_LEN = 120
 
 
@@ -1252,6 +1256,14 @@ def extract_file(entry: FileEntry, cfg: Config, cache: Cache | None = None, sour
         and entry.language in ("javascript", "typescript", "tsx", "jsx")
     )
     cache_language = f"{entry.language or 'unknown'}:{'tsc' if compiler_resolver_active else 'ast'}"
+    if source_index is not None and entry.language in _RESOLVER_LANGUAGES:
+        # Import resolution happens at extraction time, so a cached result
+        # embeds which sibling modules existed when it was written. Keying on
+        # content_hash alone let an unchanged importer keep stale EXACT_IMPORT /
+        # EXTERNAL_IMPORT edges after a sibling was added or removed (#2).
+        # Only resolver-consulting languages pay this invalidation: Go and Rust
+        # extraction is file-local and cannot go stale this way.
+        cache_language = f"{cache_language}:fs{source_index.file_set_digest()}"
     if cache is not None and not compiler_resolver_active:
         cached = cache.read("ast", entry.content_hash, cache_language)
         if cached is not None:
