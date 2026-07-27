@@ -414,3 +414,34 @@ def test_context_neighbor_totals_absent_marker_when_complete():
     text = format_context_markdown(context)
 
     assert "more" not in text.split("## Direct Dependencies")[1]
+
+
+def test_cli_output_is_utf8_when_redirected(tmp_path: Path) -> None:
+    """#17: redirected output fell back to the host ANSI codepage, so the
+    em-dash in the INCONCLUSIVE marker reached UTF-8 consumers as garbage.
+
+    Runs a real subprocess with a pipe -- the in-process path cannot reproduce
+    it, since pytest's capture replaces the stream entirely.
+    """
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "from graphite.cli import main; main(['--help'])"],
+        capture_output=True,
+    )
+    assert proc.returncode in (0, 2)
+    proc.stdout.decode("utf-8")  # must not raise
+
+    marker = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from graphite.cli import _force_utf8_when_redirected as f; f();"
+            "print('none found \u2014 INCONCLUSIVE')",
+        ],
+        capture_output=True,
+    )
+    assert marker.returncode == 0
+    text = marker.stdout.decode("utf-8")
+    assert "\u2014" in text, f"em-dash did not survive redirection: {marker.stdout!r}"

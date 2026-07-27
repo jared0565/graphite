@@ -1861,7 +1861,33 @@ def cmd_lifecycle_verification_prepare(args: argparse.Namespace) -> int:
     )
 
 
+def _force_utf8_when_redirected() -> None:
+    """Emit UTF-8 whenever output is not a terminal.
+
+    Attached to a real console, Python writes Unicode through the OS console
+    API and renders correctly -- reconfiguring there would actively break it.
+    Redirected to a pipe or file it falls back to the host ANSI codepage
+    (cp1252 on this machine), so an em-dash lands as the single byte 0x97 and
+    any UTF-8 consumer sees corruption. That consumer is typically an agent
+    capturing stdout, and the string most often hit is the INCONCLUSIVE trust
+    marker -- the one signal the answer contract exists to deliver (#17).
+
+    Best-effort: a captured or already-UTF-8 stream is left alone.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is None or stream.isatty():
+                continue
+            if (getattr(stream, "encoding", "") or "").lower().replace("-", "") == "utf8":
+                continue
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:
+            # Never let output plumbing break a command.
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_when_redirected()
     parser = argparse.ArgumentParser(prog="graphite", description="Local-first code knowledge graph.")
     parser.add_argument("--output-dir", default=None, help="Output directory (default: graph-out)")
     parser.add_argument("--cache-dir", default=None, help="Cache directory (default: .cache/graphite)")
