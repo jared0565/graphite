@@ -501,5 +501,5 @@ def test_impact_finds_test_via_from_package_submodule_import(tmp_path):
     assert "tests/test_consumer.py" in result["likely_tests"]
 
 
-def test_cache_version_is_v8():
-    assert Config().cache_version == "v8"
+def test_cache_version_is_v9():
+    assert Config().cache_version == "v9"

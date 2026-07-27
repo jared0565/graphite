@@ -7,7 +7,7 @@ import sys
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 from ..cache import Cache
 from ..config import Config
@@ -46,6 +46,49 @@ _LANGUAGE_BUILTIN_GLOBALS: frozenset[str] = frozenset({
     # call extraction; these are the plain-call noise sources)
     "Some", "None", "Ok", "Err", "Box", "drop", "Default",
 })
+
+
+# Names that are never defined in-repo: test-framework injections, runtime
+# globals, and language builtins missing from _LANGUAGE_BUILTIN_GLOBALS.
+# These are TAGGED EXTERNAL_CALL and excluded from the health ratio by
+# health.py -- NOT dropped -- so the excluded evidence stays visible and
+# countable in graph.json. Nothing moves between this set and the drop-list
+# above; see spec §4.3.
+#
+# Deliberately absent: generic words a repo plausibly defines itself
+# (`context`, `run`, `setup`, `main`). A false external costs more than a
+# missed one, because it would mask real code. Also absent: `process`,
+# `console`, `window`, `document` -- already in resolve.py's _BUILTIN_OBJECTS,
+# so their member calls are dropped before reaching this classifier.
+_EXTERNAL_GLOBALS: frozenset[str] = frozenset({
+    # test-framework injected globals (vitest / jest / mocha)
+    "expect", "it", "describe", "test", "vi", "jest",
+    "beforeEach", "afterEach", "beforeAll", "afterAll",
+    "suite", "xit", "xdescribe", "fit", "fdescribe",
+    # JS / Web runtime globals absent from the drop-list
+    "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+    "fetch", "queueMicrotask", "structuredClone", "atob", "btoa",
+    "crypto", "performance", "Buffer", "require",
+    # Python builtins absent from the drop-list
+    "ValueError", "OSError", "AssertionError", "KeyError", "IndexError",
+    "RuntimeError", "NotImplementedError", "StopIteration",
+    "frozenset", "bytearray", "complex", "object", "Exception",
+    "BaseException", "property", "staticmethod", "classmethod",
+    "slice", "divmod", "format",
+})
+
+
+def _call_confidence(called: str, external_names: Collection[str] = ()) -> str:
+    """`LOCAL_CALL`, or `EXTERNAL_CALL` when the call provably leaves the repo.
+
+    ``called`` may be dotted (``z.object``); the ROOT carries the binding, so
+    that is what is tested. ``external_names`` holds local names bound by
+    imports that did not resolve in-repo (Tasks 3 and 4); it is empty here.
+    """
+    root = called.split(".", 1)[0]
+    if root in _EXTERNAL_GLOBALS or root in external_names:
+        return "EXTERNAL_CALL"
+    return "LOCAL_CALL"
 
 
 _MAX_ID_LEN = 120
@@ -276,7 +319,7 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
                 if called and called not in _LANGUAGE_BUILTIN_GLOBALS and should_keep_call_target(called):
                     target_id = _resolve_call(file_id, called, import_symbols)
                     _materialize(scope)
-                    edge = _edge(scope.id, target_id, "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+                    edge = _edge(scope.id, target_id, "calls", rel_path, _line(node), confidence=_call_confidence(called))
                     # Method dispatch: for `recv.method(...)` the callee is a
                     # member_expression and target_id above is only a file-scoped
                     # phantom. Stash the bare method name so the global post-pass
@@ -729,7 +772,7 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
             edge = None
             if bare and bare not in _LANGUAGE_BUILTIN_GLOBALS:
                 target = symbol_map.get(bare) or _resolve_call(file_id, bare)
-                edge = _edge(scope_id, target, "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+                edge = _edge(scope_id, target, "calls", rel_path, _line(node), confidence=_call_confidence(bare))
             elif attr:
                 dotted = f"{obj_name}.{attr}" if obj_name else attr
                 if obj_name and obj_name in alias_map:
@@ -737,7 +780,7 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                 elif should_keep_call_target(dotted):
                     # Unresolved member call: file-scoped phantom now, re-pointed
                     # (or dropped) by the method-dispatch post-pass via _member.
-                    edge = _edge(scope_id, _resolve_call(file_id, dotted), "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+                    edge = _edge(scope_id, _resolve_call(file_id, dotted), "calls", rel_path, _line(node), confidence=_call_confidence(dotted))
                     edge["_member"] = attr
             if edge is not None:
                 result.edges.append(edge)
@@ -832,7 +875,7 @@ def _extract_go(file_id: str, rel_path: str, source: bytes, tree: Any) -> Extrac
                 else:
                     called = _call_target_name(func, source)
                 if called and called not in _LANGUAGE_BUILTIN_GLOBALS and should_keep_call_target(called):
-                    edge = _edge(scope_id, _resolve_call(file_id, called), "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+                    edge = _edge(scope_id, _resolve_call(file_id, called), "calls", rel_path, _line(node), confidence=_call_confidence(called))
                     if member:
                         edge["_member"] = member
                     result.edges.append(edge)
@@ -932,7 +975,7 @@ def _extract_rust(file_id: str, rel_path: str, source: bytes, tree: Any) -> Extr
                 else:
                     called = _call_target_name(func, source)
                 if called and called not in _LANGUAGE_BUILTIN_GLOBALS and should_keep_call_target(called):
-                    edge = _edge(scope_id, _resolve_call(file_id, called), "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+                    edge = _edge(scope_id, _resolve_call(file_id, called), "calls", rel_path, _line(node), confidence=_call_confidence(called))
                     if member:
                         edge["_member"] = member
                     result.edges.append(edge)
@@ -1141,14 +1184,17 @@ def _resolve_method_dispatch(
             continue
         candidates = methods_by_name.get(method.casefold())
         if not candidates or len(candidates) > _MAX_METHOD_DISPATCH_CANDIDATES:
-            # Member call that resolves to no known definition: if its target
-            # is a real node keep it, otherwise DROP it. These unresolved
-            # phantoms (`c.json()`, `db.prepare()`, `stmt.bind()`, ...) are
-            # framework/runtime API calls, not project symbols — in a real
-            # worker codebase they outnumbered genuine nodes and dominated
-            # every degree/god-node statistic while asserting nothing true
-            # about the project.
-            if e.get("target") in known_ids:
+            # Member call that resolves to no known definition. Keep it when
+            # the target is a real node, or when the call was already
+            # classified EXTERNAL_CALL -- its root is a known external binding
+            # (an unresolved import or an _EXTERNAL_GLOBALS member), so the
+            # edge is attributable evidence that this file calls into that
+            # package, and health.py excludes it from the ratio.
+            #
+            # Everything else still DROPS: `c.json()`, `db.prepare()`,
+            # `stmt.bind()` have unattributable receivers and are the
+            # framework/runtime noise this filter exists to remove.
+            if e.get("target") in known_ids or e.get("confidence") == "EXTERNAL_CALL":
                 out.append(e)
             continue
         # Unique -> single re-point; small set -> one edge per candidate (sorted

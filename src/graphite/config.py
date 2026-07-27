@@ -29,7 +29,7 @@ class Config:
 
     output_dir: Path = Path("graph-out")
     cache_dir: Path = Path(".cache/graphite")
-    cache_version: str = "v8"  # bump on extraction-format changes (v8: from-package submodule import edges; v7: python import/file-node resolution, import maps, python method dispatch; v6: per-package tsconfig path aliases; v5: resolve JS-extension + ".."-relative imports; v4: full-path node ids, workspace imports, phantom-edge drop)
+    cache_version: str = "v9"  # bump on extraction-format changes (v9: EXTERNAL_CALL confidence on calls edges; v8: from-package submodule import edges; v7: python import/file-node resolution, import maps, python method dispatch; v6: per-package tsconfig path aliases; v5: resolve JS-extension + ".."-relative imports; v4: full-path node ids, workspace imports, phantom-edge drop)
     workers: int = 4
     max_file_size: int = 1_000_000  # bytes
     max_files: int | None = None
@@ -156,7 +156,7 @@ class Config:
         config = cls(
             output_dir=_path("graphite_output_dir", Path("graph-out")),
             cache_dir=_path("graphite_cache_dir", Path(".cache/graphite")),
-            cache_version=env.get("graphite_cache_version", "v8"),
+            cache_version=env.get("graphite_cache_version", "v9"),
             workers=_int("graphite_workers", 4),
             max_file_size=_int("graphite_max_file_size", 1_000_000),
             max_files=_opt_int("graphite_max_files", None),
