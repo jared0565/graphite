@@ -690,8 +690,15 @@ def _collect_python_import_maps(
                         else:
                             external.add(module)
                     elif module:
-                        # `import os.path` binds only the root name `os`.
-                        external.add(module.split(".", 1)[0])
+                        # `import pkg.sub` binds only the root name `pkg`.
+                        # Mark it external ONLY if that root does not
+                        # resolve in-repo -- a local `pkg` would otherwise
+                        # have its calls excluded from the ratio as a false
+                        # external (spec §4.2: a false external costs more
+                        # than a missed one).
+                        root = module.split(".", 1)[0]
+                        if source_index.resolve_python_module(rel_path, root) is None:
+                            external.add(root)
                 elif child.type == "aliased_import":
                     module = _text(child.child_by_field_name("name"))
                     local = _text(child.child_by_field_name("alias"))

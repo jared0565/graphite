@@ -227,3 +227,59 @@ def test_python_in_repo_import_stays_local(tmp_path):
     )
     result = _extract(tmp_path)
     assert {e["confidence"] for e in _calls(result, "m.py")} == {"LOCAL_CALL"}
+
+
+def test_python_dotted_import_of_in_repo_package_stays_local(tmp_path):
+    """The false-external this fix round exists to prevent: `import pkg.sub`
+    binds only the root `pkg`, but when `pkg` itself resolves in-repo, a
+    call through it must NOT be excluded from the health ratio as external
+    just because the import statement was dotted.
+    """
+    _write(
+        tmp_path / "pkg" / "__init__.py",
+        "class Widget:\n"
+        "    def build(self):\n"
+        "        return 1\n",
+    )
+    _write(tmp_path / "pkg" / "sub.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path / "m.py",
+        "import pkg.sub\n"
+        "def go():\n"
+        "    return pkg.build()\n",
+    )
+    result = _extract(tmp_path)
+    assert {e["confidence"] for e in _calls(result, "m.py")} == {"LOCAL_CALL"}
+
+
+def test_python_attribute_root_falls_back_sanely_on_broken_chain(tmp_path):
+    """`_python_attribute_root` only walks nested `attribute` object fields;
+    a subscript (`items[0].render()`) or an intervening call
+    (`pathlib.Path('.').render()`) breaks that chain. Both must fall back to
+    classifying off the leaf name rather than mis-rooting -- neither call may
+    be tagged external just because `pathlib` appears in the same expression
+    or file. The leaf is a real in-repo method (`Renderer.render`) so both
+    calls resolve via method-name dispatch to a known node and their
+    confidence is directly observable, instead of silently vanishing (dropped
+    by the D7 retention gate for lacking a known target) and masking the
+    assertion as a false pass.
+
+    NOTE: the leaf is `render`, never `describe` -- `describe` is itself in
+    `_EXTERNAL_GLOBALS` (mocha/jest global), a fourth drop-list beyond the
+    three the brief calls out, and would make this assert on the wrong
+    reason.
+    """
+    _write(
+        tmp_path / "m.py",
+        "import pathlib\n"
+        "class Renderer:\n"
+        "    def render(self):\n"
+        "        return 1\n"
+        "def go(items):\n"
+        "    items[0].render()\n"
+        "    pathlib.Path('.').render()\n",
+    )
+    result = _extract(tmp_path)
+    conf = _confidence_by_target_suffix(result, "m.py")
+    assert conf["render"] == "LOCAL_CALL"
+    assert conf["path"] == "EXTERNAL_CALL"
