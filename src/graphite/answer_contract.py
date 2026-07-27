@@ -54,6 +54,10 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         "languages": ("typescript", "javascript", "python"),
         "summary": "a call whose receiver is not a simple identifier is classified by its bare method name and may be wrongly excluded from the ratio as external",
         "since": "2026-07-27",
+        # Fixed by #14: an unattributable receiver is no longer classified at
+        # all, so it can no longer be excused from the ratio. The entry keeps
+        # its original summary -- a published code's meaning never changes.
+        "retired_by": "2026-07-27",
     },
 )
 
@@ -77,14 +81,29 @@ def is_degraded(block: dict[str, Any] | None) -> bool:
     )
 
 
+def is_unmeasured(block: dict[str, Any] | None) -> bool:
+    """True when an answer block exists but carries no scoped health cells.
+
+    Distinct from a fail-open `None`: the block was built, but nothing was
+    measured for the relations x languages the answer used. An empty listing
+    under it is unverified, not a trustworthy absence (#12). A `None` block is
+    the fail-open path and stays permissive.
+    """
+    if not block:
+        return False
+    return not any(langs for langs in (block.get("health") or {}).values())
+
+
 def empty_marker(block: dict[str, Any] | None) -> str:
     """Empty-listing text for an answer surface, scoped to the answer's grade.
 
     A degraded-and-empty listing is `inconclusive` by this contract's own
     definition, even when the answer as a whole graded `advisory` because its
-    other half was non-empty. See spec §5.
+    other half was non-empty. See spec §5. An unmeasured block gets the same
+    treatment: zero cells is zero evidence, so a bare "none found" would claim
+    an absence nothing verified.
     """
-    return INCONCLUSIVE_EMPTY if is_degraded(block) else "none found"
+    return INCONCLUSIVE_EMPTY if (is_degraded(block) or is_unmeasured(block)) else "none found"
 
 
 def languages_for_nodes(g: nx.DiGraph, node_ids: Iterable[str]) -> list[str]:
@@ -126,7 +145,11 @@ def build_answer_block(
                 degraded = degraded or not healthy
                 cells.setdefault(relation, {})[language] = {**cell, "healthy": healthy}
         empty = total == 0
-        if degraded:
+        # No cells at all means nothing was measured for the relations x
+        # languages this answer actually used. That is not evidence of health;
+        # it is the absence of evidence, so it cannot grade decision_grade (#12).
+        unmeasured = not cells
+        if degraded or unmeasured:
             grade = GRADE_INCONCLUSIVE if empty else GRADE_ADVISORY
         else:
             grade = GRADE_DECISION

@@ -447,43 +447,35 @@ def test_genuine_in_repo_miss_still_counts_unbound(tmp_path):
     assert cell["ratio"] < 1.0, "the unresolved missing() call must still count against the ratio"
 
 
-def test_computed_receiver_bare_name_collision_is_a_false_external(tmp_path):
-    """Pins a false-external risk flagged by Task 2's implementer; not a fix.
+def test_computed_receiver_bare_name_collision_is_not_classified_external(tmp_path):
+    """#14 mechanism A, now fixed -- this test previously pinned the defect.
 
     When a call's receiver is not a simple identifier -- here `getThing()`,
-    itself a call expression -- `_simple_object_name` returns None (it only
-    stringifies identifiers and member chains, deliberately refusing to
-    stringify a "complex literal" like a call result:
-    src/graphite/extract/ast.py:585-600). `_call_target_name` then falls back
-    to the bare property name alone, `test`, with no object prefix. That bare
-    name collides with an `_EXTERNAL_GLOBALS` entry (mocha's focused-test
-    global, alongside `format`, `property`, `fit`), so `_call_confidence`
-    tags the call EXTERNAL_CALL.
+    itself a call expression -- `_simple_object_name` returns None, and
+    `_call_target_name` falls back to the bare property name alone, `test`,
+    with no object prefix. That bare name collides with an `_EXTERNAL_GLOBALS`
+    entry (mocha's focused-test global, alongside `format`, `property`, `fit`).
 
-    THIS IS A FALSE EXTERNAL: `getThing` is a same-file, in-repo function
-    returning a plain object literal -- the receiver was never proven to
-    leave the repo, and no in-repo `test` method exists for the dispatch
-    post-pass to re-point the phantom target to. Empirically, the edge is
-    neither dropped by the phantom filter nor bound; it survives as an
-    EXTERNAL_CALL phantom (confirmed via a direct extract_all() run before
-    writing this assertion). `_EXTERNAL_GLOBALS` and `_call_confidence` are
-    frozen for this round (spec), so this test pins the current behaviour as
-    a known limitation for the follow-up round rather than "fixing" it here.
+    Classifying that collision tagged the call EXTERNAL_CALL, which was a FALSE
+    EXTERNAL: `getThing` is a same-file, in-repo function returning a plain
+    object literal, so the receiver was never proven to leave the repo. The
+    consequence was measurable, not cosmetic -- the calls cell read
+    `total: 1, bound: 1, ratio: 1.0, external: 1`, a perfect ratio with an
+    unbound, unproven-external call sitting right there invisible to it. A
+    false external inflates health, the more dangerous direction than a
+    missed one.
 
-    Contrast with `test_unattributable_member_call_is_still_dropped` above:
-    `ctx.json()` has the exact same unattributable-receiver shape and is
-    DROPPED entirely by the phantom filter. `getThing().test()` differs only
-    in that its bare method name happens to collide with an
-    `_EXTERNAL_GLOBALS` entry -- so instead of being dropped, it is kept and
-    silently excluded from the calls health ratio, which is worse: it looks
-    like attributable evidence instead of vanishing.
+    The extractor now marks such calls unattributable, so `_call_confidence`
+    declines to classify them. The edge is then dropped by the method-dispatch
+    retention gate exactly like every other unattributable member call --
+    that gate keeps a phantom only when the target is a known node OR the
+    confidence is already EXTERNAL_CALL, and neither now holds.
 
-    That exclusion is the concrete, measurable consequence, not just a label:
-    `resolution_health`'s calls cell for this exact fixture reports
-    `total: 1, bound: 1, ratio: 1.0, external: 1` -- a perfect 1.0 ratio
-    while an unbound, unproven-external call sits right there, invisible to
-    the ratio. That is the masking failure mode this round's health schema
-    exists to prevent, reproduced in miniature by a single name collision.
+    So this fixture ends up behaving identically to
+    `test_unattributable_member_call_is_still_dropped` above, where `ctx.json()`
+    has the same shape. That is the point: `getThing().test()` previously
+    diverged from its peer *only* because its bare method name happened to
+    collide with the globals list. The collision no longer changes the outcome.
     """
     _write(
         tmp_path / "src" / "t.ts",
@@ -493,12 +485,55 @@ def test_computed_receiver_bare_name_collision_is_a_false_external(tmp_path):
     result = _extract(tmp_path)
     conf = _confidence_by_target_suffix(result, "src/t.ts")
     assert conf["getthing"] == "LOCAL_CALL"
-    assert conf["test"] == "EXTERNAL_CALL"  # false external -- see docstring above
+    assert "test" not in conf, (
+        "the unattributable member call must no longer be retained as a false "
+        f"external; got {conf.get('test')!r}"
+    )
 
     g = build_graph(result.nodes, result.edges)
     cell = resolution_health(g)["by_relation"]["calls"]
-    assert cell == {"total": 1, "bound": 1, "ratio": 1.0, "external": 1}, (
-        "the getThing().test() edge should be excluded as external, leaving "
-        "a perfect 1.0 ratio that hides it -- the masking failure this test "
-        "documents as a known limitation, not asserts as correct"
+    assert cell["external"] == 0, "nothing in this fixture was proven external"
+
+
+def test_python_in_repo_name_colliding_with_globals_stays_local(tmp_path):
+    """#14 mechanism B: the in-repo precedence check is now threaded for Python.
+
+    `helpers.py` defines `format`, another module imports and calls it. The
+    source index proved the name local, so a collision with `_EXTERNAL_GLOBALS`
+    must not override that.
+    """
+    _write(tmp_path / "helpers.py", "def format(value):\n    return str(value)\n")
+    _write(
+        tmp_path / "app.py",
+        "from helpers import format\n"
+        "\n"
+        "def run():\n"
+        "    return format(1)\n",
     )
+
+    result = _extract(tmp_path)
+    calls = [
+        e for e in result.edges
+        if e["relation"] == "calls" and e.get("source_file") == "app.py"
+    ]
+    assert calls, "expected a calls edge from app.py"
+    assert all(e["confidence"] == "LOCAL_CALL" for e in calls), (
+        f"in-repo import must win over the globals list, got "
+        f"{[(e['target'], e['confidence']) for e in calls]}"
+    )
+
+
+def test_python_unattributable_receiver_is_not_classified_external(tmp_path):
+    """#14 mechanism A on the Python side: `"{}".format(x)` has no nameable receiver."""
+    _write(
+        tmp_path / "fmt.py",
+        "def run(x):\n"
+        "    return \"{}\".format(x)\n",
+    )
+
+    result = _extract(tmp_path)
+    external = [
+        e for e in result.edges
+        if e["relation"] == "calls" and e["confidence"] == "EXTERNAL_CALL"
+    ]
+    assert not external, f"string-literal receiver must not be classified: {external}"

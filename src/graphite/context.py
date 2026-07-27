@@ -11,6 +11,7 @@ from .answer_contract import (
     build_answer_block,
     empty_marker,
     is_degraded,
+    is_unmeasured,
     languages_for_nodes,
 )
 from .health import ratio_percent, resolution_health
@@ -196,7 +197,7 @@ def format_context_markdown(context: dict[str, Any]) -> str:
 
     empty = not impact["impacted_files"] and not impact["likely_tests"]
     if answer:
-        if empty or is_degraded(answer):
+        if empty or is_degraded(answer) or is_unmeasured(answer):
             cells = ", ".join(
                 f"{relation} ({language}) {langs[language]['ratio']:.2f}"
                 for relation, langs in sorted(answer.get("health", {}).items())

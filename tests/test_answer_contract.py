@@ -114,7 +114,6 @@ def test_registry_initial_entries():
     assert codes == {
         "python-dynamic-dispatch",
         "ts-destructured-locals-unbound",
-        "calls-unattributable-receiver-false-external",
     }
 
 
@@ -134,21 +133,20 @@ def test_languages_for_nodes():
     assert languages_for_nodes(g, ["no-such-node"]) == []
 
 
-def test_unattributable_receiver_caveat_is_active():
-    """F4: the false-external risk documented in F1/F2 (a member call whose
-    receiver isn't a simple identifier gets classified by its bare method
-    name) is a live blindspot -- it must be a published, active caveat, not
-    just a test docstring or a spec paragraph."""
+def test_unattributable_receiver_caveat_kept_its_published_shape_when_retired():
+    """Originally F4 pinned this caveat as ACTIVE, because the false external it
+    warns about was a live blindspot. #14 fixed the blindspot, so the entry is
+    now retired -- but its published fields must not have drifted in the
+    process. A consumer that recorded this code keeps the meaning it was
+    published with."""
     from graphite.answer_contract import CAVEAT_REGISTRY
 
-    codes = {e["code"] for e in active_caveats()}
-    assert "calls-unattributable-receiver-false-external" in codes
     by_code = {e["code"]: e for e in CAVEAT_REGISTRY}
     entry = by_code["calls-unattributable-receiver-false-external"]
     assert entry["relations"] == ("calls",)
     assert entry["languages"] == ("typescript", "javascript", "python")
     assert entry["since"] == "2026-07-27"
-    assert "retired_by" not in entry
+    assert entry["retired_by"] == "2026-07-27"
 
 
 def test_ts_external_calls_caveat_is_retired_with_a_successor():
@@ -162,3 +160,60 @@ def test_ts_external_calls_caveat_is_retired_with_a_successor():
     successor = by_code["ts-destructured-locals-unbound"]
     assert successor["relations"] == ("calls",)
     assert successor["languages"] == ("typescript", "javascript")
+
+
+def test_zero_cell_answer_is_not_decision_grade_when_empty():
+    """#12: no cells is no evidence, so an empty answer cannot claim a trustworthy absence."""
+    g = _graph_ratio(".py", 9, 1)  # python-only graph
+    block = build_answer_block(g, relations=("calls",), languages=["typescript"], total=0)
+
+    assert block["health"] == {}, "fixture must actually produce zero cells"
+    assert block["grade"] == GRADE_INCONCLUSIVE
+
+
+def test_zero_cell_answer_is_advisory_when_nonempty():
+    """A non-empty answer measured against nothing is usable but unverified."""
+    g = _graph_ratio(".py", 9, 1)
+    block = build_answer_block(g, relations=("calls",), languages=["typescript"], total=3)
+
+    assert block["health"] == {}
+    assert block["grade"] == GRADE_ADVISORY
+
+
+def test_zero_cell_empty_listing_is_marked_inconclusive():
+    """The bare 'none found' claimed an absence nothing had verified."""
+    from graphite.answer_contract import INCONCLUSIVE_EMPTY, empty_marker, is_unmeasured
+
+    g = _graph_ratio(".py", 9, 1)
+    block = build_answer_block(g, relations=("calls",), languages=["typescript"], total=0)
+
+    assert is_unmeasured(block) is True
+    assert empty_marker(block) == INCONCLUSIVE_EMPTY
+
+
+def test_fail_open_block_stays_permissive():
+    """A None block is the fail-open path and must NOT be treated as unmeasured."""
+    from graphite.answer_contract import empty_marker, is_unmeasured
+
+    assert is_unmeasured(None) is False
+    assert empty_marker(None) == "none found"
+
+
+def test_measured_healthy_answer_still_grades_decision():
+    """Guard against over-firing: real cells must still reach decision_grade."""
+    g = _graph_ratio(".py", 9, 1)
+    block = build_answer_block(g, relations=("calls",), languages=["python"], total=0)
+
+    assert block["health"], "fixture must produce cells"
+    assert block["grade"] == GRADE_DECISION
+
+
+def test_unattributable_receiver_caveat_is_retired():
+    """#14 fixed mechanism A; the published code keeps its original meaning."""
+    from graphite.answer_contract import CAVEAT_REGISTRY, active_caveats
+
+    by_code = {e["code"]: e for e in CAVEAT_REGISTRY}
+    entry = by_code["calls-unattributable-receiver-false-external"]
+    assert entry["retired_by"], "must be retired, not deleted or reworded"
+    assert "bare method name" in entry["summary"], "a published summary never changes"
+    assert "calls-unattributable-receiver-false-external" not in {e["code"] for e in active_caveats()}

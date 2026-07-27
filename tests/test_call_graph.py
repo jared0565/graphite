@@ -142,34 +142,37 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "code": "ts-destructured-locals-unbound",
         "summary": "calls through destructured local bindings (const { f } = require(...)) count as unbound",
     }
-    # Added 2026-07-27 (F4 fix wave): registered alongside ts_caveat because it
-    # also matches relations=("calls",) x languages including "typescript".
-    receiver_caveat = {
-        "code": "calls-unattributable-receiver-false-external",
-        "summary": "a call whose receiver is not a simple identifier is classified by its bare method name and may be wrongly excluded from the ratio as external",
-    }
+    # These blocks all carry `health: {}` -- see the comment above for why the
+    # fixture produces no cell for "typescript". Until #12 they also graded
+    # `decision_grade`, i.e. this golden pinned the very defect #12 described:
+    # a confident grade backed by zero measurement. They now grade `advisory`,
+    # since every one of these answers is non-empty but unmeasured. An empty
+    # one would grade `inconclusive`.
+    #
+    # `calls-unattributable-receiver-false-external` was retired by #14, so it
+    # no longer appears in any caveat list here.
     answer_calls_only = {
         "schema": 1,
         "relations": ["calls"],
         "languages": ["typescript"],
         "health": {},
-        "grade": "decision_grade",
-        "caveats": [ts_caveat, receiver_caveat],
+        "grade": "advisory",
+        "caveats": [ts_caveat],
     }
     answer_calls_and_imports = {
         "schema": 1,
         "relations": ["calls", "imports"],
         "languages": ["typescript"],
         "health": {},
-        "grade": "decision_grade",
-        "caveats": [ts_caveat, receiver_caveat],
+        "grade": "advisory",
+        "caveats": [ts_caveat],
     }
     answer_imports_only = {
         "schema": 1,
         "relations": ["imports"],
         "languages": ["typescript"],
         "health": {},
-        "grade": "decision_grade",
+        "grade": "advisory",
         "caveats": [],
     }
 
@@ -296,7 +299,14 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "resolution": [
             {"role": "node", "input": "src_app", "node": "src_app", "type": "exact-id"}
         ],
-        "answer": {**answer_calls_and_imports, "empty_meaning": "no community assigned"},
+        # Empty AND unmeasured -> inconclusive, not advisory. This is the pair
+        # #12 turns on: the same zero-cell block grades differently depending on
+        # whether the answer found anything.
+        "answer": {
+            **answer_calls_and_imports,
+            "grade": "inconclusive",
+            "empty_meaning": "no community assigned",
+        },
     }
 
     stats = query(g, "stats")

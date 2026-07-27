@@ -25,6 +25,7 @@ from .answer_contract import (
     build_answer_block,
     empty_marker,
     is_degraded,
+    is_unmeasured,
     languages_for_nodes,
 )
 from .cache import Cache
@@ -1091,7 +1092,7 @@ def _answer_lines(block: dict[str, Any] | None, *, empty: bool) -> list[str]:
     """
     if not block:
         return []
-    if not empty and not is_degraded(block):
+    if not empty and not is_degraded(block) and not is_unmeasured(block):
         return []
     cells = ", ".join(
         f"{relation} ({language}) {langs[language]['ratio']:.2f}"

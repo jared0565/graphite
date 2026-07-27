@@ -82,6 +82,8 @@ def _call_confidence(
     called: str,
     external_names: Collection[str] = (),
     in_repo_names: Collection[str] = (),
+    *,
+    attributable: bool = True,
 ) -> str:
     """`LOCAL_CALL`, or `EXTERNAL_CALL` when the call provably leaves the repo.
 
@@ -96,28 +98,25 @@ def _call_confidence(
     (``crypto`` the module vs. `crypto` the Web Crypto global) cannot make it
     external.
 
-    This precedence check is threaded for TypeScript ONLY. In `_extract_python`,
-    the bare-identifier call path and the unresolved-member-call fallback both
-    call this function without an `in_repo_names` argument, even when the
-    target resolved in-repo via `symbol_map` (`_collect_python_import_maps`).
-    (The sibling `alias_map` member-access path is immune -- it hardcodes
-    `confidence="LOCAL_CALL"` and never calls `_call_confidence` at all.) So a
-    Python name that resolves in-repo via `symbol_map` but collides with
-    `_EXTERNAL_GLOBALS` -- e.g. `helpers.py` defines `def format(...)`,
-    another module does `from helpers import format` then calls `format(...)`
-    -- is still labelled `EXTERNAL_CALL`. Measured directly: extracting that
-    fixture produces the edge `('helpers_format', 'EXTERNAL_CALL')`.
+    This precedence check is threaded for BOTH TypeScript and Python (#14
+    mechanism B). Python's bare-identifier and unresolved-member paths pass the
+    keys of `symbol_map` from `_collect_python_import_maps`, so a name the
+    source index proved local -- `helpers.py` defining `def format(...)`, then
+    `from helpers import format` and a call to `format(...)` -- stays
+    `LOCAL_CALL` rather than colliding with `_EXTERNAL_GLOBALS`.
 
-    The consequence depends on whether the target materialises as a node.
-    When it does (the case above -- `helpers_format` exists as a real
-    function node), health.py's exclusion rule only excuses UNBOUND edges
-    (spec §5), so the mislabel is cosmetic: the edge is still counted
-    normally in the ratio. When the target does NOT materialise as a node
-    (e.g. `format = lambda ...`, or a re-export the resolver can't follow),
-    the edge is unbound AND tagged `EXTERNAL_CALL`, so it is excluded from
-    the ratio -- a genuine false external. Unfixed; open for a future round
-    (spec §13, "known limitation" bullet).
+    ``attributable`` is False when ``called`` is a bare method name recovered
+    from a receiver the extractor could not name -- a regex or string literal,
+    a call result, a subscript (``/re/.test(s)``, ``"{}".format(x)``,
+    ``f().g()``). Such a name says nothing about where the call goes, so
+    classifying it against the globals list produced a **false external**
+    (#14 mechanism A): an edge excused from the health denominator despite
+    never being shown to leave the repo. A false external inflates health,
+    which is the more dangerous direction than a missed one. Unattributable
+    calls are therefore never classified external.
     """
+    if not attributable:
+        return "LOCAL_CALL"
     root = called.split(".", 1)[0]
     if root in in_repo_names:
         return "LOCAL_CALL"
@@ -376,7 +375,19 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
                 if called and called not in _LANGUAGE_BUILTIN_GLOBALS and should_keep_call_target(called):
                     target_id = _resolve_call(file_id, called, bindings.resolved)
                     _materialize(scope)
-                    edge = _edge(scope.id, target_id, "calls", rel_path, _line(node), confidence=_call_confidence(called, bindings.external, bindings.in_repo))
+                    # A member call whose receiver could not be named leaves
+                    # `called` as a bare method name, which says nothing about
+                    # where the call goes -- do not classify it (#14).
+                    attributable = True
+                    if func.type == "member_expression":
+                        obj = func.child_by_field_name("object")
+                        attributable = bool(obj is not None and _simple_object_name(obj))
+                    edge = _edge(
+                        scope.id, target_id, "calls", rel_path, _line(node),
+                        confidence=_call_confidence(
+                            called, bindings.external, bindings.in_repo, attributable=attributable
+                        ),
+                    )
                     # Method dispatch: for `recv.method(...)` the callee is a
                     # member_expression and target_id above is only a file-scoped
                     # phantom. Stash the bare method name so the global post-pass
@@ -952,7 +963,10 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
             edge = None
             if bare and bare not in _LANGUAGE_BUILTIN_GLOBALS:
                 target = symbol_map.get(bare) or _resolve_call(file_id, bare)
-                edge = _edge(scope_id, target, "calls", rel_path, _line(node), confidence=_call_confidence(bare, external_names))
+                edge = _edge(
+                    scope_id, target, "calls", rel_path, _line(node),
+                    confidence=_call_confidence(bare, external_names, symbol_map),
+                )
             elif attr:
                 dotted = f"{obj_name}.{attr}" if obj_name else attr
                 if obj_name and obj_name in alias_map:
@@ -965,8 +979,19 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                     # receiver, e.g. `foo().bar()`), not off `dotted` -- a
                     # depth->=2 chain like `os.path.join` would otherwise
                     # test "join" instead of the bound name "os".
-                    root_name = obj_name or _python_attribute_root(func) or dotted
-                    edge = _edge(scope_id, _resolve_call(file_id, dotted), "calls", rel_path, _line(node), confidence=_call_confidence(root_name, external_names))
+                    # When neither a simple receiver nor a chain root can be
+                    # recovered, `dotted` is the bare attribute name and carries
+                    # no information about the receiver -- classifying it would
+                    # be a false external (#14).
+                    recovered_root = obj_name or _python_attribute_root(func)
+                    root_name = recovered_root or dotted
+                    edge = _edge(
+                        scope_id, _resolve_call(file_id, dotted), "calls", rel_path, _line(node),
+                        confidence=_call_confidence(
+                            root_name, external_names, symbol_map,
+                            attributable=recovered_root is not None,
+                        ),
+                    )
                     edge["_member"] = attr
             if edge is not None:
                 result.edges.append(edge)
