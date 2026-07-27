@@ -16,6 +16,14 @@ RESOLUTION_HEALTHY_RATIO: Final = 0.8
 
 _COUNTED_RELATIONS: Final = ("calls", "imports")
 
+# Per-relation marker for "this edge leaves the repo". An edge counts as
+# external ONLY when it also failed to bind -- externality excuses an unbound
+# edge, it never removes a bound one (spec §5).
+_EXTERNAL_CONFIDENCE: Final = {
+    "imports": "EXTERNAL_IMPORT",
+    "calls": "EXTERNAL_CALL",
+}
+
 _EXTENSION_LANGUAGES: Final = {
     ".py": "python",
     ".ts": "typescript",
@@ -40,15 +48,13 @@ def _edge_language(source_file: object) -> str:
     return _EXTENSION_LANGUAGES.get(suffix, "other")
 
 
-def _cell(bound: int, total: int, external: int, relation: str) -> dict[str, Any]:
-    cell: dict[str, Any] = {
+def _cell(bound: int, total: int, external: int) -> dict[str, Any]:
+    return {
         "total": total,
         "bound": bound,
         "ratio": None if total == 0 else round(bound / total, 3),
+        "external": external,
     }
-    if relation == "imports":
-        cell["external"] = external
-    return cell
 
 
 def resolution_health(g: nx.DiGraph) -> dict[str, Any]:
@@ -68,23 +74,23 @@ def resolution_health(g: nx.DiGraph) -> dict[str, Any]:
         buckets = language_counts.setdefault(
             language, {rel: [0, 0, 0] for rel in _COUNTED_RELATIONS}
         )
-        if relation == "imports" and data.get("confidence") == "EXTERNAL_IMPORT":
+        bound = int(g.nodes[v].get("kind", "unknown") != "unknown")
+        if not bound and data.get("confidence") == _EXTERNAL_CONFIDENCE.get(relation):
             counts[2] += 1
             buckets[relation][2] += 1
             continue
-        bound = int(g.nodes[v].get("kind", "unknown") != "unknown")
         counts[0] += bound
         counts[1] += 1
         buckets[relation][0] += bound
         buckets[relation][1] += 1
-    by_relation = {rel: _cell(c[0], c[1], c[2], rel) for rel, c in relation_counts.items()}
+    by_relation = {rel: _cell(c[0], c[1], c[2]) for rel, c in relation_counts.items()}
     by_language = {
-        language: {rel: _cell(c[0], c[1], c[2], rel) for rel, c in buckets.items()}
+        language: {rel: _cell(c[0], c[1], c[2]) for rel, c in buckets.items()}
         for language, buckets in sorted(language_counts.items())
     }
     ratios = [cell["ratio"] for cell in by_relation.values() if cell["ratio"] is not None]
     return {
-        "schema": 2,
+        "schema": 3,
         "placeholder_nodes": {
             "total": node_total,
             "unknown": unknown_nodes,

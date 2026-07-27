@@ -17,18 +17,22 @@ def _graph(nodes, edges):
     g = nx.DiGraph()
     for node_id, kind, source_file in nodes:
         g.add_node(node_id, kind=kind, source_file=source_file)
-    for src, dst, relation, source_file in edges:
-        g.add_edge(src, dst, relation=relation, source_file=source_file)
+    for edge in edges:
+        src, dst, relation, source_file = edge[:4]
+        attrs = {"relation": relation, "source_file": source_file}
+        if len(edge) > 4 and edge[4] is not None:
+            attrs["confidence"] = edge[4]
+        g.add_edge(src, dst, **attrs)
     return g
 
 
 def test_empty_graph_is_healthy_with_null_ratios():
     block = resolution_health(nx.DiGraph())
-    assert block["schema"] == 2
+    assert block["schema"] == 3
     assert block["healthy"] is True
     assert block["threshold"] == RESOLUTION_HEALTHY_RATIO
     assert block["placeholder_nodes"] == {"total": 0, "unknown": 0, "share": None}
-    assert block["by_relation"]["calls"] == {"total": 0, "bound": 0, "ratio": None}
+    assert block["by_relation"]["calls"] == {"total": 0, "bound": 0, "ratio": None, "external": 0}
     assert block["by_relation"]["imports"] == {"total": 0, "bound": 0, "ratio": None, "external": 0}
     assert block["by_language"] == {}
 
@@ -47,7 +51,7 @@ def test_bound_and_unbound_edges_counted_per_relation():
         ],
     )
     block = resolution_health(g)
-    assert block["by_relation"]["calls"] == {"total": 2, "bound": 1, "ratio": 0.5}
+    assert block["by_relation"]["calls"] == {"total": 2, "bound": 1, "ratio": 0.5, "external": 0}
     assert block["by_relation"]["imports"] == {"total": 1, "bound": 0, "ratio": 0.0, "external": 0}
     assert block["healthy"] is False
     assert block["placeholder_nodes"] == {"total": 3, "unknown": 1, "share": 0.333}
@@ -85,8 +89,8 @@ def test_language_attribution_from_edge_source_file():
         ],
     )
     block = resolution_health(g)
-    assert block["by_language"]["python"]["calls"] == {"total": 1, "bound": 1, "ratio": 1.0}
-    assert block["by_language"]["typescript"]["calls"] == {"total": 1, "bound": 0, "ratio": 0.0}
+    assert block["by_language"]["python"]["calls"] == {"total": 1, "bound": 1, "ratio": 1.0, "external": 0}
+    assert block["by_language"]["typescript"]["calls"] == {"total": 1, "bound": 0, "ratio": 0.0, "external": 0}
     assert block["by_language"]["other"]["imports"] == {"total": 1, "bound": 0, "ratio": 0.0, "external": 0}
     # languages appear only when they carry at least one counted edge
     assert "go" not in block["by_language"]
@@ -98,7 +102,7 @@ def test_missing_kind_counts_as_unknown():
     g.add_node("mystery")  # no kind attribute
     g.add_edge("a", "mystery", relation="calls", source_file="a.py")
     block = resolution_health(g)
-    assert block["by_relation"]["calls"] == {"total": 1, "bound": 0, "ratio": 0.0}
+    assert block["by_relation"]["calls"] == {"total": 1, "bound": 0, "ratio": 0.0, "external": 0}
     assert block["by_relation"]["imports"] == {"total": 0, "bound": 0, "ratio": None, "external": 0}
     assert block["placeholder_nodes"]["unknown"] == 1
 
@@ -146,7 +150,7 @@ def test_analyze_includes_resolution_block():
     )
     result = analyze(g)
     assert result["resolution_health"]["by_relation"]["calls"] == {
-        "total": 1, "bound": 0, "ratio": 0.0,
+        "total": 1, "bound": 0, "ratio": 0.0, "external": 0,
     }
     assert result["resolution_health"]["by_relation"]["imports"] == {
         "total": 0, "bound": 0, "ratio": None, "external": 0,
@@ -167,11 +171,11 @@ def test_build_persists_resolution_in_artifacts(tmp_path, monkeypatch):
     analysis = json.loads(
         (tmp_path / "graph-out" / ".graphite_analysis.json").read_text(encoding="utf-8")
     )
-    assert analysis["resolution_health"]["schema"] == 2
+    assert analysis["resolution_health"]["schema"] == 3
     bundle = json.loads(
         (tmp_path / "graph-out" / "graph.json").read_text(encoding="utf-8")
     )
-    assert bundle["analysis"]["resolution_health"]["schema"] == 2
+    assert bundle["analysis"]["resolution_health"]["schema"] == 3
     assert persisted_resolution(tmp_path) == analysis["resolution_health"]
 
 
@@ -516,7 +520,7 @@ def test_external_imports_excluded_from_ratio():
     g.add_edge("f", "dep", relation="imports", source_file="a.py", confidence="EXACT_IMPORT")
     g.add_edge("f", "pathlib", relation="imports", source_file="a.py", confidence="EXTERNAL_IMPORT")
     block = resolution_health(g)
-    assert block["schema"] == 2
+    assert block["schema"] == 3
     assert block["by_relation"]["imports"] == {
         "total": 1, "bound": 1, "ratio": 1.0, "external": 1,
     }
@@ -536,9 +540,11 @@ def test_untagged_import_edges_still_count():
     assert block["healthy"] is False
 
 
-def test_calls_cells_have_no_external_field():
+def test_both_relations_carry_external_field():
+    """Schema 3: `external` is unconditional on every cell, calls included
+    (superseded schema-2 invariant: calls previously omitted the key)."""
     block = resolution_health(nx.DiGraph())
-    assert "external" not in block["by_relation"]["calls"]
+    assert block["by_relation"]["calls"]["external"] == 0
     assert block["by_relation"]["imports"]["external"] == 0
 
 
@@ -677,3 +683,82 @@ def test_impact_never_prints_a_bare_header(capsys, monkeypatch):
         if line.endswith(":") and not line.startswith(" "):
             assert index + 1 < len(lines), f"bare header at end of output: {line!r}"
             assert lines[index + 1].startswith("  "), f"bare header: {line!r}"
+
+
+def test_external_call_edges_are_excluded_and_counted():
+    g = _graph(
+        nodes=[
+            ("f1", "function", "a.ts"),
+            ("f2", "function", "b.ts"),
+            ("expect", "unknown", None),
+        ],
+        edges=[
+            ("f1", "f2", "calls", "a.ts", "LOCAL_CALL"),
+            ("f1", "expect", "calls", "a.ts", "EXTERNAL_CALL"),
+        ],
+    )
+    block = resolution_health(g)
+    assert block["by_relation"]["calls"] == {
+        "total": 1, "bound": 1, "ratio": 1.0, "external": 1
+    }
+    assert block["by_language"]["typescript"]["calls"]["external"] == 1
+
+
+def test_schema_is_three():
+    assert resolution_health(nx.DiGraph())["schema"] == 3
+
+
+def test_external_call_that_bound_is_counted_normally():
+    """Externality only excuses an UNBOUND edge (spec §5).
+
+    Guards the name-based matching in _EXTERNAL_GLOBALS: a repo that defines
+    its own test()/process() must not have that real binding excluded.
+    """
+    g = _graph(
+        nodes=[
+            ("f1", "function", "a.ts"),
+            ("mine", "function", "a.ts"),
+        ],
+        edges=[("f1", "mine", "calls", "a.ts", "EXTERNAL_CALL")],
+    )
+    block = resolution_health(g)
+    assert block["by_relation"]["calls"] == {
+        "total": 1, "bound": 1, "ratio": 1.0, "external": 0
+    }
+
+
+def test_calls_cell_with_only_external_edges_reports_null_ratio():
+    g = _graph(
+        nodes=[("f1", "function", "a.ts"), ("expect", "unknown", None)],
+        edges=[("f1", "expect", "calls", "a.ts", "EXTERNAL_CALL")],
+    )
+    cell = resolution_health(g)["by_relation"]["calls"]
+    assert cell == {"total": 0, "bound": 0, "ratio": None, "external": 1}
+
+
+def test_external_import_that_bound_is_counted_normally():
+    """Mirrors test_external_call_that_bound_is_counted_normally for the
+    imports relation: the guard is uniform across _EXTERNAL_CONFIDENCE, not
+    calls-only. Pre-Task-1, ANY EXTERNAL_IMPORT edge was excluded regardless
+    of binding -- this pins the new, narrower guarded behavior."""
+    g = _graph(
+        nodes=[
+            ("f1", "file", "a.py"),
+            ("dep", "file", "b.py"),
+        ],
+        edges=[("f1", "dep", "imports", "a.py", "EXTERNAL_IMPORT")],
+    )
+    block = resolution_health(g)
+    assert block["by_relation"]["imports"] == {
+        "total": 1, "bound": 1, "ratio": 1.0, "external": 0
+    }
+
+
+def test_external_call_confidence_on_imports_relation_is_not_external():
+    """The mapping is per-relation: EXTERNAL_CALL means nothing on imports."""
+    g = _graph(
+        nodes=[("f1", "file", "a.ts"), ("ghost", "unknown", None)],
+        edges=[("f1", "ghost", "imports", "a.ts", "EXTERNAL_CALL")],
+    )
+    cell = resolution_health(g)["by_relation"]["imports"]
+    assert cell == {"total": 1, "bound": 0, "ratio": 0.0, "external": 0}

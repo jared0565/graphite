@@ -115,17 +115,17 @@ def test_query_verb_outputs_are_golden_stable() -> None:
     """Exact-output pins so interface refactors are provably inert."""
     g = _golden_graph()
     # Pinned verbatim from an actual resolution_health(g) run over the fixture
-    # above (schema-2 shape) — independent of the function under test.
+    # above (schema-3 shape) — independent of the function under test.
     health_block = {
-        "schema": 2,
+        "schema": 3,
         "placeholder_nodes": {"total": 4, "unknown": 0, "share": 0.0},
         "by_relation": {
-            "calls": {"total": 1, "bound": 1, "ratio": 1.0},
+            "calls": {"total": 1, "bound": 1, "ratio": 1.0, "external": 0},
             "imports": {"total": 1, "bound": 1, "ratio": 1.0, "external": 0},
         },
         "by_language": {
             "other": {
-                "calls": {"total": 1, "bound": 1, "ratio": 1.0},
+                "calls": {"total": 1, "bound": 1, "ratio": 1.0, "external": 0},
                 "imports": {"total": 1, "bound": 1, "ratio": 1.0, "external": 0},
             }
         },
@@ -368,7 +368,7 @@ def test_query_error_outputs_are_golden_stable() -> None:
             "relations": ["calls"],
             "languages": ["other"],
             "health": {
-                "calls": {"other": {"total": 1, "bound": 1, "ratio": 1.0, "healthy": True}}
+                "calls": {"other": {"total": 1, "bound": 1, "ratio": 1.0, "external": 0, "healthy": True}}
             },
             "grade": "decision_grade",
             "caveats": [],

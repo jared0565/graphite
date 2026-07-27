@@ -479,7 +479,7 @@ def test_end_to_end_build_binds_and_is_healthy(tmp_path, monkeypatch):
     _build_project(tmp_path, Config(workers=1, cache_dir=tmp_path / ".cache" / "graphite"))
     bundle = _json.loads((tmp_path / "graph-out" / "graph.json").read_text(encoding="utf-8"))
     block = bundle["analysis"]["resolution_health"]
-    assert block["schema"] == 2
+    assert block["schema"] == 3
     assert block["healthy"] is True
     assert block["by_relation"]["imports"]["ratio"] == 1.0
     assert block["by_relation"]["imports"]["external"] >= 1  # json import
