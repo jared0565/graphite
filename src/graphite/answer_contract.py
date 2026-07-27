@@ -39,6 +39,14 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         "languages": ("typescript", "javascript"),
         "summary": "calls to external-package symbols, runtime globals, and destructured locals count as unbound",
         "since": "2026-07-26",
+        "retired_by": "2026-07-27",
+    },
+    {
+        "code": "ts-destructured-locals-unbound",
+        "relations": ("calls",),
+        "languages": ("typescript", "javascript"),
+        "summary": "calls through destructured local bindings (const { f } = require(...)) count as unbound",
+        "since": "2026-07-27",
     },
 )
 

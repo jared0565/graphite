@@ -111,7 +111,7 @@ def test_retired_caveats_never_emitted(monkeypatch):
 
 def test_registry_initial_entries():
     codes = {e["code"] for e in active_caveats()}
-    assert codes == {"python-dynamic-dispatch", "ts-external-calls-unclassified"}
+    assert codes == {"python-dynamic-dispatch", "ts-destructured-locals-unbound"}
 
 
 def test_fail_open_returns_none(monkeypatch):
@@ -128,3 +128,16 @@ def test_languages_for_nodes():
     assert languages_for_nodes(g, ["caller_py", "caller_ts"]) == ["python", "typescript"]
     assert languages_for_nodes(g, ["phantom0"]) == []
     assert languages_for_nodes(g, ["no-such-node"]) == []
+
+
+def test_ts_external_calls_caveat_is_retired_with_a_successor():
+    from graphite.answer_contract import CAVEAT_REGISTRY, active_caveats
+
+    by_code = {e["code"]: e for e in CAVEAT_REGISTRY}
+    assert by_code["ts-external-calls-unclassified"]["retired_by"]
+    active = {e["code"] for e in active_caveats()}
+    assert "ts-external-calls-unclassified" not in active
+    assert "ts-destructured-locals-unbound" in active
+    successor = by_code["ts-destructured-locals-unbound"]
+    assert successor["relations"] == ("calls",)
+    assert successor["languages"] == ("typescript", "javascript")
