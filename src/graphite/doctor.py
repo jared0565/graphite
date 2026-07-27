@@ -35,6 +35,7 @@ _DAEMON_ISSUES_EXCLUDED_FROM_GLOBAL = {
     "project_failing",
     "project_pending_initial_build",
     "project_not_built_recently",
+    "project_nested_repo_unsupervised",
     "daemon_process_check_unavailable",
 }
 

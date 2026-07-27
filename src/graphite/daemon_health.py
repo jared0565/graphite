@@ -221,6 +221,18 @@ def evaluate_daemon_health(
             "message": f"project not built recently: {project['root']}",
             "project": project,
         })
+    # A nested git repo is never discovered, so it can never appear in the two
+    # warnings above -- health would otherwise report ok while that repo's
+    # graph goes stale indefinitely (#6).
+    for root in status.get("unsupervised_nested_repos") or []:
+        _append_bounded(warnings, {
+            "code": "project_nested_repo_unsupervised",
+            "message": (
+                f"nested git repo is not supervised and its graph may be stale: {root} "
+                "-- build it directly or run the daemon on it"
+            ),
+            "project": {"root": root},
+        })
 
     process = {"checked": False}
     if opts.require_process:
@@ -511,6 +523,20 @@ def _normalize_status(
             issues.append(_schema_issue("provider_lifecycle"))
         else:
             status["provider_lifecycle"] = provider_lifecycle
+    # Bounded like every other field here: this dict is the non-leaking subset
+    # health is allowed to classify on, so a new key must be normalized
+    # explicitly or it is silently dropped (#6).
+    raw_nested = raw_status.get("unsupervised_nested_repos")
+    if isinstance(raw_nested, list):
+        nested = [
+            str(item)[:_MAX_ROOT_LENGTH]
+            for item in raw_nested[:_MAX_INPUT_PROJECTS]
+            if isinstance(item, str)
+        ]
+        if nested:
+            status["unsupervised_nested_repos"] = nested
+    elif raw_nested is not None:
+        issues.append(_schema_issue("unsupervised_nested_repos"))
     raw_projects = raw_status.get("projects")
     valid_projects: list[dict[str, Any]] = []
     processed_count = 0

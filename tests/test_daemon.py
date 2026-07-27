@@ -316,3 +316,111 @@ def test_daemon_suggestion_does_not_hijack_a_real_directory(tmp_path, monkeypatc
 
     assert _daemon_subcommand_suggestion("status", {"daemon-status"}) is None
     assert _daemon_subcommand_suggestion("health", {"daemon-health"}) == "daemon-health"
+
+
+def test_nested_git_repo_is_reported_as_unsupervised(tmp_path: Path) -> None:
+    """#6: discovery deliberately stops at a project root, so a nested git repo
+    is never supervised. The pruning stays; the skip must stop being silent."""
+    from graphite.daemon import discover_projects, nested_git_repos
+
+    _write(tmp_path / "app" / "package.json", "{}\n")
+    _write(tmp_path / "app" / "worker" / "package.json", "{}\n")
+    (tmp_path / "app" / "worker" / ".git").mkdir(parents=True)
+
+    projects = discover_projects(tmp_path)
+    assert (tmp_path / "app") in projects
+    assert (tmp_path / "app" / "worker") not in projects, "pruning must be preserved"
+
+    nested = nested_git_repos(tmp_path / "app")
+    assert nested == [tmp_path / "app" / "worker"]
+
+
+def test_plain_workspace_is_not_reported_as_a_nested_repo(tmp_path: Path) -> None:
+    """Only a separate git repo counts -- an ordinary monorepo workspace does not."""
+    from graphite.daemon import nested_git_repos
+
+    _write(tmp_path / "app" / "package.json", "{}\n")
+    _write(tmp_path / "app" / "packages" / "ui" / "package.json", "{}\n")
+
+    assert nested_git_repos(tmp_path / "app") == []
+
+
+def test_daemon_health_warns_about_unsupervised_nested_repos(tmp_path: Path) -> None:
+    """The warning exists because a nested repo can appear in no other check.
+
+    Also guards `_normalize_status`: that function is a strict whitelist, so a
+    new status field is silently dropped unless normalized explicitly -- which
+    would make this warning a no-op that still looks implemented.
+    """
+    import json
+    from datetime import datetime, timezone
+
+    from graphite.daemon_health import HealthOptions, evaluate_daemon_health
+
+    state = tmp_path / ".graphite-daemon"
+    state.mkdir(parents=True, exist_ok=True)
+    now = datetime(2026, 7, 27, 12, 0, 0, tzinfo=timezone.utc)
+    (state / "status.json").write_text(json.dumps({
+        "status": "ok",
+        "updated_at": now.isoformat(),
+        "project_count": 1,
+        "projects": [],
+        "unsupervised_nested_repos": ["/projects/demo/worker"],
+    }), encoding="utf-8")
+
+    report = evaluate_daemon_health(
+        tmp_path,
+        options=HealthOptions(require_process=False, require_startup=False),
+        now=now,
+    )
+
+    codes = {w["code"] for w in report["warnings"]}
+    assert "project_nested_repo_unsupervised" in codes, (
+        f"warning absent; got {codes} -- check _normalize_status kept the field"
+    )
+    assert any("/projects/demo/worker" in w["message"] for w in report["warnings"])
+    assert report["status"] != "ok", "an unsupervised nested repo must not read as healthy"
+
+
+def test_cycle_level_failure_records_an_incident(tmp_path: Path, monkeypatch) -> None:
+    """#3: failures before a build was attempted bypassed the incident writer.
+
+    They were durable only in status.json, which ages out, so a chronically
+    failing project showed as failing with an empty ledger.
+    """
+    import graphite.daemon as daemon_mod
+    from graphite.incident_ledger import repo_ledger_dir
+
+    project = tmp_path / "proj"
+    _write(project / "package.json", "{}\n")
+    _write(project / "src" / "a.ts", "export function a() { return 1; }\n")
+    state_dir = tmp_path / ".graphite-daemon"
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("unable to enumerate Git repository safely")
+
+    # diff_snapshots is the first call inside the cycle's try block, so this
+    # models a change-enumeration failure -- the exact shape the issue reports
+    # ("unable to enumerate Git repository safely").
+    monkeypatch.setattr(daemon_mod, "diff_snapshots", boom)
+
+    cfg = Config(workers=1, cache_dir=tmp_path / ".cache")
+    daemon_mod.run_daemon(
+        tmp_path,
+        cfg,
+        DaemonOptions(
+            once=False,
+            max_cycles=2,
+            build_now=False,
+            scan_interval_seconds=0.01,
+            debounce_seconds=0.0,
+            state_dir=state_dir,
+        ),
+    )
+
+    ledger = repo_ledger_dir(project)
+    entries = [p for p in ledger.glob("*.jsonl")] if ledger.exists() else []
+    text = "".join(p.read_text(encoding="utf-8") for p in entries)
+    assert "daemon_cycle_failed" in text, (
+        f"cycle-level failure recorded no incident; ledger dir={ledger} files={entries}"
+    )

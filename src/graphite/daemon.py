@@ -263,6 +263,43 @@ def discover_projects(base: Path, *, max_depth: int = 6, max_projects: int = 128
     return sorted(projects, key=lambda p: str(p).lower())
 
 
+def nested_git_repos(project_root: Path, *, max_depth: int = 6) -> list[Path]:
+    """Directories strictly below `project_root` that are their own git repos.
+
+    `discover_projects` deliberately stops at a project root so monorepo
+    workspaces do not each become a duplicate, cross-workspace-blind project.
+    A nested *separate git repo* is collateral of that rule: it is a real
+    project the daemon never supervises, so its graph goes stale indefinitely
+    while status and health report everything healthy (#6).
+
+    The pruning stays -- this only makes the skip visible.
+    """
+    found: list[Path] = []
+    try:
+        root = project_root.resolve()
+    except OSError:
+        return found
+    for dirpath, dirnames, _ in os.walk(root):
+        current = Path(dirpath)
+        try:
+            rel = current.relative_to(root)
+        except ValueError:
+            continue
+        depth = 0 if rel == Path(".") else len(rel.parts)
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in DISCOVERY_SKIP_DIRS and not d.startswith(".")
+        ]
+        if depth > max_depth:
+            dirnames[:] = []
+            continue
+        if depth > 0 and (current / ".git").exists():
+            found.append(current)
+            # Its own nested repos are its problem, not this project's.
+            dirnames[:] = []
+    return sorted(found, key=lambda p: str(p).lower())
+
+
 def daemon_config_for_project(cfg: Config, root: Path, options: DaemonOptions) -> Config:
     data = cfg.canonical_graph().to_dict()
     if not Path(data["output_dir"]).is_absolute():
@@ -435,6 +472,7 @@ def _write_status(
     options: DaemonOptions,
     cycle: int,
     provider_lifecycle: dict[str, object] | None = None,
+    unsupervised_nested_repos: list[str] | None = None,
 ) -> dict[str, object]:
     projects = [state.to_status() for _, state in sorted(states.items(), key=lambda item: str(item[0]).lower())]
     healthy = sum(1 for state in states.values() if state.last_error is None and not state.needs_initial_build)
@@ -449,6 +487,10 @@ def _write_status(
         "healthy_projects": healthy,
         "failing_projects": failing,
         "pending_projects": pending,
+        # Real git repos nested inside a supervised project, which discovery
+        # deliberately does not descend into. Surfaced so daemon-health can
+        # warn instead of reporting healthy over a stale graph (#6).
+        "unsupervised_nested_repos": list(unsupervised_nested_repos or []),
         "limits": {
             "scan_interval_seconds": options.scan_interval_seconds,
             "discover_interval_seconds": options.discover_interval_seconds,
@@ -534,6 +576,7 @@ def run_daemon(
     states: dict[Path, ProjectRuntime] = {}
     last_discovery = 0.0
     last_status: dict[str, object] = {}
+    unsupervised_nested: list[str] = []
     cycle = 0
 
     while True:
@@ -541,6 +584,13 @@ def run_daemon(
         if cycle == 0 or now - last_discovery >= options.discover_interval_seconds:
             projects = discover_projects(base, max_depth=options.max_depth, max_projects=options.max_projects)
             discovered = set(projects)
+            unsupervised_nested = sorted({
+                str(nested)
+                for project in projects
+                for nested in nested_git_repos(project, max_depth=options.max_depth)
+            })
+            for nested in unsupervised_nested:
+                logger.event("nested_repo_unsupervised", project=nested)
             for project in projects:
                 if project not in states:
                     try:
@@ -586,6 +636,17 @@ def run_daemon(
                 state.last_error = str(exc)
                 state.failure_count += 1
                 logger.event("project_scan_failed", project=str(project), error=str(exc))
+                # Failures before a build is attempted (git enumeration,
+                # snapshotting, watcher errors) never reached the incident
+                # writer, so they were durable only in status.json, which ages
+                # out. A distinct code separates them from build failures (#3).
+                record_incident(
+                    repo_ledger_dir(state.root),
+                    klass="daemon",
+                    code="daemon_cycle_failed",
+                    subject=str(state.root),
+                    detail=str(exc) or "project scan failed",
+                )
                 continue
 
             was_initial_build = state.needs_initial_build
@@ -608,6 +669,7 @@ def run_daemon(
             options,
             cycle,
             None if provider_worker is None else provider_worker.snapshot(),
+            unsupervised_nested_repos=unsupervised_nested,
         )
         if options.once:
             if provider_worker is not None:
