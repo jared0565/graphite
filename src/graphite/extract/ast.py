@@ -297,7 +297,9 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
     def walk(node: Any, parent_id: str | None, scope: _Scope) -> None:
         t = node.type
         if t in ("function_declaration", "generator_function_declaration", "function", "generator_function", "method_definition"):
-            name = _name(node)
+            # An anonymous function expression assigned to a name is callable by
+            # that name, so it takes the named path too (#16).
+            name = _name(node) or _declarator_binding_name(node)
             if name:
                 mid = _make_id(file_id, name)
                 # Tag class methods so the global method-dispatch post-pass can
@@ -309,10 +311,25 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
                 walk_children(node, mid, _Scope(mid))
             else:
                 walk_children(node, parent_id, _anon_scope(node))
-        elif t == "arrow_function":
+        elif t in ("arrow_function", "function_expression", "generator_function_expression"):
             # Arrows carry no name of their own; _name would misread a bare
-            # single parameter as the name, so always treat them as anonymous.
-            walk_children(node, parent_id, _anon_scope(node))
+            # single parameter as the name, so they are anonymous by default.
+            # A variable-declarator binding is the one exception: it makes the
+            # function callable by name, so it must get the same id shape a
+            # `function f()` declaration produces or nothing can bind to it.
+            bound = _declarator_binding_name(node)
+            if bound:
+                mid = _make_id(file_id, bound)
+                result.nodes.append(_node(mid, "function", bound, rel_path, _line(node)))
+                if parent_id:
+                    result.edges.append(_edge(parent_id, mid, "contains", rel_path, _line(node)))
+                walk_children(node, mid, _Scope(mid))
+            elif t == "arrow_function":
+                walk_children(node, parent_id, _anon_scope(node))
+            else:
+                # Unbound function expressions keep their previous handling:
+                # calls inside them stay attributed to the enclosing scope.
+                walk_children(node, parent_id, scope)
         elif t == "class_declaration":
             name = _name(node)
             if name:
@@ -349,6 +366,11 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
             walk_children(node, parent_id, scope)
         elif t in ("call_expression", "new_expression"):
             func = node.child_by_field_name("function")
+            if func is None and t == "new_expression":
+                # tree-sitter names this field `constructor` on a new_expression,
+                # not `function`, so the lookup above always returned None and
+                # this whole arm was dead code for construction (#15).
+                func = node.child_by_field_name("constructor")
             if func:
                 called = _call_target_name(func, source)
                 if called and called not in _LANGUAGE_BUILTIN_GLOBALS and should_keep_call_target(called):
@@ -501,6 +523,31 @@ def _iter_bound_local_names(clause: Any):
                 chosen = alias_node if alias_node is not None else name_node
                 if chosen is not None and chosen.text:
                     yield chosen.text.decode("utf-8", errors="ignore")
+
+
+def _declarator_binding_name(node: Any) -> str | None:
+    """The plain identifier a function-valued variable declarator binds to.
+
+    ``const f = () => ...`` and ``const f = function () {}`` make ``f`` callable
+    by that name, so the definition must carry the same id shape a
+    ``function f()`` declaration produces -- otherwise no call to ``f()`` can
+    ever bind, even inside the defining file (#16).
+
+    Returns None for anything that binds no such callable name: destructuring
+    patterns, object-literal property values, class fields, and callbacks.
+    """
+    parent = node.parent
+    if parent is None or parent.type != "variable_declarator":
+        return None
+    value = parent.child_by_field_name("value")
+    # Compare by node id, not identity: the tree-sitter binding returns a fresh
+    # Node object per call, so `value is node` is always False.
+    if value is None or value.id != node.id:
+        return None
+    name = parent.child_by_field_name("name")
+    if name is None or name.type != "identifier" or not name.text:
+        return None
+    return name.text.decode("utf-8", errors="ignore") or None
 
 
 def _synthetic_fn_name(node: Any, source: bytes) -> str | None:

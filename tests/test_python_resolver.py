@@ -501,5 +501,7 @@ def test_impact_finds_test_via_from_package_submodule_import(tmp_path):
     assert "tests/test_consumer.py" in result["likely_tests"]
 
 
-def test_cache_version_is_v9():
-    assert Config().cache_version == "v9"
+def test_cache_version_is_v10():
+    """Bumped by the arrow/constructor binding round: extraction output changed,
+    so every pre-existing graph must re-extract rather than serve a stale cache."""
+    assert Config().cache_version == "v10"
