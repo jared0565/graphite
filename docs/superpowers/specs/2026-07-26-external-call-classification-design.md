@@ -203,10 +203,18 @@ target is unbound (`kind == "unknown"`). An external-marked edge whose target
 *did* bind is counted normally, in both numerator and denominator.
 
 This is what makes §4.2's name-based matching safe: the worst a false external
-can do is fail to exclude, never hide real binding. It is also a no-op for
-`imports`, whose `EXTERNAL_IMPORT` targets are `_make_id(module)` phantoms and
-therefore always unbound — so schema 3 does not change any existing imports
-number. Stating the rule for both relations keeps one law instead of two.
+can do is fail to exclude, never hide real binding.
+
+For `imports` it is a behaviour change, though an empirically inert one. Schema 2
+excluded every `EXTERNAL_IMPORT` edge *unconditionally*; schema 3 excludes only
+the unbound ones, so a bound `EXTERNAL_IMPORT` edge now counts in `total` and
+`bound`. Such an edge is possible — `EXTERNAL_IMPORT` targets are
+`_make_id(module)` phantoms, and a module name can collide with a real file's
+node id (`json` ↔ `src/json.py`) — so this is **not** structurally impossible,
+only currently absent: graphite's own graph carries 908 `EXTERNAL_IMPORT` edges,
+all unbound, verified 2026-07-27. No published imports number moves today.
+Stating the rule for both relations keeps one law instead of two, and
+`test_external_import_that_bound_is_counted_normally` pins the behaviour.
 
 Unchanged: `RESOLUTION_HEALTHY_RATIO` (0.8), the `healthy` rule, the
 `placeholder_nodes` block, `ratio_percent`, and `persisted_resolution`.
