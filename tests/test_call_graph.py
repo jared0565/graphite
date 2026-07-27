@@ -139,8 +139,8 @@ def test_query_verb_outputs_are_golden_stable() -> None:
     # caveat still fires (relations/languages match on the seed's language,
     # independent of whether a health cell exists for it).
     ts_caveat = {
-        "code": "ts-external-calls-unclassified",
-        "summary": "calls to external-package symbols, runtime globals, and destructured locals count as unbound",
+        "code": "ts-destructured-locals-unbound",
+        "summary": "calls through destructured local bindings (const { f } = require(...)) count as unbound",
     }
     answer_calls_only = {
         "schema": 1,
