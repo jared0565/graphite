@@ -114,3 +114,58 @@ def test_unattributable_member_call_is_still_dropped(tmp_path):
     )
     result = _extract(tmp_path)
     assert _calls(result, "src/t.ts") == []
+
+
+def test_named_import_from_external_package_is_tagged(tmp_path):
+    _write(
+        tmp_path / "src" / "t.ts",
+        "import { z } from 'zod';\n"
+        "export function go() { return z.object({}); }\n",
+    )
+    result = _extract(tmp_path)
+    assert {e["confidence"] for e in _calls(result, "src/t.ts")} == {"EXTERNAL_CALL"}
+
+
+def test_default_import_from_external_package_is_tagged(tmp_path):
+    # NOTE: the method is `request`, never `get` -- `get` is in resolve.py's
+    # _NOISY_MEMBER_CALLS drop-list (pre-existing, unrelated to this task), so
+    # `axios.get(...)` produces NO edge at all and this test would silently
+    # assert on an empty set instead of exercising the default-import path.
+    _write(
+        tmp_path / "src" / "t.ts",
+        "import axios from 'axios';\n"
+        "export function go() { return axios.request('/x'); }\n",
+    )
+    result = _extract(tmp_path)
+    assert {e["confidence"] for e in _calls(result, "src/t.ts")} == {"EXTERNAL_CALL"}
+
+
+def test_namespace_import_from_external_package_is_tagged(tmp_path):
+    _write(
+        tmp_path / "src" / "t.ts",
+        "import * as lib from 'some-lib';\n"
+        "export function go() { return lib.run(); }\n",
+    )
+    result = _extract(tmp_path)
+    assert {e["confidence"] for e in _calls(result, "src/t.ts")} == {"EXTERNAL_CALL"}
+
+
+def test_aliased_named_import_uses_the_local_name(tmp_path):
+    _write(
+        tmp_path / "src" / "t.ts",
+        "import { parse as p } from 'yaml';\n"
+        "export function go() { return p('x'); }\n",
+    )
+    result = _extract(tmp_path)
+    assert {e["confidence"] for e in _calls(result, "src/t.ts")} == {"EXTERNAL_CALL"}
+
+
+def test_in_repo_import_is_not_tagged_external(tmp_path):
+    """The discriminating case: same syntax, resolvable module."""
+    _write(tmp_path / "src" / "dep.ts", "export function dep() { return 1; }\n")
+    _write(
+        tmp_path / "src" / "t.ts",
+        "import { dep } from './dep';\nexport function go() { return dep(); }\n",
+    )
+    result = _extract(tmp_path)
+    assert {e["confidence"] for e in _calls(result, "src/t.ts")} == {"LOCAL_CALL"}

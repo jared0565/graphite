@@ -239,7 +239,7 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
     # Pre-pass: map locally-bound imported names to the definition node id in
     # the file that defines them, so cross-file calls resolve to the real target
     # instead of a same-file phantom.
-    import_symbols = _collect_ts_import_symbols(root, rel_path, source_index)
+    bindings = _collect_ts_import_symbols(root, rel_path, source_index)
 
     def _materialize(scope: _Scope) -> None:
         if scope.pending is not None:
@@ -317,9 +317,9 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
             if func:
                 called = _call_target_name(func, source)
                 if called and called not in _LANGUAGE_BUILTIN_GLOBALS and should_keep_call_target(called):
-                    target_id = _resolve_call(file_id, called, import_symbols)
+                    target_id = _resolve_call(file_id, called, bindings.resolved)
                     _materialize(scope)
-                    edge = _edge(scope.id, target_id, "calls", rel_path, _line(node), confidence=_call_confidence(called))
+                    edge = _edge(scope.id, target_id, "calls", rel_path, _line(node), confidence=_call_confidence(called, bindings.external))
                     # Method dispatch: for `recv.method(...)` the callee is a
                     # member_expression and target_id above is only a file-scoped
                     # phantom. Stash the bare method name so the global post-pass
@@ -357,18 +357,34 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
     return result
 
 
-def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceIndex | None) -> dict[str, str]:
-    """Map locally-bound imported names to their definition node id.
+@dataclass(frozen=True)
+class _ImportBindings:
+    """What a file's import statements bind.
 
-    Only *named* imports are mapped: ``import { foo }`` / ``import { foo as bar }``.
-    The value is ``<defining-file-id>_<original-export-name>`` so a call to the
-    local name links to the real definition node in the file that exports it.
-    Default and namespace imports are skipped (they can't be tied to a single
-    named definition), so those calls fall back to same-file resolution.
+    ``resolved`` maps a local name to the definition node id in the in-repo
+    file that exports it (used for call resolution). ``external`` holds local
+    names bound by imports that did NOT resolve in-repo, in every binding form
+    -- those calls leave the repo and are tagged EXTERNAL_CALL.
+    """
+    resolved: dict[str, str]
+    external: frozenset[str]
+
+
+def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceIndex | None) -> _ImportBindings:
+    """What this file's imports bind: resolved definitions and external names.
+
+    Only *named* imports are mapped for resolution: ``import { foo }`` /
+    ``import { foo as bar }``. The value is ``<defining-file-id>_<original-export-name>``
+    so a call to the local name links to the real definition node in the file
+    that exports it. Default and namespace imports are skipped for resolution
+    (they can't be tied to a single named definition), so those calls fall
+    back to same-file resolution. Every binding form (default, namespace,
+    named) is collected for externality when its import does not resolve in-repo.
     """
     symbols: dict[str, str] = {}
+    external: set[str] = set()
     if source_index is None:
-        return symbols
+        return _ImportBindings(symbols, frozenset())
     for node in root.children:
         if node.type != "import_statement":
             continue
@@ -383,11 +399,13 @@ def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceInd
             continue
         resolved = _resolve_import(rel_path, source_lit, source_index)
         if resolved is None:
+            # Unresolved module: every name it binds leaves the repo.
+            external.update(_iter_bound_local_names(clause))
             continue
         target_file_id = _file_node_id(resolved.rel_path)
         for local, original in _iter_named_imports(clause):
             symbols[local] = _make_id(target_file_id, original)
-    return symbols
+    return _ImportBindings(symbols, frozenset(external))
 
 
 def _iter_named_imports(clause: Any):
@@ -409,6 +427,33 @@ def _iter_named_imports(clause: Any):
                 else original
             )
             yield local, original
+
+
+def _iter_bound_local_names(clause: Any):
+    """Yield every local name a TS import clause binds.
+
+    `_iter_named_imports` is deliberately narrower: resolution needs the
+    original export name, so it handles only `named_imports`. Externality needs
+    only the local name, so all three binding forms count here -- otherwise
+    `import axios from 'axios'` and `import * as lib from 'lib'` stay invisible.
+    """
+    for child in clause.children:
+        if child.type == "identifier":          # import axios from 'axios'
+            if child.text:
+                yield child.text.decode("utf-8", errors="ignore")
+        elif child.type == "namespace_import":  # import * as lib from 'lib'
+            for sub in child.children:
+                if sub.type == "identifier" and sub.text:
+                    yield sub.text.decode("utf-8", errors="ignore")
+        elif child.type == "named_imports":     # import { a, b as c } from 'lib'
+            for spec in child.children:
+                if spec.type != "import_specifier":
+                    continue
+                alias_node = spec.child_by_field_name("alias")
+                name_node = spec.child_by_field_name("name")
+                chosen = alias_node if alias_node is not None else name_node
+                if chosen is not None and chosen.text:
+                    yield chosen.text.decode("utf-8", errors="ignore")
 
 
 def _synthetic_fn_name(node: Any, source: bytes) -> str | None:
