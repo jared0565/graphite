@@ -129,13 +129,25 @@ to distinguish "no results" from "the resolver could not bind".
 ```
 
 - `healthy` is `true` iff every non-null `by_relation` ratio is `>= threshold`
-  (0.8). Zero-edge relations have `ratio: null` and do not count against health.
+  (0.8). A cell reports `ratio: null` whenever it has no *counted* edges —
+  either it genuinely carries zero edges, or (schema 3) every edge it carries
+  is external and therefore excluded from `total`/`bound` (e.g. a `calls` cell
+  that is 100% `expect`/`describe`/package calls reports `{"total": 0,
+  "bound": 0, "ratio": null, "external": N}` for `N > 0`). Either way a
+  null-ratio cell does not count against `healthy` — check `external` to tell
+  a truly-empty relation from an all-external one.
 - **schema 3**: BOTH `calls` and `imports` cells carry an `external` count of
   edges that leave the repo. For `imports` these are stdlib/pip/node_modules
   modules (`confidence="EXTERNAL_IMPORT"`); for `calls` they are calls to
   external-package symbols and never-imported runtime globals
-  (`confidence="EXTERNAL_CALL"`). Ratios count only should-bind-in-repo edges
-  and exclude externals. An edge counts as external only when it ALSO failed to
+  (`confidence="EXTERNAL_CALL"`) — but this classification is **best-effort,
+  not proof**: a member call whose receiver is not a simple identifier (a
+  regex/string literal, a call result, ...) is classified by its bare method
+  name alone, so a same-file, genuinely in-repo call can be wrongly tagged
+  external merely because that bare name collides with the global list (e.g.
+  `/re/.test(x)`, `"{}".format(x)`) — see the
+  `calls-unattributable-receiver-false-external` caveat. Ratios count only
+  should-bind-in-repo edges and exclude externals. An edge counts as external only when it ALSO failed to
   bind — externality never removes a bound edge from the ratio. `total` and
   `external` are disjoint counts: an external edge is never included in
   `total` (or `bound`), so `ratio == bound / total` already reflects the

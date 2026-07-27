@@ -78,14 +78,30 @@ _EXTERNAL_GLOBALS: frozenset[str] = frozenset({
 })
 
 
-def _call_confidence(called: str, external_names: Collection[str] = ()) -> str:
+def _call_confidence(
+    called: str,
+    external_names: Collection[str] = (),
+    in_repo_names: Collection[str] = (),
+) -> str:
     """`LOCAL_CALL`, or `EXTERNAL_CALL` when the call provably leaves the repo.
 
     ``called`` may be dotted (``z.object``); the ROOT carries the binding, so
     that is what is tested. ``external_names`` holds local names bound by
-    imports that did not resolve in-repo (Tasks 3 and 4); it is empty here.
+    imports that did not resolve in-repo (Tasks 3 and 4). ``in_repo_names``
+    holds local names bound by imports that DID resolve in-repo -- for
+    TypeScript/JavaScript this is every binding form (default, namespace,
+    named), not just the named imports resolution already tracks. An in-repo
+    binding wins over both ``_EXTERNAL_GLOBALS`` and ``external_names``: the
+    source index proved the name local, so a name collision with a global
+    (``crypto`` the module vs. `crypto` the Web Crypto global) cannot make it
+    external. Python needs no such precedence check here -- its import maps
+    (`_collect_python_import_maps`) already put a resolved name in
+    ``alias_map``/``symbol_map`` and an unresolved one in ``external_names``,
+    never both, so ``in_repo_names`` is unused on that path.
     """
     root = called.split(".", 1)[0]
+    if root in in_repo_names:
+        return "LOCAL_CALL"
     if root in _EXTERNAL_GLOBALS or root in external_names:
         return "EXTERNAL_CALL"
     return "LOCAL_CALL"
@@ -319,7 +335,7 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
                 if called and called not in _LANGUAGE_BUILTIN_GLOBALS and should_keep_call_target(called):
                     target_id = _resolve_call(file_id, called, bindings.resolved)
                     _materialize(scope)
-                    edge = _edge(scope.id, target_id, "calls", rel_path, _line(node), confidence=_call_confidence(called, bindings.external))
+                    edge = _edge(scope.id, target_id, "calls", rel_path, _line(node), confidence=_call_confidence(called, bindings.external, bindings.in_repo))
                     # Method dispatch: for `recv.method(...)` the callee is a
                     # member_expression and target_id above is only a file-scoped
                     # phantom. Stash the bare method name so the global post-pass
@@ -364,10 +380,16 @@ class _ImportBindings:
     ``resolved`` maps a local name to the definition node id in the in-repo
     file that exports it (used for call resolution). ``external`` holds local
     names bound by imports that did NOT resolve in-repo, in every binding form
-    -- those calls leave the repo and are tagged EXTERNAL_CALL.
+    -- those calls leave the repo and are tagged EXTERNAL_CALL. ``in_repo``
+    holds local names bound by imports that DID resolve in-repo, in every
+    binding form -- an in-repo binding must win over an `_EXTERNAL_GLOBALS`
+    name collision (`crypto` the local module vs. `crypto` the Web Crypto
+    global), mirroring the precedence Python's import maps already give
+    resolved names for free (they simply never enter `external_names`).
     """
     resolved: dict[str, str]
     external: frozenset[str]
+    in_repo: frozenset[str] = frozenset()
 
 
 def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceIndex | None) -> _ImportBindings:
@@ -379,12 +401,15 @@ def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceInd
     that exports it. Default and namespace imports are skipped for resolution
     (they can't be tied to a single named definition), so those calls fall
     back to same-file resolution. Every binding form (default, namespace,
-    named) is collected for externality when its import does not resolve in-repo.
+    named) is collected for externality when its import does not resolve
+    in-repo, and for `in_repo` (classification precedence, not resolution)
+    when it does.
     """
     symbols: dict[str, str] = {}
     external: set[str] = set()
+    in_repo: set[str] = set()
     if source_index is None:
-        return _ImportBindings(symbols, frozenset())
+        return _ImportBindings(symbols, frozenset(), frozenset())
     for node in root.children:
         if node.type != "import_statement":
             continue
@@ -402,10 +427,13 @@ def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceInd
             # Unresolved module: every name it binds leaves the repo.
             external.update(_iter_bound_local_names(clause))
             continue
+        # Resolved module: every name it binds is proven in-repo, regardless
+        # of binding form -- must win over an _EXTERNAL_GLOBALS collision.
+        in_repo.update(_iter_bound_local_names(clause))
         target_file_id = _file_node_id(resolved.rel_path)
         for local, original in _iter_named_imports(clause):
             symbols[local] = _make_id(target_file_id, original)
-    return _ImportBindings(symbols, frozenset(external))
+    return _ImportBindings(symbols, frozenset(external), frozenset(in_repo))
 
 
 def _iter_named_imports(clause: Any):
@@ -1278,13 +1306,19 @@ def _resolve_method_dispatch(
         if not candidates or len(candidates) > _MAX_METHOD_DISPATCH_CANDIDATES:
             # Member call that resolves to no known definition. Keep it when
             # the target is a real node, or when the call was already
-            # classified EXTERNAL_CALL -- its root is a known external binding
-            # (an unresolved import or an _EXTERNAL_GLOBALS member), so the
-            # edge is attributable evidence that this file calls into that
-            # package, and health.py excludes it from the ratio.
+            # classified EXTERNAL_CALL. That classification does NOT require
+            # an attributable receiver: _call_confidence tests the call's
+            # classified root, and _call_target_name (:556-572) falls back to
+            # the bare method name whenever _simple_object_name (:538-553)
+            # can't stringify the receiver -- so a member call with an
+            # unresolvable receiver is ALSO kept when its bare method name
+            # alone collides with _EXTERNAL_GLOBALS (e.g. `/re/.test(x)`,
+            # `"{}".format(x)`), even though the receiver was never proven
+            # external.
             #
             # Everything else still DROPS: `c.json()`, `db.prepare()`,
-            # `stmt.bind()` have unattributable receivers and are the
+            # `stmt.bind()` -- unattributable receivers whose bare method name
+            # does NOT collide with _EXTERNAL_GLOBALS -- are the
             # framework/runtime noise this filter exists to remove.
             if e.get("target") in known_ids or e.get("confidence") == "EXTERNAL_CALL":
                 out.append(e)

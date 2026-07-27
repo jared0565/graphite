@@ -142,13 +142,19 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "code": "ts-destructured-locals-unbound",
         "summary": "calls through destructured local bindings (const { f } = require(...)) count as unbound",
     }
+    # Added 2026-07-27 (F4 fix wave): registered alongside ts_caveat because it
+    # also matches relations=("calls",) x languages including "typescript".
+    receiver_caveat = {
+        "code": "calls-unattributable-receiver-false-external",
+        "summary": "a call whose receiver is not a simple identifier is classified by its bare method name and may be wrongly excluded from the ratio as external",
+    }
     answer_calls_only = {
         "schema": 1,
         "relations": ["calls"],
         "languages": ["typescript"],
         "health": {},
         "grade": "decision_grade",
-        "caveats": [ts_caveat],
+        "caveats": [ts_caveat, receiver_caveat],
     }
     answer_calls_and_imports = {
         "schema": 1,
@@ -156,7 +162,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "languages": ["typescript"],
         "health": {},
         "grade": "decision_grade",
-        "caveats": [ts_caveat],
+        "caveats": [ts_caveat, receiver_caveat],
     }
     answer_imports_only = {
         "schema": 1,

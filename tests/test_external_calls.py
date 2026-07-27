@@ -83,7 +83,8 @@ def test_drop_list_names_still_produce_no_edge(tmp_path):
     """_LANGUAGE_BUILTIN_GLOBALS is frozen for this round (spec §4.3).
 
     `len` stays dropped -- it must NOT become an EXTERNAL_CALL edge, because
-    that would add edges and break the pure-relabel invariant.
+    that would move it off `_LANGUAGE_BUILTIN_GLOBALS`, which spec §4.3
+    freezes for this round, and add an edge that shouldn't exist.
     """
     _write(tmp_path / "m.py", "def go(xs):\n    return len(xs)\n")
     result = _extract(tmp_path)
@@ -104,11 +105,29 @@ def test_member_call_root_decides_externality(tmp_path):
 
 
 def test_unattributable_member_call_is_still_dropped(tmp_path):
-    """The retention in Step 4b is NARROW. `ctx` is a local parameter, not an
-    external binding, so `ctx.json()` stays dropped -- that framework-noise
-    population is the whole reason the phantom filter exists. If this test
-    fails, the retention was widened to every member call and every TS graph
-    just grew by the runtime-API population.
+    """The retention gate (ast.py:1323) keys on the edge's CONFIDENCE LABEL,
+    not on receiver attributability. `ctx` is a plain identifier, so
+    `_call_target_name` stringifies the receiver directly and `_call_confidence`
+    tests the root `ctx` -- it is in neither `_EXTERNAL_GLOBALS` nor
+    `external_names`, so the edge classifies LOCAL_CALL, resolves to no known
+    definition, and the member-dispatch post-pass drops it. That framework-noise
+    population (`ctx.json()`, `db.prepare()`, `stmt.bind()`) is the whole
+    reason the phantom filter exists.
+
+    This is NOT a general "every unattributable receiver is dropped"
+    guarantee: when a receiver can't be stringified at all (a regex literal, a
+    string literal, a call result -- `_simple_object_name` returns `None`,
+    ast.py:538-553), `_call_target_name` falls back to the BARE METHOD NAME
+    with no object prefix, and if that bare name collides with
+    `_EXTERNAL_GLOBALS` the call IS tagged and retained regardless -- see
+    `test_computed_receiver_bare_name_collision_is_a_false_external`. `ctx`
+    never hits that fallback because it stringifies fine; `json` also doesn't
+    collide with `_EXTERNAL_GLOBALS`, so this fixture drops for two
+    independent reasons, neither of which is "receivers are always safe".
+
+    If this test fails, either the drop-list/global-list changed, or the
+    dispatch retention gate (ast.py:1323) was widened to keep every
+    unresolved member call outright.
     """
     _write(
         tmp_path / "src" / "t.ts",
@@ -171,6 +190,65 @@ def test_in_repo_import_is_not_tagged_external(tmp_path):
     )
     result = _extract(tmp_path)
     assert {e["confidence"] for e in _calls(result, "src/t.ts")} == {"LOCAL_CALL"}
+
+
+def test_namespace_import_of_in_repo_module_stays_local(tmp_path):
+    """F2: an in-repo import binding must win over an _EXTERNAL_GLOBALS name
+    collision. `crypto` is a MODULE name here (`src/crypto.ts`), not the Web
+    Crypto global -- it collides with `_EXTERNAL_GLOBALS` by spelling only.
+    Nothing before this fix checked whether the TS import walk had already
+    resolved that name to an in-repo file, so a namespace import of a
+    same-named local module lost to the global collision every time.
+
+    NOTE: the method is `encrypt`, never `format`/`test`/`get`/... -- see the
+    fixture footgun list (this file's module docstring / the task brief):
+    `_LANGUAGE_BUILTIN_GLOBALS` and `_EXTERNAL_GLOBALS` in
+    src/graphite/extract/ast.py, `_NOISY_MEMBER_CALLS` and `_BUILTIN_OBJECTS`
+    in src/graphite/resolve.py. `encrypt` is in none of them.
+
+    The method lives on a class, not a bare function, so the member-dispatch
+    post-pass (`_resolve_method_dispatch`) has a real `is_method` node named
+    `encrypt` to re-point the phantom edge to. Without that, the edge would be
+    DROPPED outright regardless of confidence (LOCAL_CALL with no known
+    target survives nothing), and this test would silently pass on an empty
+    edge set instead of exercising the classification -- the exact false-pass
+    shape this round has already produced once.
+    """
+    _write(
+        tmp_path / "src" / "crypto.ts",
+        "export class Cipher {\n"
+        "  encrypt() { return 1; }\n"
+        "}\n",
+    )
+    _write(
+        tmp_path / "src" / "use.ts",
+        "import * as crypto from './crypto';\n"
+        "export function go() { return crypto.encrypt(); }\n",
+    )
+    result = _extract(tmp_path)
+    conf = _confidence_by_target_suffix(result, "src/use.ts")
+    assert conf["encrypt"] == "LOCAL_CALL"
+
+
+def test_named_import_of_in_repo_module_wins_over_global_collision(tmp_path):
+    """F2 covers ALL binding forms, not just namespace imports -- `in_repo` is
+    collected from the same `_iter_bound_local_names` walk used for
+    `external`, which already handles default/namespace/named uniformly.
+    `test` is deliberately the bound name: it collides with `_EXTERNAL_GLOBALS`
+    (the mocha/jest global), so before this fix `import { test } from
+    './helpers'` resolving in-repo still tagged the call EXTERNAL_CALL --
+    mislabeling a call whose target `_resolve_call` already resolves directly
+    via the named-import symbol map (no dispatch post-pass involved, so this
+    is a distinct code path from the namespace-import test above).
+    """
+    _write(tmp_path / "src" / "helpers.ts", "export function test() { return 1; }\n")
+    _write(
+        tmp_path / "src" / "use2.ts",
+        "import { test } from './helpers';\n"
+        "export function go() { return test(); }\n",
+    )
+    result = _extract(tmp_path)
+    assert {e["confidence"] for e in _calls(result, "src/use2.ts")} == {"LOCAL_CALL"}
 
 
 def test_python_plain_import_of_external_module_is_tagged(tmp_path):

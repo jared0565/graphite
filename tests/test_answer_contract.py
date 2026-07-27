@@ -111,7 +111,11 @@ def test_retired_caveats_never_emitted(monkeypatch):
 
 def test_registry_initial_entries():
     codes = {e["code"] for e in active_caveats()}
-    assert codes == {"python-dynamic-dispatch", "ts-destructured-locals-unbound"}
+    assert codes == {
+        "python-dynamic-dispatch",
+        "ts-destructured-locals-unbound",
+        "calls-unattributable-receiver-false-external",
+    }
 
 
 def test_fail_open_returns_none(monkeypatch):
@@ -128,6 +132,23 @@ def test_languages_for_nodes():
     assert languages_for_nodes(g, ["caller_py", "caller_ts"]) == ["python", "typescript"]
     assert languages_for_nodes(g, ["phantom0"]) == []
     assert languages_for_nodes(g, ["no-such-node"]) == []
+
+
+def test_unattributable_receiver_caveat_is_active():
+    """F4: the false-external risk documented in F1/F2 (a member call whose
+    receiver isn't a simple identifier gets classified by its bare method
+    name) is a live blindspot -- it must be a published, active caveat, not
+    just a test docstring or a spec paragraph."""
+    from graphite.answer_contract import CAVEAT_REGISTRY
+
+    codes = {e["code"] for e in active_caveats()}
+    assert "calls-unattributable-receiver-false-external" in codes
+    by_code = {e["code"]: e for e in CAVEAT_REGISTRY}
+    entry = by_code["calls-unattributable-receiver-false-external"]
+    assert entry["relations"] == ("calls",)
+    assert entry["languages"] == ("typescript", "javascript", "python")
+    assert entry["since"] == "2026-07-27"
+    assert "retired_by" not in entry
 
 
 def test_ts_external_calls_caveat_is_retired_with_a_successor():

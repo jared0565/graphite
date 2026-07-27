@@ -103,11 +103,38 @@ discovered it during Task 2: `_resolve_method_dispatch`
 no known definition, so `z.object()` / `crypto.randomUUID()` were never counted
 against the ratio — they did not exist as edges at all. Per operator decision
 (D7) those calls are now **retained** as `EXTERNAL_CALL` instead of dropped, so
-this round **adds** edges. The retention is narrow: a member call is kept only
-when its root is a known external binding (an unresolved import or an entry in
-`_EXTERNAL_GLOBALS`). An unattributable receiver — `c.json()`, `db.prepare()`,
-`stmt.bind()`, the framework-noise population the filter was built to remove —
-is still dropped.
+this round **adds** edges.
+
+**Amended 2026-07-27, second correction (was "the retention is narrow: kept
+only when its root is a known external binding").** That description was also
+**false**, caught by the same final review. The retention gate, inside
+`_resolve_method_dispatch` (`ast.py:1268-`, gate at `:1323`), does not
+inspect the receiver at all — it keys purely on the
+edge's CONFIDENCE LABEL, `EXTERNAL_CALL`. That label comes from
+`_call_confidence`, which classifies the call's ROOT string, and the root is
+only ever the true receiver when `_call_target_name` can stringify it via
+`_simple_object_name` (`ast.py:538-553`) — a simple identifier, or a member
+chain where every segment stringifies. When the receiver is anything else (a
+regex literal, a string literal, a call result, ...), `_simple_object_name`
+returns `None` and `_call_target_name` falls back to the BARE METHOD NAME with
+no object prefix. So the gate retains a member call whenever EITHER the
+receiver is a known external binding OR the bare method name alone collides
+with `_EXTERNAL_GLOBALS` — regardless of whether the receiver was ever proven
+external. Measured: `/^a$/.test(s)` (receiver is a regex literal) and
+`"{}".format(x)` (receiver is a string literal) are both retained as
+`EXTERNAL_CALL`, purely because `test` and `format` are in
+`_EXTERNAL_GLOBALS` — their receivers say nothing about externality.
+`ctx.json()` still drops, not because its receiver `ctx` is unattributable
+(it's a plain identifier, so the classifier tests `ctx` directly, not a
+bare-name fallback), but because neither `ctx` nor `json` is in
+`_EXTERNAL_GLOBALS` or `external_names`.
+
+**Cost, stated plainly:** `external` is not a clean count of "edges that leave
+the repo" — it also includes unattributable-receiver calls admitted solely
+because their bare method name matches the global list. Each such retained
+edge also materialises an `unknown` phantom node, so
+`placeholder_nodes.unknown` and `share` grow from a population this design did
+not originally account for.
 
 Consequences that must be tracked, not assumed away:
 
@@ -200,8 +227,10 @@ Already-dropped names stay dropped; newly-classified names are tagged.
 The health ratio is *identical* under either treatment — a dropped edge is
 **absent** from the denominator, a tagged edge is **excluded** from it — so
 the split costs nothing in measured accuracy. The only difference is graph
-visibility, and preserving today's drop behaviour is what makes the
-pure-relabel invariant (§4) provable.
+visibility, and preserving today's drop behaviour is what keeps
+`_LANGUAGE_BUILTIN_GLOBALS` itself frozen — the nothing-is-deleted invariant
+(§4) still holds for that list even though the round as a whole is not a pure
+relabel (§4's 2026-07-27 amendment).
 
 This is a scoping decision, not a principle. It leaves a cosmetic
 inconsistency: `TypeError` is dropped (it is in the existing list) while
@@ -312,9 +341,16 @@ Health:
 
 Invariant and falsifier:
 
-- **Edge-count regression:** total edges and nodes on a fixture are identical
-  before and after classification. This is the guard on §4's pure-relabel
-  invariant.
+- **Edge-count floor, not a fixed count:** classification must never delete an
+  edge. On the round's mixed fixture
+  (`tests/test_external_calls.py::test_every_call_still_produces_an_edge`) the
+  `calls` edge count went from **4 pre-D7 to 6 post-D7** — D7 retains two
+  attributable external member calls (`z.object()`, `crypto.randomUUID()`)
+  that `_resolve_method_dispatch` used to drop — and must not fall below 6 on
+  that fixture going forward, only rise as coverage improves. This is the
+  guard on §4's nothing-is-deleted invariant, which is narrower than "edge
+  counts are identical before and after" (that framing was wrong; see §4's
+  2026-07-27 amendment).
 - **The falsifier that matters:** a fixture containing a genuine in-repo
   binding miss must **still** count as unbound and must still drag the ratio
   below threshold. It is easy to write a version of this change that tags
@@ -362,24 +398,34 @@ Run pre-merge, falsifier stated before each run.
 - **D4** — External-call edges keep their current file-scoped phantom targets.
   Re-pointing them to shared external nodes would also reduce
   `placeholder_nodes.unknown`, but that changes node counts and breaks the
-  pure-relabel invariant that makes this round auditable. Separate concern.
+  nothing-is-deleted invariant that makes this round auditable (not a
+  "pure-relabel" invariant — §4's 2026-07-27 amendment). Separate concern.
 - **D5** — Acceptance requires movement and an unchanged edge count, **not**
   that every repo crosses 0.8. A repo still below threshold after
   classification is reporting a genuine binding gap; that is a true finding
   and a follow-up, not a failure of this round.
 - **D6** — Retire-and-replace the caveat rather than amend it in place (§7).
-- **D7** (operator decision, 2026-07-27) — **Retain attributable external member
-  calls instead of dropping them.** `_resolve_method_dispatch` drops member
-  calls that resolve to no known definition, which made the member-root branch
-  of `_call_confidence` unobservable: a surviving member call is bound, and §5
-  never excludes a bound edge, so the branch could not change any number.
-  Three options were put to the operator — keep the rule and test it on bare
-  calls only, drop the rule, or make it observable. The operator chose to make
-  it observable, accepting that the round now adds edges and grows TS graphs.
-  Rationale: "record, don't delete" is the round's governing principle, and a
-  call into a known external package is exactly the evidence the health block
-  should be able to account for. The narrowing to *attributable* roots is what
-  keeps the original filter's purpose intact.
+- **D7** (operator decision, 2026-07-27) — **Retain member calls classified
+  `EXTERNAL_CALL` instead of dropping them.** `_resolve_method_dispatch` drops
+  member calls that resolve to no known definition, which made the
+  member-root branch of `_call_confidence` unobservable: a surviving member
+  call is bound, and §5 never excludes a bound edge, so the branch could not
+  change any number. Three options were put to the operator — keep the rule
+  and test it on bare calls only, drop the rule, or make it observable. The
+  operator chose to make it observable, accepting that the round now adds
+  edges and grows TS graphs. Rationale: "record, don't delete" is the round's
+  governing principle, and a call into a known external package is exactly
+  the evidence the health block should be able to account for.
+
+  **Correction, 2026-07-27 (final review).** This decision was originally
+  written up as retaining calls whose receiver root is attributable to a known
+  external binding. That is not what the gate does — see the §4 correction. It
+  retains by CONFIDENCE LABEL, and the classifier that assigns that label
+  falls back to the bare method name for any receiver `_call_target_name`
+  can't stringify, so an unattributable receiver is retained too whenever that
+  bare name collides with `_EXTERNAL_GLOBALS`. The original filter's purpose
+  (dropping framework-noise member calls like `ctx.json()`, `db.prepare()`) is
+  intact only for method names outside that collision set.
 
 ## 12. Rollout
 
@@ -429,3 +475,17 @@ Run pre-merge, falsifier stated before each run.
   `placeholder_nodes.share`.
 - Re-run the 9-repo corpus sweep under schema 3 and republish the weighted TS
   figure, replacing the 0.584 recorded on issue #4.
+- **Known limitation: `EXTERNAL_CALL` on an edge that binds.** A Source-B name
+  collision (`format()`, `test()`, `fetch()`, ... resolving to an in-repo
+  definition, same-file or via method dispatch) still carries
+  `confidence="EXTERNAL_CALL"` even though it is bound. §5's exclusion guard
+  is unaffected — a bound edge is never removed from the ratio
+  (`test_external_call_that_bound_is_counted_normally` pins this) — and only
+  two readers consult the field today (`health.py:78`, and
+  `_resolve_method_dispatch`'s retention gate at `ast.py:1323`), so nothing
+  downstream is broken now. It bites a future consumer that filters
+  `graph.json` by `confidence` directly and expects `EXTERNAL_CALL` to imply
+  "left the repo." The 2026-07-27 fix round closed the narrower import-bound
+  case (an in-repo-resolved import root now wins over `_EXTERNAL_GLOBALS`,
+  §4's second correction); this same-file/global-name-collision case is
+  unfixed and open for a future round.

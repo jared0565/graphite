@@ -48,6 +48,13 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         "summary": "calls through destructured local bindings (const { f } = require(...)) count as unbound",
         "since": "2026-07-27",
     },
+    {
+        "code": "calls-unattributable-receiver-false-external",
+        "relations": ("calls",),
+        "languages": ("typescript", "javascript", "python"),
+        "summary": "a call whose receiver is not a simple identifier is classified by its bare method name and may be wrongly excluded from the ratio as external",
+        "since": "2026-07-27",
+    },
 )
 
 
