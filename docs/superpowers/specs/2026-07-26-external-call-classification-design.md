@@ -343,6 +343,27 @@ Run pre-merge, falsifier stated before each run.
    `misc\Medication Reminder`, `demo-store2`, `demo-store2\pawscout-worker`)
    via `graphite init`, rebuild each graph, and record the schema-3 `calls`
    ratio for each.
+
+   **Do not treat `init`'s exit code as evidence that a consumer was updated.**
+   `init` cannot upgrade a doc it classifies as *legacy unversioned*: it reports
+   the file, changes nothing, and exits 0 (issue #13, reproduced 2026-07-26 —
+   `git diff` byte-identical before and after). The rollout's acceptance check
+   is a **marker survey**, not `init`'s output:
+
+   ```
+   grep -l 'graphite:managed version=' <repo>/{GRAPHITE,CLAUDE,AGENTS,ANTIGRAVITY}.md \
+     <repo>/.github/copilot-instructions.md
+   ```
+
+   Every managed doc must report the current `DOC_VERSION`. A repo with a legacy
+   doc silently never receives template changes — which is how two of the five
+   consumers came to be missing the graphite-first and answer-contract text while
+   being believed current.
+
+   Audited and remediated 2026-07-26, ahead of this round: all five consumers ×
+   five docs now carry `version=9` (25/25). Repo-specific content was preserved
+   by hand where legacy docs held it — notably `pawscout-worker/CLAUDE.md`, which
+   carried an owner rule about operational Shopify Admin API access.
 3. **Restart the daemon.** Extraction is a daemon-executed surface and this
    round changes it, which meets the operator rule for a restart. The daemon
    spawns fresh `-m graphite build` children and holds no cache-version state,
@@ -353,6 +374,9 @@ Run pre-merge, falsifier stated before each run.
 ## 13. Follow-ups
 
 - Issue #12 — zero-health-cell grading. Next round; design against schema 3.
+- Issue #13 — `init` cannot upgrade legacy unversioned docs. Filed during this
+  round's consumer audit; §12 works around it with a marker survey, but the
+  workaround is manual and every future template change inherits the same trap.
 - Destructured-local call binding (the new caveat's subject).
 - Unify `_LANGUAGE_BUILTIN_GLOBALS` and `_EXTERNAL_GLOBALS` into one list with
   one behaviour (§4.3).
