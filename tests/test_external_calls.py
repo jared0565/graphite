@@ -105,7 +105,7 @@ def test_member_call_root_decides_externality(tmp_path):
 
 
 def test_unattributable_member_call_is_still_dropped(tmp_path):
-    """The retention gate (ast.py:1323) keys on the edge's CONFIDENCE LABEL,
+    """The retention gate (ast.py:1342) keys on the edge's CONFIDENCE LABEL,
     not on receiver attributability. `ctx` is a plain identifier, so
     `_call_target_name` stringifies the receiver directly and `_call_confidence`
     tests the root `ctx` -- it is in neither `_EXTERNAL_GLOBALS` nor
@@ -117,7 +117,7 @@ def test_unattributable_member_call_is_still_dropped(tmp_path):
     This is NOT a general "every unattributable receiver is dropped"
     guarantee: when a receiver can't be stringified at all (a regex literal, a
     string literal, a call result -- `_simple_object_name` returns `None`,
-    ast.py:538-553), `_call_target_name` falls back to the BARE METHOD NAME
+    ast.py:585-600), `_call_target_name` falls back to the BARE METHOD NAME
     with no object prefix, and if that bare name collides with
     `_EXTERNAL_GLOBALS` the call IS tagged and retained regardless -- see
     `test_computed_receiver_bare_name_collision_is_a_false_external`. `ctx`
@@ -126,7 +126,7 @@ def test_unattributable_member_call_is_still_dropped(tmp_path):
     independent reasons, neither of which is "receivers are always safe".
 
     If this test fails, either the drop-list/global-list changed, or the
-    dispatch retention gate (ast.py:1323) was widened to keep every
+    dispatch retention gate (ast.py:1342) was widened to keep every
     unresolved member call outright.
     """
     _write(
@@ -454,7 +454,7 @@ def test_computed_receiver_bare_name_collision_is_a_false_external(tmp_path):
     itself a call expression -- `_simple_object_name` returns None (it only
     stringifies identifiers and member chains, deliberately refusing to
     stringify a "complex literal" like a call result:
-    src/graphite/extract/ast.py:538-553). `_call_target_name` then falls back
+    src/graphite/extract/ast.py:585-600). `_call_target_name` then falls back
     to the bare property name alone, `test`, with no object prefix. That bare
     name collides with an `_EXTERNAL_GLOBALS` entry (mocha's focused-test
     global, alongside `format`, `property`, `fit`), so `_call_confidence`

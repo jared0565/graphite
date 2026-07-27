@@ -94,10 +94,29 @@ def _call_confidence(
     binding wins over both ``_EXTERNAL_GLOBALS`` and ``external_names``: the
     source index proved the name local, so a name collision with a global
     (``crypto`` the module vs. `crypto` the Web Crypto global) cannot make it
-    external. Python needs no such precedence check here -- its import maps
-    (`_collect_python_import_maps`) already put a resolved name in
-    ``alias_map``/``symbol_map`` and an unresolved one in ``external_names``,
-    never both, so ``in_repo_names`` is unused on that path.
+    external.
+
+    This precedence check is threaded for TypeScript ONLY. In `_extract_python`,
+    the bare-identifier call path and the unresolved-member-call fallback both
+    call this function without an `in_repo_names` argument, even when the
+    target resolved in-repo via `symbol_map` (`_collect_python_import_maps`).
+    (The sibling `alias_map` member-access path is immune -- it hardcodes
+    `confidence="LOCAL_CALL"` and never calls `_call_confidence` at all.) So a
+    Python name that resolves in-repo via `symbol_map` but collides with
+    `_EXTERNAL_GLOBALS` -- e.g. `helpers.py` defines `def format(...)`,
+    another module does `from helpers import format` then calls `format(...)`
+    -- is still labelled `EXTERNAL_CALL`. Measured directly: extracting that
+    fixture produces the edge `('helpers_format', 'EXTERNAL_CALL')`.
+
+    The consequence depends on whether the target materialises as a node.
+    When it does (the case above -- `helpers_format` exists as a real
+    function node), health.py's exclusion rule only excuses UNBOUND edges
+    (spec §5), so the mislabel is cosmetic: the edge is still counted
+    normally in the ratio. When the target does NOT materialise as a node
+    (e.g. `format = lambda ...`, or a re-export the resolver can't follow),
+    the edge is unbound AND tagged `EXTERNAL_CALL`, so it is excluded from
+    the ratio -- a genuine false external. Unfixed; open for a future round
+    (spec §13, "known limitation" bullet).
     """
     root = called.split(".", 1)[0]
     if root in in_repo_names:
@@ -1308,8 +1327,8 @@ def _resolve_method_dispatch(
             # the target is a real node, or when the call was already
             # classified EXTERNAL_CALL. That classification does NOT require
             # an attributable receiver: _call_confidence tests the call's
-            # classified root, and _call_target_name (:556-572) falls back to
-            # the bare method name whenever _simple_object_name (:538-553)
+            # classified root, and _call_target_name (:603-619) falls back to
+            # the bare method name whenever _simple_object_name (:585-600)
             # can't stringify the receiver -- so a member call with an
             # unresolvable receiver is ALSO kept when its bare method name
             # alone collides with _EXTERNAL_GLOBALS (e.g. `/re/.test(x)`,

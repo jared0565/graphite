@@ -108,12 +108,12 @@ this round **adds** edges.
 **Amended 2026-07-27, second correction (was "the retention is narrow: kept
 only when its root is a known external binding").** That description was also
 **false**, caught by the same final review. The retention gate, inside
-`_resolve_method_dispatch` (`ast.py:1268-`, gate at `:1323`), does not
+`_resolve_method_dispatch` (`ast.py:1287-`, gate at `:1342`), does not
 inspect the receiver at all — it keys purely on the
 edge's CONFIDENCE LABEL, `EXTERNAL_CALL`. That label comes from
 `_call_confidence`, which classifies the call's ROOT string, and the root is
 only ever the true receiver when `_call_target_name` can stringify it via
-`_simple_object_name` (`ast.py:538-553`) — a simple identifier, or a member
+`_simple_object_name` (`ast.py:585-600`) — a simple identifier, or a member
 chain where every segment stringifies. When the receiver is anything else (a
 regex literal, a string literal, a call result, ...), `_simple_object_name`
 returns `None` and `_call_target_name` falls back to the BARE METHOD NAME with
@@ -341,16 +341,18 @@ Health:
 
 Invariant and falsifier:
 
-- **Edge-count floor, not a fixed count:** classification must never delete an
-  edge. On the round's mixed fixture
-  (`tests/test_external_calls.py::test_every_call_still_produces_an_edge`) the
-  `calls` edge count went from **4 pre-D7 to 6 post-D7** — D7 retains two
+- **Edge count pinned on the mixed fixture, guarding the nothing-is-deleted
+  invariant:** classification must never delete an edge. On the round's mixed
+  fixture (`tests/test_external_calls.py::test_every_call_still_produces_an_edge`)
+  the `calls` edge count went from **4 pre-D7 to 6 post-D7** — D7 retains two
   attributable external member calls (`z.object()`, `crypto.randomUUID()`)
-  that `_resolve_method_dispatch` used to drop — and must not fall below 6 on
-  that fixture going forward, only rise as coverage improves. This is the
-  guard on §4's nothing-is-deleted invariant, which is narrower than "edge
-  counts are identical before and after" (that framing was wrong; see §4's
-  2026-07-27 amendment).
+  that `_resolve_method_dispatch` used to drop. The test asserts the count is
+  **exactly 6**, not a floor: it fails on a fall (deletion, the invariant this
+  guards) and on a rise (a fixture change or a classifier change that adds an
+  edge on this exact input must update the assertion deliberately, not pass
+  silently). This is the guard on §4's nothing-is-deleted invariant, which is
+  narrower than "edge counts are identical before and after" (that framing was
+  wrong; see §4's 2026-07-27 amendment).
 - **The falsifier that matters:** a fixture containing a genuine in-repo
   binding miss must **still** count as unbound and must still drag the ratio
   below threshold. It is easy to write a version of this change that tags
@@ -482,10 +484,19 @@ Run pre-merge, falsifier stated before each run.
   is unaffected — a bound edge is never removed from the ratio
   (`test_external_call_that_bound_is_counted_normally` pins this) — and only
   two readers consult the field today (`health.py:78`, and
-  `_resolve_method_dispatch`'s retention gate at `ast.py:1323`), so nothing
+  `_resolve_method_dispatch`'s retention gate at `ast.py:1342`), so nothing
   downstream is broken now. It bites a future consumer that filters
   `graph.json` by `confidence` directly and expects `EXTERNAL_CALL` to imply
   "left the repo." The 2026-07-27 fix round closed the narrower import-bound
-  case (an in-repo-resolved import root now wins over `_EXTERNAL_GLOBALS`,
-  §4's second correction); this same-file/global-name-collision case is
-  unfixed and open for a future round.
+  case **for TypeScript only** (an in-repo-resolved import root now wins over
+  `_EXTERNAL_GLOBALS`, §4's second correction — `_call_confidence`'s
+  `in_repo_names` parameter). This same-file/global-name-collision case is
+  unfixed and open for a future round in both languages, and so is **Python's
+  own import-bound case**: no call site in `_extract_python` passes
+  `in_repo_names` to `_call_confidence` (the `alias_map` member-access path is
+  the exception — it hardcodes `LOCAL_CALL` and never calls
+  `_call_confidence`), so a Python name that resolves in-repo via
+  `symbol_map` but collides with `_EXTERNAL_GLOBALS` (`from helpers import
+  format` in a module defining `def format(...)`, then calling `format(...)`)
+  is still mislabeled `EXTERNAL_CALL` — measured:
+  `('helpers_format', 'EXTERNAL_CALL')`.
