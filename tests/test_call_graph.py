@@ -660,3 +660,75 @@ def test_member_call_over_cap_is_left_unresolved(tmp_path: Path) -> None:
     assert not any(src == "src_use_run" for src, _tgt in calls)
     # And no annotation leaked.
     assert all("_member" not in e for e in result.edges)
+
+
+def test_edges_with_different_relations_between_one_pair_are_not_lost() -> None:
+    """#1: build_graph deduped on (source, target) only, so a second edge with a
+    DIFFERENT relation was dropped outright -- its relation lost and its weight
+    blended into the survivor. Measured live before the fix: 109 such pairs in
+    graphite's own graph, 390 in open-design, all (calls, contains).
+    """
+    from graphite.graph import build_graph, edge_relations
+
+    nodes = [
+        {"id": "f", "kind": "file", "name": "a.py", "source_file": "a.py"},
+        {"id": "f_go", "kind": "function", "name": "go", "source_file": "a.py"},
+    ]
+    edges = [
+        {"source": "f", "target": "f_go", "relation": "calls", "weight": 1.0},
+        {"source": "f", "target": "f_go", "relation": "contains", "weight": 1.0},
+    ]
+
+    g = build_graph(nodes, edges)
+    data = g["f"]["f_go"]
+
+    assert set(edge_relations(data)) == {"calls", "contains"}, (
+        f"a relation was dropped: {data}"
+    )
+
+
+def test_merged_edge_weight_folds_the_incoming_value_not_a_flat_one() -> None:
+    """The old merge added a flat +1.0, discarding the edge's own weight."""
+    from graphite.graph import build_graph
+
+    nodes = [
+        {"id": "a", "kind": "function", "name": "a", "source_file": "a.py"},
+        {"id": "b", "kind": "function", "name": "b", "source_file": "a.py"},
+    ]
+    edges = [
+        {"source": "a", "target": "b", "relation": "calls", "weight": 2.0},
+        {"source": "a", "target": "b", "relation": "calls", "weight": 3.0},
+    ]
+
+    g = build_graph(nodes, edges)
+
+    assert g["a"]["b"]["weight"] == 5.0
+
+
+def test_edge_relations_reads_a_plain_edge() -> None:
+    from graphite.graph import edge_relations
+
+    assert edge_relations({"relation": "calls"}) == ("calls",)
+    assert edge_relations({}) == ()
+
+
+def test_health_counts_a_relation_that_collided_with_another() -> None:
+    """A measured relation must not vanish from health because it shared a pair."""
+    from graphite.graph import build_graph
+    from graphite.health import resolution_health
+
+    nodes = [
+        {"id": "a", "kind": "file", "name": "a.py", "source_file": "a.py"},
+        {"id": "b", "kind": "file", "name": "b.py", "source_file": "b.py"},
+    ]
+    edges = [
+        {"source": "a", "target": "b", "relation": "calls", "source_file": "a.py"},
+        {"source": "a", "target": "b", "relation": "imports", "source_file": "a.py"},
+    ]
+
+    health = resolution_health(build_graph(nodes, edges))
+
+    assert health["by_relation"]["calls"]["total"] == 1
+    assert health["by_relation"]["imports"]["total"] == 1, (
+        "the imports edge collided with calls and was previously invisible to health"
+    )

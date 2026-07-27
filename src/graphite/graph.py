@@ -18,6 +18,21 @@ def normalize_id(value: str) -> str:
     return cleaned.casefold()
 
 
+def edge_relations(data: dict[str, Any]) -> tuple[str, ...]:
+    """Every relation an edge carries.
+
+    A DiGraph holds one edge per node pair, so when edges with different
+    relations share a pair they are merged and `relations` lists all of them.
+    Read this rather than `relation` alone whenever the question is "does this
+    pair have relation X" -- `relation` is only the first-sorted value (#1).
+    """
+    relations = data.get("relations")
+    if relations:
+        return tuple(r for r in relations if r)
+    relation = data.get("relation")
+    return (relation,) if relation else ()
+
+
 def build_graph(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> nx.DiGraph:
     """Build a normalized directed graph from extraction results."""
     g = nx.DiGraph()
@@ -45,7 +60,20 @@ def build_graph(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> nx.
         if not g.has_node(tgt):
             g.add_node(tgt, id=tgt, kind="unknown", name=tgt, label=tgt)
         if g.has_edge(src, tgt):
-            g[src][tgt]["weight"] = g[src][tgt].get("weight", 1.0) + 1.0
+            data = g[src][tgt]
+            # Fold the incoming edge's own weight; a flat +1.0 discarded it
+            # (extraction-level _merge emits weights >= 1.0).
+            data["weight"] = data.get("weight", 1.0) + float(e.get("weight", 1.0) or 1.0)
+            # A DiGraph cannot hold parallel edges, so a second edge between the
+            # same pair with a DIFFERENT relation used to be dropped outright,
+            # losing its relation entirely (#1). Record it instead: `relation`
+            # keeps the first-sorted value for display, `relations` carries every
+            # relation this pair actually has.
+            relation = e.get("relation")
+            if relation and relation != data.get("relation"):
+                relations = data.setdefault("relations", [data.get("relation")])
+                if relation not in relations:
+                    relations.append(relation)
         else:
             attrs = dict(e)
             attrs["source"] = src

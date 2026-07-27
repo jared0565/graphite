@@ -8,6 +8,8 @@ from typing import Any, Callable
 
 import networkx as nx
 
+from .graph import edge_relations
+
 from .answer_contract import GRADE_INCONCLUSIVE, build_answer_block, languages_for_nodes
 from .health import resolution_health
 from .query_plan import DEFAULT_MAX_DEPTH, DEFAULT_MAX_RESULTS, make_plan, plan_error
@@ -36,12 +38,12 @@ def _capped_edge_listing(
     if incoming:
         full = [
             p for p in sorted(g.predecessors(node_id))
-            if g[p][node_id].get("relation") in _CALL_RELATIONS
+            if any(r in _CALL_RELATIONS for r in edge_relations(g[p][node_id]))
         ]
     else:
         full = [
             s for s in sorted(g.successors(node_id))
-            if g[node_id][s].get("relation") in _CALL_RELATIONS
+            if any(r in _CALL_RELATIONS for r in edge_relations(g[node_id][s]))
         ]
     shown = full[:cap]
     return _attach_resolution({
@@ -596,7 +598,7 @@ def _bounded_bfs_path(
     while queue:
         u = queue.popleft()
         for v in sorted(g.successors(u)):
-            if relations is not None and g[u][v].get("relation") not in relations:
+            if relations is not None and not any(r in relations for r in edge_relations(g[u][v])):
                 continue
             if v in prev:
                 continue

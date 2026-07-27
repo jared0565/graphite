@@ -12,6 +12,8 @@ from typing import Any, Callable, Final
 
 import networkx as nx
 
+from .graph import edge_relations
+
 RESOLUTION_HEALTHY_RATIO: Final = 0.8
 
 _COUNTED_RELATIONS: Final = ("calls", "imports")
@@ -66,23 +68,26 @@ def resolution_health(g: nx.DiGraph) -> dict[str, Any]:
     relation_counts = {rel: [0, 0, 0] for rel in _COUNTED_RELATIONS}  # [bound, total, external]
     language_counts: dict[str, dict[str, list[int]]] = {}
     for _u, v, data in g.edges(data=True):
-        relation = data.get("relation")
-        counts = relation_counts.get(relation)
-        if counts is None:
-            continue
-        language = _edge_language(data.get("source_file"))
-        buckets = language_counts.setdefault(
-            language, {rel: [0, 0, 0] for rel in _COUNTED_RELATIONS}
-        )
-        bound = int(g.nodes[v].get("kind", "unknown") != "unknown")
-        if not bound and data.get("confidence") == _EXTERNAL_CONFIDENCE.get(relation):
-            counts[2] += 1
-            buckets[relation][2] += 1
-            continue
-        counts[0] += bound
-        counts[1] += 1
-        buckets[relation][0] += bound
-        buckets[relation][1] += 1
+        # A merged edge carries every relation of its node pair; counting only
+        # `relation` would drop a measured relation that collided with an
+        # earlier-sorting one (#1).
+        for relation in edge_relations(data):
+            counts = relation_counts.get(relation)
+            if counts is None:
+                continue
+            language = _edge_language(data.get("source_file"))
+            buckets = language_counts.setdefault(
+                language, {rel: [0, 0, 0] for rel in _COUNTED_RELATIONS}
+            )
+            bound = int(g.nodes[v].get("kind", "unknown") != "unknown")
+            if not bound and data.get("confidence") == _EXTERNAL_CONFIDENCE.get(relation):
+                counts[2] += 1
+                buckets[relation][2] += 1
+                continue
+            counts[0] += bound
+            counts[1] += 1
+            buckets[relation][0] += bound
+            buckets[relation][1] += 1
     by_relation = {rel: _cell(c[0], c[1], c[2]) for rel, c in relation_counts.items()}
     by_language = {
         language: {rel: _cell(c[0], c[1], c[2]) for rel, c in buckets.items()}
