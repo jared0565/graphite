@@ -136,23 +136,33 @@ to distinguish "no results" from "the resolver could not bind".
   external-package symbols and never-imported runtime globals
   (`confidence="EXTERNAL_CALL"`). Ratios count only should-bind-in-repo edges
   and exclude externals. An edge counts as external only when it ALSO failed to
-  bind — externality never removes a bound edge from the ratio.
+  bind — externality never removes a bound edge from the ratio. `total` and
+  `external` are disjoint counts: an external edge is never included in
+  `total` (or `bound`), so `ratio == bound / total` already reflects the
+  exclusion — do not subtract `external` again (do not compute
+  `bound / (total - external)`).
   Ratios are **not comparable across schemas**: schema 1 includes all externals,
   schema 2 excludes only import externals, schema 3 excludes both. Branch on
   `schema` when reading ratios. Consumers reading only `healthy` need no change.
-- On a post-resolver-binding graph an unresolved import edge is tagged
+- On a post-resolver-binding graph, in a language with an import resolver
+  (Python, TypeScript/JavaScript), an unresolved import edge is tagged
   `EXTERNAL_IMPORT` (and excluded) rather than left unbound, so `imports`
   `total` tends to converge on `bound` and the ratio trends toward 1.0 by
   construction (the `0.999` above, not `1.0`, reflects the rare edge whose
   target module resolved to an in-repo path but that file itself never
   emitted a node — e.g. it hit a read/parse error during extraction — so the
   import edge still counts as unbound even though it wasn't external).
-  Because imports is structurally near-saturated on a healthy graph, it stops
-  being the signal that tells healthy repos apart from unhealthy ones. Under
-  schema 3 the `calls` ratio also rises once externals are excluded, so a high
-  `calls` ratio no longer implies deep binding coverage on its own — read it
-  alongside the `external` count and `placeholder_nodes.share`, and prefer the
-  answer-scoped `answer.grade` over any aggregate ratio for a specific question.
+  Because imports is structurally near-saturated on a healthy graph in one of
+  those resolver languages, it stops being the signal that tells healthy
+  repos apart from unhealthy ones there. Go and Rust have no import resolver
+  and never emit `EXTERNAL_IMPORT`: their unresolved imports stay counted as
+  unbound in `total`, so their `imports` ratio does not trend toward 1.0 even
+  on a genuinely healthy repo — a lower ratio there is honest counting, not a
+  resolver defect. Under schema 3 the `calls` ratio also rises once externals
+  are excluded, so a high `calls` ratio no longer implies deep binding
+  coverage on its own — read it alongside the `external` count and
+  `placeholder_nodes.share`, and prefer the answer-scoped `answer.grade` over
+  any aggregate ratio for a specific question.
 - `impact`, `context`, and the relation verbs (`callers`, `calls`,
   `imported-by`, `depends-on`) additionally return `"inconclusive": true` when
   the result is EMPTY and the graph is unhealthy. **An inconclusive empty
