@@ -5,6 +5,8 @@ from pathlib import Path
 
 from graphite.config import Config
 from graphite.extract.ast import extract_all
+from graphite.graph import build_graph
+from graphite.health import resolution_health
 from graphite.ingest import collect_files
 
 
@@ -283,3 +285,142 @@ def test_python_attribute_root_falls_back_sanely_on_broken_chain(tmp_path):
     conf = _confidence_by_target_suffix(result, "m.py")
     assert conf["render"] == "LOCAL_CALL"
     assert conf["path"] == "EXTERNAL_CALL"
+
+
+def _mixed_fixture(tmp_path: Path) -> None:
+    """Six calls, one of each kind, counted by hand from the source below.
+
+    src/dep.ts   -- in-repo definition
+    src/t.ts     -- dep() local, z.object() external-import,
+                    crypto.randomUUID() external-global, missing() in-repo MISS
+    src/t.test.ts -- it(), expect()  external-globals
+
+    All six survive `should_keep_call_target`: `crypto` is not in
+    `_BUILTIN_OBJECTS` and `randomUUID`/`object` are not in
+    `_NOISY_MEMBER_CALLS` (both checked in src/graphite/resolve.py:15-27).
+    """
+    _write(tmp_path / "src" / "dep.ts", "export function dep() { return 1; }\n")
+    _write(
+        tmp_path / "src" / "t.ts",
+        "import { dep } from './dep';\n"
+        "import { z } from 'zod';\n"
+        "export function go() {\n"
+        "  dep();\n"
+        "  z.object({});\n"
+        "  crypto.randomUUID();\n"
+        "  missing();\n"
+        "  return 1;\n"
+        "}\n",
+    )
+    _write(
+        tmp_path / "src" / "t.test.ts",
+        # No chained assertion: `expect(1).toBe(1)` emits a SECOND calls edge
+        # for `toBe` (the member call on the result), which would make the
+        # counts below wrong. Keep the fixture to unchained calls.
+        "it('works', () => { expect(1); });\n",
+    )
+
+
+def test_every_call_still_produces_an_edge(tmp_path):
+    """Nothing-is-deleted invariant: classification must not drop edges.
+
+    The fixture contains exactly six calls that survive the drop-list and the
+    phantom filter. If a future change 'improves' the ratio by deleting noisy
+    calls instead of tagging them, this count falls and the test fails.
+
+    Two of the six -- `z.object()` and `crypto.randomUUID()` -- exist ONLY
+    because of operator decision D7, which stopped `_resolve_method_dispatch`
+    dropping member calls whose root is a known external binding. Before that
+    change this count was four. If someone reverts D7, this test is where it
+    shows up.
+    """
+    _mixed_fixture(tmp_path)
+    result = _extract(tmp_path)
+    total = len(_calls(result, "src/t.ts")) + len(_calls(result, "src/t.test.ts"))
+    assert total == 6
+
+
+def test_classification_splits_as_expected(tmp_path):
+    _mixed_fixture(tmp_path)
+    result = _extract(tmp_path)
+    edges = _calls(result, "src/t.ts") + _calls(result, "src/t.test.ts")
+    external = [e for e in edges if e["confidence"] == "EXTERNAL_CALL"]
+    local = [e for e in edges if e["confidence"] == "LOCAL_CALL"]
+    # z.object, crypto.randomUUID, expect, it
+    assert len(external) == 4
+    # dep() and missing() -- the in-repo hit and the in-repo MISS
+    assert len(local) == 2
+
+
+def test_genuine_in_repo_miss_still_counts_unbound(tmp_path):
+    """The falsifier. A real binding failure must survive classification.
+
+    `missing()` is called but never defined, so it stays LOCAL_CALL, stays
+    unbound, and must still drag the calls ratio below 1.0. A version of this
+    feature that tags everything external would report 1.0 here and pass every
+    other test in this file.
+    """
+    _mixed_fixture(tmp_path)
+    result = _extract(tmp_path)
+    g = build_graph(result.nodes, result.edges)
+    cell = resolution_health(g)["by_relation"]["calls"]
+    assert cell["external"] == 4
+    assert cell["ratio"] is not None
+    assert cell["ratio"] < 1.0, "the unresolved missing() call must still count against the ratio"
+
+
+def test_computed_receiver_bare_name_collision_is_a_false_external(tmp_path):
+    """Pins a false-external risk flagged by Task 2's implementer; not a fix.
+
+    When a call's receiver is not a simple identifier -- here `getThing()`,
+    itself a call expression -- `_simple_object_name` returns None (it only
+    stringifies identifiers and member chains, deliberately refusing to
+    stringify a "complex literal" like a call result:
+    src/graphite/extract/ast.py:538-553). `_call_target_name` then falls back
+    to the bare property name alone, `test`, with no object prefix. That bare
+    name collides with an `_EXTERNAL_GLOBALS` entry (mocha's focused-test
+    global, alongside `format`, `property`, `fit`), so `_call_confidence`
+    tags the call EXTERNAL_CALL.
+
+    THIS IS A FALSE EXTERNAL: `getThing` is a same-file, in-repo function
+    returning a plain object literal -- the receiver was never proven to
+    leave the repo, and no in-repo `test` method exists for the dispatch
+    post-pass to re-point the phantom target to. Empirically, the edge is
+    neither dropped by the phantom filter nor bound; it survives as an
+    EXTERNAL_CALL phantom (confirmed via a direct extract_all() run before
+    writing this assertion). `_EXTERNAL_GLOBALS` and `_call_confidence` are
+    frozen for this round (spec), so this test pins the current behaviour as
+    a known limitation for the follow-up round rather than "fixing" it here.
+
+    Contrast with `test_unattributable_member_call_is_still_dropped` above:
+    `ctx.json()` has the exact same unattributable-receiver shape and is
+    DROPPED entirely by the phantom filter. `getThing().test()` differs only
+    in that its bare method name happens to collide with an
+    `_EXTERNAL_GLOBALS` entry -- so instead of being dropped, it is kept and
+    silently excluded from the calls health ratio, which is worse: it looks
+    like attributable evidence instead of vanishing.
+
+    That exclusion is the concrete, measurable consequence, not just a label:
+    `resolution_health`'s calls cell for this exact fixture reports
+    `total: 1, bound: 1, ratio: 1.0, external: 1` -- a perfect 1.0 ratio
+    while an unbound, unproven-external call sits right there, invisible to
+    the ratio. That is the masking failure mode this round's health schema
+    exists to prevent, reproduced in miniature by a single name collision.
+    """
+    _write(
+        tmp_path / "src" / "t.ts",
+        "function getThing() { return { test: () => 1 }; }\n"
+        "export function go() { return getThing().test(); }\n",
+    )
+    result = _extract(tmp_path)
+    conf = _confidence_by_target_suffix(result, "src/t.ts")
+    assert conf["getthing"] == "LOCAL_CALL"
+    assert conf["test"] == "EXTERNAL_CALL"  # false external -- see docstring above
+
+    g = build_graph(result.nodes, result.edges)
+    cell = resolution_health(g)["by_relation"]["calls"]
+    assert cell == {"total": 1, "bound": 1, "ratio": 1.0, "external": 1}, (
+        "the getThing().test() edge should be excluded as external, leaving "
+        "a perfect 1.0 ratio that hides it -- the masking failure this test "
+        "documents as a known limitation, not asserts as correct"
+    )
