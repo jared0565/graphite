@@ -797,6 +797,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         daemon_base=daemon_base,
         agent_hooks_mode=agent_hooks_mode,
         install_agent_hooks=not args.no_agent_hooks,
+        adopt=args.adopt,
     ).to_dict()
     cfg = _project_scoped_config(args, root, canonical=True)
     activation = _activate_typescript_for_onboarding(args, root, cfg)
@@ -2196,6 +2197,7 @@ def main(argv: list[str] | None = None) -> int:
     p_init.add_argument("--no-validate", action="store_true", help="Skip graph validation after init")
     p_init.add_argument("--list-platforms", action="store_true", help="Print supported platform keys and exit")
     p_init.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_init.add_argument("--adopt", action="store_true", help="Bring legacy unversioned instruction docs under management by appending the managed block; existing content is preserved, never overwritten")
     p_init_mode = p_init.add_mutually_exclusive_group()
     p_init_mode.add_argument("--strict", action="store_true", help="Write strict-mode graphite-first hook wiring (denies provable relationship greps)")
     p_init_mode.add_argument("--remind", action="store_true", help="Write remind-mode hook wiring (non-blocking reminders; default for first-time wiring)")

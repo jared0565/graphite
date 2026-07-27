@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from graphite.cli import main
-from graphite.init import init_project, resolve_platform_selection
+from graphite.init import MANAGED_BEGIN, init_project, resolve_platform_selection
 from graphite.typescript_activation import ActivationOutcome, ActivationResult
 
 
@@ -137,6 +137,59 @@ def test_init_leaves_legacy_unversioned_docs_untouched(tmp_path: Path) -> None:
     assert result["platform_files"][0]["action"] == "legacy unversioned"
     assert (tmp_path / "GRAPHITE.md").read_text(encoding="utf-8") == legacy_doc
     assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == legacy_pointer
+
+
+def test_init_adopt_upgrades_legacy_docs_without_losing_content(tmp_path: Path) -> None:
+    """#13: init could not upgrade a legacy doc at all -- it reported success,
+    changed nothing and exited 0, so 're-init the consumers' silently no-opped
+    on exactly the repos that most needed the update.
+
+    --adopt is the opt-in. It must APPEND, never overwrite: legacy docs carried
+    hand-written owner policy, and blind regeneration would destroy it.
+    """
+    legacy_doc = (
+        "# Graphite Development Context\n\n"
+        "## Required Workflow\n\n"
+        "Hand-curated legacy instructions.\n"
+    )
+    owner_policy = (
+        "# Notes\n\nFollow `GRAPHITE.md`; use `graph-out/graph.json` as the shared graph.\n\n"
+        "IMPORTANT OWNER RULE: only the ops app may touch the Admin API.\n"
+    )
+    _write(tmp_path / "GRAPHITE.md", legacy_doc)
+    _write(tmp_path / "CLAUDE.md", owner_policy)
+
+    result = init_project(tmp_path, platforms=["claude"], adopt=True).to_dict()
+
+    assert result["graphite_doc"]["action"] == "adopted"
+    assert result["graphite_doc"]["changed"] is True
+    assert result["platform_files"][0]["action"] == "adopted"
+
+    doc = (tmp_path / "GRAPHITE.md").read_text(encoding="utf-8")
+    pointer = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+
+    # The managed marker is now present -- this is what the rollout survey greps.
+    assert MANAGED_BEGIN in doc
+    assert MANAGED_BEGIN in pointer
+    # Nothing hand-written was lost.
+    assert "Hand-curated legacy instructions." in doc
+    assert "IMPORTANT OWNER RULE: only the ops app may touch the Admin API." in pointer
+
+
+def test_init_adopt_is_idempotent_and_later_runs_refresh_normally(tmp_path: Path) -> None:
+    """Once adopted, the doc is marked, so an ordinary init refreshes it."""
+    _write(
+        tmp_path / "GRAPHITE.md",
+        "# Graphite Development Context\n\n## Required Workflow\n\nLegacy.\n",
+    )
+
+    first = init_project(tmp_path, platforms=["claude"], adopt=True).to_dict()
+    assert first["graphite_doc"]["action"] == "adopted"
+
+    # No --adopt this time: it is already managed, so the legacy branch is gone.
+    second = init_project(tmp_path, platforms=["claude"]).to_dict()
+    assert second["graphite_doc"]["action"] == "already current"
+    assert "Legacy." in (tmp_path / "GRAPHITE.md").read_text(encoding="utf-8")
 
 
 def test_init_never_downgrades_or_touches_damaged_managed_regions(tmp_path: Path) -> None:

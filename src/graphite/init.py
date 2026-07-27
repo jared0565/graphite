@@ -211,6 +211,7 @@ def init_project(
     daemon_base: Path | None = None,
     agent_hooks_mode: str | None = None,
     install_agent_hooks: bool = True,
+    adopt: bool = False,
 ) -> InitResult:
     root = project_root.resolve()
     if not root.exists():
@@ -219,7 +220,7 @@ def init_project(
         raise NotADirectoryError(root)
 
     selected = resolve_platform_selection(platforms)
-    graphite_doc = ensure_graphite_doc(root / "GRAPHITE.md")
+    graphite_doc = ensure_graphite_doc(root / "GRAPHITE.md", adopt=adopt)
     gitignore = ensure_gitignore(root / ".gitignore")
     platform_files: list[dict[str, Any]] = []
     instruction_paths = [Path("GRAPHITE.md")]
@@ -228,7 +229,7 @@ def init_project(
         spec = PLATFORMS[key]
         for rel in spec.files:
             rel_path = Path(rel)
-            platform_files.append(ensure_platform_file(root / rel_path, spec=spec))
+            platform_files.append(ensure_platform_file(root / rel_path, spec=spec, adopt=adopt))
             instruction_paths.append(rel_path)
 
     if install_agent_hooks:
@@ -263,7 +264,7 @@ def _managed_block(body: str) -> str:
 
 
 def _ensure_managed_text(
-    original: str, body: str, *, is_legacy: bool, heading: str = ""
+    original: str, body: str, *, is_legacy: bool, heading: str = "", adopt: bool = False
 ) -> tuple[str | None, str]:
     """Return (new_text_or_None, action) for a versioned managed region."""
     begin = _MANAGED_BEGIN_RE.search(original)
@@ -284,34 +285,43 @@ def _ensure_managed_text(
         return replaced, "refreshed"
 
     if is_legacy:
-        # Pre-versioning content, possibly hand-curated; never rewrite it
-        # automatically. Reported so the operator can reconcile and opt in.
-        return None, "legacy unversioned"
+        if not adopt:
+            # Pre-versioning content, possibly hand-curated; never rewrite it
+            # automatically. Reported so the operator can reconcile and opt in.
+            return None, "legacy unversioned"
+        # --adopt is that opt-in. It APPENDS the managed block and leaves the
+        # legacy text untouched above it, so hand-curated owner policy survives
+        # (#13). Nothing is overwritten: this is the same non-destructive path
+        # an unmarked non-legacy doc already takes, and once the markers exist
+        # later runs refresh normally.
+        return _append_section(original, _managed_block(body)), "adopted"
 
     if not original.strip():
         return heading + _managed_block(body) + "\n", "created"
     return _append_section(original, _managed_block(body)), "updated"
 
 
-def ensure_graphite_doc(path: Path) -> dict[str, Any]:
+def ensure_graphite_doc(path: Path, *, adopt: bool = False) -> dict[str, Any]:
     original = path.read_text(encoding="utf-8") if path.exists() else ""
     new_text, action = _ensure_managed_text(
         original,
         GRAPHITE_DOC,
         is_legacy=GRAPHITE_DOC_HEADER in original and GRAPHITE_REQUIRED_WORKFLOW in original,
+        adopt=adopt,
     )
     if new_text is not None:
         atomic_write_text(path, new_text)
     return {"path": str(path), "changed": new_text is not None, "action": action}
 
 
-def ensure_platform_file(path: Path, *, spec: PlatformSpec) -> dict[str, Any]:
+def ensure_platform_file(path: Path, *, spec: PlatformSpec, adopt: bool = False) -> dict[str, Any]:
     original = path.read_text(encoding="utf-8") if path.exists() else ""
     new_text, action = _ensure_managed_text(
         original,
         spec.content,
         is_legacy="GRAPHITE.md" in original and "graph-out/graph.json" in original,
         heading=f"# {spec.label} Project Instructions\n\n",
+        adopt=adopt,
     )
     if new_text is not None:
         atomic_write_text(path, new_text)
