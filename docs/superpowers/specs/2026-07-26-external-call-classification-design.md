@@ -90,11 +90,33 @@ One new edge confidence value, `EXTERNAL_CALL`, assigned at extraction time.
 count in a new `external` field — structurally identical to what
 `EXTERNAL_IMPORT` does for `imports`.
 
-**Invariant: this is a pure relabel.** No `calls` edge is added, removed, or
-re-targeted. Edge and node counts before and after are identical on every
-fixture. This is what keeps the ratio honest — an excluded call remains
-visible and countable in `graph.json`, so the denominator can never shrink
+**Invariant: nothing is deleted, and every exclusion stays visible.** No
+`calls` edge is removed or re-targeted by this round, and no name moves onto a
+drop-list. What keeps the ratio honest is that an excluded call remains
+present and countable in `graph.json`, so the denominator can never shrink
 silently.
+
+**Amended 2026-07-27 (was "pure relabel").** The original invariant claimed
+edge counts are identical before and after. That was **false**, and the round
+discovered it during Task 2: `_resolve_method_dispatch`
+(`ast.py:1186-1196`) already **drops** a member call whose target resolves to
+no known definition, so `z.object()` / `crypto.randomUUID()` were never counted
+against the ratio — they did not exist as edges at all. Per operator decision
+(D7) those calls are now **retained** as `EXTERNAL_CALL` instead of dropped, so
+this round **adds** edges. The retention is narrow: a member call is kept only
+when its root is a known external binding (an unresolved import or an entry in
+`_EXTERNAL_GLOBALS`). An unattributable receiver — `c.json()`, `db.prepare()`,
+`stmt.bind()`, the framework-noise population the filter was built to remove —
+is still dropped.
+
+Consequences that must be tracked, not assumed away:
+
+- `calls` `total`/`bound`/`ratio` are unaffected by the retained edges (they are
+  external and unbound, so §5 excludes them), but `external` counts rise.
+- `placeholder_nodes.unknown` and `share` **worsen**, because each retained edge
+  materialises its phantom target as an `unknown` node.
+- Graph size grows on TS repos by the attributable-external-member-call
+  population. That number is unmeasured — acceptance A1 reports it.
 
 `_edge` (`ast.py:100-121`) already takes `confidence`, defaulting to
 `"EXTRACTED"`; call sites currently pass `"LOCAL_CALL"` explicitly. The change
@@ -303,9 +325,12 @@ Invariant and falsifier:
 
 Run pre-merge, falsifier stated before each run.
 
-- **A1** — pawscout `calls` 0.667 → **≥ 0.89**, with `graph.json` edge count
-  unchanged from the schema-2 build. Fails if the ratio rises *and* the edge
-  count drops (that would mean deletion, not classification).
+- **A1** — pawscout `calls` 0.667 → **≥ 0.89**. The edge count is expected to
+  **rise**, not hold, because D7 retains external member calls the phantom
+  filter used to drop. **Record the before/after edge count, node count, and
+  `placeholder_nodes.share` explicitly** — this is the round's only measurement
+  of how much the graph grew, and A1 fails if the edge count *drops*, which
+  would mean deletion rather than classification.
 - **A2** — graphite's own `calls` 0.896 → **≥ 0.92**, `python` cell reports a
   non-zero `external`. The bar comes from §2's indicative measurement (0.923
   excluding the detected externals alone) and should be *beaten*, because the
@@ -343,6 +368,18 @@ Run pre-merge, falsifier stated before each run.
   classification is reporting a genuine binding gap; that is a true finding
   and a follow-up, not a failure of this round.
 - **D6** — Retire-and-replace the caveat rather than amend it in place (§7).
+- **D7** (operator decision, 2026-07-27) — **Retain attributable external member
+  calls instead of dropping them.** `_resolve_method_dispatch` drops member
+  calls that resolve to no known definition, which made the member-root branch
+  of `_call_confidence` unobservable: a surviving member call is bound, and §5
+  never excludes a bound edge, so the branch could not change any number.
+  Three options were put to the operator — keep the rule and test it on bare
+  calls only, drop the rule, or make it observable. The operator chose to make
+  it observable, accepting that the round now adds edges and grows TS graphs.
+  Rationale: "record, don't delete" is the round's governing principle, and a
+  call into a known external package is exactly the evidence the health block
+  should be able to account for. The narrowing to *attributable* roots is what
+  keeps the original filter's purpose intact.
 
 ## 12. Rollout
 

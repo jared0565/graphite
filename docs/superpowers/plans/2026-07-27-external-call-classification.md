@@ -12,7 +12,9 @@
 
 ## Global Constraints
 
-- **Pure relabel.** No `calls` edge may be added, removed, or re-targeted. Only the `confidence` value changes. Task 7 enforces this.
+- **Nothing is deleted, and every exclusion stays visible.** No `calls` edge may be removed or re-targeted, and no name may move onto a drop-list. Task 7 enforces this.
+- **This round DOES add edges** (amended 2026-07-27, operator decision D7). `_resolve_method_dispatch` (`ast.py:1186-1196`) currently drops a member call whose target resolves to no known definition — so `z.object()` and `crypto.randomUUID()` were never edges at all. Those are now **retained** as `EXTERNAL_CALL`. Retention is narrow: keep a member call only when its root is a known external binding (unresolved import, or `_EXTERNAL_GLOBALS` member). An unattributable receiver (`c.json()`, `db.prepare()`, `stmt.bind()`) is still dropped — that noise population is what the filter exists for. Earlier plan text saying "pure relabel / edge counts identical" is superseded.
+- **Never name a fixture symbol after a `_LANGUAGE_BUILTIN_GLOBALS` entry.** `sum`, `map`, `filter`, `format`, `min`, `max`, `open`, `type`, `id`, `hash` and friends are on the drop-list, so a call to them produces NO edge and any test asserting on one is unpassable. Use a name like `addOne`.
 - **Nothing moves between `_LANGUAGE_BUILTIN_GLOBALS` and `_EXTERNAL_GLOBALS`.** The existing drop-list is frozen for this round (spec §4.3).
 - **Externality only excuses an UNBOUND edge.** An edge marked external whose target resolved to a real node is counted normally, in numerator and denominator (spec §5). This is the guard against name-based matching masking a repo's own `test()`/`process()`.
 - Confidence string is exactly `"EXTERNAL_CALL"`. Health schema value is exactly `3`. Cache version is exactly `"v9"`.
@@ -279,28 +281,33 @@ def _confidence_by_target_suffix(result, source_file):
 
 
 def test_injected_test_globals_are_tagged_external(tmp_path):
-    _write(tmp_path / "src" / "sum.ts", "export function sum(a: number) { return a; }\n")
+    # NOTE: the helper is `addOne`, never `sum` -- `sum` is in
+    # _LANGUAGE_BUILTIN_GLOBALS, so a call to it produces NO edge and this
+    # test would silently assert on a smaller edge set than it appears to.
+    _write(tmp_path / "src" / "dep.ts", "export function addOne(a: number) { return a; }\n")
     _write(
-        tmp_path / "src" / "sum.test.ts",
-        "import { sum } from './sum';\n"
-        "describe('sum', () => {\n"
+        tmp_path / "src" / "dep.test.ts",
+        "import { addOne } from './dep';\n"
+        "describe('addOne', () => {\n"
         "  it('adds', () => {\n"
-        "    expect(sum(1)).toBe(1);\n"
+        "    expect(addOne(1));\n"
         "  });\n"
         "});\n",
     )
     result = _extract(tmp_path)
-    conf = _confidence_by_target_suffix(result, "src/sum.test.ts")
+    conf = _confidence_by_target_suffix(result, "src/dep.test.ts")
     assert conf["expect"] == "EXTERNAL_CALL"
     assert conf["describe"] == "EXTERNAL_CALL"
     assert conf["it"] == "EXTERNAL_CALL"
+    # the in-repo helper called from inside the test still binds locally
+    assert conf["addone"] == "LOCAL_CALL"
 
 
 def test_in_repo_call_stays_local(tmp_path):
-    _write(tmp_path / "src" / "sum.ts", "export function sum(a: number) { return a; }\n")
+    _write(tmp_path / "src" / "dep.ts", "export function addOne(a: number) { return a; }\n")
     _write(
         tmp_path / "src" / "use.ts",
-        "import { sum } from './sum';\nexport function go() { return sum(1); }\n",
+        "import { addOne } from './dep';\nexport function go() { return addOne(1); }\n",
     )
     result = _extract(tmp_path)
     confidences = {e["confidence"] for e in _calls(result, "src/use.ts")}
@@ -331,6 +338,8 @@ def test_drop_list_names_still_produce_no_edge(tmp_path):
 
 
 def test_member_call_root_decides_externality(tmp_path):
+    """Requires the Step 4b retention change -- without it this edge is dropped
+    by _resolve_method_dispatch before it can be observed."""
     _write(
         tmp_path / "src" / "t.ts",
         "export function go() { return crypto.randomUUID(); }\n",
@@ -338,6 +347,21 @@ def test_member_call_root_decides_externality(tmp_path):
     result = _extract(tmp_path)
     confidences = {e["confidence"] for e in _calls(result, "src/t.ts")}
     assert confidences == {"EXTERNAL_CALL"}
+
+
+def test_unattributable_member_call_is_still_dropped(tmp_path):
+    """The retention in Step 4b is NARROW. `ctx` is a local parameter, not an
+    external binding, so `ctx.json()` stays dropped -- that framework-noise
+    population is the whole reason the phantom filter exists. If this test
+    fails, the retention was widened to every member call and every TS graph
+    just grew by the runtime-API population.
+    """
+    _write(
+        tmp_path / "src" / "t.ts",
+        "export function go(ctx: any) { return ctx.json(); }\n",
+    )
+    result = _extract(tmp_path)
+    assert _calls(result, "src/t.ts") == []
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -418,6 +442,32 @@ Each site currently hardcodes `confidence="LOCAL_CALL"`. Replace with `confidenc
   ```python
                     edge = _edge(scope_id, _resolve_call(file_id, called), "calls", rel_path, _line(node), confidence=_call_confidence(called))
   ```
+
+- [ ] **Step 4b: Retain attributable external member calls (operator decision D7)**
+
+`_resolve_method_dispatch` (`src/graphite/extract/ast.py:1186-1196`) drops a member call that resolves to no known definition. That makes an `EXTERNAL_CALL` member edge unobservable — it never reaches the graph. Narrow the drop so an already-classified external call survives.
+
+Replace the no-candidates branch:
+
+```python
+        candidates = methods_by_name.get(method.casefold())
+        if not candidates or len(candidates) > _MAX_METHOD_DISPATCH_CANDIDATES:
+            # Member call that resolves to no known definition. Keep it when
+            # the target is a real node, or when the call was already
+            # classified EXTERNAL_CALL -- its root is a known external binding
+            # (an unresolved import or an _EXTERNAL_GLOBALS member), so the
+            # edge is attributable evidence that this file calls into that
+            # package, and health.py excludes it from the ratio.
+            #
+            # Everything else still DROPS: `c.json()`, `db.prepare()`,
+            # `stmt.bind()` have unattributable receivers and are the
+            # framework/runtime noise this filter exists to remove.
+            if e.get("target") in known_ids or e.get("confidence") == "EXTERNAL_CALL":
+                out.append(e)
+            continue
+```
+
+This is the one place in the round that **adds** edges. It is deliberate — see the plan's Global Constraints and spec D7.
 
 - [ ] **Step 5: Bump the cache version**
 
@@ -1054,11 +1104,17 @@ def _mixed_fixture(tmp_path: Path) -> None:
 
 
 def test_every_call_still_produces_an_edge(tmp_path):
-    """Pure-relabel invariant: classification must not drop edges.
+    """Nothing-is-deleted invariant: classification must not drop edges.
 
     The fixture contains exactly six calls that survive the drop-list and the
     phantom filter. If a future change 'improves' the ratio by deleting noisy
     calls instead of tagging them, this count falls and the test fails.
+
+    Two of the six -- `z.object()` and `crypto.randomUUID()` -- exist ONLY
+    because of operator decision D7, which stopped `_resolve_method_dispatch`
+    dropping member calls whose root is a known external binding. Before that
+    change this count was four. If someone reverts D7, this test is where it
+    shows up.
     """
     _mixed_fixture(tmp_path)
     result = _extract(tmp_path)
