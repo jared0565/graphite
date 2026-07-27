@@ -169,3 +169,61 @@ def test_in_repo_import_is_not_tagged_external(tmp_path):
     )
     result = _extract(tmp_path)
     assert {e["confidence"] for e in _calls(result, "src/t.ts")} == {"LOCAL_CALL"}
+
+
+def test_python_plain_import_of_external_module_is_tagged(tmp_path):
+    _write(
+        tmp_path / "m.py",
+        "import pathlib\n"
+        "def go():\n"
+        "    return pathlib.Path('.')\n",
+    )
+    result = _extract(tmp_path)
+    assert {e["confidence"] for e in _calls(result, "m.py")} == {"EXTERNAL_CALL"}
+
+
+def test_python_aliased_import_uses_the_alias(tmp_path):
+    _write(
+        tmp_path / "m.py",
+        "import numpy as np\n"
+        "def go():\n"
+        "    return np.array([])\n",
+    )
+    result = _extract(tmp_path)
+    assert {e["confidence"] for e in _calls(result, "m.py")} == {"EXTERNAL_CALL"}
+
+
+def test_python_from_import_of_external_symbol_is_tagged(tmp_path):
+    _write(
+        tmp_path / "m.py",
+        "from dataclasses import dataclass\n"
+        "def go():\n"
+        "    return dataclass()\n",
+    )
+    result = _extract(tmp_path)
+    assert {e["confidence"] for e in _calls(result, "m.py")} == {"EXTERNAL_CALL"}
+
+
+def test_python_dotted_import_binds_the_root(tmp_path):
+    """`import os.path` binds `os`, so `os.path.join()` is external."""
+    _write(
+        tmp_path / "m.py",
+        "import os.path\n"
+        "def go():\n"
+        "    return os.path.join('a')\n",
+    )
+    result = _extract(tmp_path)
+    assert {e["confidence"] for e in _calls(result, "m.py")} == {"EXTERNAL_CALL"}
+
+
+def test_python_in_repo_import_stays_local(tmp_path):
+    """The discriminating case: same syntax, resolvable module."""
+    _write(tmp_path / "dep.py", "def helper():\n    return 1\n")
+    _write(
+        tmp_path / "m.py",
+        "from dep import helper\n"
+        "def go():\n"
+        "    return helper()\n",
+    )
+    result = _extract(tmp_path)
+    assert {e["confidence"] for e in _calls(result, "m.py")} == {"LOCAL_CALL"}

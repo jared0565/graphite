@@ -656,18 +656,24 @@ def _python_from_import_submodules(
 
 def _collect_python_import_maps(
     root: Any, rel_path: str, source_index: SourceIndex | None
-) -> tuple[dict[str, str], dict[str, str]]:
-    """(symbol_map: local -> definition node id, alias_map: local -> module file id).
+) -> tuple[dict[str, str], dict[str, str], frozenset[str]]:
+    """(symbol_map, alias_map, external_names).
+
+    symbol_map: local -> definition node id. alias_map: local -> module file id.
+    external_names: local names bound by imports that did NOT resolve in-repo --
+    calls through them leave the repo (EXTERNAL_CALL).
 
     Walked at ALL depths (Python allows function-local imports). For
     `from P import name`, `P.name` is tried as a MODULE first (alias), then
-    as a symbol defined in P's file. Unresolvable modules enter neither map.
+    as a symbol defined in P's file. Unresolvable modules enter neither map,
+    but DO enter external_names.
     Last binding wins, matching Python shadowing.
     """
     symbol_map: dict[str, str] = {}
     alias_map: dict[str, str] = {}
+    external: set[str] = set()
     if source_index is None:
-        return symbol_map, alias_map
+        return symbol_map, alias_map, frozenset()
 
     def _text(n: Any) -> str:
         return n.text.decode("utf-8", errors="ignore") if n is not None and n.text else ""
@@ -681,6 +687,11 @@ def _collect_python_import_maps(
                         resolved = source_index.resolve_python_module(rel_path, module)
                         if resolved:
                             alias_map[module] = _file_node_id(resolved)
+                        else:
+                            external.add(module)
+                    elif module:
+                        # `import os.path` binds only the root name `os`.
+                        external.add(module.split(".", 1)[0])
                 elif child.type == "aliased_import":
                     module = _text(child.child_by_field_name("name"))
                     local = _text(child.child_by_field_name("alias"))
@@ -688,6 +699,8 @@ def _collect_python_import_maps(
                         resolved = source_index.resolve_python_module(rel_path, module)
                         if resolved:
                             alias_map[local] = _file_node_id(resolved)
+                        else:
+                            external.add(local)
         elif node.type == "import_from_statement":
             modules = _python_import_modules(node)
             if modules:
@@ -719,11 +732,13 @@ def _collect_python_import_maps(
                     parent = source_index.resolve_python_module(rel_path, base_module, dots)
                     if parent:
                         symbol_map[local] = _make_id(_file_node_id(parent), original)
+                    else:
+                        external.add(local)
         for child in node.children:
             visit(child)
 
     visit(root)
-    return symbol_map, alias_map
+    return symbol_map, alias_map, frozenset(external)
 
 
 def _python_call_target(func: Any) -> tuple[str | None, str | None, str | None]:
@@ -741,6 +756,25 @@ def _python_call_target(func: Any) -> tuple[str | None, str | None, str | None]:
     return None, None, None
 
 
+def _python_attribute_root(node: Any) -> str | None:
+    """Leftmost identifier of a (possibly nested) attribute chain.
+
+    `os.path.join` parses as `attribute(attribute(identifier(os), path), join)`
+    -- `_python_call_target` only looks at the immediate object, so for a
+    depth->=2 chain `obj_name` comes back None and the import-bound root
+    (`os`) is invisible to `_call_confidence`. Walked here purely to recover
+    that root for classification; the `dotted` string used for targeting,
+    dispatch (`_member`), and `should_keep_call_target` noise-filtering is
+    untouched by this -- changing that shape trips the noise filter on leaf
+    names like `join` for reasons unrelated to externality.
+    """
+    while node is not None and node.type == "attribute":
+        node = node.child_by_field_name("object")
+    if node is not None and node.type == "identifier" and node.text:
+        return node.text.decode("utf-8", errors="ignore")
+    return None
+
+
 def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, source_index: SourceIndex | None = None) -> ExtractionResult:
     result = ExtractionResult()
     root = tree.root_node
@@ -750,7 +784,7 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
 
     result.nodes.append(_node(file_id, "file", Path(rel_path).name, rel_path))
 
-    symbol_map, alias_map = _collect_python_import_maps(root, rel_path, source_index)
+    symbol_map, alias_map, external_names = _collect_python_import_maps(root, rel_path, source_index)
 
     class_ids: set[str] = set()
 
@@ -817,7 +851,7 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
             edge = None
             if bare and bare not in _LANGUAGE_BUILTIN_GLOBALS:
                 target = symbol_map.get(bare) or _resolve_call(file_id, bare)
-                edge = _edge(scope_id, target, "calls", rel_path, _line(node), confidence=_call_confidence(bare))
+                edge = _edge(scope_id, target, "calls", rel_path, _line(node), confidence=_call_confidence(bare, external_names))
             elif attr:
                 dotted = f"{obj_name}.{attr}" if obj_name else attr
                 if obj_name and obj_name in alias_map:
@@ -825,7 +859,13 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                 elif should_keep_call_target(dotted):
                     # Unresolved member call: file-scoped phantom now, re-pointed
                     # (or dropped) by the method-dispatch post-pass via _member.
-                    edge = _edge(scope_id, _resolve_call(file_id, dotted), "calls", rel_path, _line(node), confidence=_call_confidence(dotted))
+                    # Confidence is classified off the recovered chain root
+                    # (falls back to `dotted` itself for a non-attribute
+                    # receiver, e.g. `foo().bar()`), not off `dotted` -- a
+                    # depth->=2 chain like `os.path.join` would otherwise
+                    # test "join" instead of the bound name "os".
+                    root_name = obj_name or _python_attribute_root(func) or dotted
+                    edge = _edge(scope_id, _resolve_call(file_id, dotted), "calls", rel_path, _line(node), confidence=_call_confidence(root_name, external_names))
                     edge["_member"] = attr
             if edge is not None:
                 result.edges.append(edge)
