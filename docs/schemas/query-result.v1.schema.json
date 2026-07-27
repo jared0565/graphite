@@ -71,7 +71,7 @@
     "resolution_health": {
       "type": "object",
       "additionalProperties": true,
-      "description": "Measured resolution-health block: placeholder_nodes, by_relation, by_language, healthy, threshold. Present on stats/impact/context/relation-verb results from 2026-07-25. Distinct from the top-level `resolution` array above, which is per-target input-match metadata, not graph-wide resolver health. schema 2: imports cells carry an `external` count; external imports are excluded from ratios."
+      "description": "Measured resolution-health block: placeholder_nodes, by_relation, by_language, healthy, threshold. Present on stats/impact/context/relation-verb results from 2026-07-25. Distinct from the top-level `resolution` array above, which is per-target input-match metadata, not graph-wide resolver health. schema 3: both `calls` and `imports` cells carry an `external` count of edges that leave the repo (confidence `EXTERNAL_CALL`/`EXTERNAL_IMPORT`); an edge counts as external only when it also failed to bind, and externals are excluded from ratios. Ratios are not comparable across schemas (1: includes all externals; 2: excludes only import externals; 3: excludes both) — branch on `schema`."
     },
     "inconclusive": {
       "type": "boolean",

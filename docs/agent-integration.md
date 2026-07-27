@@ -115,13 +115,13 @@ to distinguish "no results" from "the resolver could not bind".
 
 ```json
 {
-  "schema": 2,
+  "schema": 3,
   "placeholder_nodes": {"total": 4519, "unknown": 2463, "share": 0.545},
   "by_relation": {
-    "calls":   {"total": 6631, "bound": 1730, "ratio": 0.261},
+    "calls":   {"total": 6631, "bound": 1730, "ratio": 0.261, "external": 412},
     "imports": {"total": 1920, "bound": 1918, "ratio": 0.999, "external": 127}
   },
-  "by_language": {"python": {"calls": {"total": 6631, "bound": 1730, "ratio": 0.261},
+  "by_language": {"python": {"calls": {"total": 6631, "bound": 1730, "ratio": 0.261, "external": 412},
                               "imports": {"total": 1920, "bound": 1918, "ratio": 0.999, "external": 127}}},
   "healthy": false,
   "threshold": 0.8
@@ -130,12 +130,16 @@ to distinguish "no results" from "the resolver could not bind".
 
 - `healthy` is `true` iff every non-null `by_relation` ratio is `>= threshold`
   (0.8). Zero-edge relations have `ratio: null` and do not count against health.
-- **schema 2**: imports cells carry an `external` count of imports outside the repo
-  (stdlib, pip packages). Ratios count only should-bind-in-repo edges and exclude
-  externals. `external` counts edges with `confidence="EXTERNAL_IMPORT"`.
-  Ratios over graphs built before this change (schema 1) include externals — when
-  reading ratios, branch on `schema` to interpret correctly. Consumers reading
-  only `healthy` need no change.
+- **schema 3**: BOTH `calls` and `imports` cells carry an `external` count of
+  edges that leave the repo. For `imports` these are stdlib/pip/node_modules
+  modules (`confidence="EXTERNAL_IMPORT"`); for `calls` they are calls to
+  external-package symbols and never-imported runtime globals
+  (`confidence="EXTERNAL_CALL"`). Ratios count only should-bind-in-repo edges
+  and exclude externals. An edge counts as external only when it ALSO failed to
+  bind — externality never removes a bound edge from the ratio.
+  Ratios are **not comparable across schemas**: schema 1 includes all externals,
+  schema 2 excludes only import externals, schema 3 excludes both. Branch on
+  `schema` when reading ratios. Consumers reading only `healthy` need no change.
 - On a post-resolver-binding graph an unresolved import edge is tagged
   `EXTERNAL_IMPORT` (and excluded) rather than left unbound, so `imports`
   `total` tends to converge on `bound` and the ratio trends toward 1.0 by
@@ -143,10 +147,12 @@ to distinguish "no results" from "the resolver could not bind".
   target module resolved to an in-repo path but that file itself never
   emitted a node — e.g. it hit a read/parse error during extraction — so the
   import edge still counts as unbound even though it wasn't external).
-  Because imports is structurally near-saturated on a healthy Python graph,
-  it stops being the signal that tells healthy repos apart from unhealthy
-  ones — the `calls` ratio is the one that still reflects real binding
-  difficulty, and is the discriminating health signal consumers should watch.
+  Because imports is structurally near-saturated on a healthy graph, it stops
+  being the signal that tells healthy repos apart from unhealthy ones. Under
+  schema 3 the `calls` ratio also rises once externals are excluded, so a high
+  `calls` ratio no longer implies deep binding coverage on its own — read it
+  alongside the `external` count and `placeholder_nodes.share`, and prefer the
+  answer-scoped `answer.grade` over any aggregate ratio for a specific question.
 - `impact`, `context`, and the relation verbs (`callers`, `calls`,
   `imported-by`, `depends-on`) additionally return `"inconclusive": true` when
   the result is EMPTY and the graph is unhealthy. **An inconclusive empty
