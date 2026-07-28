@@ -1269,6 +1269,12 @@ answered a question this design deletes. Closes #6."
 
 - [ ] **Re-install the daemon launcher — but only AFTER Task 2 merges.** The daemon was stopped and `daemon-uninstall-startup-windows` was run on 2026-07-28 so nothing could resurrect full supervision. Once Task 2 ships, the daemon is the component that builds active repos, so rebuild-on-open does nothing without it: markers get written and no one acts on them. Re-install with `graphite daemon-install-startup-windows F:\Projects` and confirm `active_projects` matches the repos actually open. **Ordering matters** — re-installing before Task 2 merges force-rebuilds all 32 projects.
 
+- [ ] **Transition: sessions already open when this ships do not self-register immediately.** `SessionStart` cannot fire retroactively, so a repo that was already open is absent from the registry until it acts. It is **not** stuck until a new session: `Stop` fires once per assistant turn and marks activation, so each open repo registers on its very next turn. Verified live on 2026-07-28 — `aramid/.claude/settings.json` wires `python -m graphite agent-hook stop`. Bridge the gap immediately for any repo that must not wait a turn:
+  ```
+  python -m graphite activate "<repo>" --agent claude
+  ```
+  This marks without building, so it is safe under the mandate. Done on 2026-07-28 for `aramid` and `Shopify\demo-store2\pawscout-worker`, which were open but unregistered while `graphite` was registered via the CLI backstop.
+
 - [ ] **Known coverage gap to record, not fix here.** Open repos are currently detectable for Claude Code (per-project session directories under `~/.claude/projects/`) but **not for Codex** — a Codex-opened repo is invisible until it invokes graphite and trips the Task 3 backstop. Worth its own issue after this lands.
 
 ## Self-review notes
