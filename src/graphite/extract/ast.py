@@ -340,9 +340,15 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
             # function callable by name, so it must get the same id shape a
             # `function f()` declaration produces or nothing can bind to it.
             bound = _declarator_binding_name(node)
-            if bound:
-                mid = _make_id(file_id, bound)
-                result.nodes.append(_node(mid, "function", bound, rel_path, _line(node)))
+            # A class field holding an arrow is callable too, but only through
+            # `this.handle()` / `obj.handle()`, so it needs the `is_method` tag
+            # the dispatch post-pass indexes on -- a bare name is not enough (#19).
+            field = _class_field_binding_name(node) if not bound else None
+            name = bound or field
+            if name:
+                mid = _make_id(file_id, name)
+                extra = {"is_method": True} if field else None
+                result.nodes.append(_node(mid, "function", name, rel_path, _line(node), extra=extra))
                 if parent_id:
                     result.edges.append(_edge(parent_id, mid, "contains", rel_path, _line(node)))
                 walk_children(node, mid, _Scope(mid))
@@ -601,6 +607,36 @@ def _declarator_binding_name(node: Any) -> str | None:
         return None
     name = parent.child_by_field_name("name")
     if name is None or name.type != "identifier" or not name.text:
+        return None
+    return name.text.decode("utf-8", errors="ignore") or None
+
+
+def _class_field_binding_name(node: Any) -> str | None:
+    """The field name a function-valued class field binds to.
+
+    ``handle = () => 1`` inside a class parses as ``public_field_definition``
+    (``field_definition`` in plain JS), not ``method_definition``, so it never
+    reached the named path and produced no call target at all (#19). This is the
+    case #16 explicitly scoped out.
+
+    Such a field is invoked as ``this.handle()`` / ``obj.handle()`` -- through
+    method dispatch rather than by bare name -- so the caller must also tag the
+    resulting node ``is_method``, or the dispatch post-pass will not index it and
+    the call edge stays dropped.
+
+    Returns None for anything that binds no such callable name: object-literal
+    property values and callbacks keep the deliberate anonymity of #16.
+    """
+    parent = node.parent
+    if parent is None or parent.type not in ("public_field_definition", "field_definition"):
+        return None
+    value = parent.child_by_field_name("value")
+    # Compare by node id, not identity: the tree-sitter binding returns a fresh
+    # Node object per call, so `value is node` is always False.
+    if value is None or value.id != node.id:
+        return None
+    name = parent.child_by_field_name("name")
+    if name is None or name.type not in ("property_identifier", "identifier") or not name.text:
         return None
     return name.text.decode("utf-8", errors="ignore") or None
 
@@ -1483,10 +1519,10 @@ def _resolve_method_dispatch(
 
     Ambiguity policy (``_MAX_METHOD_DISPATCH_CANDIDATES``): a unique name re-points to
     the single definition; 2..cap candidates each get an edge; more than cap (or zero)
-    candidates leaves the original phantom edge unchanged. Known limitation: methods
-    written as arrow-valued class fields (``foo = () => {}``) parse as
-    ``public_field_definition``, not ``method_definition``, so they are not indexed and
-    won't resolve.
+    candidates leaves the original phantom edge unchanged. Arrow-valued class fields
+    (``foo = () => {}``) parse as ``public_field_definition`` rather than
+    ``method_definition``; they are tagged ``is_method`` at extraction so they are
+    indexed here on equal terms (#19).
 
     ``_member`` is stripped from every returned edge so it never leaks into the graph.
     """
