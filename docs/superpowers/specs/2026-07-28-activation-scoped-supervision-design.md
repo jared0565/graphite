@@ -95,11 +95,29 @@ Staleness for this purpose is whatever `check_graph_freshness` reports: missing 
 
 ### 5. Doctrine
 
-`GRAPHITE.md` and the per-agent instruction files currently tell agents the daemon keeps graphs fresh, so they should query directly rather than rebuild. That guidance changes:
+**Governing principle: freshness is never a precondition for querying the graph.**
 
-> The graph refreshes when you open this repo in a coding agent. A just-opened repo may still be building — `graphite check .` is the authority on whether the graph is current.
+An agent must never decide *in advance* that the graph is not worth consulting. It queries, reads the grade the answer carries, and falls back only after an insufficient answer — saying so when it does. This is already what `PRE_TOOL_REMINDER` instructs (`agent_hooks.py:82`) and what the answer contract exists to support: `answer.grade` reports `decision_grade` / `advisory` / `inconclusive` per question, so the graph tells the agent when not to trust it. Any doctrine sentence that lets an agent skip on freshness grounds duplicates that judgement badly and unconditionally.
+
+**The current text violates this.** `init.py:57`, shipped verbatim into every consumer (e.g. `aramid/GRAPHITE.md:34`):
+
+> Run `python -m graphite build .` (skip if a Graphite daemon/watcher keeps this repo fresh; verify with `python -m graphite check .`)
+
+It places "skip" beside "a daemon keeps this repo fresh." Scoped to the build step, it reads as a general licence, and it contradicts `PRE_TOOL_REMINDER` directly. Operator-reported: agents have declined to use the graph, citing that graphite is supervising the repo.
+
+**This design must not replace one excuse with a better one.** An earlier draft of this spec proposed "a just-opened repo may still be building" — which is a *more* defensible reason to skip, and would have made the problem worse. Rejected.
+
+Replacement wording, which states the refresh mechanism without offering an out:
+
+> This repo's graph refreshes when you open it in a coding agent. Always query the graph for relationship questions — it grades its own answers, so trust `answer.grade` rather than guessing whether the graph is current. If an answer comes back `inconclusive` or insufficient, then fall back to search and say that you did. Run `python -m graphite build .` yourself only when `graphite check .` reports the graph stale.
+
+Two rules follow for all shipped doctrine:
+- The words "skip" and "daemon"/"supervising"/"fresh" never appear in the same instruction.
+- Rebuilding is conditioned on an *observation* (`check` says stale), never on an assumption about who is maintaining the graph.
 
 `DOC_VERSION` 9 → 10; re-init the five managed consumers.
+
+This is a live defect in shipped consumer docs, independent of activation scoping, and is tracked separately so it can be fixed without waiting for this design.
 
 ## Error handling
 
