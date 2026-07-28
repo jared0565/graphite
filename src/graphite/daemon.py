@@ -14,6 +14,8 @@ from typing import Callable
 
 from . import activation
 from .config import Config
+from .engine_identity import EngineIdentityError, engine_identity
+from .freshness import graph_engine_changed
 from .incident_ledger import record_incident, repo_ledger_dir
 from .io import atomic_write_json
 from .provider_observer import ProviderObservationSummary
@@ -618,6 +620,37 @@ def run_daemon(
                 if project not in discovered:
                     logger.event("project_deactivated", project=str(project))
                     del states[project]
+
+            # An engine upgrade invalidates every supervised graph at once, but
+            # the file-diff path cannot see it: a repo whose files are untouched
+            # was never rebuilt on engine grounds (#18). Activation transitions
+            # bound the window -- they force a full rebuild -- but a repo held
+            # continuously open across an upgrade never transitions.
+            #
+            # Only correct because #21 keys the extraction cache on engine
+            # identity. Before that, this rebuild would have served the old
+            # engine's cached extraction and rewritten the recorded fingerprint
+            # to the new value, so `check` would report fresh -- automating the
+            # self-concealing failure rather than fixing it.
+            #
+            # Computed once per discovery cycle, not per project: it hashes the
+            # packaged engine files, and the discovery interval is what
+            # rate-limits it.
+            try:
+                current_engine: dict[str, str] | None = engine_identity(cfg.cache_version)
+            except EngineIdentityError as exc:
+                logger.event("engine_identity_unavailable", error=str(exc))
+                current_engine = None
+            if current_engine is not None:
+                for project, state in states.items():
+                    if state.needs_initial_build:
+                        continue
+                    if graph_engine_changed(
+                        daemon_config_for_project(cfg, project, options), current_engine
+                    ):
+                        state.needs_initial_build = True
+                        logger.event("engine_changed", project=str(project))
+
             last_discovery = now
 
         builds_this_cycle = 0
