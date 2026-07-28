@@ -37,6 +37,7 @@ from .config import Config, default_projects_root
 from .context import build_context, format_context_markdown
 from .daemon import DaemonOptions, read_daemon_status, run_daemon
 from .daemon_health import HealthOptions, evaluate_daemon_health, format_health_text
+from . import buildlock
 from .doctor import format_doctor_text, run_doctor
 from .engine_identity import engine_identity
 from .export.html import to_html as export_html
@@ -522,7 +523,19 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 def cmd_build(args: argparse.Namespace) -> int:
     cfg = _config_from_args(args, canonical=True)
-    _build_project(Path(args.path).resolve(), cfg)
+    root = Path(args.path).resolve()
+
+    # A parent that already holds the lock (the daemon) sets this for its child,
+    # which would otherwise deadlock against its own parent.
+    if os.environ.get(buildlock.ENV_LOCK_HELD):
+        _build_project(root, cfg)
+        return 0
+
+    with buildlock.build_lock(cfg.cache_dir) as acquired:
+        if not acquired:
+            print("[graphite] build skipped: another build is already running for this repo")
+            return 0
+        _build_project(root, cfg)
     return 0
 
 
