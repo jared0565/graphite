@@ -239,7 +239,10 @@ def _build(
     entries: list[Any],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     cfg = cfg.canonical_graph()
-    cache = Cache(cfg.cache_dir, cfg.cache_version)
+    # `_scan` always populates manifest["engine"] or raises, so the fingerprint
+    # is guaranteed present here; a KeyError would be a loud programming error
+    # rather than the silent staleness of #21.
+    cache = Cache(cfg.cache_dir, cfg.cache_version, engine=manifest["engine"]["fingerprint"])
     start = time.time()
     extraction = extract_all(entries, cfg, cache)
     if extraction.errors:

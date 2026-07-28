@@ -10,8 +10,18 @@ from typing import Any
 class Cache:
     """Simple content-addressed cache on disk."""
 
-    def __init__(self, root: Path, version: str):
-        self.root = root / version
+    def __init__(self, root: Path, version: str, *, engine: str):
+        # Partitioned on engine identity as well as `cache_version` (#21).
+        # `engine_identity()` is strictly finer-grained -- it hashes the packaged
+        # engine files and takes `cache_version` as an input -- so keying on the
+        # version alone let an extraction change serve the previous engine's
+        # cached result while the graph's recorded fingerprint moved to the new
+        # value, which made `check` report the stale graph as fresh.
+        #
+        # `engine` is a required keyword rather than an optional one on purpose:
+        # a caller that forgets it must fail loudly, not silently fall back to a
+        # shared partition and reintroduce the defect.
+        self.root = root / f"{version}-{engine[:16]}"
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _key(self, *parts: str) -> str:
