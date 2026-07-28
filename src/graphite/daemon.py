@@ -344,6 +344,14 @@ def _build_command(cfg: Config, root: Path) -> tuple[list[str], dict[str, str]]:
     src_root = str(Path(__file__).resolve().parents[1])
     existing_pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = src_root if not existing_pythonpath else f"{src_root}{os.pathsep}{existing_pythonpath}"
+    # Mark this as a daemon-spawned build so the CLI activation backstop stays
+    # quiet. The child runs INSIDE the repo being supervised, so without this it
+    # would refresh that repo's activation marker on every build and the repo
+    # could never expire -- supervision would ratchet up and never release.
+    # NOTE: one extra key on the *filtered* env above. Never rebuild this from
+    # os.environ; the filtering is what keeps provider credentials out of a
+    # daemon child (test_daemon_child_build_has_no_provider_argv_or_environment).
+    env[activation.ENV_DAEMON_CHILD] = "1"
     return cmd, env
 
 

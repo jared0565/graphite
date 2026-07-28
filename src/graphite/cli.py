@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
+from . import activation
 from .analyze import analyze
 from .answer_contract import (
     ANSWER_SCHEMA,
@@ -131,6 +132,21 @@ _CANONICAL_COMMANDS = frozenset(
 # Hook endpoints are inference-free like canonical commands but are not part of
 # the agent-facing query surface, so they stay out of `capabilities` output.
 _INFERENCE_FREE_EXTRA_COMMANDS = frozenset({"agent-hook", "savings"})
+# Commands that must NOT register the working directory as an open repo:
+# the daemon supervises rather than edits, and the hook endpoint records
+# activation itself using the real agent name instead of "cli".
+_ACTIVATION_EXEMPT_COMMANDS = frozenset({
+    "daemon",
+    "daemon-status",
+    "daemon-health",
+    "daemon-install-windows",
+    "daemon-task-status",
+    "daemon-uninstall-windows",
+    "daemon-install-startup-windows",
+    "daemon-startup-status",
+    "daemon-uninstall-startup-windows",
+    "agent-hook",
+})
 _LLM_GATED_COMMANDS = _CANONICAL_COMMANDS | _INFERENCE_FREE_EXTRA_COMMANDS
 _LEGACY_LLM_ARGUMENTS = (
     "llm_provider",
@@ -2481,6 +2497,16 @@ def main(argv: list[str] | None = None) -> int:
     ):
         print(CANONICAL_ENRICHMENT_MIGRATION_MESSAGE, file=sys.stderr)
         return 2
+
+    # Universal activation backstop. An agent graphite cannot hook -- Codex,
+    # Gemini -- still registers its repo the moment it uses graphite at all,
+    # which is what keeps coverage from depending on per-platform integrations.
+    # `daemon` is excluded because a supervisor is not an editing session;
+    # `agent-hook` because it marks activation itself with the real agent name.
+    # Daemon-spawned builds are excluded inside mark_active via
+    # GRAPHITE_DAEMON_CHILD, without which activation would never expire.
+    if args.command not in _ACTIVATION_EXEMPT_COMMANDS:
+        activation.mark_active(Path.cwd(), "cli")
 
     try:
         return int(args.func(args) or 0)
