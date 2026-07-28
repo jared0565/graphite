@@ -85,6 +85,56 @@ def test_interactive_cli_invocation_marks_the_repo_active(
     assert [r.root for r in activation.read_active()] == [repo.resolve()]
 
 
+def test_backstop_ignores_graphite_scratch_workspaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`graphite doctor` builds throwaway probe workspaces under the system temp
+    dir and runs the CLI inside them. Found live: the real registry held 14
+    `graphite-doctor-*` markers and none of the three actually-open repos.
+
+    They self-heal once the directory is deleted (read_active drops roots that
+    no longer exist), but while a probe is running the daemon would supervise
+    and build a scratch directory nobody opened.
+
+    Opportunistic marking is conservative; explicit activation (`graphite
+    activate`, agent hooks) is trusted and still honoured -- see the test below.
+    """
+    import tempfile
+
+    from graphite.cli import main
+
+    scratch = Path(tempfile.mkdtemp(prefix="graphite-doctor-"))
+    try:
+        (scratch / "src").mkdir()
+        (scratch / "src" / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+        monkeypatch.chdir(scratch)
+
+        main(["build", "."])
+
+        assert activation.read_active() == []
+    finally:
+        import shutil
+
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_explicit_activation_of_a_temp_path_is_still_honoured(tmp_path: Path) -> None:
+    """The temp-dir rule guards the opportunistic backstop only. If a human or
+    an editor explicitly says a path is open, believe them."""
+    import tempfile
+
+    from graphite.cli import main
+
+    scratch = Path(tempfile.mkdtemp(prefix="graphite-explicit-"))
+    try:
+        assert main(["activate", str(scratch), "--agent", "editor"]) == 0
+        assert [r.root for r in activation.read_active()] == [scratch.resolve()]
+    finally:
+        import shutil
+
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def test_daemon_subcommand_does_not_mark_the_repo_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

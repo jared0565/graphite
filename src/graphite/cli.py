@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 import time
 import unicodedata
 from collections import deque
@@ -151,6 +152,10 @@ _ACTIVATION_EXEMPT_COMMANDS = frozenset({
     # for an editor task is whatever directory the editor happened to launch in.
     "activate",
 })
+# Directory prefixes graphite uses for its own throwaway workspaces. Defined in
+# probe_workspace.py and typescript_activation.py; a repo under one of these is
+# graphite's scratch space, never something a person opened.
+_SCRATCH_WORKSPACE_PREFIXES = ("graphite-doctor-", "graphite-typescript-")
 _LLM_GATED_COMMANDS = _CANONICAL_COMMANDS | _INFERENCE_FREE_EXTRA_COMMANDS
 _LEGACY_LLM_ARGUMENTS = (
     "llm_provider",
@@ -1089,6 +1094,34 @@ def cmd_savings(args: argparse.Namespace) -> int:
             print(f"  - {cmd_name}: {bucket['count']} calls, est. {bucket_compact}")
     print(f"[graphite] methodology: {payload['methodology']}")
     return 0
+
+
+def _is_scratch_workspace(path: Path) -> bool:
+    """True inside a workspace graphite created for its own probing.
+
+    `graphite doctor` builds probe workspaces and runs the CLI inside them;
+    without this the opportunistic backstop marks each one as an open repo and
+    the daemon supervises a scratch directory nobody opened. Found by inspecting
+    the live registry, which held 14 `graphite-doctor-*` markers and none of the
+    repositories that were actually open.
+
+    Matches graphite's own prefixes rather than "anywhere under the system temp
+    dir": a temp checkout can be a repo someone is genuinely working in, and
+    over-blocking would silently stop supervising it. These prefixes are ours --
+    see `probe_workspace.py` and `typescript_activation.py`.
+
+    Guards the *opportunistic* path only. Explicit activation -- `graphite
+    activate`, agent hooks -- is trusted and still honoured: if a human or an
+    editor says a path is open, that is a statement of fact, not an inference.
+    """
+    try:
+        resolved = path.resolve()
+    except Exception:
+        return False
+    candidates = (resolved, *resolved.parents)
+    return any(
+        part.name.startswith(_SCRATCH_WORKSPACE_PREFIXES) for part in candidates
+    )
 
 
 def cmd_activate(args: argparse.Namespace) -> int:
@@ -2539,7 +2572,7 @@ def main(argv: list[str] | None = None) -> int:
     # `agent-hook` because it marks activation itself with the real agent name.
     # Daemon-spawned builds are excluded inside mark_active via
     # GRAPHITE_DAEMON_CHILD, without which activation would never expire.
-    if args.command not in _ACTIVATION_EXEMPT_COMMANDS:
+    if args.command not in _ACTIVATION_EXEMPT_COMMANDS and not _is_scratch_workspace(Path.cwd()):
         activation.mark_active(Path.cwd(), "cli")
 
     try:
