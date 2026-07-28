@@ -61,6 +61,7 @@ synchronous `post-commit` would put 15s on every commit in `app`.
 | `graphite init` | extend | Writes hooks, sets `core.hooksPath`, migrates existing hooks |
 | `graphite build --detach` | new flag | Re-spawns detached, returns immediately |
 | `buildlock.py` | new module | Repo build lock, used by hook builds **and** the daemon |
+| `graphite hooks install` | new | Installs the guarded template into git's `init.templateDir` so future clones self-arm |
 | `graphite doctor` | extend | "Configured but not enforced" fresh-clone probe |
 
 ### Flow
@@ -77,6 +78,29 @@ git commit
 The daemon is unchanged except that it acquires the same lock. That is what
 makes "hooks baseline, daemon accelerates" true rather than two systems
 fighting: whoever arrives first builds, the other no-ops.
+
+### Shim rendering: constraints taken from aramid
+
+`aramid/hooks.py` is the reference implementation on this machine and encodes
+Windows correctness lessons that are not obvious. Graphite follows all of them:
+
+- **Render shim bytes with `\n` only, and write via `Path.write_bytes`.** Never
+  a text-mode write on Windows. Git-for-Windows' bundled `sh` chokes on a bare
+  CR in the exec line, and a text-mode write silently reintroduces CRLF.
+- **Never invoke a bare `python`.** Bake the blessed interpreter's absolute
+  path, converted to Git-for-Windows `/c/...` form (aramid's `win_sh_path`) and
+  double-quoted, with a `command -v py` / `py -3` fallback for when that path
+  goes stale. This machine has up to five different `python`s visible to hook
+  `sh`, including the WindowsApps store stub.
+- **Bake no chaining state into the rendered bytes.** The shim always includes
+  the chain-check block; `install()` alone decides whether the
+  `<hook>.graphite-chained` sibling exists, via rename-on-chain. This is what
+  makes regeneration idempotent.
+- **Resolve the hook directory through `core.hooksPath`**, with a relative value
+  resolved against the repo root (aramid's `hooks_dir`).
+
+Marker pair, mirroring the existing managed-doc convention:
+`# >>> graphite managed >>>` / `# <<< graphite managed <<<`.
 
 ### Detach belongs in Python, not the shell
 
@@ -171,11 +195,40 @@ build cannot trigger a commit that triggers a build.
 
 ## The fresh-clone hole
 
-Git never runs hooks from a fresh clone — a security boundary, not an oversight.
-So "clone it and it works with zero steps" is unachievable by any design. The
-honest framing is **one command per clone, then it works by itself** — that
-command being `graphite init .`, which sets `core.hooksPath` and marks the
-committed hooks executable.
+`.git/hooks` is not version-controlled, so cloning an onboarded repo yields the
+committed config with no hooks: configured, but silently not enforced.
+
+**An earlier draft of this spec claimed "zero steps is unachievable by any
+design." That was wrong.** aramid closes the hole with git's
+`init.templateDir` (`aramid/hooks.py:render_template_shim`, `template_dir`):
+git copies template hooks into every **new** `git init` / `git clone`, so
+future clones self-arm with no per-clone step at all.
+
+Graphite adopts the same three-layer approach:
+
+| Layer | Covers | Cost |
+|---|---|---|
+| Committed `.githooks/` | Reviewable hook source, travels with the repo | none |
+| `graphite init` sets `core.hooksPath` | **Existing** clones | one command per existing clone |
+| `init.templateDir` (`graphite hooks install`) | **Future** clones on this machine | one command per machine, ever |
+
+The template variant needs an **opt-in guard**, because git copies it into every
+new repo including ones nobody onboarded. `GRAPHITE.md` at the repo root is
+graphite's proof-of-onboarding — it is committed, so a fresh clone of an
+onboarded repo has it, which is precisely what closes the hole:
+
+```sh
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -n "$ROOT" ] || exit 0
+[ -f "$ROOT/GRAPHITE.md" ] || exit 0
+```
+
+The guard **fails open** on every ambiguity — no git, not a repo, no
+`GRAPHITE.md` — because a machine-wide template hook that errors would break
+unrelated repos.
+
+The `doctor` probe below remains necessary regardless: it covers clones made
+before the template was installed.
 
 That step is exactly the thing people forget, so it needs a diagnostic. aramid
 solves this with `probe_enforcement` (`commands/doctor.py:488`), which reports
