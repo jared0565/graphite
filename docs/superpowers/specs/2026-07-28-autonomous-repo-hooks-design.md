@@ -102,6 +102,26 @@ Windows correctness lessons that are not obvious. Graphite follows all of them:
 Marker pair, mirroring the existing managed-doc convention:
 `# >>> graphite managed >>>` / `# <<< graphite managed <<<`.
 
+### Spawn cost — measured, and it changes the trampoline
+
+Measured after Plan A landed (2026-07-28): `graphite build . --detach` returns
+in **~1741ms**. That is not the build — the detached child finishes ~1s later,
+independently. It is import cost:
+
+| | |
+|---|---|
+| bare `python -c pass` | 225 ms |
+| `import graphite.cli` | 1469 ms |
+
+So a naive trampoline calling `python -m graphite build . --detach` adds ~1.7s
+to **every commit** purely to spawn, which contradicts this design's "commits
+stay instant" premise.
+
+**Plan B must not have the hook import the graphite CLI.** The parent's only job
+is to spawn; the heavy import belongs in the child. Either add a minimal entry
+point that imports nothing beyond `subprocess`, or have the trampoline inline a
+one-line `python -c` spawn. Target the 225ms floor, not 1741ms.
+
 ### Detach belongs in Python, not the shell
 
 Windows git hooks run under Git Bash, where backgrounding is unreliable, and
