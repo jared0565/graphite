@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from . import activation
+from . import activation, buildlock
 from .config import Config
 from .engine_identity import EngineIdentityError, engine_identity
 from .freshness import graph_engine_changed
@@ -354,6 +354,9 @@ def _build_command(cfg: Config, root: Path) -> tuple[list[str], dict[str, str]]:
     # os.environ; the filtering is what keeps provider credentials out of a
     # daemon child (test_daemon_child_build_has_no_provider_argv_or_environment).
     env[activation.ENV_DAEMON_CHILD] = "1"
+    # The cycle already holds the repo build lock; without this the child would
+    # contend with its own parent and skip the build it was spawned to do.
+    env[buildlock.ENV_LOCK_HELD] = "1"
     return cmd, env
 
 
@@ -689,18 +692,29 @@ def run_daemon(
                 )
                 continue
 
-            was_initial_build = state.needs_initial_build
-            state.last_build_started_at = utc_now()
-            logger.event("build_started", project=str(project), change=summarize_change(change))
-            result = build_project(project, project_cfg, options.build_timeout_seconds)
-            _record_build_result(state, change, result)
-            if result.success:
-                if not was_initial_build:
-                    state.snapshot = current
-                logger.event("build_succeeded", project=str(project), seconds=state.last_build_seconds)
-            else:
-                logger.event("build_failed", project=str(project), seconds=state.last_build_seconds, error=state.last_error)
-            builds_this_cycle += 1
+            with buildlock.build_lock(project_cfg.cache_dir) as acquired:
+                if not acquired:
+                    # Another builder (a git hook, or a manual `graphite build`)
+                    # owns this repo right now. Deliberately NOT recorded as a
+                    # failure: _record_build_result would set last_error and
+                    # write a ledger incident, and daemon_health counts any
+                    # project with last_error as failing. Retry next cycle --
+                    # needs_initial_build is intentionally left untouched.
+                    logger.event("build_skipped_locked", project=str(project))
+                    continue
+
+                was_initial_build = state.needs_initial_build
+                state.last_build_started_at = utc_now()
+                logger.event("build_started", project=str(project), change=summarize_change(change))
+                result = build_project(project, project_cfg, options.build_timeout_seconds)
+                _record_build_result(state, change, result)
+                if result.success:
+                    if not was_initial_build:
+                        state.snapshot = current
+                    logger.event("build_succeeded", project=str(project), seconds=state.last_build_seconds)
+                else:
+                    logger.event("build_failed", project=str(project), seconds=state.last_build_seconds, error=state.last_error)
+                builds_this_cycle += 1
 
         last_status = _write_status(
             state_dir,

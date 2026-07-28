@@ -1,4 +1,4 @@
-<!-- graphite:managed version=9 -->
+<!-- graphite:managed version=10 -->
 # Graphite Development Context
 
 Graphite is the shared local code graph for this project. Codex, Claude Code, Gemini CLI, Antigravity, Visual Studio, and other coding agents should use the same graph instead of rebuilding separate mental maps.
@@ -31,9 +31,14 @@ Before non-trivial code changes:
 
 After edits:
 
-1. Run `python -m graphite build .` (skip if a Graphite daemon/watcher keeps this repo fresh; verify with `python -m graphite check .`)
+1. Run `python -m graphite build .` when `python -m graphite check .` reports the graph stale. Otherwise this repo's graph refreshes on its own while it is open in a coding agent.
 2. Run relevant tests, typechecks, or validation commands.
 3. Do not edit `graph-out/` manually.
+
+Graph freshness is never a reason to avoid the graph. Always query it for
+relationship questions: every answer carries its own `answer.grade`, so trust
+that rather than guessing whether the graph is current. If an answer comes back
+`inconclusive` or insufficient, fall back to search and say that you did.
 
 ## Canonical Graph Isolation
 
