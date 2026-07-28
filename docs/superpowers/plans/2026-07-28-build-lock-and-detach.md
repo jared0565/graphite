@@ -417,19 +417,32 @@ git commit -m "feat(build): acquire the repo build lock, skip cleanly when held"
 ### Task 3: Daemon acquires the lock before spawning
 
 **Files:**
-- Modify: `src/graphite/daemon.py` (`run_graphite_build` at `daemon.py:361`, and `_build_command`'s env at `daemon.py:354`)
+- Modify: `src/graphite/daemon.py` (the per-project build block at `daemon.py:690-696`, and `_build_command`'s env at `daemon.py:354`)
 - Test: `tests/test_daemon_build_lock.py`
 
 **Interfaces:**
 - Consumes: `graphite.buildlock.build_lock`, `ENV_LOCK_HELD`.
-- Produces: `run_graphite_build` returns `BuildResult(success=False, returncode=None, error="build_lock_held")` when the lock is held, without spawning.
+- Produces: no signature changes. A locked project is skipped for the cycle and produces **no `BuildResult` at all**.
 
-**Naming trap — read before editing.** `build_project` is NOT a function. It is
-the *injectable parameter* on `run_daemon` (`daemon.py:564`,
-`build_project: BuildProject = run_graphite_build`), which tests replace with a
-fake. The real implementation you are modifying is **`run_graphite_build`**.
-Putting the lock in the parameter's call site (`daemon.py:695`) instead would
-mean every test that injects a fake builder also acquires a real file lock.
+**A lock skip must NOT look like a build failure.** This is the whole design of
+this task, and the obvious implementation gets it wrong.
+
+Returning `BuildResult(success=False, ...)` from the builder would route the skip
+straight into the failure path at `daemon.py:547-550`, which increments
+`failure_count`, sets `last_error`, **and writes an incident to the ledger**.
+`daemon_health` then counts any project with `last_error is not None` as failing
+(`daemon_health.py:403`) and emits `project_failing`. Once git hooks contend with
+the daemon routinely, health would sit permanently degraded and the ledger would
+fill with non-incidents.
+
+So the lock is acquired at the **daemon cycle level**, before any build is
+attempted or recorded — not inside the builder.
+
+**Naming trap.** `build_project` is NOT a function; it is the *injectable
+parameter* on `run_daemon` (`daemon.py:564`, `build_project: BuildProject =
+run_graphite_build`) that tests replace with a fake. Acquiring the lock around
+its call site is correct here precisely because it leaves the injected fake
+alone — the skip decision belongs to the daemon, not the builder.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -441,43 +454,88 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from graphite import buildlock
+from graphite import activation, buildlock
 from graphite.config import Config
-from graphite.daemon import run_graphite_build
+from graphite.daemon import BuildResult, DaemonOptions, run_daemon
 
 
-def test_daemon_build_is_refused_while_the_lock_is_held(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    (repo / "src").mkdir(parents=True)
-    (repo / "src" / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
-    cfg = Config(cache_dir=repo / ".cache" / "graphite", output_dir=repo / "graph-out")
+def _seed(tmp_path: Path) -> Path:
+    project = tmp_path / "alpha"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "index.ts").write_text("export const a = 1;\n", encoding="utf-8")
+    (project / "package.json").write_text("{}\n", encoding="utf-8")
+    activation.mark_active(project)
+    return project
 
-    with buildlock.build_lock(cfg.cache_dir) as held:
+
+def _run(tmp_path: Path) -> tuple[list[Path], dict]:
+    builds: list[Path] = []
+
+    def fake_build(root: Path, cfg: Config, timeout: float) -> BuildResult:
+        builds.append(root)
+        return BuildResult(success=True, returncode=0, duration_seconds=0.01, stdout="ok")
+
+    status = run_daemon(
+        tmp_path,
+        Config(),
+        DaemonOptions(
+            once=True,
+            debounce_seconds=0,
+            max_builds_per_cycle=10,
+            state_dir=tmp_path / "state",
+        ),
+        build_project=fake_build,
+    )
+    return builds, status
+
+
+def test_daemon_skips_a_locked_project_without_building(tmp_path: Path) -> None:
+    project = _seed(tmp_path)
+    cache = project / ".cache" / "graphite"
+
+    with buildlock.build_lock(cache) as held:
         assert held is True
-        result = run_graphite_build(repo, cfg, 30.0)
+        builds, _ = _run(tmp_path)
 
-    assert result.success is False
-    assert result.error == "build_lock_held"
-    assert not (repo / "graph-out" / "graph.json").exists(), "daemon built despite the lock"
+    assert builds == [], f"daemon built despite the lock: {builds}"
 
 
-def test_daemon_build_runs_when_the_lock_is_free(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    (repo / "src").mkdir(parents=True)
-    (repo / "src" / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
-    cfg = Config(cache_dir=repo / ".cache" / "graphite", output_dir=repo / "graph-out")
+def test_a_lock_skip_is_not_recorded_as_a_failure(tmp_path: Path) -> None:
+    """The point of this task. A skip must not look like a broken build.
 
-    result = run_graphite_build(repo, cfg, 120.0)
+    A non-success BuildResult increments failure_count, sets last_error and
+    writes a ledger incident (daemon.py:547-550); daemon_health then counts any
+    project with last_error as failing (daemon_health.py:403). Routine lock
+    contention would degrade health permanently.
+    """
+    project = _seed(tmp_path)
+    cache = project / ".cache" / "graphite"
 
-    assert result.success is True, f"build failed: {result.error} {result.stderr}"
-    assert (repo / "graph-out" / "graph.json").exists()
-    assert not buildlock.lock_path(cfg.cache_dir).exists(), "daemon leaked the lock"
+    with buildlock.build_lock(cache) as held:
+        assert held is True
+        _, status = _run(tmp_path)
+
+    entry = next(p for p in status["projects"] if Path(p["root"]) == project)
+    assert entry["failure_count"] == 0, "lock skip counted as a build failure"
+    assert entry["last_error"] is None, "lock skip set last_error, which health reads as failing"
+    assert entry["build_count"] == 0, "lock skip counted as a build"
+    assert status["status"] == "ok", f"lock skip degraded daemon health: {status['status']}"
+
+
+def test_daemon_builds_normally_when_the_lock_is_free(tmp_path: Path) -> None:
+    project = _seed(tmp_path)
+
+    builds, status = _run(tmp_path)
+
+    assert builds == [project]
+    assert not buildlock.lock_path(project / ".cache" / "graphite").exists(), "daemon leaked the lock"
+    assert status["status"] == "ok"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_daemon_build_lock.py -q`
-Expected: `test_daemon_build_is_refused_while_the_lock_is_held` FAILS — `result.success is True` and `graph.json` exists.
+Expected: `test_daemon_skips_a_locked_project_without_building` FAILS with `builds == [project]` — the daemon builds straight through the held lock.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -495,21 +553,40 @@ env[buildlock.ENV_LOCK_HELD] = "1"
 
 **Add a key to the existing filtered `env` dict — never rebuild `env` from `os.environ`.** The comment above that line spells out why: the filtering is what keeps provider credentials out of a daemon child, guarded by `test_daemon_child_build_has_no_provider_argv_or_environment`.
 
-Wrap the spawn in `run_graphite_build`. Immediately inside the function, before the existing `cmd, env = _build_command(cfg, root)` line:
+Now guard the build at the **cycle level**, in `run_daemon`. The existing block reads:
 
 ```python
-    with buildlock.build_lock(cfg.cache_dir) as acquired:
-        if not acquired:
-            return BuildResult(
-                success=False,
-                returncode=None,
-                duration_seconds=0.0,
-                error="build_lock_held",
-            )
-        return _run_build_locked(root, cfg, timeout_seconds)
+            was_initial_build = state.needs_initial_build
+            state.last_build_started_at = utc_now()
+            logger.event("build_started", project=str(project), change=summarize_change(change))
+            result = build_project(project, project_cfg, options.build_timeout_seconds)
+            _record_build_result(state, change, result)
 ```
 
-Move the existing body of `run_graphite_build` (from `start = time.time()` / `cmd, env = _build_command(...)` through its final `return`) into a new module-level helper `_run_build_locked(root: Path, cfg: Config, timeout_seconds: float) -> BuildResult` with that body unchanged, and have `run_graphite_build` call `_run_build_locked(root, cfg, timeout_seconds)` inside the `with` block. Keep the argument order `(root, cfg, timeout_seconds)` to match `run_graphite_build` and the `BuildProject` protocol.
+Wrap it so a held lock skips *before* anything is marked started or recorded:
+
+```python
+            with buildlock.build_lock(project_cfg.cache_dir) as acquired:
+                if not acquired:
+                    # Another builder (a git hook, or a manual `graphite build`)
+                    # owns this repo right now. Deliberately NOT recorded as a
+                    # failure: _record_build_result would set last_error and
+                    # write a ledger incident, and daemon_health counts any
+                    # project with last_error as failing. Retry next cycle --
+                    # needs_initial_build is intentionally left untouched.
+                    logger.event("build_skipped_locked", project=str(project))
+                    continue
+
+                was_initial_build = state.needs_initial_build
+                state.last_build_started_at = utc_now()
+                logger.event("build_started", project=str(project), change=summarize_change(change))
+                result = build_project(project, project_cfg, options.build_timeout_seconds)
+                _record_build_result(state, change, result)
+```
+
+Everything after `_record_build_result` in that loop iteration stays where it is, inside the `with` block, so the lock is held for the whole build.
+
+Note `continue` is already the loop's idiom for "nothing to do this cycle" — see the no-changes path at `daemon.py:634`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -706,6 +783,7 @@ git commit -m "feat(build): --detach spawns a background build and returns immed
 | TTL 600s, no PID liveness check | 1 (`DEFAULT_TTL_SECONDS`, `_is_stale`) |
 | Held → exit 0 silently | 2 |
 | Daemon acquires the same lock | 3 |
+| A lock skip is not a failure (health/ledger stay clean) | 3 |
 | `build --detach`, platform logic in Python | 4 |
 | Detached child must not re-spawn | 4 (asserted explicitly) |
 
