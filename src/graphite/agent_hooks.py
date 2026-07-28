@@ -14,6 +14,7 @@ from typing import Any
 
 from . import savings as savings_model
 from . import usage_ledger
+from .activation import mark_active
 from .config import Config
 from .freshness import check_graph_freshness
 from .graph_io import load_validated_graph_bundle
@@ -38,6 +39,20 @@ def _payload_root(payload: dict[str, Any]) -> Path:
     return Path.cwd()
 
 
+def _activate(root: Path) -> None:
+    """Register this repo as open, so the daemon supervises it and leaves the
+    rest of the machine alone.
+
+    Guarded separately from the caller's own try/except: activation is
+    bookkeeping, and this module is fail-open by contract -- a broken registry
+    must never cost the agent its session context or its graph-first reminder.
+    """
+    try:
+        mark_active(root, "claude")
+    except Exception:
+        return
+
+
 def _freshness_within_budget(root: Path) -> str | None:
     """Return 'fresh' | 'stale' | None (unknown), never raising, within budget."""
     outcome: list[str | None] = [None]
@@ -59,6 +74,7 @@ def _freshness_within_budget(root: Path) -> str | None:
 def handle_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
     try:
         root = _payload_root(payload)
+        _activate(root)
         if (root / "graph-out" / "graph.json").is_file():
             freshness = _freshness_within_budget(root)
             if freshness == "stale":
@@ -197,6 +213,10 @@ def handle_stop(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Turn-end savings summary; silent unless graphite was used this turn."""
     try:
         root = _payload_root(payload)
+        # Stop fires once per assistant turn, which makes it the heartbeat that
+        # keeps a working session inside the activation TTL. It must run before
+        # the session_id guard below, which returns early on most turns.
+        _activate(root)
         session_id = str(payload.get("session_id") or "")
         if not session_id:
             return None
