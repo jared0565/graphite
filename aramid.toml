@@ -1,0 +1,4 @@
+# aramid repo config -- detected stack: python; package manager: none
+schema_version = 1
+semgrep_block_armed = false
+bake_started = "2026-07-28"
