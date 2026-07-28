@@ -38,6 +38,7 @@ from .context import build_context, format_context_markdown
 from .daemon import DaemonOptions, read_daemon_status, run_daemon
 from .daemon_health import HealthOptions, evaluate_daemon_health, format_health_text
 from . import buildlock
+from .detach import spawn_detached
 from .doctor import format_doctor_text, run_doctor
 from .engine_identity import engine_identity
 from .export.html import to_html as export_html
@@ -522,6 +523,15 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
+    if getattr(args, "detach", False):
+        root = Path(args.path).resolve()
+        # Deliberately omits --detach: the child must build, not re-spawn.
+        pid = spawn_detached(
+            [sys.executable, "-B", "-m", "graphite", "build", str(root)], root
+        )
+        print(f"[graphite] detached build started (pid {pid})")
+        return 0
+
     cfg = _config_from_args(args, canonical=True)
     root = Path(args.path).resolve()
 
@@ -2245,6 +2255,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p_build = sub.add_parser("build", help="Scan + extract + build graph + report")
     p_build.add_argument("path", help="Repository path")
+    p_build.add_argument(
+        "--detach",
+        action="store_true",
+        help="Start the build as a detached background process and return immediately",
+    )
     p_build.set_defaults(func=cmd_build)
 
     p_report = sub.add_parser("report", help="Alias for build")
