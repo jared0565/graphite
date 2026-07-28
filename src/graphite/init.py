@@ -1,6 +1,7 @@
 """Interactive project initialization for Graphite-aware AI coding agents."""
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +15,7 @@ from .io import atomic_write_text
 # test_template_change_requires_doc_version_bump pins the pairing. Files
 # written before versioning existed count as version 1 ("legacy unversioned")
 # and are never rewritten automatically.
-DOC_VERSION = 9
+DOC_VERSION = 10
 
 MANAGED_BEGIN = f"<!-- graphite:managed version={DOC_VERSION} -->"
 MANAGED_END = "<!-- graphite:managed-end -->"
@@ -54,9 +55,14 @@ Before non-trivial code changes:
 
 After edits:
 
-1. Run `python -m graphite build .` (skip if a Graphite daemon/watcher keeps this repo fresh; verify with `python -m graphite check .`)
+1. Run `python -m graphite build .` when `python -m graphite check .` reports the graph stale. Otherwise this repo's graph refreshes on its own while it is open in a coding agent.
 2. Run relevant tests, typechecks, or validation commands.
 3. Do not edit `graph-out/` manually.
+
+Graph freshness is never a reason to avoid the graph. Always query it for
+relationship questions: every answer carries its own `answer.grade`, so trust
+that rather than guessing whether the graph is current. If an answer comes back
+`inconclusive` or insufficient, fall back to search and say that you did.
 
 ## Canonical Graph Isolation
 
@@ -233,7 +239,12 @@ def init_project(
             instruction_paths.append(rel_path)
 
     if install_agent_hooks:
-        agent_hooks = ensure_claude_settings(root, mode=agent_hooks_mode)
+        # Strict is the default for every caller, not just the CLI. A setting
+        # that must be applied by sweeping repos decays as soon as a new repo
+        # appears, and the sweep itself rebuilds repos nobody has open. Strict
+        # denials are health-gated and re-arm on their own, so this cannot trap
+        # an agent behind a bad graph.
+        agent_hooks = ensure_claude_settings(root, mode=agent_hooks_mode or "strict")
         instruction_paths.append(Path(".claude/settings.json"))
     else:
         agent_hooks = {
@@ -243,6 +254,7 @@ def init_project(
             "mode": None,
         }
 
+    ensure_vscode_activation_task(root / ".vscode" / "tasks.json")
     allowlist = ensure_gitignore_allowlist(root / ".gitignore", instruction_paths)
     daemon = daemon_visibility(root, daemon_base=daemon_base)
     return InitResult(
@@ -255,6 +267,49 @@ def init_project(
         daemon=daemon,
         agent_hooks=agent_hooks,
     )
+
+
+VSCODE_ACTIVATION_LABEL = "graphite: activate repo"
+
+
+def ensure_vscode_activation_task(path: Path) -> dict[str, Any]:
+    """Register this repo as open when the folder is opened in an editor.
+
+    VS Code, Cursor and Antigravity are all VS Code-derived and honour
+    ``runOn: folderOpen``. This is what lets a repo edited outside an agent CLI
+    still be supervised, without the daemon scanning anything.
+
+    Existing tasks are preserved: destroying hand-written config is the #13
+    mistake, and a tasks.json is far more likely to be hand-written than not.
+    An unparseable file is left completely alone rather than replaced.
+    """
+    document: dict[str, Any] = {"version": "2.0.0", "tasks": []}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"path": str(path), "changed": False, "action": "skipped", "reason": "unparseable"}
+        if isinstance(loaded, dict):
+            document = loaded
+            document.setdefault("version", "2.0.0")
+            if not isinstance(document.get("tasks"), list):
+                document["tasks"] = []
+
+    existing = [t for t in document["tasks"] if isinstance(t, dict)]
+    kept = [t for t in existing if t.get("label") != VSCODE_ACTIVATION_LABEL]
+    kept.append(
+        {
+            "label": VSCODE_ACTIVATION_LABEL,
+            "type": "shell",
+            "command": "python -m graphite activate .",
+            "presentation": {"reveal": "never", "panel": "dedicated"},
+            "runOptions": {"runOn": "folderOpen"},
+        }
+    )
+    document["tasks"] = kept
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"path": str(path), "changed": True, "action": "written"}
 
 
 def _managed_block(body: str) -> str:

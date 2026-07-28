@@ -223,8 +223,8 @@ def test_template_change_requires_doc_version_bump() -> None:
         ).encode("utf-8")
     ).hexdigest()
     assert (init_module.DOC_VERSION, digest) == (
-        9,
-        "acdcc1d1ddba3837b714a91e35eecffbcd4a37bc62284cd1a0dd67c011130ccd",
+        10,
+        "9ccdb2228704d65ce7cd6a81ad1545d9c0a713f154f05284658cbf4bfef0953c",
     ), "template content changed: bump DOC_VERSION and update this pinned digest"
 
 
@@ -366,13 +366,15 @@ def test_init_installs_agent_hook_wiring_and_allowlists_it(tmp_path: Path) -> No
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
 
     assert result["agent_hooks"]["action"] == "created"
-    assert result["agent_hooks"]["mode"] == "remind"
+    # Strict is the default now: applying it by sweeping every repo decays as
+    # soon as a new repo appears, and the sweep rebuilds repos nobody opened.
+    assert result["agent_hooks"]["mode"] == "strict"
     commands = [
         h["command"]
         for entry in settings["hooks"]["PreToolUse"]
         for h in entry["hooks"]
     ]
-    assert "python -m graphite agent-hook pre-tool-use --mode remind" in commands
+    assert "python -m graphite agent-hook pre-tool-use --mode strict" in commands
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     lines = gitignore.splitlines()
     assert "!/.claude/" in lines
@@ -430,10 +432,10 @@ def test_init_wires_stop_hook(tmp_path: Path) -> None:
     assert commands == ["python -m graphite agent-hook stop"]
 
 
-def test_doc_version_is_9_and_template_documents_answer_contract():
+def test_doc_version_is_10_and_template_documents_answer_contract():
     from graphite import init as graphite_init
 
-    assert graphite_init.DOC_VERSION == 9
+    assert graphite_init.DOC_VERSION == 10
     template = graphite_init.GRAPHITE_DOC
     assert "decision_grade" in template
     assert "advisory" in template

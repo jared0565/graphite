@@ -131,7 +131,7 @@ _CANONICAL_COMMANDS = frozenset(
 )
 # Hook endpoints are inference-free like canonical commands but are not part of
 # the agent-facing query surface, so they stay out of `capabilities` output.
-_INFERENCE_FREE_EXTRA_COMMANDS = frozenset({"agent-hook", "savings"})
+_INFERENCE_FREE_EXTRA_COMMANDS = frozenset({"agent-hook", "savings", "activate"})
 # Commands that must NOT register the working directory as an open repo:
 # the daemon supervises rather than edits, and the hook endpoint records
 # activation itself using the real agent name instead of "cli".
@@ -146,6 +146,10 @@ _ACTIVATION_EXEMPT_COMMANDS = frozenset({
     "daemon-startup-status",
     "daemon-uninstall-startup-windows",
     "agent-hook",
+    # `activate` marks the path it was GIVEN, with the real agent name. Letting
+    # the backstop also fire would additionally mark the caller's cwd -- which
+    # for an editor task is whatever directory the editor happened to launch in.
+    "activate",
 })
 _LLM_GATED_COMMANDS = _CANONICAL_COMMANDS | _INFERENCE_FREE_EXTRA_COMMANDS
 _LEGACY_LLM_ARGUMENTS = (
@@ -745,7 +749,10 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
     result = bootstrap_project(root, daemon_base=daemon_base).to_dict()
     cfg = _project_scoped_config(args, root, canonical=True)
-    activation = _activate_typescript_for_onboarding(args, root, cfg)
+    # ts_activation, not activation: the module-level `activation` import is the
+    # repo-open registry, and shadowing it here would silently break any future
+    # use of it inside this function.
+    ts_activation = _activate_typescript_for_onboarding(args, root, cfg)
     build: dict[str, Any] = {"requested": not args.no_build, "ok": None}
     validation: dict[str, Any] = {"requested": not args.no_validate, "ok": None}
 
@@ -768,7 +775,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
     payload = {
         **result,
-        "typescript_activation": activation.to_dict(),
+        "typescript_activation": ts_activation.to_dict(),
         "build": build,
         "validation": validation,
     }
@@ -783,12 +790,12 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         daemon = result["daemon"]
         daemon_note = "listed" if daemon.get("project_listed") else "not listed yet"
         print(f"  - daemon: {daemon_note} ({daemon.get('status_path')})")
-        _print_typescript_activation(activation)
+        _print_typescript_activation(ts_activation)
         if build["requested"]:
             print(f"  - build: {'ok' if build['ok'] else 'failed'}")
         if validation["requested"]:
             print(f"  - validation: {'ok' if validation.get('ok') else 'failed'}")
-    return 1 if activation.fatal or validation.get("ok") is False else 0
+    return 1 if ts_activation.fatal or validation.get("ok") is False else 0
 
 
 
@@ -806,7 +813,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     requested = ["all"] if args.all else (args.platform or [])
     platforms = resolve_platform_selection(requested, interactive=interactive)
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
-    agent_hooks_mode = "strict" if args.strict else ("remind" if args.remind else None)
+    # Strict by default. A per-repo setting that must be applied by sweeping
+    # every repo decays the moment a new repo appears -- and the sweep itself
+    # rebuilds repos nobody has open, which the operator mandate forbids.
+    # Strict denials are health-gated in code: they fire only on a proven-healthy
+    # graph and re-arm automatically, so this cannot trap an agent behind a bad
+    # graph. `--remind` remains the opt-out.
+    agent_hooks_mode = "remind" if args.remind else "strict"
     result = init_project(
         root,
         platforms=platforms,
@@ -816,7 +829,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         adopt=args.adopt,
     ).to_dict()
     cfg = _project_scoped_config(args, root, canonical=True)
-    activation = _activate_typescript_for_onboarding(args, root, cfg)
+    # ts_activation, not activation: the module-level `activation` import is the
+    # repo-open registry, and shadowing it here would silently break any future
+    # use of it inside this function.
+    ts_activation = _activate_typescript_for_onboarding(args, root, cfg)
     build: dict[str, Any] = {"requested": not args.no_build, "ok": None}
     validation: dict[str, Any] = {"requested": not args.no_validate, "ok": None}
 
@@ -839,7 +855,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     payload = {
         **result,
-        "typescript_activation": activation.to_dict(),
+        "typescript_activation": ts_activation.to_dict(),
         "build": build,
         "validation": validation,
     }
@@ -865,12 +881,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         daemon = result["daemon"]
         daemon_note = "listed" if daemon.get("project_listed") else "not listed yet"
         print(f"  - daemon: {daemon_note} ({daemon.get('status_path')})")
-        _print_typescript_activation(activation)
+        _print_typescript_activation(ts_activation)
         if build["requested"]:
             print(f"  - build: {'ok' if build['ok'] else 'failed'}")
         if validation["requested"]:
             print(f"  - validation: {'ok' if validation.get('ok') else 'failed'}")
-    return 1 if activation.fatal or validation.get("ok") is False else 0
+    return 1 if ts_activation.fatal or validation.get("ok") is False else 0
 
 def cmd_audit_replacement(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
@@ -1072,6 +1088,16 @@ def cmd_savings(args: argparse.Namespace) -> int:
             bucket_compact = savings_model.format_compact(bucket["tokens_saved"], bucket["seconds_saved"])
             print(f"  - {cmd_name}: {bucket['count']} calls, est. {bucket_compact}")
     print(f"[graphite] methodology: {payload['methodology']}")
+    return 0
+
+
+def cmd_activate(args: argparse.Namespace) -> int:
+    """Register a repository as open in a coding agent.
+
+    Exists so editors that cannot run a graphite hook -- VS Code and its forks,
+    via a `runOn: folderOpen` task -- can still put a repo under supervision.
+    """
+    activation.mark_active(Path(args.path).resolve(), args.agent)
     return 0
 
 
@@ -2307,6 +2333,14 @@ def main(argv: list[str] | None = None) -> int:
     p_capabilities = sub.add_parser("capabilities", help="List supported operations, query verbs, and limits")
     p_capabilities.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_capabilities.set_defaults(func=cmd_capabilities)
+
+    p_activate = sub.add_parser(
+        "activate",
+        help="Mark a repository as open in a coding agent so the daemon supervises it",
+    )
+    p_activate.add_argument("path", nargs="?", default=".")
+    p_activate.add_argument("--agent", default="editor", help="Agent or editor name recorded in the marker")
+    p_activate.set_defaults(func=cmd_activate)
 
     p_agent_hook = sub.add_parser(
         "agent-hook",
