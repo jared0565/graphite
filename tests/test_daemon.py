@@ -365,41 +365,38 @@ def test_plain_workspace_is_not_reported_as_a_nested_repo(tmp_path: Path) -> Non
     assert nested_git_repos(tmp_path / "app") == []
 
 
-def test_daemon_health_warns_about_unsupervised_nested_repos(tmp_path: Path) -> None:
-    """The warning exists because a nested repo can appear in no other check.
+def test_nested_repo_is_supervised_once_opened(tmp_path: Path) -> None:
+    """Replaces test_daemon_health_warns_about_unsupervised_nested_repos (#6).
 
-    Also guards `_normalize_status`: that function is a strict whitelist, so a
-    new status field is silently dropped unless normalized explicitly -- which
-    would make this warning a no-op that still looks implemented.
+    That warning existed because discovery deliberately refused to descend into
+    a nested git repo, so such a repo could appear in no other check. Under
+    activation the supervised set comes from markers carrying absolute roots, so
+    nesting is irrelevant: a nested repo is supervised on exactly the same terms
+    as any other once it is opened. Warning about an unopened repo would fire
+    constantly and mean nothing, so the check is replaced by this one, which
+    asserts the property that made it unnecessary.
     """
-    import json
-    from datetime import datetime, timezone
+    parent = tmp_path / "app"
+    _write(parent / "package.json", "{}\n")
+    nested = parent / "worker"
+    _write(nested / "package.json", "{}\n")
+    _write(nested / "index.ts", "export const w = 1;\n")
+    activation.mark_active(nested)
 
-    from graphite.daemon_health import HealthOptions, evaluate_daemon_health
+    builds: list[Path] = []
 
-    state = tmp_path / ".graphite-daemon"
-    state.mkdir(parents=True, exist_ok=True)
-    now = datetime(2026, 7, 27, 12, 0, 0, tzinfo=timezone.utc)
-    (state / "status.json").write_text(json.dumps({
-        "status": "ok",
-        "updated_at": now.isoformat(),
-        "project_count": 1,
-        "projects": [],
-        "unsupervised_nested_repos": ["/projects/demo/worker"],
-    }), encoding="utf-8")
+    def fake_build(root: Path, _cfg: Config, _timeout: float) -> BuildResult:
+        builds.append(root)
+        return BuildResult(True, 0, 0.01)
 
-    report = evaluate_daemon_health(
+    run_daemon(
         tmp_path,
-        options=HealthOptions(require_process=False, require_startup=False),
-        now=now,
+        Config(),
+        DaemonOptions(once=True, debounce_seconds=0, state_dir=tmp_path / "state"),
+        build_project=fake_build,
     )
 
-    codes = {w["code"] for w in report["warnings"]}
-    assert "project_nested_repo_unsupervised" in codes, (
-        f"warning absent; got {codes} -- check _normalize_status kept the field"
-    )
-    assert any("/projects/demo/worker" in w["message"] for w in report["warnings"])
-    assert report["status"] != "ok", "an unsupervised nested repo must not read as healthy"
+    assert builds == [nested.resolve()], "a nested repo that is open must be supervised"
 
 
 def test_cycle_level_failure_records_an_incident(tmp_path: Path, monkeypatch) -> None:

@@ -221,18 +221,11 @@ def evaluate_daemon_health(
             "message": f"project not built recently: {project['root']}",
             "project": project,
         })
-    # A nested git repo is never discovered, so it can never appear in the two
-    # warnings above -- health would otherwise report ok while that repo's
-    # graph goes stale indefinitely (#6).
-    for root in status.get("unsupervised_nested_repos") or []:
-        _append_bounded(warnings, {
-            "code": "project_nested_repo_unsupervised",
-            "message": (
-                f"nested git repo is not supervised and its graph may be stale: {root} "
-                "-- build it directly or run the daemon on it"
-            ),
-            "project": {"root": root},
-        })
+    # The nested-repo warning (#6) is deliberately gone. Supervision follows
+    # activation markers, which carry absolute roots, so a nested repo is
+    # supervised on exactly the same terms as any other once it is opened --
+    # and an unopened repo being unsupervised is now correct rather than a
+    # defect worth warning about.
 
     process = {"checked": False}
     if opts.require_process:
@@ -526,17 +519,15 @@ def _normalize_status(
     # Bounded like every other field here: this dict is the non-leaking subset
     # health is allowed to classify on, so a new key must be normalized
     # explicitly or it is silently dropped (#6).
-    raw_nested = raw_status.get("unsupervised_nested_repos")
-    if isinstance(raw_nested, list):
-        nested = [
+    raw_active = raw_status.get("active_projects")
+    if isinstance(raw_active, list):
+        status["active_projects"] = [
             str(item)[:_MAX_ROOT_LENGTH]
-            for item in raw_nested[:_MAX_INPUT_PROJECTS]
+            for item in raw_active[:_MAX_INPUT_PROJECTS]
             if isinstance(item, str)
         ]
-        if nested:
-            status["unsupervised_nested_repos"] = nested
-    elif raw_nested is not None:
-        issues.append(_schema_issue("unsupervised_nested_repos"))
+    elif raw_active is not None:
+        issues.append(_schema_issue("active_projects"))
     raw_projects = raw_status.get("projects")
     valid_projects: list[dict[str, Any]] = []
     processed_count = 0
@@ -721,6 +712,11 @@ def _finalize(
         "status_path": str(status_path),
         "status_age_seconds": None if status_age_seconds is None else round(status_age_seconds, 3),
         "daemon_status": status.get("status") if status else None,
+        # The repos open in a coding agent -- the entire supervised set. Making
+        # it visible matters because the failure mode inverted: instead of
+        # building too much, graphite can now build nothing because activation
+        # never fired, and that is otherwise silent.
+        "active_projects": (status.get("active_projects") if status else None) or [],
         "summary": summary,
         "errors": errors,
         "warnings": warnings,
