@@ -1267,6 +1267,8 @@ answered a question this design deletes. Closes #6."
 
 - [ ] **Update issues:** #6 closed by Task 6, #22 closed by Task 5, #18 re-scoped (rebuild-on-open covers the engine-change case — record what remains). #21 is untouched and stays open.
 
+- [ ] **Re-install the daemon launcher — but only AFTER Task 2 merges.** The daemon was stopped and `daemon-uninstall-startup-windows` was run on 2026-07-28 so nothing could resurrect full supervision. Once Task 2 ships, the daemon is the component that builds active repos, so rebuild-on-open does nothing without it: markers get written and no one acts on them. Re-install with `graphite daemon-install-startup-windows F:\Projects` and confirm `active_projects` matches the repos actually open. **Ordering matters** — re-installing before Task 2 merges force-rebuilds all 32 projects.
+
 - [ ] **Known coverage gap to record, not fix here.** Open repos are currently detectable for Claude Code (per-project session directories under `~/.claude/projects/`) but **not for Codex** — a Codex-opened repo is invisible until it invokes graphite and trips the Task 3 backstop. Worth its own issue after this lands.
 
 ## Self-review notes

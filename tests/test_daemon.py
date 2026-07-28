@@ -5,6 +5,7 @@ import json
 import threading
 from pathlib import Path
 
+from graphite import activation
 from graphite.cli import main
 from graphite.config import Config
 from graphite.daemon import BuildResult, DaemonOptions, discover_projects, run_daemon
@@ -14,6 +15,13 @@ from graphite.provider_observer import ProviderObservationSummary
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _activate_only(project: Path) -> None:
+    """Make `project` the one and only open repository."""
+    for stale in activation.active_dir().glob("*.json"):
+        stale.unlink(missing_ok=True)
+    activation.mark_active(project)
 
 
 def test_discover_projects_stops_at_project_roots_and_skips_heavy_tool_directories(tmp_path: Path) -> None:
@@ -46,10 +54,13 @@ def test_discover_projects_honors_graphite_ignore_marker(tmp_path: Path) -> None
     assert projects == [tmp_path / "app"]
 
 
-def test_run_daemon_once_builds_discovered_projects_and_writes_status(tmp_path: Path) -> None:
+def test_run_daemon_once_builds_supervised_projects_and_writes_status(tmp_path: Path) -> None:
     project = tmp_path / "alpha"
     _write(project / "package.json", "{}\n")
     _write(project / "src" / "index.ts", "export const alpha = 1;\n")
+    # Supervision follows activation, not filesystem discovery: a repo nobody
+    # has open is left alone entirely.
+    activation.mark_active(project)
     state_dir = tmp_path / "state"
     builds: list[tuple[Path, Path, Path, float]] = []
 
@@ -87,6 +98,7 @@ def test_daemon_respects_max_builds_per_cycle(tmp_path: Path) -> None:
     for name in ("alpha", "beta"):
         _write(tmp_path / name / "package.json", "{}\n")
         _write(tmp_path / name / "src" / "index.ts", f"export const {name} = 1;\n")
+        activation.mark_active(tmp_path / name)
     builds: list[Path] = []
 
     def fake_build(root: Path, cfg: Config, timeout: float) -> BuildResult:
@@ -108,6 +120,7 @@ def test_daemon_respects_max_builds_per_cycle(tmp_path: Path) -> None:
 def test_daemon_forces_canonical_project_config(tmp_path: Path) -> None:
     project = tmp_path / "app"
     _write(project / "package.json", "{}\n")
+    activation.mark_active(project)
     observed: list[Config] = []
 
     def fake_build(_root: Path, cfg: Config, _timeout: float) -> BuildResult:
@@ -138,6 +151,7 @@ def test_daemon_forces_canonical_project_config(tmp_path: Path) -> None:
 def test_provider_observation_cannot_delay_or_consume_graph_build_budget(tmp_path: Path) -> None:
     project = tmp_path / "app"
     _write(project / "package.json", "{}\n")
+    activation.mark_active(project)
     entered = threading.Event()
     release = threading.Event()
     builds: list[Path] = []
@@ -176,6 +190,7 @@ def test_provider_observation_cannot_delay_or_consume_graph_build_budget(tmp_pat
 def test_daemon_status_contains_only_sanitized_provider_aggregates(tmp_path: Path) -> None:
     project = tmp_path / "app"
     _write(project / "package.json", "{}\n")
+    activation.mark_active(project)
     observed = threading.Event()
 
     def observer() -> ProviderObservationSummary:
@@ -227,6 +242,10 @@ def test_provider_lifecycle_state_cannot_change_canonical_daemon_graph(tmp_path:
         project = base / "app"
         _write(project / "package.json", "{}\n")
         _write(project / "src" / "index.ts", "export const value = 1;\n")
+        # Each iteration is an independent scenario, so only this case's repo is
+        # open. Without clearing, markers accumulate across iterations and the
+        # per-cycle build budget starves the later cases.
+        _activate_only(project)
         run_daemon(
             base,
             Config(),
@@ -253,6 +272,7 @@ def test_daemon_cli_once_builds_project_and_status_can_be_read(tmp_path: Path, c
     project = tmp_path / "app"
     _write(project / "package.json", "{}\n")
     _write(project / "src" / "math.ts", "export const add = (a: number, b: number) => a + b;\n")
+    activation.mark_active(project)
     state_dir = tmp_path / "state"
 
     result = main([
@@ -394,6 +414,7 @@ def test_cycle_level_failure_records_an_incident(tmp_path: Path, monkeypatch) ->
     project = tmp_path / "proj"
     _write(project / "package.json", "{}\n")
     _write(project / "src" / "a.ts", "export function a() { return 1; }\n")
+    activation.mark_active(project)
     state_dir = tmp_path / ".graphite-daemon"
 
     def boom(*_args, **_kwargs):

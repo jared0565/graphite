@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from . import activation
 from .config import Config
 from .incident_ledger import record_incident, repo_ledger_dir
 from .io import atomic_write_json
@@ -118,6 +119,7 @@ class DaemonOptions:
     max_cycles: int | None = None
     state_dir: Path | None = None
     log_max_bytes: int = 5_000_000
+    activation_ttl_seconds: float = 3600.0
 
     def validate(self) -> None:
         if self.scan_interval_seconds <= 0:
@@ -472,7 +474,6 @@ def _write_status(
     options: DaemonOptions,
     cycle: int,
     provider_lifecycle: dict[str, object] | None = None,
-    unsupervised_nested_repos: list[str] | None = None,
 ) -> dict[str, object]:
     projects = [state.to_status() for _, state in sorted(states.items(), key=lambda item: str(item[0]).lower())]
     healthy = sum(1 for state in states.values() if state.last_error is None and not state.needs_initial_build)
@@ -487,10 +488,9 @@ def _write_status(
         "healthy_projects": healthy,
         "failing_projects": failing,
         "pending_projects": pending,
-        # Real git repos nested inside a supervised project, which discovery
-        # deliberately does not descend into. Surfaced so daemon-health can
-        # warn instead of reporting healthy over a stale graph (#6).
-        "unsupervised_nested_repos": list(unsupervised_nested_repos or []),
+        # Repositories currently open in a coding agent -- the whole supervised
+        # set. An unopened repo is absent by construction, not by pruning.
+        "active_projects": sorted(str(root) for root in states),
         "limits": {
             "scan_interval_seconds": options.scan_interval_seconds,
             "discover_interval_seconds": options.discover_interval_seconds,
@@ -576,21 +576,20 @@ def run_daemon(
     states: dict[Path, ProjectRuntime] = {}
     last_discovery = 0.0
     last_status: dict[str, object] = {}
-    unsupervised_nested: list[str] = []
     cycle = 0
 
     while True:
         now = time.time()
         if cycle == 0 or now - last_discovery >= options.discover_interval_seconds:
-            projects = discover_projects(base, max_depth=options.max_depth, max_projects=options.max_projects)
+            # Supervision follows activation markers, not a filesystem walk: a
+            # repository nobody has open is never snapshotted and never built.
+            # Because markers carry absolute roots, a repo outside `base` -- or
+            # nested inside another repo -- is supervised on equal terms, which
+            # is what makes the nested-repo blindness (#6) structurally
+            # impossible rather than merely reported.
+            records = activation.read_active(ttl_seconds=options.activation_ttl_seconds)
+            projects = [record.root for record in records]
             discovered = set(projects)
-            unsupervised_nested = sorted({
-                str(nested)
-                for project in projects
-                for nested in nested_git_repos(project, max_depth=options.max_depth)
-            })
-            for nested in unsupervised_nested:
-                logger.event("nested_repo_unsupervised", project=nested)
             for project in projects:
                 if project not in states:
                     try:
@@ -604,12 +603,12 @@ def run_daemon(
                         snapshot=snap,
                         needs_initial_build=options.build_now,
                     )
-                    logger.event("project_discovered", project=str(project), file_count=len(snap))
+                    logger.event("project_activated", project=str(project), file_count=len(snap))
                 else:
                     states[project].last_seen_at = utc_now()
             for project in list(states):
                 if project not in discovered:
-                    logger.event("project_removed", project=str(project))
+                    logger.event("project_deactivated", project=str(project))
                     del states[project]
             last_discovery = now
 
@@ -669,7 +668,6 @@ def run_daemon(
             options,
             cycle,
             None if provider_worker is None else provider_worker.snapshot(),
-            unsupervised_nested_repos=unsupervised_nested,
         )
         if options.once:
             if provider_worker is not None:
