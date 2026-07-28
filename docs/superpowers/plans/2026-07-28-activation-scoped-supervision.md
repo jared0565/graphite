@@ -904,7 +904,9 @@ session inside the activation TTL."
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: `DOC_VERSION = 10`; init writes/merges `.vscode/tasks.json`.
+- Produces: `DOC_VERSION = 10`; init writes/merges `.vscode/tasks.json`; init defaults to `strict` hooks; init gains `--no-build`.
+
+**Why strict becomes the default and init stops rebuilding.** Both changes exist so this decision never requires visiting every repo again. A per-repo setting that must be applied by sweeping decays the moment a new repo appears — and the sweep itself violates the operator mandate, because `init` rebuilds. Changing the default means a repo inherits strict when it is next opened and re-inited, one repo at a time.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -941,6 +943,34 @@ def test_no_shipped_instruction_pairs_skip_with_supervision() -> None:
 
 def test_doc_version_is_10() -> None:
     assert init_mod.DOC_VERSION == 10
+
+
+def test_init_defaults_to_strict_hooks(tmp_path: Path) -> None:
+    """A setting that has to be applied by sweeping every repo decays the moment
+    a new repo appears -- and the sweep itself rebuilds repos nobody opened."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+
+    init_mod.init_repo(repo)
+
+    settings = (repo / ".claude" / "settings.json").read_text(encoding="utf-8")
+    assert "strict" in settings
+
+
+def test_no_build_leaves_an_existing_graph_untouched(tmp_path: Path) -> None:
+    """Re-initing for a DOC_VERSION bump must be a doc-only operation, so a repo
+    that is not open is never rebuilt (operator mandate)."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "main.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    init_mod.init_repo(repo)
+    graph = repo / "graph-out" / "graph.json"
+    before = graph.stat().st_mtime_ns
+
+    init_mod.init_repo(repo, build=False)
+
+    assert graph.stat().st_mtime_ns == before, "--no-build rebuilt the graph anyway"
+    assert (repo / "GRAPHITE.md").is_file()
 
 
 def test_vscode_task_activates_on_folder_open(tmp_path: Path) -> None:
@@ -1075,6 +1105,36 @@ and register it beside the other subparsers:
 
 Add `"activate"` to `_INFERENCE_FREE_EXTRA_COMMANDS` (`cli.py:133`) — it reads no model and must stay in the inference-free set.
 
+- [ ] **Step 6b: Make strict the default and add `--no-build`**
+
+In `src/graphite/cli.py:793`, the mode currently defaults to `remind`:
+
+```python
+    agent_hooks_mode = "strict" if args.strict else ("remind" if args.remind else None)
+```
+
+Invert it so strict is what a repo gets unless asked otherwise:
+
+```python
+    # Strict by default: a setting that must be applied by sweeping every repo
+    # decays as soon as a new repo appears. Strict denials are health-gated in
+    # code -- they fire only on a proven-healthy graph and re-arm automatically
+    # -- so this cannot trap an agent behind a bad graph.
+    agent_hooks_mode = "remind" if args.remind else "strict"
+```
+
+Keep `--strict` accepted (now a no-op that states intent) and keep `--remind` as the opt-out.
+
+Then add the doc-only path. Register the flag beside the other `init` arguments:
+
+```python
+    p_init.add_argument("--no-build", action="store_true", help="Write docs and hooks without building the graph")
+```
+
+and thread it to the init entry point as `build=not args.no_build`, defaulting to `True`. The entry point must skip both the build and the validation step when `build=False`, and report `build: skipped` so a rollout can be audited.
+
+> This exists so re-initing five consumers for a `DOC_VERSION` bump does not rebuild five repos nobody has open.
+
 - [ ] **Step 7: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_init_activation_doctrine.py -q`
@@ -1193,10 +1253,21 @@ answered a question this design deletes. Closes #6."
 
 ## Post-implementation (operator steps, not code)
 
-- [ ] Re-run `graphite init` on the five managed consumers; verify with a marker survey that each reached `version=10` — `init` exiting 0 does not prove a repo was updated (#13).
-- [ ] Restart the daemon once so it runs marker-reading code. **This is the last full-supervision restart.**
-- [ ] Confirm the mandate holds live: open one repo, wait a cycle, and check `graphite daemon-health --json` lists only that repo under `active_projects`.
-- [ ] Update issues: #6 closed by Task 6, #22 closed by Task 5, #18 re-scoped (rebuild-on-open covers the engine-change case; note what remains). #21 is untouched and stays open.
+**Operator mandate — binding on this rollout.** Graphite may act only on the repo currently open in a coding agent. No step here may build, scan, or re-init a repo that is not open. An earlier draft of this section said "re-run `graphite init` on the five managed consumers" and "restart the daemon once" — **both were violations**, because `init` rebuilds and a daemon restart force-rebuilds all 32 projects. They are replaced.
+
+- [ ] **Stop the old daemon before anything else.** Until Task 2 ships, the running daemon derives its supervised set from a filesystem walk and rebuilds repos nobody opened — it violates the mandate on every cycle. Operator action (the classifier blocks the agent from killing it):
+  ```
+  ! taskkill //F //PID <daemon-pid>
+  ```
+  Do **not** relaunch it from the Startup launcher until Task 2 is merged; a restart force-rebuilds everything.
+
+- [ ] **Do not sweep the consumers.** Each managed consumer picks up the `version=10` docs and its rebuild **when it is next opened**, via `graphite init --no-build` from the activation path or a deliberate re-init while that repo is the one being worked on. Audit opportunistically with a marker survey — `init` exiting 0 does not prove a repo was updated (#13).
+
+- [ ] **Confirm the mandate holds live.** With exactly one repo open, wait one cycle and check `graphite daemon-health --json`: `active_projects` must list that repo and nothing else. Compare against the ground truth — the live agent sessions. On 2026-07-28 that was 3 open repos (`graphite`, `aramid`, `pawscout-worker`) against 32 the daemon was tracking.
+
+- [ ] **Update issues:** #6 closed by Task 6, #22 closed by Task 5, #18 re-scoped (rebuild-on-open covers the engine-change case — record what remains). #21 is untouched and stays open.
+
+- [ ] **Known coverage gap to record, not fix here.** Open repos are currently detectable for Claude Code (per-project session directories under `~/.claude/projects/`) but **not for Codex** — a Codex-opened repo is invisible until it invokes graphite and trips the Task 3 backstop. Worth its own issue after this lands.
 
 ## Self-review notes
 
