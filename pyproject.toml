@@ -41,3 +41,12 @@ line-length = 100
 select = ["E4", "E7", "E9", "F"]
 [tool.hatch.build.targets.wheel.force-include]
 "src/graphite/ts_resolver.mjs" = "graphite/ts_resolver.mjs"
+
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so tests importing a top-level package
+# (`benchmarks/`, used by tests/test_routing_benchmark.py) resolve however
+# pytest is launched. `python -m pytest` prepends the CWD implicitly; the
+# `pytest` console script does not. Without this the suite passed one way and
+# died in collection the other -- which is how it reached aramid's pre-push
+# gate as a blocking "pytest exited 2" while a local run read green.
+pythonpath = ["."]

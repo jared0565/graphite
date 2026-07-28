@@ -2,3 +2,19 @@
 schema_version = 1
 semgrep_block_armed = false
 bake_started = "2026-07-28"
+
+# graphite's full suite takes ~432s, well past the stock 300s pre-push budget.
+# Both keys are raised together on purpose: `[tests].timeout_s` is capped by the
+# gate's wall-clock budget, so raising it alone would be unreachable (see
+# aramid's data/defaults.toml -- "Raise BOTH to allow a longer run"). Kept
+# timeout_s below pre_push so the two stay coherent and aramid's
+# incoherent-config notice does not fire.
+#
+# Deliberately NOT pointed at a fast subset via `[tests].command`: this repo's
+# gate is the last thing standing between a broken graph engine and five
+# consumer repos, so the whole suite gates the push even though it costs ~7min.
+[timeouts]
+pre_push = 900
+
+[tests]
+timeout_s = 780
