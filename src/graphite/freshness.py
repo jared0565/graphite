@@ -38,6 +38,30 @@ def manifest_map(manifest: dict[str, Any]) -> dict[str, str]:
     return {f["rel_path"]: f.get("hash", "") for f in manifest.get("files", []) if "rel_path" in f}
 
 
+def graph_engine_changed(cfg: Config, current_engine: dict[str, Any]) -> bool:
+    """True when a built graph records an engine identity other than the current one.
+
+    Narrow by design, for the daemon (#18): it reads the manifest and nothing
+    else. `check_graph_freshness` re-scans the whole repo, which is far too
+    expensive to run per supervised project on every discovery cycle.
+
+    A missing, unreadable, or engine-less manifest is deliberately NOT an engine
+    change. Those are the initial-build path's job; reporting them here would
+    queue a rebuild every cycle, forever, for any project without a graph.
+    """
+    manifest_path = cfg.output_dir / ".graphite_manifest.json"
+    try:
+        previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(previous, dict):
+        return False
+    recorded = previous.get("engine")
+    if not recorded:
+        return False
+    return bool(recorded != current_engine)
+
+
 def check_graph_freshness(
     root: Path,
     cfg: Config,
