@@ -501,7 +501,17 @@ def test_impact_finds_test_via_from_package_submodule_import(tmp_path):
     assert "tests/test_consumer.py" in result["likely_tests"]
 
 
-def test_cache_version_is_v10():
-    """Bumped by the arrow/constructor binding round: extraction output changed,
-    so every pre-existing graph must re-extract rather than serve a stale cache."""
-    assert Config().cache_version == "v10"
+def test_cache_version_is_v11():
+    """Bumped by the destructured-hook-binding round (#20): extraction output
+    changed, so every pre-existing graph must re-extract rather than serve a
+    stale cache.
+
+    The bump is REQUIRED, not belt-and-braces. `Cache.__init__` partitions on
+    `cache_version` alone (`self.root = root / version`); `engine_identity` is
+    recorded in the manifest for `graphite check` but is NOT part of the
+    extraction cache key. Verified the hard way on this round: with v10 left in
+    place, a full rebuild of a real repo served cached extraction and reported
+    byte-identical health (javascript calls 0.391) even though the engine
+    fingerprint had changed. Only after the bump did it re-extract (0.923).
+    """
+    assert Config().cache_version == "v11"

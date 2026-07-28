@@ -294,6 +294,25 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
         pending = _node(mid, "function", syn, rel_path, line, extra={"anonymous": True})
         return _Scope(mid, pending=pending)
 
+    # Destructured hook results: `const [v, setV] = useState(...)` binds a
+    # callable that no declaration names, so calls to it could never resolve
+    # (#20). Collected during the walk, materialized after it -- see the
+    # post-pass below for why the decision has to be deferred.
+    hook_bindings: dict[str, tuple[str | None, int]] = {}
+
+    def _record_hook_destructuring(node: Any, parent_id: str | None) -> None:
+        name = node.child_by_field_name("name")
+        value = node.child_by_field_name("value")
+        if name is None or value is None:
+            return
+        if name.type not in ("array_pattern", "object_pattern"):
+            return
+        if not _is_hook_call(value):
+            return
+        for ident, text in _pattern_identifiers(name):
+            if text and text not in hook_bindings:
+                hook_bindings[text] = (parent_id, _line(ident))
+
     # Walk for declarations and calls. ``parent_id`` is the nearest named
     # container (for ``contains`` edges); ``scope`` is the nearest function-like
     # scope (for ``calls`` attribution).
@@ -405,6 +424,9 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
                             edge["_member"] = method
                     result.edges.append(edge)
             walk_children(node, parent_id, scope)
+        elif t == "variable_declarator":
+            _record_hook_destructuring(node, parent_id)
+            walk_children(node, parent_id, scope)
         else:
             walk_children(node, parent_id, scope)
 
@@ -413,6 +435,24 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
             walk(child, parent_id, scope)
 
     walk(root, file_id, file_scope)
+    # Materialize a destructured hook binding ONLY if this file actually calls
+    # it. Deferring the decision is what keeps the node provably callable: the
+    # non-callable half of `[value, setValue]` never gets a `function` node, and
+    # destructured locals that nobody invokes do not inflate the node count.
+    # A name that resolved to an import is skipped too -- `_resolve_call` would
+    # have pointed the call at the exporting file, so `mid` is absent from
+    # `called` and the real cross-file target keeps the edge (#20).
+    if hook_bindings:
+        existing = {n["id"] for n in result.nodes}
+        called = {e["target"] for e in result.edges if e["relation"] == "calls"}
+        for bound_name, (parent_id, line) in hook_bindings.items():
+            mid = _make_id(file_id, bound_name)
+            if mid in existing or mid not in called:
+                continue
+            result.nodes.append(_node(mid, "function", bound_name, rel_path, line))
+            if parent_id:
+                result.edges.append(_edge(parent_id, mid, "contains", rel_path, line))
+            existing.add(mid)
     if source_index is not None:
         for edge in source_index.supplemental_ts_edges(rel_path):
             result.edges.append(
@@ -563,6 +603,66 @@ def _declarator_binding_name(node: Any) -> str | None:
     if name is None or name.type != "identifier" or not name.text:
         return None
     return name.text.decode("utf-8", errors="ignore") or None
+
+
+# React enforces that hooks are named `use<Capital>` -- it is a real language
+# convention (eslint-plugin-react-hooks keys on exactly this), not a guess.
+# Restricting destructure-binding to hook calls is deliberate: `const { readFile }
+# = require('fs')` destructures an EXTERNAL callable, and registering that as an
+# in-repo definition would be a bound-to-wrong-target error, which #7 established
+# is invisible to health. A missed binding is honestly counted; a false one is not.
+_HOOK_CALL_NAME = re.compile(r"^use[A-Z]\w*$")
+
+
+def _is_hook_call(value: Any) -> bool:
+    """True for `useThing(...)` / `React.useThing(...)`, including `useThing<T>(...)`.
+
+    The TS generic spelling matters: `useState<string>('')` is the dominant form
+    in typed React code, and keying on the plain `useState(` shape would miss
+    every TypeScript repo (#20).
+    """
+    if value is None or value.type != "call_expression":
+        return False
+    func = value.child_by_field_name("function")
+    if func is None or not func.text:
+        return False
+    name = func.text.decode("utf-8", errors="ignore").strip().rsplit(".", 1)[-1]
+    return bool(_HOOK_CALL_NAME.match(name))
+
+
+def _pattern_identifiers(pattern: Any) -> list[tuple[Any, str]]:
+    """Binding identifiers introduced by a destructuring pattern.
+
+    Covers `[a, b]`, `{ a }`, `{ a: b }`, defaults (`[a = 1]`) and nesting. Only
+    the *binding* side is collected -- an object pattern's key is a
+    `property_identifier`, so `{ a: b }` yields `b` and never `a`.
+    """
+    out: list[tuple[Any, str]] = []
+
+    def visit(node: Any) -> None:
+        for child in node.children:
+            ct = child.type
+            if ct in ("identifier", "shorthand_property_identifier_pattern"):
+                if child.text:
+                    out.append((child, child.text.decode("utf-8", errors="ignore")))
+            elif ct == "pair_pattern":
+                value = child.child_by_field_name("value")
+                if value is None:
+                    continue
+                if value.type == "identifier" and value.text:
+                    out.append((value, value.text.decode("utf-8", errors="ignore")))
+                elif value.type in ("array_pattern", "object_pattern"):
+                    visit(value)
+            elif ct == "assignment_pattern":
+                # `[a = fallback()]` -- take the binding, never the default expr.
+                left = child.child_by_field_name("left")
+                if left is not None and left.type == "identifier" and left.text:
+                    out.append((left, left.text.decode("utf-8", errors="ignore")))
+            elif ct in ("array_pattern", "object_pattern", "rest_pattern"):
+                visit(child)
+
+    visit(pattern)
+    return out
 
 
 def _synthetic_fn_name(node: Any, source: bytes) -> str | None:
