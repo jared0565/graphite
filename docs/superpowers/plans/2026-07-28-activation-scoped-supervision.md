@@ -620,7 +620,20 @@ Run: `python -m pytest tests/test_daemon_activation.py -q`
 Expected: PASS
 
 Run: `python -m pytest tests/ -k daemon -q`
-Expected: some existing tests FAIL — they assert discovery behaviour this task deliberately removes. Read each failure. Update tests that assert on `unsupervised_nested_repos` or on repos being supervised without a marker; those assertions encode the old contract. Do **not** weaken a test that is catching a real regression.
+
+The affected tests were identified from the graph (`graphite query "callers discover_projects"` and `"callers nested_git_repos"`, both `decision_grade`), not by guesswork:
+
+| test | action |
+|---|---|
+| `tests/test_daemon.py::test_nested_git_repo_is_reported_as_unsupervised` | **Delete.** Asserts the #6 warning this task removes. |
+| `tests/test_daemon.py::test_plain_workspace_is_not_reported_as_a_nested_repo` | **Delete.** Same contract, negative side. |
+| `tests/test_daemon.py::test_discover_projects_honors_graphite_ignore_marker` | **Keep unchanged.** Tests `discover_projects` directly. |
+| `tests/test_daemon.py::test_discover_projects_stops_at_project_roots_and_skips_heavy_tool_directories` | **Keep unchanged.** Same. |
+| `tests/test_monorepo.py::test_discovery_does_not_descend_into_projects` | **Keep unchanged.** Same. |
+
+**Do not delete `discover_projects` or `nested_git_repos` themselves.** Three tests still exercise `discover_projects` directly, and it remains a legitimate utility (`graphite daemon-health` and future tooling may want it). This task removes the daemon's *use* of them, not the functions.
+
+Any other daemon test that fails because a repo is no longer supervised without a marker is asserting the old contract — update it to mark the repo active first. Do **not** weaken a test that is catching a real regression.
 
 - [ ] **Step 7: Run the full suite**
 
@@ -671,7 +684,8 @@ from pathlib import Path
 import pytest
 
 from graphite import activation
-from graphite.daemon import DaemonOptions, _build_command
+from graphite.config import Config
+from graphite.daemon import _build_command
 
 
 @pytest.fixture(autouse=True)
@@ -681,15 +695,36 @@ def _isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_daemon_build_children_run_with_the_suppression_flag(tmp_path: Path) -> None:
-    """Whatever the command shape, the child must carry the suppression env var."""
+    """_build_command(cfg, root) -> (argv, env). Verified signature, not guessed."""
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    result = _build_command(repo, DaemonOptions())
+    _argv, env = _build_command(Config(), repo)
 
-    env = result[1] if isinstance(result, tuple) else None
-    assert env is not None, "_build_command must supply an environment for the child"
     assert env.get(activation.ENV_DAEMON_CHILD) == "1"
+
+
+def test_suppression_flag_does_not_disturb_provider_credential_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_build_command` builds the child env by FILTERING provider variables out
+    (daemon.py:337-341), guarded by
+    tests/test_graph_provider_isolation.py::test_daemon_child_build_has_no_provider_argv_or_environment.
+
+    Adding the activation flag must be one extra key on that filtered env. It
+    must NOT become `dict(os.environ)` -- that would copy ANTHROPIC_API_KEY,
+    OPENAI_API_KEY and friends into every daemon build child and silently undo
+    the isolation contract.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-propagate")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-propagate")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    _argv, env = _build_command(Config(), repo)
+
+    assert env.get(activation.ENV_DAEMON_CHILD) == "1"
+    assert "must-not-propagate" not in " ".join(env.values())
 
 
 def test_a_daemon_child_cannot_renew_activation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -713,14 +748,15 @@ Expected: FAIL — `_build_command` does not yet return an environment carrying 
 
 - [ ] **Step 3: Set the suppression flag on daemon children**
 
-In `src/graphite/daemon.py`, find `_build_command` and the `subprocess` call in `build_project`. Pass an explicit environment to the child:
+`_build_command` (`daemon.py:315`) already returns `(cmd, env)`, and `run_graphite_build` (`daemon.py:348`) already passes that env to the child. **Do not restructure either.** The change is one line, added immediately before `return cmd, env` (i.e. after the PYTHONPATH block at `daemon.py:342-344`):
 
 ```python
-    child_env = dict(os.environ)
-    child_env[activation.ENV_DAEMON_CHILD] = "1"
+    env[activation.ENV_DAEMON_CHILD] = "1"
 ```
 
-and hand `child_env` to the `subprocess.run(...)` call via `env=child_env`. If `_build_command` currently returns only an argument list, change it to return `(args, child_env)` and update its call site. Add `import os` if absent.
+Add `from . import activation` to the imports if Task 2 has not already.
+
+> **Do not** replace the env-construction loop with `dict(os.environ)`. Lines 337-341 build the child environment by *filtering out* every variable matching `_PROVIDER_ENV_PREFIXES`, so provider credentials never reach a daemon build child. Copying the whole environment would undo that. If `test_daemon_child_build_has_no_provider_argv_or_environment` fails after your change, the change is wrong — do not edit that test.
 
 - [ ] **Step 4: Add the CLI backstop**
 
