@@ -48,6 +48,13 @@ def graph_engine_changed(cfg: Config, current_engine: dict[str, Any]) -> bool:
     A missing, unreadable, or engine-less manifest is deliberately NOT an engine
     change. Those are the initial-build path's job; reporting them here would
     queue a rebuild every cycle, forever, for any project without a graph.
+
+    The comparison is on the WHOLE identity, not the fingerprint alone, so a
+    `version` or `cache_version` bump counts as a change even when the packaged
+    engine files are byte-identical. That is deliberate: it is exactly what
+    `check_graph_freshness` treats as `engine_changed`, and the daemon reporting
+    a different notion of staleness than `graphite check` is how the two drift
+    apart.
     """
     manifest_path = cfg.output_dir / ".graphite_manifest.json"
     try:
