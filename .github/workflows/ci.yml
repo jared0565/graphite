@@ -14,8 +14,23 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # These majors track the runner's Node runtime, so they need a periodic
+      # bump: v4/v5 were built for Node 20, which the runner now force-migrates
+      # to Node 24 and will eventually refuse. The bump surfaces as a run
+      # annotation long before it becomes a failure -- read them.
+      - uses: actions/checkout@v7
+      # Pinned to v6, NOT v7. v7 fails the probe_mcp real-server tests (2/2)
+      # while v6 and v5 pass (2/2 each) -- bisected on this branch, same runner
+      # image, Python and mcp version throughout. v6 is Node 24, so it still
+      # clears the Node 20 deprecation that motivated the bump.
+      #
+      # See issue #29. Suspected cause: probe_mcp derives its metadata search
+      # roots from the PARENT process's sys.path (`_raw_metadata_search_roots`)
+      # and hands them to children run with `-I -S -B`, which cannot discover
+      # packages themselves. Anything that reshapes sys.path breaks the handoff
+      # -- and the probe fail-closes BY DESIGN, so under v7 it may be refusing
+      # correctly rather than misbehaving. #29 carries that open question.
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
           cache: pip
