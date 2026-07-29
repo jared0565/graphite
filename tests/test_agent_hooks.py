@@ -370,3 +370,82 @@ def test_cli_stop_event_emits_summary(built_repo, monkeypatch, capsys) -> None:
     )
     assert code == 0
     assert json.loads(out)["systemMessage"].startswith("graphite: est. ")
+
+
+def _graph_only(root: Path) -> None:
+    """A graph file with no manifest, so the freshness path is reached."""
+    (root / "graph-out").mkdir(exist_ok=True)
+    (root / "graph-out" / "graph.json").write_text("{}", encoding="utf-8")
+
+
+def test_session_start_distinguishes_timeout_from_inconclusive(tmp_path: Path, monkeypatch) -> None:
+    """#24: a check that never finishes and a check that ran and could not tell
+    both collapsed to the identical 'unknown' message. The timeout case is the
+    one most likely to coincide with a real STALE -- a slow check suggests a
+    big or cold repo -- so it must not read the same."""
+    import graphite.agent_hooks as hooks
+
+    monkeypatch.setattr(hooks, "_FRESHNESS_BUDGET_SECONDS", 0.05)
+
+    def _never_returns(root, cfg):
+        import time
+
+        time.sleep(5.0)
+        return {"stale": False}
+
+    monkeypatch.setattr(hooks, "check_graph_freshness", _never_returns)
+    _graph_only(tmp_path)
+
+    ctx = handle_session_start(_payload(tmp_path))["hookSpecificOutput"]["additionalContext"]
+
+    assert "did not finish" in ctx
+    assert "0.05s" in ctx
+
+
+def test_session_start_inconclusive_check_says_it_ran(tmp_path: Path, monkeypatch) -> None:
+    """The other half of #24: a check that RAN and raised must say so, rather
+    than borrowing the timeout wording."""
+    import graphite.agent_hooks as hooks
+
+    def _raises(root, cfg):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(hooks, "check_graph_freshness", _raises)
+    _graph_only(tmp_path)
+
+    ctx = handle_session_start(_payload(tmp_path))["hookSpecificOutput"]["additionalContext"]
+
+    assert "could not determine" in ctx
+    assert "did not finish" not in ctx
+
+
+def test_session_start_stale_message_carries_the_reason(tmp_path: Path, monkeypatch) -> None:
+    """#24's second defect: only `stale` survived out of check_graph_freshness's
+    status dict, so STALE could never say WHY -- forcing a second manual
+    `graphite check .` just to learn it was an engine change."""
+    import graphite.agent_hooks as hooks
+
+    monkeypatch.setattr(
+        hooks, "check_graph_freshness",
+        lambda root, cfg: {"stale": True, "reason": "engine_changed"},
+    )
+    _graph_only(tmp_path)
+
+    ctx = handle_session_start(_payload(tmp_path))["hookSpecificOutput"]["additionalContext"]
+
+    assert "STALE" in ctx
+    assert "engine_changed" in ctx
+
+
+def test_session_start_stale_without_a_reason_still_reports_stale(tmp_path: Path, monkeypatch) -> None:
+    """A reason is threaded when present and must never become load-bearing:
+    absent one, STALE still has to be reported."""
+    import graphite.agent_hooks as hooks
+
+    monkeypatch.setattr(hooks, "check_graph_freshness", lambda root, cfg: {"stale": True})
+    _graph_only(tmp_path)
+
+    ctx = handle_session_start(_payload(tmp_path))["hookSpecificOutput"]["additionalContext"]
+
+    assert "STALE" in ctx
+    assert "python -m graphite build ." in ctx
