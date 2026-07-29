@@ -272,6 +272,43 @@ fingerprint reopening after resolution, or a code that keeps showing up
 across builds — is evidence of a real, unaddressed defect and belongs in a
 governed spec round, not an ad-hoc fix squeezed into an unrelated change.
 
+## Scope: the graph does not model time
+
+Raised by aramid's agent (2026-07-29) after it answered "what changed since
+commit X" and "does file Y exist yet" with `git log` / `ls` instead of the
+graph, and correctly declined to decide graphite's scope boundary on its own.
+Settled here so no consuming agent has to re-derive it.
+
+**The graph is a point-in-time structural model of one working tree.** Nodes
+are functions, classes and files; edges are calls, imports and contains. There
+is no temporal dimension and no notion of a commit. Freshness machinery
+(`check`, the manifest, engine identity) knows only *whether* the graph lags
+the tree — never *what changed semantically*.
+
+Route by the **question**, not by whether git is involved:
+
+| Question | Tool | Is it a "fallback"? |
+|---|---|---|
+| Who calls X, what's the blast radius of file Y, where is Z defined, structure | `query` / `impact` / `context` / `search` | — graph-first applies |
+| What's the blast radius of **what I changed** | `review-changes` | — graph-first applies; it discovers changed paths from git itself and traverses reverse dependencies |
+| What commits landed since X; does file Y exist; what does line N say | `git` / filesystem / literal search | **No.** These are outside the model by design. Using git here is the correct tool, not a deviation, and needs no announcement |
+
+So "involves git" does **not** imply "outside graph-first" — `review-changes`
+is the git-aware bridge and is squarely inside it. What sits outside is
+*history and existence*, which the model has no representation for.
+
+**Known gaps, named rather than implied.** Neither is built, and nothing has
+needed them yet: querying a *historical* graph ("as of commit X"), and diffing
+two builds to get a structural changelog. If either becomes necessary they are
+additions to this model, not corrections to it.
+
+**On the strict hook.** `graphite-first (strict)` denies a cross-file grep when
+the search term matches a symbol in the graph. That is a heuristic on the
+*term*, not on the question, so it can fire on a history or existence question
+that merely mentions a symbol name. Literal-text searches scoped to a single
+file path are always allowed; when a genuine history/existence question is
+denied, that is the heuristic misfiring, not a scope violation.
+
 ## Non-goals (governance)
 
 Canonical commands are inference-free by contract: `--llm` flags are rejected
