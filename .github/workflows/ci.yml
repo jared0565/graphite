@@ -48,6 +48,15 @@ jobs:
       - name: Diagnose issue 29
         continue-on-error: true
         run: python scripts/diagnose_issue_29.py
-      - name: Test
+      # FULL suite deliberately. The previous diagnostic run passed these two
+      # tests in isolation under v7, which is the whole point: the failures
+      # only ever appeared in a full-suite run, so scope -- not action version
+      # -- is the uncontrolled variable. This run decides between them.
+      - name: Test (full suite)
+        continue-on-error: true
+        run: python -m pytest -q
+      # Re-run just the pair afterwards. If the full suite fails them but this
+      # passes in the same job, interference is proven rather than suspected.
+      - name: Test (the two probe tests alone, after the suite)
         continue-on-error: true
         run: python -m pytest -q tests/test_doctor.py -k mcp_deep_probe_real_server
