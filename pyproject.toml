@@ -39,6 +39,16 @@ line-length = 100
 # Pin the rule set explicitly: ruff 0.16 expanded its default `select`,
 # so relying on defaults makes lint results drift with the installed version.
 select = ["E4", "E7", "E9", "F"]
+[tool.ruff.lint.per-file-ignores]
+# `assert` IS the point of a test, but aramid's gate forces `--extend-select S`
+# (flake8-bandit), so S101 fires once per assert -- 4599 hits across tests/.
+# That volume buries real findings long before `aramid arm`, which is the
+# failure mode the gate exists to prevent. Suppressed at the source rather
+# than in aramid's config: aramid.toml has NO rule-suppression mechanism, so
+# the consumer repo's own ruff config is the only real place for this.
+# Scoped to S101 alone -- deliberately not a blanket flake8-bandit exemption,
+# since the other S-rules can still catch genuine problems in test helpers.
+"tests/**" = ["S101"]
 [tool.hatch.build.targets.wheel.force-include]
 "src/graphite/ts_resolver.mjs" = "graphite/ts_resolver.mjs"
 
