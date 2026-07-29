@@ -377,3 +377,63 @@ resolve manually". Mechanism is their call.
 
 **Status:** sent. No open ask blocking graphite; Task 4 is the next gate before
 anything touches a consumer repo.
+
+---
+
+# Round 5 — aramid's fix, verified first-hand (2026-07-29)
+
+aramid reported back: `_find_chained_aramid_shim` (`hooks.py:306-311`) now
+scans the hooks dir for any `{hook}`-prefixed sibling still carrying aramid's
+own marker, detected by marker content rather than hardcoding graphite's
+`.local` suffix — so it generalizes to any future relocating tool too. When
+found, `_warn_foreign_managed_conflict` softens from "NOT installed ...
+resolve manually" to a message that names the surviving `.local` shim and
+says explicitly there is nothing to resolve. The unchained case (a genuine
+gap) keeps the original stronger wording. Shipped `7497f15` on aramid's main,
+30/30 in `test_hooks.py`, full suite 1261 passed / 4 skipped.
+
+Verified independently rather than taken on report, same discipline as Round
+4 (in-process `aramid.hooks.install()`, never `aramid init`, drain registry
+hash-checked before/after):
+
+- `git log -1 --stat 7497f15` on aramid's repo: present, and
+  `main == origin/main == 7497f15`.
+- `python -m pytest tests/unit/test_hooks.py -q` on aramid's repo, first-hand:
+  **30 passed**.
+- **Two-answer test on my own Round-4 finding** — built the exact scenario I
+  described (graphite relocates aramid's `post-commit` shim to
+  `post-commit.local` byte-identically, writes its own trampoline at
+  `post-commit`), called `aramid.hooks.install()` in-process against it:
+  stderr now reads *"aramid's own post-commit shim survives at
+  'post-commit.local' and still runs via 'graphite's chain -- not stale,
+  nothing to resolve"* — the alarming line is gone. `post-commit` and
+  `post-commit.local` both left byte-unchanged; `~/.aramid/repos.toml` hash
+  identical before/after.
+- **Negative control**, since a fix that silences a real gap would be worse
+  than the bug: a foreign hook (`husky`) with no chained aramid sibling
+  anywhere still gets the original *"NOT installed ... resolve manually"*
+  wording, unsoftened. The fix discriminates correctly rather than
+  blanket-suppressing the warning.
+
+Both directions confirmed. Nothing further needed from aramid on this thread.
+
+## Proceeding to Task 4
+
+Checked before writing any code, not assumed from the plan:
+
+- **Who calls `init_project`?** `python -m graphite query "callers
+  init_project"` — decision_grade, healthy. Only `cmd_init` (the CLI entry
+  point) and test files call it; no daemon, no agent-hook, no automated path.
+  Defaulting hook installation to on inside `init_project` cannot fire from a
+  daemon restart or background rebuild — only from a deliberate `graphite
+  init` invocation.
+- **Real `install_hooks` signature**, since Task 3 shipped after this plan was
+  written: `install_hooks(root: Path, interpreter: Path) -> list[str]`,
+  returning the names of *relocated* (non-trigger) hooks — matches what the
+  plan assumed. Confirmed by reading `hookinstall.py` directly rather than
+  trusting the plan's snapshot.
+
+Task 4 as scoped (`init.py`, `cli.py`, `tests/test_init_hooks.py`) does not
+call `install_hooks` against any consumer repo — it only makes the capability
+available via `graphite init`. Live verification and any consumer rollout
+stay a separate, deliberate step per the plan's own sequencing.
