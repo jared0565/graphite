@@ -19,17 +19,21 @@ jobs:
       # to Node 24 and will eventually refuse. The bump surfaces as a run
       # annotation long before it becomes a failure -- read them.
       - uses: actions/checkout@v7
-      # Pinned to v6, NOT v7. v7 fails the probe_mcp real-server tests (2/2)
-      # while v6 and v5 pass (2/2 each) -- bisected on this branch, same runner
-      # image, Python and mcp version throughout. v6 is Node 24, so it still
-      # clears the Node 20 deprecation that motivated the bump.
+      # Held at v6. v6 is Node 24, so it clears the Node 20 deprecation this
+      # bump exists for; v7 is simply not yet demonstrated safe here.
       #
-      # See issue #29. Suspected cause: probe_mcp derives its metadata search
-      # roots from the PARENT process's sys.path (`_raw_metadata_search_roots`)
-      # and hands them to children run with `-I -S -B`, which cannot discover
-      # packages themselves. Anything that reshapes sys.path breaks the handoff
-      # -- and the probe fail-closes BY DESIGN, so under v7 it may be refusing
-      # correctly rather than misbehaving. #29 carries that open question.
+      # This pin was originally justified by "v7 breaks the probe_mcp
+      # real-server tests". THAT CLAIM IS REFUTED -- the full suite has since
+      # passed under v7 (run 30453660307, 2480 passed). The original bisect
+      # (v7 failing 2/2, v5/v6 passing) looked conclusive but is consistent
+      # with an intermittent fault: the two failures hit DIFFERENT tests, and
+      # at a ~30% flake rate that pattern arises by chance.
+      #
+      # So the real defect is flaky probe_mcp real-server tests, tracked in
+      # #29, independent of action versions. v6 is kept only because it is
+      # measured-green here and nothing yet justifies moving; it is NOT a
+      # workaround for a v7 incompatibility, because no such incompatibility
+      # has been shown. Do not infer one from this pin.
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
