@@ -121,7 +121,10 @@ def _report_with_health(status: str, *, ok: bool) -> dict:
     """
     return {
         "replacement_ready": True,
-        "project_root": "/tmp/p",
+        # Not a real path and deliberately not /tmp-shaped: it is only echoed
+        # into a line these tests never assert on, and a temp-looking literal
+        # trips ruff S108 (which stays enabled for tests/ on purpose).
+        "project_root": "project-root",
         "blockers": [],
         "warnings": [],
         "recommendations": [],
