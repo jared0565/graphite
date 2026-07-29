@@ -244,6 +244,14 @@ def _build(
     # is guaranteed present here; a KeyError would be a loud programming error
     # rather than the silent staleness of #21.
     cache = Cache(cfg.cache_dir, cfg.cache_version, engine=manifest["engine"]["fingerprint"])
+    # #23: reclaim partitions this build can never read again. Safe here and
+    # only here -- cmd_build holds the repo build lock around _build_project,
+    # so no concurrent build of this repo can be reading a sibling partition.
+    # Reported rather than silent: a reclaim that deletes hundreds of MB should
+    # say so.
+    pruned = cache.prune_other_partitions()
+    if pruned:
+        print(f"[graphite] reclaimed {len(pruned)} unreachable cache partition(s)")
     start = time.time()
     extraction = extract_all(entries, cfg, cache)
     if extraction.errors:

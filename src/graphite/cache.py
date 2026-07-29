@@ -3,8 +3,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import shutil
 from pathlib import Path
 from typing import Any
+
+# The two partition shapes that exist on disk. Both are matched because a rule
+# covering only the engine-suffixed form would strand the legacy ones and still
+# appear to work:
+#   v11-0570918cea69669b   post-#21, `{version}-{engine[:16]}`
+#   v10                    pre-#21, bare version
+# Lowercase hex and an exact width of 16 are required so a directory that
+# merely resembles a partition is left alone -- `.cache/graphite/` is
+# graphite-owned, but a rule loose enough to delete an unrelated directory is
+# not worth the reclaimed megabytes.
+_PARTITION_RE = re.compile(r"^(?:v\d+|.+-[0-9a-f]{16})$")
+
+
+def _is_partition_dir(path: Path) -> bool:
+    try:
+        if not path.is_dir():
+            return False
+    except OSError:
+        return False
+    return bool(_PARTITION_RE.match(path.name))
 
 
 class Cache:
@@ -51,6 +73,43 @@ class Cache:
         if self.root.exists():
             for item in self.root.rglob("*.json"):
                 item.unlink()
+
+    def prune_other_partitions(self) -> list[str]:
+        """Delete sibling partitions this cache can never read again (#23).
+
+        Only one partition is reachable at a time -- the one whose name matches
+        the current `cache_version` and engine -- so every other one is dead
+        weight. Nothing ever removed them, and since #21 a new one appears per
+        distinct engine build rather than per manual version bump, so the leak
+        grew from bounded to unbounded.
+
+        Reachability is the rule, deliberately, rather than a count or an age.
+        "Keep the newest N" is a guess that can delete a partition another
+        build is mid-read on; "is not the partition I am using" is a fact.
+        Callers hold the repo build lock, which serialises builds of the same
+        repo, so no concurrent build of this cache can be reading a sibling.
+
+        Failures are swallowed. A partition can be locked by another process
+        (routine on Windows), and cache content is regenerable, so a failed
+        reclaim is a non-event that must never fail a build.
+
+        Returns the names actually removed.
+        """
+        parent = self.root.parent
+        removed: list[str] = []
+        try:
+            entries = list(parent.iterdir())
+        except OSError:
+            return removed
+        for entry in entries:
+            if entry.name == self.root.name or not _is_partition_dir(entry):
+                continue
+            try:
+                shutil.rmtree(entry)
+            except OSError:
+                continue
+            removed.append(entry.name)
+        return removed
 
 
 def file_hash(path: Path) -> str:
