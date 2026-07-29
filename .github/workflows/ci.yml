@@ -24,10 +24,12 @@ jobs:
       # image, Python and mcp version throughout. v6 is Node 24, so it still
       # clears the Node 20 deprecation that motivated the bump.
       #
-      # Suspected cause: probe_mcp derives its metadata search roots from the
-      # PARENT process's sys.path (`_raw_metadata_search_roots`) and hands them
-      # to children run with `-I -S -B`, which cannot discover packages
-      # themselves. Anything that reshapes sys.path breaks the handoff.
+      # See issue #29. Suspected cause: probe_mcp derives its metadata search
+      # roots from the PARENT process's sys.path (`_raw_metadata_search_roots`)
+      # and hands them to children run with `-I -S -B`, which cannot discover
+      # packages themselves. Anything that reshapes sys.path breaks the handoff
+      # -- and the probe fail-closes BY DESIGN, so under v7 it may be refusing
+      # correctly rather than misbehaving. #29 carries that open question.
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
