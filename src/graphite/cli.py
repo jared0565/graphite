@@ -515,7 +515,9 @@ def _print_watch_impact(root: Path, cfg: Config, change: WatchChange, depth: int
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
-    cfg = _config_from_args(args, canonical=True)
+    # Anchored to the repo (#26) -- the manifest belongs next to the graph it
+    # describes, not next to whatever directory scan was launched from.
+    cfg = _project_scoped_config(args, Path(args.path).resolve(), canonical=True)
     manifest, _ = _scan(args, cfg)
     _write_json(cfg.output_dir / ".graphite_manifest.json", manifest)
     print(f"[graphite] manifest written: {cfg.output_dir / '.graphite_manifest.json'}")
@@ -532,8 +534,13 @@ def cmd_build(args: argparse.Namespace) -> int:
         print(f"[graphite] detached build started (pid {pid})")
         return 0
 
-    cfg = _config_from_args(args, canonical=True)
     root = Path(args.path).resolve()
+    # Anchor relative output_dir/cache_dir to the REPO, not the process CWD
+    # (#26). Using `_config_from_args` directly meant `graphite build <path>`
+    # from another directory wrote the graph next to wherever it was launched
+    # -- and, worse, took the build lock at a CWD-relative path while the
+    # daemon takes it at `<root>/.cache/graphite`, so the two never contended.
+    cfg = _project_scoped_config(args, root, canonical=True)
 
     # A parent that already holds the lock (the daemon) sets this for its child,
     # which would otherwise deadlock against its own parent.
@@ -554,8 +561,11 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    cfg = _config_from_args(args, canonical=True)
     root = Path(args.path).resolve()
+    # Anchored to the repo (#26): otherwise `check <path>` compared the CWD's
+    # graph against the target's files, which reported every file in the
+    # current repo as "removed".
+    cfg = _project_scoped_config(args, root, canonical=True)
     status = check_graph_freshness(root, cfg, ignore_engine=args.ignore_engine)
     if args.json:
         status["resolution_health"] = persisted_resolution(
@@ -1378,8 +1388,10 @@ def cmd_context(args: argparse.Namespace) -> int:
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
-    cfg = _config_from_args(args, canonical=True)
     root = Path(args.path).resolve()
+    # Anchored to the repo (#26): a long-running watcher rebuilding into the
+    # CWD is the same defect, just harder to notice.
+    cfg = _project_scoped_config(args, root, canonical=True)
     options = WatchOptions(
         interval_seconds=args.interval,
         debounce_seconds=args.debounce,
