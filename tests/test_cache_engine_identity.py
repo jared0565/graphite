@@ -85,16 +85,31 @@ def test_build_partitions_the_cache_by_engine_fingerprint(
     monkeypatch.chdir(repo)
     monkeypatch.setenv("GRAPHITE_DAEMON_CHILD", "1")  # don't touch the live activation registry
 
+    cache_dir = repo / ".cache" / "graphite"
+
+    def _partitions() -> list[str]:
+        return sorted(p.name for p in cache_dir.iterdir() if p.is_dir())
+
     monkeypatch.setattr(cli, "engine_identity", lambda _v: _engine("a" * 64))
     assert cli.main(["build", "."]) == 0
+    first = _partitions()
 
     # Same repo, same cache_version, different engine. Nothing else changes.
     monkeypatch.setattr(cli, "engine_identity", lambda _v: _engine("b" * 64))
     assert cli.main(["build", "."]) == 0
+    second = _partitions()
 
-    partitions = sorted(p.name for p in (repo / ".cache" / "graphite").iterdir() if p.is_dir())
-
-    assert len(partitions) == 2, (
+    # The property #21 requires is that the two builds do not SHARE a partition.
+    # This originally asserted `len(partitions) == 2`, using the count as a proxy
+    # for that. Since #23 the superseded partition is reclaimed on the next
+    # build, so the count no longer distinguishes anything -- but the names still
+    # do, and they test the requirement directly rather than by proxy. If the
+    # engine stopped reaching the Cache, both builds would land in the same
+    # partition and these would be equal.
+    assert first != second, (
         f"two engines shared one cache partition, so the second build served the "
-        f"first's extraction: {partitions}"
+        f"first's extraction: {first} then {second}"
+    )
+    assert len(second) == 1, (
+        f"#23: the superseded partition should have been reclaimed: {second}"
     )
