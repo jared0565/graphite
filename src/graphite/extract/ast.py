@@ -7,7 +7,7 @@ import sys
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Collection
+from typing import Any, Collection, Final
 
 from ..cache import Cache
 from ..config import Config
