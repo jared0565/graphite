@@ -53,21 +53,43 @@ def _activate(root: Path) -> None:
         return
 
 
-def _freshness_within_budget(root: Path) -> str | None:
-    """Return 'fresh' | 'stale' | None (unknown), never raising, within budget."""
-    outcome: list[str | None] = [None]
+def _freshness_within_budget(root: Path) -> tuple[str, str | None]:
+    """Return ``(state, reason)`` within budget, never raising.
+
+    ``state`` is 'fresh' | 'stale' | 'timeout' | 'unknown'.
+
+    'timeout' and 'unknown' are kept apart deliberately (#24). Both used to
+    collapse into a single "unknown" message, but they mean different things
+    and the timeout case is the one most likely to be hiding a real STALE --
+    a check that runs long suggests a large, cold, or unbuilt repo, which is
+    exactly the population that tends to be stale. Reporting them identically
+    made the reassuring reading the default in the least reassuring case.
+
+    ``reason`` carries ``check_graph_freshness``'s own explanation
+    (``engine_changed``, ``missing manifest``, ...) so a STALE message can say
+    why without the agent running ``graphite check .`` a second time to find
+    out. It is advisory: absent or malformed, the state still stands.
+    """
+    outcome: list[tuple[str, str | None]] = [("unknown", None)]
 
     def _worker() -> None:
         try:
             cfg = Config(output_dir=root / "graph-out", cache_dir=root / ".cache" / "graphite")
             status = check_graph_freshness(root, cfg)
-            outcome[0] = "stale" if status.get("stale") else "fresh"
+            raw = status.get("reason")
+            reason = raw if isinstance(raw, str) and raw else None
+            outcome[0] = ("stale", reason) if status.get("stale") else ("fresh", reason)
         except Exception:
-            outcome[0] = None
+            outcome[0] = ("unknown", None)
 
     worker = threading.Thread(target=_worker, daemon=True)
     worker.start()
     worker.join(_FRESHNESS_BUDGET_SECONDS)
+    # The thread is a daemon and is never joined again, so a slow check is
+    # abandoned rather than waited on. is_alive() is what separates "still
+    # running" from "ran and gave up" -- outcome[0] alone cannot.
+    if worker.is_alive():
+        return ("timeout", None)
     return outcome[0]
 
 
@@ -76,13 +98,22 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
         root = _payload_root(payload)
         _activate(root)
         if (root / "graph-out" / "graph.json").is_file():
-            freshness = _freshness_within_budget(root)
-            if freshness == "stale":
-                status = "Graph status: STALE - run `python -m graphite build .` before relying on graph answers."
-            elif freshness == "fresh":
+            state, reason = _freshness_within_budget(root)
+            if state == "stale":
+                cause = f" ({reason})" if reason else ""
+                status = f"Graph status: STALE{cause} - run `python -m graphite build .` before relying on graph answers."
+            elif state == "fresh":
                 status = "Graph status: fresh."
+            elif state == "timeout":
+                status = (
+                    f"Graph status: unknown (freshness check did not finish in {_FRESHNESS_BUDGET_SECONDS}s) "
+                    "- verify with `python -m graphite check .`."
+                )
             else:
-                status = "Graph status: unknown - verify with `python -m graphite check .`."
+                status = (
+                    "Graph status: unknown (check ran, could not determine) "
+                    "- verify with `python -m graphite check .`."
+                )
         else:
             status = "Graph status: missing - run `python -m graphite build .` to create it."
         return {
