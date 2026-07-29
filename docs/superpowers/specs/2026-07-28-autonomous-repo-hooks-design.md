@@ -158,15 +158,91 @@ interest in.
 [ -f "$CHAINED" ] && { "$CHAINED" "$@" || exit $?; }
 ```
 
-### Coexistence with aramid — verified safe
+### Coexistence with aramid — NOT safe as designed above
 
-`core.hooksPath` was expected to orphan aramid's managed hooks. It does not:
-`aramid/hooks.py:79-82` resolves its hook directory *through* `core.hooksPath`
-("Respects `git config core.hooksPath` (husky et al.)"). After graphite sets it,
-aramid's next `init` writes into `.githooks/` and both tools coexist.
+**Corrected 2026-07-29 after aramid's agent reviewed this document.** The
+heading previously read "verified safe". It was not: it verified exactly one
+direction — that aramid still *finds* the hook dir after graphite moves it —
+and never asked what aramid's `install()` does to graphite's trampoline when it
+next runs. That second direction is where the design breaks.
 
-Graphite must still migrate aramid's existing `.git/hooks` entries, because
-those files do not move themselves and would be dead until `aramid init` reran.
+Still true: `aramid/hooks.py:79-82` resolves its hook directory *through*
+`core.hooksPath`, so setting it does not orphan aramid. Graphite must still
+migrate aramid's existing `.git/hooks` entries, since those files do not move
+themselves.
+
+**What was missed.** The chain-check above is a subprocess *call*, not an
+`exec`: the trampoline runs `.local`, then continues into its own body. So a
+managed hook does not terminate the chain, it forwards and keeps going. When
+`aramid init` later finds graphite's trampoline, it sees a hook that is not its
+own, renames it to `<hook>.aramid-chained`, and installs a fresh shim in front
+— yielding `aramid → graphite → aramid` and running aramid's gate **twice per
+hook fire**. aramid's agent confirmed this against this document's own text.
+
+**Two consequences neither side had written down:**
+
+1. `aramid uninstall` was silently incomplete in that state — it restored the
+   `.aramid-chained` file (graphite's trampoline, still internally chaining to
+   the *original* aramid shim) and reported a clean uninstall while aramid's
+   gate kept running. Fixed on aramid's side (`0f24609`).
+2. **The Migration step at line 146 makes this worse, not better.** It writes
+   pass-through trampolines for *every* migrated hook — including `pre-commit`
+   and `pre-push`, which graphite has no interest in. If those carry
+   `# >>> graphite managed >>>`, then after `0f24609` aramid's `install()`
+   **refuses every one of them** and does not install its gates at all
+   ("aramid's <hook> gate is NOT installed until this is resolved manually").
+   Running `graphite init` would therefore disable aramid's security gates
+   across graphite itself and all five consumer repos.
+
+**Therefore: graphite must not write marker-bearing trampolines into shared
+hook slots.** See "Hook slot sharing" below. This is a blocking constraint on
+Plan B, not a refinement.
+
+### Hook slot sharing — the `<hook>.d/` dispatcher
+
+**Decision (2026-07-29): adopt a shared `<hook>.d/` dispatcher directory.**
+aramid offered three conventions ranked against one invariant — *the gate runs
+exactly once per hook fire*. Chosen on that invariant, not preference:
+
+- *Mutual marker recognition* (each tool special-cases the other's marker and
+  regenerates in place) is not merely `O(n²)`. Combined with what aramid has
+  **already shipped**, it means whichever tool inits second loses its hook —
+  and for graphite's pass-through trampolines that is aramid's security gate,
+  repo-wide. Making it work requires graphite to know how to invoke aramid,
+  which is exactly the coupling the `O(n²)` objection names.
+- *Documented suffix protocol* is a norm with no enforcement point. It holds
+  nothing.
+- *`<hook>.d/` dispatcher* holds the invariant structurally: one dispatcher
+  owns the slot, each tool owns one numbered file, and **no tool inspects or
+  rewrites another's**. It also dissolves aramid's uninstall bug rather than
+  patching it — removing your own numbered file is complete by construction.
+
+Proposed concrete shape (the three items marked ⚠ cannot be decided
+unilaterally and are graphite's open asks to aramid):
+
+- Slot: `.githooks/<hook>` is a dispatcher, generated **byte-identically** by
+  either tool, so whoever writes first wins and regeneration is a no-op. No
+  ownership negotiation.
+- ⚠ It must carry a *shared* marker (proposal: `# >>> hookd managed >>>`) that
+  **both** tools treat as not-foreign — otherwise aramid's own `0f24609`
+  refusal fires on the dispatcher itself.
+- Entries: `.githooks/<hook>.d/NN-<tool>`, run in lexical order.
+- ⚠ Number bands: `00-09` the repo's original hook (migration lands it at
+  `00-local`), `10-49` gates (aramid ≈ `20`), `50-89` side-effecting tooling
+  (graphite ≈ `50`), `90-99` notifications. Gates before side effects, so a
+  rejected push does not first spend time rebuilding a graph.
+- Exit semantics, inherited from the class of the hook: `pre-*` runs entries in
+  order and exits immediately with the first non-zero status (fail-closed,
+  preserving gate semantics); `post-*` runs every entry and ignores statuses.
+- ⚠ Invocation: git-for-Windows checkouts frequently lack the exec bit, so the
+  dispatcher should run `sh "$entry" "$@"` when an entry is not executable.
+- Uninstall: a tool removes only its own numbered file; the dispatcher goes
+  only when `.d/` is empty or holds nothing but `00-*`.
+
+**Sequencing constraint.** aramid's refusal is already live on `origin/main`,
+so this ordering is not optional: the dispatcher convention must be agreed and
+implemented **before** graphite's migration ships. Shipping migration first
+disables aramid's gates everywhere graphite touches.
 
 ### The hook that must not break
 

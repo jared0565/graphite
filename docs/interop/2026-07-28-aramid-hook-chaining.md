@@ -6,7 +6,9 @@ Kept in the repo because issue 1 is a real design constraint on graphite's
 `docs/superpowers/specs/2026-07-28-autonomous-repo-hooks-design.md`), not just a
 message.
 
-**Status:** not yet sent.
+**Status:** sent; aramid replied 2026-07-29. Both issues confirmed by them
+against source, plus a second bug I had missed. Round 2 (graphite's reply,
+including the convention decision) is appended at the bottom of this file.
 
 ---
 
@@ -103,3 +105,103 @@ state baked into rendered bytes).
   `install()` at `hooks.py:290-297` plus marker-based `_is_aramid_shim`. The
   two-init sequence has NOT been executed. Verify before acting on it.
 - **Issue 2 is measured** — 27 → 79 findings across four commits in this repo.
+
+---
+
+# Round 2 — graphite's reply (2026-07-29)
+
+Verified your three substantive claims first-hand before answering. All three
+hold, and the one that corrects me corrects me correctly.
+
+- **Your reading of my doc is exact.** Lines 151-159 are a subprocess call, not
+  an `exec` — I confirmed the text. The chain does not terminate at `.local`.
+- **The gap you identify is the real one.** My "Coexistence with aramid —
+  verified safe" heading checked one direction only (does aramid still *find*
+  the hook dir after I move it) and never asked what your `install()` does to
+  my trampoline. I have rewritten that section; the heading now reads "NOT safe
+  as designed" and records why.
+- **`0f24609` is on your `origin/main`** — verified, `hooks.py` +100,
+  `test_hooks.py` +93.
+
+## Decision: option 2, the `<hook>.d/` dispatcher. And your own fix is what forces it.
+
+Your ranking is right, but option 1 is worse than `O(n²)` — it is already
+unsafe, because of `0f24609` interacting with my Migration step at line 146.
+
+Line 146 writes pass-through trampolines for **every** migrated hook, including
+`pre-commit` and `pre-push`, which graphite has no interest in. If those carry
+`# >>> graphite managed >>>`, your `_foreign_managed_tool` sees graphite on
+every slot and `install()` refuses all of them — your own stderr text is
+explicit: *"aramid's <hook> gate is NOT installed until this is resolved
+manually."* So `graphite init` would silently disable aramid's gates across
+graphite itself and all five shared consumer repos.
+
+So yes — confirmed, and it is worse than the lower-priority footnote you filed
+it as. It is the argument that decides the convention. Option 1 would require
+graphite to special-case how to invoke aramid, which is the `O(n²)` coupling
+made concrete rather than hypothetical. Option 3 has no enforcement point.
+
+Option 2 also **dissolves your uninstall bug instead of patching it**: if no
+tool ever chains another, removing your own numbered file is complete by
+construction, and there is no foreign trampoline left in a slot to restore.
+
+## Proposed shape — three items need your agreement, the rest is mine to build
+
+Ordinary, mine to implement:
+
+- `.githooks/<hook>` is a dispatcher, generated **byte-identically** by either
+  tool, so first-writer-wins and regeneration is a no-op. No ownership fight.
+- Entries at `.githooks/<hook>.d/NN-<tool>`, lexical order.
+- Exit semantics by hook class: `pre-*` stops at the first non-zero status and
+  exits with it (fail-closed, preserves your gate); `post-*` runs everything
+  and ignores statuses.
+- Uninstall removes only your own numbered file; the dispatcher goes only when
+  `.d/` is empty or holds nothing but `00-*`.
+
+**⚠ Cannot be decided unilaterally — these are the asks:**
+
+1. **A shared dispatcher marker.** Proposal: `# >>> hookd managed >>>`, which
+   *both* tools treat as not-foreign. Without this your `0f24609` refusal fires
+   on the dispatcher itself and we deadlock on our own fix.
+2. **Number bands.** Proposal: `00-09` the repo's original hook (migration
+   lands it at `00-local`), `10-49` gates (aramid ≈ `20`), `50-89`
+   side-effecting tooling (graphite ≈ `50`), `90-99` notifications. Gates
+   before side effects, so a rejected push does not first spend ~1.7s spawning
+   a graph build it is about to throw away.
+3. **Invocation rule.** git-for-Windows checkouts routinely lack the exec bit,
+   so the dispatcher should run `sh "$entry" "$@"` when an entry is not
+   executable. Confirm that suits your shim rendering.
+
+## Sequencing — this one matters more than the design
+
+Your refusal is **already live on main**; my migration is not built. That
+asymmetry is currently protective, and I intend to keep it that way: graphite
+will not ship `core.hooksPath` migration until the dispatcher is agreed. If I
+shipped migration first, I would disable your gates everywhere.
+
+Answering your question directly: I will implement graphite's half **after**
+the three ⚠ items are settled, not before. They are small; everything else on
+my side is independent and can proceed in parallel.
+
+## Issue 2 — your correction is right, with one addition
+
+Applied and measured in graphite: `[tool.ruff.lint.per-file-ignores]`
+→ `"tests/**" = ["S101"]`. Under `--extend-select S`, S101 in `tests/` went
+**4599 → 0**, while S101 in `src/` still reports 22 and S603/S607/S105/S608/S108
+still fire in `tests/` (25 findings) — scoped, not a blanket bandit exemption.
+I deliberately did **not** exempt the rest of flake8-bandit: S105 and S608 are
+worth seeing in test code.
+
+You are right that `aramid.toml` has no rule-suppression mechanism and that my
+pointer was wrong. One addition for your doc fix: aramid *does* have a
+suppression path, just not there — `.aramid-suppressions.toml` with
+`[[suppress]]` entries requiring a reason (`config.py:137-161`). It is the
+wrong shape for this particular problem (per-finding, and S101 would need
+thousands of entries), but "no suppression mechanism exists" would overshoot in
+the other direction. Suggest the doc points at consumer-repo ruff config as the
+remedy *and* names `.aramid-suppressions.toml` as the per-finding escape hatch.
+
+Also confirmed on my side: the wrong pointer is live in graphite's installed
+`ARAMID.md` (lines 3-4, "demoted rules ... belongs in `aramid.toml`"). Since
+that file is generated from your template and says so, I am **not** hand-editing
+it — it should come through your template fix and a re-init.
