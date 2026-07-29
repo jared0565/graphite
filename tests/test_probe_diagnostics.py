@@ -106,3 +106,36 @@ def test_recorded_diagnostics_are_bounded(tmp_path: Path) -> None:
     assert entries, "nothing recorded, so the bound below was never tested"
     for entry in entries:
         assert len(str(entry.get("detail", ""))) <= 2048
+
+
+def test_diagnostics_also_reach_stderr(tmp_path: Path, capfd) -> None:
+    """Load-bearing, not belt-and-braces. The ledger is per-repo on local disk;
+    a CI runner throws that disk away, so a ledger-only diagnostic is invisible
+    in exactly the environment where this failure actually occurs. Verified
+    empirically: PR #35's own CI run hit this failure and produced zero
+    diagnostic lines in the log."""
+    import graphite.doctor_probes as probes
+
+    probes.probe_mcp(
+        tmp_path,
+        _runner=lambda *a, **k: probes.ProbeProcessResult(7, b"junk", b"the real cause", 0.01),
+    )
+
+    err = capfd.readouterr().err
+    assert "deep_mcp" in err
+    assert "the real cause" in err
+
+
+def test_process_error_paths_are_recorded_too(tmp_path: Path) -> None:
+    """The original fix only covered `invalid_response`. The failure actually
+    seen in CI arrived via ProbeProcessError, which recorded nothing."""
+    import graphite.doctor_probes as probes
+
+    def _raise(*args, **kwargs):
+        raise probes.ProbeProcessError("nonzero")
+
+    check = probes.probe_mcp(tmp_path, _runner=_raise)
+
+    assert check.details == {"code": "nonzero"}
+    codes = {e.get("code") for e in _doctor_entries(tmp_path)}
+    assert "deep_mcp_nonzero" in codes

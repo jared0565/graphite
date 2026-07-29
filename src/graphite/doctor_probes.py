@@ -688,7 +688,7 @@ def _stream_excerpt(raw: object) -> str:
     return f"{text[:_PROBE_DIAGNOSTIC_STREAM_CHARS]}...[{len(text) - _PROBE_DIAGNOSTIC_STREAM_CHARS} more chars]"
 
 
-def _record_probe_diagnostics(root: Path, failure: str, result: object) -> None:
+def _record_probe_diagnostics(root: Path, failure: str, result: object = None) -> None:
     """Record what a failing probe knew, so the next occurrence explains itself.
 
     `DoctorCheck.details` deliberately stays `{"code": ...}`: callers assert
@@ -714,6 +714,12 @@ def _record_probe_diagnostics(root: Path, failure: str, result: object) -> None:
             subject="deep_mcp",
             detail=detail,
         )
+        # Also to stderr, and this is load-bearing rather than belt-and-braces.
+        # The ledger is per-repo on local disk; on a CI runner that disk is
+        # thrown away, so a ledger-only diagnostic is invisible in exactly the
+        # environment where this failure actually occurs. pytest shows captured
+        # stderr for a failing test, so this reaches the CI log.
+        print(f"[graphite-probe] deep_mcp {failure}: {detail}", file=sys.stderr)
     except Exception:
         return
 
@@ -1511,8 +1517,16 @@ def probe_mcp(
             max_output_bytes=_MCP_OUTPUT_LIMIT_BYTES,
         )
     except ProbeProcessError as exc:
+        # No `result` on this path -- run_bounded_process raises before
+        # returning, so its stdout/stderr are lost inside it. The code alone
+        # still discriminates a great deal (timeout vs nonzero vs
+        # launch_failed), which is more than the bare "degraded" this used to
+        # give. Threading the streams out of ProbeProcessError would be
+        # strictly better and is deliberately left as a separate change.
+        _record_probe_diagnostics(root, exc.code)
         return _degraded_probe("deep_mcp", "MCP", exc.code)
     except Exception:
+        _record_probe_diagnostics(root, "probe_failed")
         return _degraded_probe("deep_mcp", "MCP", "probe_failed")
 
     try:
