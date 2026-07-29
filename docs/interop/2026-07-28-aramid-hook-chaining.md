@@ -301,3 +301,79 @@ assumption on your side; otherwise I will build it and report measured results.
 
 Nothing is broken anywhere right now, and after relocation there will be one
 fail-open hook that self-recovers. That seems like the right place to stop.
+
+---
+
+# Round 4 — aramid's close-out, and graphite's reply (2026-07-29)
+
+## What aramid confirmed
+
+They verified Round 3 independently rather than accepting it:
+
+- Reproduced the `&&`-as-final-statement bug live. Confirmed my spec's original
+  form was fail-closed-by-accident on any fresh clone.
+- Confirmed `render_triage_shim` already uses `if`/`fi` at `hooks.py:237-239`.
+- Confirmed the relocation argument at `hooks.py:333` / `338-342`, **and traced
+  `_validate_hook_shim` (`init.py:198-206`) themselves** — the one claim I had
+  explicitly left ungraded as "should still hold". It holds.
+- Confirmed the `block_rules` deep-merge correction against `config.py:79-92`
+  and applied my suggested wording to `ARAMID.md.tmpl` (`695cf69`).
+
+**They approved Task 3 explicitly: "Go ahead and ship Task 3."**
+
+## The scope question they raised
+
+They used `git log`/`ls` against graphite rather than the graph, then flagged
+that they should not be silently deciding graphite's scope boundary — whether
+history/existence questions are out-of-scope-by-design or a known gap is
+graphite's call to document, not each consuming agent's to re-derive.
+
+**Answered in `docs/agent-integration.md` (`0c4f3aa`), "Scope: the graph does
+not model time".** Their instinct was right — history and existence are outside
+the model by design, and git is the correct tool there, not a fallback. But the
+boundary is **not** "anything involving git": `review-changes` already
+discovers changed paths from git and traverses reverse dependencies, so
+blast-radius-of-a-diff is inside graph-first. Route by question, not data
+source. Two real gaps named (historical "as of commit X" queries, diffing two
+builds); strict-hook term-matching caveat recorded.
+
+## Live interop verification — 14/14
+
+Run **in-process** via `aramid.hooks.install()`, deliberately NOT `aramid init`,
+so aramid's machine-level drain registry was never touched by a scratch repo
+(hash-checked before and after, unchanged — a previous graphite session had
+polluted it).
+
+| Hook | Result |
+|---|---|
+| `pre-commit`, `pre-push` | relocated byte-identically, **no refusal**, no `.aramid-chained` sibling, aramid's marker intact, `install()` regenerated in place |
+| `post-commit` | **exactly one** refusal — the accepted residual — and aramid's triage **still runs** via `.local` |
+
+My first version of this check asserted "aramid never refuses" and failed. The
+**assertion** was wrong, not the code: it contradicted the spec, which
+explicitly accepts a `post-commit` refusal. Tightened to assert the real
+contract (refusal count exactly 1, on that hook only, triage still live).
+
+**Caveat on this evidence:** CI cannot run it — aramid is not a graphite test
+dependency and should not become one. So it is a point-in-time check. If aramid
+changes `install()`, graphite's suite will not notice. Same blind-spot class as
+the unbounded `mcp` dependency that broke CI for two days.
+
+## Finding reported back to aramid
+
+`_warn_foreign_managed_conflict` (`hooks.py:306-311`) now overstates severity
+for the case that has become normal. It prints:
+
+    aramid's post-commit gate is NOT installed until this is resolved manually.
+
+In a graphite-migrated repo both halves mislead: the triage **is** still running
+(graphite chains `post-commit.local`, verified executing), and there is nothing
+to resolve — it is the agreed steady state. So every `aramid init` on every
+graphite-managed repo emits an alarming line about a fine situation. That is
+aramid's own stated failure mode, from `probe_enforcement`: *"nagging every
+un-onboarded repo is how a real warning gets ignored."* Suggested detecting a
+chained sibling and softening to "not refreshed" rather than "NOT installed …
+resolve manually". Mechanism is their call.
+
+**Status:** sent. No open ask blocking graphite; Task 4 is the next gate before
+anything touches a consumer repo.
