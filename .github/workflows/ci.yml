@@ -30,7 +30,11 @@ jobs:
       # packages themselves. Anything that reshapes sys.path breaks the handoff
       # -- and the probe fail-closes BY DESIGN, so under v7 it may be refusing
       # correctly rather than misbehaving. #29 carries that open question.
-      - uses: actions/setup-python@v6
+      #
+      # THROWAWAY DIAGNOSTIC BRANCH -- do not merge. Deliberately set to v7,
+      # the version that fails, so the diagnostic step below can capture WHY.
+      # main stays on v6.
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
           cache: pip
@@ -39,5 +43,11 @@ jobs:
         run: python -m pip install -e ".[dev,mcp]"
       - name: Lint
         run: python -m ruff check .
+      # Runs BEFORE the suite so it reports even though the suite is expected
+      # to fail here, and never gates: this step reports, it does not judge.
+      - name: Diagnose issue 29
+        continue-on-error: true
+        run: python scripts/diagnose_issue_29.py
       - name: Test
-        run: python -m pytest -q
+        continue-on-error: true
+        run: python -m pytest -q tests/test_doctor.py -k mcp_deep_probe_real_server
