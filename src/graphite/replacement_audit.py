@@ -122,6 +122,28 @@ def audit_replacement(
     }
 
 
+# Keyed 1:1 off `status`, never off the separate `ok` boolean. `ok` is
+# `not errors` in daemon_health._finalize, so it is True for the warnings-only
+# tier and rendered the self-contradictory `daemon health: warning (ok)` (#25).
+# Same shape as `resolution_health.healthy` vs the scoped `answer.grade`: an
+# aggregate boolean that discards the middle tier can disagree with the
+# granular status sitting next to it.
+_HEALTH_ADVICE = {
+    "ok": "no action needed",
+    "warning": "attention suggested",
+    "degraded": "attention required",
+}
+
+
+def _health_advice(status: object) -> str:
+    """Advice for a health tier, failing closed on anything unrecognised.
+
+    An unknown tier must not read as reassuring -- a status this code has
+    never heard of is precisely when a human should look.
+    """
+    return _HEALTH_ADVICE.get(status, "attention required") if isinstance(status, str) else "attention required"
+
+
 def format_replacement_audit(report: dict[str, Any]) -> str:
     lines = [
         f"[graphite] replacement audit: {'ready' if report['replacement_ready'] else 'not ready'}",
@@ -146,7 +168,8 @@ def format_replacement_audit(report: dict[str, Any]) -> str:
     lines.append(f"  - daemon listed: {daemon.get('project_listed')}")
     health = report["graphite"]["health"]
     if health.get("checked"):
-        lines.append(f"  - daemon health: {health.get('status')} ({'ok' if health.get('ok') else 'attention required'})")
+        status = health.get("status")
+        lines.append(f"  - daemon health: {status} ({_health_advice(status)})")
     graphify = report["graphify"]
     lines.append("Graphify remnants:")
     lines.append(f"  - existing paths: {len(graphify['existing_paths'])}")

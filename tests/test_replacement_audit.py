@@ -4,9 +4,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from graphite.bootstrap import bootstrap_project
 from graphite.cli import main
-from graphite.replacement_audit import audit_replacement
+from graphite.replacement_audit import audit_replacement, format_replacement_audit
 
 
 def _write(path: Path, text: str) -> None:
@@ -108,3 +110,61 @@ def test_audit_replacement_cli_json_and_fail_on_blocker(tmp_path: Path, monkeypa
 
     assert result == 1
     assert payload["blockers"][0]["code"] == "graph_missing"
+
+
+def _report_with_health(status: str, *, ok: bool) -> dict:
+    """A minimal report carrying one daemon-health verdict.
+
+    `ok` is deliberately settable apart from `status`: reproducing #25 needs
+    the warnings-only state the daemon actually produces, where `ok` is
+    `not errors` (so True) while `status` is already "warning".
+    """
+    return {
+        "replacement_ready": True,
+        "project_root": "/tmp/p",
+        "blockers": [],
+        "warnings": [],
+        "recommendations": [],
+        "graphite": {
+            "graph": {"exists": True, "valid": True, "stale": False},
+            "daemon": {"project_listed": True},
+            "health": {"checked": True, "ok": ok, "status": status},
+        },
+        "graphify": {"existing_paths": [], "text_references": [], "gitignore_entries": []},
+    }
+
+
+def _health_line(status: str, *, ok: bool) -> str:
+    rendered = format_replacement_audit(_report_with_health(status, ok=ok))
+    return next(ln for ln in rendered.splitlines() if "daemon health:" in ln)
+
+
+def test_warnings_only_daemon_health_line_does_not_contradict_itself() -> None:
+    """#25: `ok` is `not errors`, so a warnings-only daemon rendered
+    `daemon health: warning (ok)` -- the two halves disagreeing about whether
+    anything needs attention."""
+    line = _health_line("warning", ok=True)
+
+    assert "(ok)" not in line
+    assert "warning" in line
+
+
+@pytest.mark.parametrize(
+    ("status", "ok", "expected"),
+    [
+        ("ok", True, "  - daemon health: ok (no action needed)"),
+        ("warning", True, "  - daemon health: warning (attention suggested)"),
+        ("degraded", False, "  - daemon health: degraded (attention required)"),
+    ],
+)
+def test_daemon_health_line_is_keyed_off_status(status: str, ok: bool, expected: str) -> None:
+    assert _health_line(status, ok=ok) == expected
+
+
+def test_unrecognised_daemon_health_status_does_not_read_as_fine() -> None:
+    """An unknown status must not render as reassuring. Fail closed: a tier
+    this code has never heard of is exactly when a human should look."""
+    line = _health_line("some-future-tier", ok=True)
+
+    assert "no action needed" not in line
+    assert "attention required" in line
