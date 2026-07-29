@@ -22,7 +22,11 @@ MAX_LEDGER_BYTES = 5 * 1024 * 1024
 MAX_SUBJECT_CHARS = 512
 MAX_DETAIL_CHARS = 2048
 MAX_LINE_BYTES = 8192
-_CLASSES = frozenset({"build", "query", "daemon"})
+# "doctor" covers deep-probe failures (#29). It is a class of its own rather
+# than folded into "build" because doctor incidents must not inflate build
+# failure counts -- daemon_health reads those, and a probe that could not reach
+# an MCP server says nothing about whether the graph builds.
+_CLASSES = frozenset({"build", "query", "daemon", "doctor"})
 _LIFECYCLE_KINDS = frozenset({"ack", "resolve"})
 _KINDS = frozenset({"occurrence"}) | _LIFECYCLE_KINDS
 _STATE_ORDER = {"open": 0, "acked": 1, "resolved": 2}

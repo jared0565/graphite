@@ -19,6 +19,7 @@ from typing import Any
 
 from .config import Config
 from .doctor import DoctorCheck
+from .incident_ledger import record_incident, repo_ledger_dir
 from .llm import canonical_provider_name
 from .llm_probe import SYSTEM_PROMPT as _LLM_SYSTEM_PROMPT
 from .llm_probe import USER_PROMPT as _LLM_USER_PROMPT
@@ -669,6 +670,58 @@ def probe_core_pipeline(
     if _clock() >= deadline and candidate.details.get("error_type") != "cleanup":
         return _blocked("timeout", "timeout")
     return candidate
+
+
+# Bounded well under the ledger's own 2048-char cap. The probe must not lean on
+# that cap: an unbounded string still gets built, hashed and passed around
+# before the ledger ever sees it, and a server can emit megabytes.
+_PROBE_DIAGNOSTIC_STREAM_CHARS = 600
+
+
+def _stream_excerpt(raw: object) -> str:
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", "replace")
+    else:
+        text = str(raw or "")
+    if len(text) <= _PROBE_DIAGNOSTIC_STREAM_CHARS:
+        return text
+    return f"{text[:_PROBE_DIAGNOSTIC_STREAM_CHARS]}...[{len(text) - _PROBE_DIAGNOSTIC_STREAM_CHARS} more chars]"
+
+
+def _record_probe_diagnostics(root: Path, failure: str, result: object = None) -> None:
+    """Record what a failing probe knew, so the next occurrence explains itself.
+
+    `DoctorCheck.details` deliberately stays `{"code": ...}`: callers assert
+    exact equality on it, and a doctor report may be shared, whereas subprocess
+    stderr should not travel. The repo incident ledger is local and bounded, so
+    that is where the evidence goes.
+
+    Swallows everything. Diagnostics are a convenience; a probe that failed
+    because its own logging failed would be worse than the opacity this fixes.
+    """
+    try:
+        detail = " | ".join(
+            (
+                f"returncode={getattr(result, 'returncode', '<none>')}",
+                f"stdout={_stream_excerpt(getattr(result, 'stdout', b''))!r}",
+                f"stderr={_stream_excerpt(getattr(result, 'stderr', b''))!r}",
+            )
+        )
+        record_incident(
+            repo_ledger_dir(root),
+            klass="doctor",
+            code=f"deep_mcp_{failure}",
+            subject="deep_mcp",
+            detail=detail,
+        )
+        # Also to stderr, and this is load-bearing rather than belt-and-braces.
+        # The ledger is per-repo on local disk; on a CI runner that disk is
+        # thrown away, so a ledger-only diagnostic is invisible in exactly the
+        # environment where this failure actually occurs. pytest shows captured
+        # stderr for a failing test, so this reaches the CI log.
+        print(f"[graphite-probe] deep_mcp {failure}: {detail}", file=sys.stderr)
+    except Exception:
+        return
 
 
 def _degraded_probe(code: str, label: str, failure: str) -> DoctorCheck:
@@ -1464,8 +1517,16 @@ def probe_mcp(
             max_output_bytes=_MCP_OUTPUT_LIMIT_BYTES,
         )
     except ProbeProcessError as exc:
+        # No `result` on this path -- run_bounded_process raises before
+        # returning, so its stdout/stderr are lost inside it. The code alone
+        # still discriminates a great deal (timeout vs nonzero vs
+        # launch_failed), which is more than the bare "degraded" this used to
+        # give. Threading the streams out of ProbeProcessError would be
+        # strictly better and is deliberately left as a separate change.
+        _record_probe_diagnostics(root, exc.code)
         return _degraded_probe("deep_mcp", "MCP", exc.code)
     except Exception:
+        _record_probe_diagnostics(root, "probe_failed")
         return _degraded_probe("deep_mcp", "MCP", "probe_failed")
 
     try:
@@ -1488,6 +1549,7 @@ def probe_mcp(
         if not _REQUIRED_MCP_TOOLS.issubset(tool_names):
             raise ValueError
     except Exception:
+        _record_probe_diagnostics(root, "invalid_response", result)
         return _degraded_probe("deep_mcp", "MCP", "invalid_response")
     return DoctorCheck(
         "deep_mcp",
