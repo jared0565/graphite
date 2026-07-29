@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, TextIO
 
 from .agent_settings import ensure_claude_settings
 from .bootstrap import ensure_gitignore, daemon_visibility
+# Imported as a module, not `from .hookinstall import install_hooks`: this
+# file also has an `install_hooks` *parameter* below, and that local name
+# would shadow a bare function import. `hookinstall.install_hooks(...)` stays
+# unambiguous either way.
+from . import hookinstall
 from .io import atomic_write_text
 
 # Bump whenever GRAPHITE_DOC, SHARED_POINTER, or CURSOR_POINTER changes;
@@ -163,6 +169,7 @@ class InitResult:
     allowlist: dict[str, Any]
     daemon: dict[str, Any]
     agent_hooks: dict[str, Any]
+    hooks: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -174,6 +181,7 @@ class InitResult:
             "allowlist": self.allowlist,
             "daemon": self.daemon,
             "agent_hooks": self.agent_hooks,
+            "hooks": self.hooks,
         }
 
 
@@ -217,6 +225,8 @@ def init_project(
     daemon_base: Path | None = None,
     agent_hooks_mode: str | None = None,
     install_agent_hooks: bool = True,
+    install_hooks: bool = True,
+    interpreter: Path | None = None,
     adopt: bool = False,
 ) -> InitResult:
     root = project_root.resolve()
@@ -254,6 +264,25 @@ def init_project(
             "mode": None,
         }
 
+    if install_hooks:
+        # Same reasoning as install_agent_hooks above: hooks-on is the default
+        # for every caller, not just the CLI. A setting applied by sweeping
+        # repos by hand decays the moment a new repo appears, and relocation
+        # (see hookinstall's docstring) means turning this on is never a
+        # surprise to another tool's hooks -- only ever reported.
+        relocated = hookinstall.install_hooks(root, interpreter or Path(sys.executable))
+        hooks_result: dict[str, Any] = {
+            "path": str(hookinstall.hooks_dir(root)),
+            "action": "installed",
+            "relocated": relocated,
+        }
+    else:
+        hooks_result = {
+            "path": str(hookinstall.hooks_dir(root)),
+            "action": "skipped",
+            "relocated": [],
+        }
+
     ensure_vscode_activation_task(root / ".vscode" / "tasks.json")
     allowlist = ensure_gitignore_allowlist(root / ".gitignore", instruction_paths)
     daemon = daemon_visibility(root, daemon_base=daemon_base)
@@ -266,6 +295,7 @@ def init_project(
         allowlist=allowlist,
         daemon=daemon,
         agent_hooks=agent_hooks,
+        hooks=hooks_result,
     )
 
 

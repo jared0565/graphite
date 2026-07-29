@@ -874,6 +874,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         daemon_base=daemon_base,
         agent_hooks_mode=agent_hooks_mode,
         install_agent_hooks=not args.no_agent_hooks,
+        install_hooks=not args.no_hooks,
         adopt=args.adopt,
     ).to_dict()
     cfg = _project_scoped_config(args, root, canonical=True)
@@ -923,6 +924,10 @@ def cmd_init(args: argparse.Namespace) -> int:
             f"  - agent_hooks: {agent_hooks.get('action')} "
             f"({agent_hooks.get('path')}, mode={agent_hooks.get('mode')})"
         )
+        hooks = result["hooks"]
+        print(f"  - hooks: {hooks.get('action')} ({hooks.get('path')})")
+        if hooks.get("relocated"):
+            print(f"    relocated: {', '.join(hooks['relocated'])}")
         allowlist = result["allowlist"]
         if allowlist.get("changed"):
             print(f"  - gitignore allowlist: added {', '.join(allowlist.get('added', []))}")
@@ -2353,6 +2358,7 @@ def main(argv: list[str] | None = None) -> int:
     p_init_mode.add_argument("--strict", action="store_true", help="Write strict-mode graphite-first hook wiring (denies provable relationship greps)")
     p_init_mode.add_argument("--remind", action="store_true", help="Write remind-mode hook wiring (non-blocking reminders; default for first-time wiring)")
     p_init.add_argument("--no-agent-hooks", action="store_true", help="Skip Claude Code hook wiring in .claude/settings.json")
+    p_init.add_argument("--no-hooks", action="store_true", help="Skip git hook installation (post-commit/post-merge/post-rewrite trampolines)")
     p_init.set_defaults(func=cmd_init)
 
     p_bootstrap = sub.add_parser("bootstrap", help="Make a project Graphite-ready and optionally build its graph")
