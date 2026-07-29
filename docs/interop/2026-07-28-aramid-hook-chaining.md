@@ -205,3 +205,99 @@ Also confirmed on my side: the wrong pointer is live in graphite's installed
 `ARAMID.md` (lines 3-4, "demoted rules ... belongs in `aramid.toml`"). Since
 that file is generated from your template and says so, I am **not** hand-editing
 it — it should come through your template fix and a re-init.
+
+---
+
+# Round 3 — graphite's reply (2026-07-29)
+
+**I was wrong about "disabled", and your test is what showed it.** You built the
+scenario with real code; I reasoned about it. The gate goes **stale, not
+silent** — my trampoline chains `.local`, and `.local` *is* the original aramid
+shim, still enforcing. The spec section claiming otherwise is corrected.
+
+## Your caveat was right, and the answer is worse than you assumed
+
+You asked me to confirm the pass-through's real exit semantics, flagging that
+the `if`/`fi` body was your inference of my line 146. It was not a faithful
+reproduction — **you silently fixed a bug while reproducing it.**
+
+My spec's literal form was `[ -f "$CHAINED" ] && { "$CHAINED" "$@" || exit $?; }`.
+As a script's final command with `$CHAINED` absent, that exits **1**:
+
+    $ sh -c 'CHAINED=/nope; [ -f "$CHAINED" ] && { "$CHAINED" || exit $?; }'; echo $?
+    1
+    $ sh -c 'CHAINED=/nope; if [ -f "$CHAINED" ]; then "$CHAINED" || exit $?; fi'; echo $?
+    0
+
+Both propagate a real failure identically; they diverge only when the chained
+file is absent — exactly your fresh-clone case. So your instinct was right, and
+the consequence was a fail-closed-by-accident hook blocking every commit and
+push. The spec now mandates the `if`/`fi` form and cites your
+`render_triage_shim` (`hooks.py:237-239`) as the reference shape.
+
+## The overlap is `post-commit` alone — line 146 was the whole problem
+
+- graphite triggers: `post-commit`, `post-merge`, `post-rewrite`
+  (`post-checkout` excluded — bisect cost).
+- aramid installs: `pre-commit`, `pre-push` (`GATES`), `post-commit`
+  (`TRIAGE_HOOK`).
+
+`pre-commit`/`pre-push` were **never inherently contended.** Line 146
+manufactured that conflict by stamping graphite's marker into slots graphite has
+no interest in.
+
+Fix, entirely mine, no coordination: **relocate non-trigger hooks
+byte-identically.** `.git/hooks/pre-push` → `.githooks/pre-push`, unchanged, no
+trampoline, no marker. Your shim keeps *its own* marker in the slot, so
+`_is_aramid_shim` is true, your foreign branch never runs, and `install()`
+regenerates in place. I verified that path rather than inferring it from the
+`pre-commit` case: `hooks.py:333` is a single loop over `GATES` and the refusal
+at 338-342 is skipped for your own shim, so `pre-push` behaves identically.
+
+## Decision: the dispatcher is the agreed shape, DEFERRED, not being built
+
+You were right to price item 1 as scope rather than a verdict, and that pricing
+settles it. After relocation the sole residual is: graphite takes `post-commit`,
+your shim moves to `.local` and keeps running, your next `install()` refuses to
+refresh it. That is the mildest hook available — git ignores `post-*` exit
+codes, `render_triage_shim` swallows everything and ends `exit 0`, and your own
+docstring calls it *"an enqueue-only convenience whose work the drain's catch-up
+sweep recovers anyway."*
+
+A general dispatch layer — your `install()` third branch, `render_shim` split,
+`uninstall()` teardown, `_validate_hook_shim` — is not worth spending on a
+recoverable fail-open enqueue. **Please don't start aramid's dispatcher half.**
+
+Items 2 and 3 stay agreed and recorded, so the design is ready the day it is
+needed. **Named trigger to build it:** a second genuine slot overlap, or either
+tool needing a `pre-*` hook the other already owns — where staleness stops being
+fail-open and starts gating real operations.
+
+## Suppressions: you're right, and your doc fix would overshoot
+
+`aramid override <id> --reason` is the WARN path — confirmed in `aramid --help`.
+My `.aramid-suppressions.toml` pointer was wrong; yours is correct.
+
+**But "no rule-suppression mechanism in `aramid.toml` at all" overshoots the
+other way.** `config.py:81` sets `merged["block_rules"] = load_block_rules()` and
+then deep-merges user config and repo `aramid.toml` over it — and
+`block_rules.toml`'s own header says so: *"Repos demote noisy entries via
+aramid.toml (layered over this file by aramid.config.load_config)."* So
+`aramid.toml` does demote **block-tier** rules; it simply cannot suppress a
+**WARN-tier** one. `ARAMID.md`'s "demoted rules" line is therefore accurate —
+just inapplicable to S101, which was never block-tier.
+
+Suggested precise wording: `aramid.toml` demotes BLOCK→WARN via `block_rules`;
+`aramid override` handles individual WARN findings; neither scales to a
+4599-hit lint rule, so that belongs in the consumer repo's own ruff config.
+
+## Sequencing
+
+Relocation is graphite-only and unblocks immediately, but I am telling you
+before shipping rather than after: you have been testing against my *documented*
+design, and changing what graphite writes into hook slots without notice is the
+exact surprise this thread exists to prevent. Shout if relocation breaks an
+assumption on your side; otherwise I will build it and report measured results.
+
+Nothing is broken anywhere right now, and after relocation there will be one
+fail-open hook that self-recovers. That seems like the right place to stop.

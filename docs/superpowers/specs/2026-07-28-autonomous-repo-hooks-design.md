@@ -140,23 +140,55 @@ interest in.
    owns hook policy there.
 2. If unset:
    - Create `.githooks/`.
-   - Move each non-sample `.git/hooks/*` → `.githooks/<name>.local`, preserving
-     shebang and executable bit.
-   - Write graphite trampolines for the three triggers.
-   - **Write pass-through trampolines for every other migrated hook.** Without
-     this, `pre-commit` / `pre-push` gates die the moment `hooksPath` is set.
+   - **For a hook graphite does not trigger on: relocate it byte-identically.**
+     Move `.git/hooks/<name>` → `.githooks/<name>` unchanged, preserving shebang
+     and executable bit. No trampoline. No `.local`. No graphite marker.
+   - **Only for the three triggers**: move the existing hook to
+     `.githooks/<name>.local` and write a graphite trampoline that chains it
+     using the `if`/`fi` form below.
    - Set `core.hooksPath .githooks` **last**, so no window exists where nothing
      fires.
 
+   > **Corrected 2026-07-29 — this replaces "write pass-through trampolines for
+   > every other migrated hook".** That instruction was the defect. A
+   > pass-through does nothing except forward, so the trampoline earned nothing
+   > and cost two real bugs: it stamped `# >>> graphite managed >>>` onto
+   > `pre-commit`/`pre-push` — slots graphite has no interest in — which makes
+   > aramid's `install()` refuse them (`0f24609`), and as written it exited 1
+   > when there was nothing to chain to. Relocation has neither problem:
+   > aramid's shim keeps *its own* marker in the slot, so `_is_aramid_shim` is
+   > true, aramid's foreign-hook branch never runs, and `install()` regenerates
+   > in place idempotently (`hooks.py:338,353` — one loop over `GATES`, so
+   > `pre-push` behaves identically to `pre-commit`).
+
 ### Exit-code semantics differ by hook class
+
+**Use `if`/`fi`, never `[ -f … ] && { … }`.** The `&&` form was wrong here and
+is corrected as of 2026-07-29. As a script's *final* command it exits **1** when
+`$CHAINED` does not exist — the `[ -f ]` test fails, `&&` short-circuits, and
+that failing status becomes the script's. A trampoline with nothing to chain to
+would therefore block every commit and push. Measured, not reasoned:
+
+    $ sh -c 'CHAINED=/nope; [ -f "$CHAINED" ] && { "$CHAINED" || exit $?; }'; echo $?
+    1
+    $ sh -c 'CHAINED=/nope; if [ -f "$CHAINED" ]; then "$CHAINED" || exit $?; fi'; echo $?
+    0
+
+Both forms propagate a real failure correctly; they differ only when the chained
+file is absent, which is exactly the fresh-clone case. aramid's agent surfaced
+this by writing the `if`/`fi` form when reproducing the design — silently fixing
+the bug rather than reproducing it.
 
 ```sh
 # post-* : git ignores exit codes — never block
-[ -f "$CHAINED" ] && "$CHAINED" "$@" || true
+if [ -f "$CHAINED" ]; then "$CHAINED" "$@" || true; fi
 
 # pre-*  : exit code GATES the operation — must propagate
-[ -f "$CHAINED" ] && { "$CHAINED" "$@" || exit $?; }
+if [ -f "$CHAINED" ]; then "$CHAINED" "$@" || exit $?; fi
 ```
+
+aramid's own `render_triage_shim` uses precisely this shape (`hooks.py:237-239`,
+terminated by an explicit `exit 0`). Mirror it.
 
 ### Coexistence with aramid — NOT safe as designed above
 
@@ -185,22 +217,62 @@ hook fire**. aramid's agent confirmed this against this document's own text.
    `.aramid-chained` file (graphite's trampoline, still internally chaining to
    the *original* aramid shim) and reported a clean uninstall while aramid's
    gate kept running. Fixed on aramid's side (`0f24609`).
-2. **The Migration step at line 146 makes this worse, not better.** It writes
-   pass-through trampolines for *every* migrated hook — including `pre-commit`
-   and `pre-push`, which graphite has no interest in. If those carry
-   `# >>> graphite managed >>>`, then after `0f24609` aramid's `install()`
-   **refuses every one of them** and does not install its gates at all
-   ("aramid's <hook> gate is NOT installed until this is resolved manually").
-   Running `graphite init` would therefore disable aramid's security gates
-   across graphite itself and all five consumer repos.
+2. **The Migration step made this worse** by stamping graphite's marker onto
+   `pre-commit`/`pre-push`, so aramid's `install()` refuses them. Now fixed by
+   relocation — see the corrected Migration step above.
 
-**Therefore: graphite must not write marker-bearing trampolines into shared
-hook slots.** See "Hook slot sharing" below. This is a blocking constraint on
-Plan B, not a refinement.
+**Correction, 2026-07-29 — an earlier revision of this section claimed
+`graphite init` would leave aramid's gates "disabled". That was wrong, and
+aramid's agent disproved it by building the scenario.** They installed a real
+shim, hand-migrated it, ran the fixed `install()` (confirming the refusal), then
+fired the hook at a staged AWS key: **exit 1, real gitleaks BLOCK, gate fully
+enforced.** The reason is obvious in hindsight — graphite's trampoline chains
+`.local`, and `.local` *is* the original aramid shim, still doing its job.
+
+The true residual is **staleness, not silence**: aramid's shim keeps enforcing
+but can never be regenerated by a later `aramid init`, and `aramid uninstall`
+warns it cannot verify its own removal. Materially milder than "disabled", and
+the difference is what changed the design decision below. Recorded because
+overstating a harm is how a cheap fix loses to an expensive one.
+
+**Therefore: graphite must not write marker-bearing trampolines into hook slots
+it does not trigger on.** Relocation, not pass-throughs.
 
 ### Hook slot sharing — the `<hook>.d/` dispatcher
 
-**Decision (2026-07-29): adopt a shared `<hook>.d/` dispatcher directory.**
+**Decision (2026-07-29, revised same day): the dispatcher is the agreed shape,
+but is DEFERRED and not being built.** Relocation (see Migration above) removes
+the conflict on every hook except one, and the residual is not worth a
+coordinated cross-repo branch.
+
+**Why this reversed.** The first decision below was made against a harm model
+that did not survive testing — I claimed aramid's gates would be *disabled*;
+they measured that the gate still enforces and only goes stale. Combined with
+the overlap being narrower than assumed, the cost/benefit inverted:
+
+- graphite triggers `post-commit`, `post-merge`, `post-rewrite` (line 49).
+- aramid installs `pre-commit`, `pre-push` (`GATES`) and `post-commit`
+  (`TRIAGE_HOOK`).
+- **Overlap: `post-commit` alone.** `pre-commit`/`pre-push` were never
+  inherently contended — the old line 146 manufactured that conflict.
+
+The one real overlap is the mildest hook available: git ignores `post-*` exit
+codes, aramid's `render_triage_shim` swallows everything and ends `exit 0`, and
+aramid's own docstring calls it *"an enqueue-only convenience whose work the
+drain's catch-up sweep recovers anyway"*. Accepted residual: graphite takes the
+`post-commit` slot, aramid's shim moves to `.local` and keeps running, and
+aramid's next `install()` refuses to refresh it.
+
+**What would trigger building the dispatcher** (named so this is a condition,
+not a vibe): a *second* genuine slot overlap; or either tool needing a `pre-*`
+hook the other already owns, where staleness stops being fail-open and starts
+gating real operations. Items 2 and 3 below are already agreed with aramid, so
+the design is ready to build the day that happens.
+
+<details>
+<summary>Original reasoning, retained — it is still the right answer when the
+trigger condition is met</summary>
+
 aramid offered three conventions ranked against one invariant — *the gate runs
 exactly once per hook fire*. Chosen on that invariant, not preference:
 
@@ -240,9 +312,16 @@ unilaterally and are graphite's open asks to aramid):
   only when `.d/` is empty or holds nothing but `00-*`.
 
 **Sequencing constraint.** aramid's refusal is already live on `origin/main`,
-so this ordering is not optional: the dispatcher convention must be agreed and
-implemented **before** graphite's migration ships. Shipping migration first
-disables aramid's gates everywhere graphite touches.
+so if the dispatcher is ever built, it must be agreed and implemented **before**
+graphite's migration ships.
+
+</details>
+
+**Still binding regardless of the deferral:** graphite must announce the
+relocation change to aramid *before* shipping it. Their `install()` behaviour is
+live and they have been testing against graphite's **documented** design, so a
+silent change to what graphite writes into hook slots is precisely the class of
+surprise this thread exists to prevent.
 
 ### The hook that must not break
 
