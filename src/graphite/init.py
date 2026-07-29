@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -218,6 +219,17 @@ def resolve_platform_selection(
     return tuple(resolved)
 
 
+def _is_git_repo(root: Path) -> bool:
+    """Ground truth, not a `.git`-exists heuristic: `--is-inside-work-tree`
+    also answers correctly for a repo `root` nested inside a larger one,
+    matching how `hookinstall`'s own `git -C root ...` calls resolve."""
+    result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
 def init_project(
     project_root: Path,
     *,
@@ -264,7 +276,7 @@ def init_project(
             "mode": None,
         }
 
-    if install_hooks:
+    if install_hooks and _is_git_repo(root):
         # Same reasoning as install_agent_hooks above: hooks-on is the default
         # for every caller, not just the CLI. A setting applied by sweeping
         # repos by hand decays the moment a new repo appears, and relocation
@@ -276,7 +288,23 @@ def init_project(
             "action": "installed",
             "relocated": relocated,
         }
+    elif install_hooks:
+        # Not a git repo (yet). `hookinstall.install_hooks` would still write
+        # trampolines into `.githooks/`, but with no `.git` for `core.hooksPath`
+        # to live in, git would never dispatch to them -- reporting "installed"
+        # here would be a confident, silent wrong answer. Report honestly and
+        # skip, rather than leave inert files that look like they did something.
+        hooks_result = {
+            "path": str(root / hookinstall.DEFAULT_HOOKS_DIRNAME),
+            "action": "skipped",
+            "relocated": [],
+            "reason": "not a git repository",
+        }
     else:
+        # install_hooks=False says nothing about whether this is a git repo
+        # (unlike the branch above) -- go through hookinstall.hooks_dir so an
+        # existing core.hooksPath (husky et al.) is still reported accurately
+        # rather than defaulting to a path graphite wouldn't actually use.
         hooks_result = {
             "path": str(hookinstall.hooks_dir(root)),
             "action": "skipped",

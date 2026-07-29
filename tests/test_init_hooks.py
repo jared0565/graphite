@@ -94,3 +94,18 @@ def test_init_reports_what_it_relocated(tmp_path: Path, capsys) -> None:
     # Relocation itself stays byte-identical -- that contract is
     # test_hookinstall.py's job; here we only need proof it was reported.
     assert (root / ".githooks" / "pre-push").read_bytes() == body.encode()
+
+
+def test_init_on_a_non_git_directory_does_not_claim_hooks_are_installed(tmp_path: Path) -> None:
+    """`hookinstall.install_hooks` would happily write trampolines into
+    `.githooks/` even with no `.git` for `core.hooksPath` to live in -- git
+    would then never dispatch to them. Reporting `action: "installed"` in
+    that case is exactly the confident-silent-wrong shape to avoid: no `git
+    init` has run here, so init must report a skip, not a claimed install,
+    and must not leave inert files behind that look like they did something.
+    """
+    result = init_project(tmp_path, platforms=["claude"]).to_dict()
+
+    assert result["hooks"]["action"] == "skipped"
+    assert result["hooks"]["reason"] == "not a git repository"
+    assert not (tmp_path / ".githooks").exists()

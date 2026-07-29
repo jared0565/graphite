@@ -925,9 +925,16 @@ def cmd_init(args: argparse.Namespace) -> int:
             f"({agent_hooks.get('path')}, mode={agent_hooks.get('mode')})"
         )
         hooks = result["hooks"]
-        print(f"  - hooks: {hooks.get('action')} ({hooks.get('path')})")
+        # Kept to a single line, not a "    "-indented sub-line: that indent
+        # is reserved for _print_typescript_activation's numbered guidance
+        # steps below, and test_init_human_guidance_uses_exact_fixed_workflow
+        # asserts on the exact set of 4-space-indented lines in this output.
+        extra = ""
+        if hooks.get("reason"):
+            extra += f", reason={hooks['reason']}"
         if hooks.get("relocated"):
-            print(f"    relocated: {', '.join(hooks['relocated'])}")
+            extra += f", relocated={', '.join(hooks['relocated'])}"
+        print(f"  - hooks: {hooks.get('action')} ({hooks.get('path')}{extra})")
         allowlist = result["allowlist"]
         if allowlist.get("changed"):
             print(f"  - gitignore allowlist: added {', '.join(allowlist.get('added', []))}")
