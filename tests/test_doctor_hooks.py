@@ -60,3 +60,19 @@ def test_un_onboarded_repo_is_not_a_finding(tmp_path: Path) -> None:
     check = check_hooks(root)
 
     assert check.status == "optional"
+
+
+def test_details_do_not_leak_the_absolute_hooks_path(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    install_hooks(root, INTERP)
+
+    check = check_hooks(root)
+
+    # NOTE: `str(tmp_path) not in json.dumps(...)` is a vacuous check on
+    # Windows -- json.dumps doubles backslashes, so a raw Windows path never
+    # matches its own JSON-escaped form. Assert directly over the detail
+    # values instead (falsified: reintroducing `"hooks_dir": str(hdir)`
+    # makes this fail, while the old `not in json.dumps(...)` form did not).
+    assert not any(str(tmp_path) in str(value) for value in check.details.values())
+    assert not any(str(hooks_dir(root)) in str(value) for value in check.details.values())
+    assert set(check.details) == {"onboarded", "custom_hooks_dir", "hookspath_configured", "trampolines_installed"}
