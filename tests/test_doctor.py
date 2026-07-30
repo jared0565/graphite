@@ -287,6 +287,26 @@ def test_freshness_file_cap_stops_before_unbounded_collection(monkeypatch: pytes
         check_graph_freshness(tmp_path, cfg, max_manifest_bytes=8)
 
 
+def _iter_strings(value: object):
+    """Yield every string leaf in a JSON-shaped structure.
+
+    Deliberately never round-trips through json.dumps: it escapes backslashes,
+    so a substring check against a raw Windows path (single backslashes) can
+    never match its own JSON-escaped form (doubled backslashes) even when the
+    path is genuinely present -- making `needle not in json.dumps(x)` a
+    silently vacuous leak guard on this platform. Walking the live structure
+    and comparing raw strings has no such gap.
+    """
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_strings(item)
+
+
 def _bundle() -> dict:
     return {"nodes": [], "edges": [], "clusters": [], "analysis": {}, "metadata": {"node_count": 0, "edge_count": 0, "community_count": 0}}
 
@@ -306,8 +326,9 @@ def test_graph_states_size_limit_and_safe_failure(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr("graphite.doctor._artifact_size", lambda path: 1)
     monkeypatch.setattr("graphite.doctor._read_json_bounded", lambda path, limit: (_ for _ in ()).throw(OSError("RAW C:/secret")))
     result = check_graph(tmp_path, cfg)
-    assert "RAW" not in json.dumps(result.to_dict())
-    assert str(tmp_path) not in json.dumps(result.to_dict())
+    leaked = list(_iter_strings(result.to_dict()))
+    assert not any("RAW" in s for s in leaked)
+    assert not any(str(tmp_path) in s for s in leaked)
 
 
 def test_graph_blocks_freshness_limits(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -343,10 +364,10 @@ def test_mcp_typescript_and_llm_never_leak_raw_values(monkeypatch: pytest.Monkey
     assert captured == {"executable": tmp_path.parent / "node.exe", "timeout": 1.25}
     assert "RAW" not in json.dumps(ts.to_dict())
 
-    secret = "CREDENTIAL_SENTINEL"
-    llm = check_llm_config(Config(llm_mode="none", llm_provider=" Open_AI ", llm_api_key=secret))
+    sentinel = "CREDENTIAL_SENTINEL"
+    llm = check_llm_config(Config(llm_mode="none", llm_provider=" Open_AI ", llm_api_key=sentinel))
     encoded = json.dumps(llm.to_dict()) + format_doctor_text(build_report(tmp_path, [llm], deep=False, llm_included=False))
-    assert secret not in encoded
+    assert sentinel not in encoded
     assert llm.details == {"mode": "none", "provider": "custom/unknown", "credential_present": True}
     assert "unused" in llm.summary.lower()
 
@@ -598,7 +619,7 @@ def test_daemon_classifies_only_selected_project(monkeypatch: pytest.MonkeyPatch
     expected = "ready" if selected_state == "healthy" else "optional" if selected_state == "missing" else "degraded"
     assert result.status == expected
     assert result.details["registered"] is (selected_state != "missing")
-    assert str(root) not in json.dumps(result.to_dict())
+    assert not any(str(root) in s for s in _iter_strings(result.to_dict()))
 
 
 @pytest.mark.parametrize(
@@ -1691,7 +1712,7 @@ def test_core_deep_probe_runs_real_pipeline_without_touching_selected_root(tmp_p
     assert check.details["commands_completed"] == 3
     assert set(check.details) == {"node_count", "edge_count", "duration_ms", "commands_completed"}
     assert before == after
-    assert str(tmp_path) not in json.dumps(check.to_dict())
+    assert not any(str(tmp_path) in s for s in _iter_strings(check.to_dict()))
 
 
 def test_core_deep_probe_uses_exact_offline_command_contract(tmp_path: Path) -> None:
@@ -1728,11 +1749,11 @@ def test_core_deep_probe_maps_runner_failures_safely(tmp_path: Path, failure_cod
     def fail(*args: object, **kwargs: object) -> object:
         raise ProbeProcessError(failure_code)
     check = probes.probe_core_pipeline(tmp_path, timeout_seconds=1, _runner=fail)
-    encoded = json.dumps(check.to_dict())
+    leaked = list(_iter_strings(check.to_dict()))
     assert check.status == "blocked"
     assert check.details == {"error_type": expected_type, "code": failure_code}
-    assert "RAW" not in encoded
-    assert str(tmp_path) not in encoded
+    assert not any("RAW" in s for s in leaked)
+    assert not any(str(tmp_path) in s for s in leaked)
 
 
 def test_core_deep_probe_blocks_malformed_and_invalid_validation(tmp_path: Path) -> None:
@@ -2535,7 +2556,7 @@ def test_mcp_import_manifest_excludes_arbitrary_pth_added_roots(
 
     manifest = probes._mcp_import_manifest(selected)
 
-    assert str(arbitrary.resolve()) not in json.dumps(manifest)
+    assert not any(str(arbitrary.resolve()) in s for s in _iter_strings(manifest))
 
 
 def test_mcp_requirement_marker_evaluates_and_or_compounds() -> None:
