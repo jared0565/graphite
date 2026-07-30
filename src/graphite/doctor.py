@@ -20,6 +20,8 @@ from .daemon import read_daemon_status
 from .daemon_health import HealthOptions, evaluate_daemon_health
 from .freshness import FreshnessLimitError, check_graph_freshness
 from .git import GitError, GitRunner
+from .hookinstall import hooks_dir
+from .hookshim import MARKER_START, TRIGGERS
 from .llm import canonical_provider_name
 from .validation import validate_graph_bundle
 
@@ -146,6 +148,52 @@ def _validated_git_records(root: Path, output: bytes) -> list[str]:
         except (OSError, ValueError) as exc:
             raise GitError("Git returned malformed output") from exc
     return records
+
+
+def _hooks_path_configured(root: Path) -> bool:
+    try:
+        result = GitRunner(root).run(["config", "--get", "core.hooksPath"], timeout_seconds=5.0, max_stdout_bytes=4096)
+    except (GitError, OSError):
+        return False
+    if result.returncode != 0:
+        return False
+    try:
+        return bool(result.stdout.decode("utf-8").strip())
+    except UnicodeDecodeError:
+        return False
+
+
+def _hook_shim_present(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        return MARKER_START.encode() in path.read_bytes()
+    except OSError:
+        return False
+
+
+def check_hooks(root: Path) -> DoctorCheck:
+    """Are graphite's git hooks not just installed, but actually enforced.
+
+    Precedent from aramid's `probe_enforcement`: a repo with no `GRAPHITE.md`
+    is deliberately not onboarded, so it is reported `optional` -- not a
+    finding -- rather than nagging every repo that never opted in.
+    """
+    if not (root / "GRAPHITE.md").is_file():
+        return DoctorCheck("hooks", "Hooks", "optional", "Repository is not onboarded onto graphite; hook enforcement does not apply.", {"onboarded": False})
+
+    hdir = hooks_dir(root)
+    installed = all(_hook_shim_present(hdir / hook) for hook in TRIGGERS)
+    configured = _hooks_path_configured(root)
+    details = {"onboarded": True, "hooks_dir": str(hdir), "hookspath_configured": configured, "trampolines_installed": installed}
+
+    if configured and installed:
+        return DoctorCheck("hooks", "Hooks", "ready", "Git hooks are installed and enforced.", details)
+    if configured and not installed:
+        return DoctorCheck("hooks", "Hooks", "degraded", "core.hooksPath is configured but graphite's hook trampolines are missing.", details, ("Run `graphite init` to (re)install the hook trampolines.",))
+    if installed and not configured:
+        return DoctorCheck("hooks", "Hooks", "degraded", "Graphite's hook trampolines are installed but core.hooksPath is not set, so Git will not run them.", details, ("Run `git config core.hooksPath` to point at the installed hooks directory, or reinstall.",))
+    return DoctorCheck("hooks", "Hooks", "degraded", "Git hooks are not installed for this onboarded repository.", details, ("Run `graphite init` to install git hooks.",))
 
 
 def _scoped_output(root: Path, cfg: Config) -> Path:
@@ -462,7 +510,7 @@ def _incidents_check(root: Path) -> DoctorCheck:
 
 
 def _fast_checks(root: Path, cfg: Config, daemon_base: Path | None) -> list[DoctorCheck]:
-    checks: list[tuple[str, str, Callable[[], DoctorCheck]]] = [("python", "Python", check_python), ("git", "Git", lambda: check_git(root)), ("graph", "Graph", lambda: check_graph(root, cfg)), ("daemon", "Daemon", lambda: check_daemon(root, daemon_base or root)), ("mcp", "MCP", check_mcp), ("typescript", "TypeScript", lambda: check_typescript(root)), ("llm", "LLM", lambda: check_llm_config(cfg)), ("incidents", "Incident ledger", lambda: _incidents_check(root))]
+    checks: list[tuple[str, str, Callable[[], DoctorCheck]]] = [("python", "Python", check_python), ("git", "Git", lambda: check_git(root)), ("hooks", "Hooks", lambda: check_hooks(root)), ("graph", "Graph", lambda: check_graph(root, cfg)), ("daemon", "Daemon", lambda: check_daemon(root, daemon_base or root)), ("mcp", "MCP", check_mcp), ("typescript", "TypeScript", lambda: check_typescript(root)), ("llm", "LLM", lambda: check_llm_config(cfg)), ("incidents", "Incident ledger", lambda: _incidents_check(root))]
     results = []
     for code, label, check in checks:
         try:
