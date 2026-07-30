@@ -380,10 +380,11 @@ def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
         # here the envelope is left exactly as it was before this block.
         try:
             seeds = [entry.get("node") for entry in envelope.get("resolution", [])]
+            matched_languages = languages_for_nodes(g, seeds)
             block = build_answer_block(
                 g,
                 relations=spec.relations,
-                languages=languages_for_nodes(g, seeds),
+                languages=matched_languages,
                 total=0 if _is_empty(spec, result) else 1,
                 empty_meaning=spec.empty_meaning or None,
             )
@@ -391,6 +392,10 @@ def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
                 envelope["answer"] = block
                 if "inconclusive" in envelope:
                     envelope["inconclusive"] = block["grade"] == GRADE_INCONCLUSIVE
+            elif seeds and not matched_languages and "inconclusive" in envelope:
+                # Matched real nodes, but none have an applicable code
+                # language -- nothing to grade, not a resolution gap.
+                envelope["inconclusive"] = False
         except Exception:
             pass
     return envelope
@@ -519,6 +524,13 @@ def _candidates(g: nx.DiGraph, token: str, limit: int = 5) -> list[dict[str, Any
     return [_node_view(g, n) for _score, n in scored[:limit]]
 
 
+def _path_depth(g: nx.DiGraph, node_id: str) -> int:
+    """Number of directory segments in a node's source file (0 = repo root)."""
+    source_file = g.nodes[node_id].get("source_file") or ""
+    normalized = source_file.replace("\\", "/").strip("/")
+    return normalized.count("/") if normalized else 0
+
+
 def _find_node_detail(g: nx.DiGraph, token: str) -> tuple[str, str, list[str]] | None:
     """Match a node and report HOW it matched.
 
@@ -531,7 +543,17 @@ def _find_node_detail(g: nx.DiGraph, token: str) -> tuple[str, str, list[str]] |
     if token in g:
         return token, "exact-id", []
 
-    name_hits = sorted(n for n in g.nodes() if g.nodes[n].get("name", "").lower() == token)
+    # Multiple files can share a basename (README.md at root and under
+    # hooks/, policy/, etc.) -- prefer the shallowest path, since a bare
+    # basename query with no path segments almost always means the
+    # repo-root file, not whichever id happened to sort first alphabetically
+    # (found via operation-firewall dogfooding, 2026-07-31: `README.md`
+    # matched `hooks/README.md` over the root file purely because
+    # "hooks_readme" < "readme" as strings).
+    name_hits = sorted(
+        (n for n in g.nodes() if g.nodes[n].get("name", "").lower() == token),
+        key=lambda n: (_path_depth(g, n), n),
+    )
     if name_hits:
         return name_hits[0], "name", name_hits[1:4]
 

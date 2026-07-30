@@ -374,22 +374,14 @@ def test_query_error_outputs_are_golden_stable() -> None:
         "error_code": "no_path",
         "truncated": False,
         "limits": {"max_depth": 32},
-        # no_path carries no resolved seeds, so languages_for_nodes([]) falls
-        # back to every language in resolution_health's by_language ("other",
-        # since this fixture's edges carry no source_file) -> health IS
-        # populated here, unlike the node-seeded verbs above, and no
-        # typescript-only caveat fires.
-        "answer": {
-            "schema": 1,
-            "relations": ["calls"],
-            "languages": ["other"],
-            "health": {
-                "calls": {"other": {"total": 1, "bound": 1, "ratio": 1.0, "external": 0, "healthy": True}}
-            },
-            "grade": "decision_grade",
-            "caveats": [],
-            "empty_meaning": "no call path found within depth",
-        },
+        # no_path carries no resolved seeds (the reaches handler doesn't
+        # surface match info on error), so languages_for_nodes([]) means
+        # "nothing to scope against" -- no answer block at all, rather than
+        # the pre-fix behavior of falling back to every language in
+        # resolution_health's by_language ("other", since this fixture's
+        # edges carry no source_file) and grading against a bucket that has
+        # nothing to do with src_lib/src_app (operation-firewall dogfooding
+        # fix, 2026-07-31).
     }
 
 
@@ -482,6 +474,25 @@ def test_query_reports_match_type_and_alternates(tmp_path: Path) -> None:
     by_path = query(g, "depends-on src/a.ts")
     assert by_path["match"]["type"] == "path-suffix"
     assert by_path["node"] == "src_a"
+
+
+def test_query_by_name_prefers_shallower_path_on_basename_collision(tmp_path: Path) -> None:
+    """Multiple files can share a basename (README.md at root and nested). A
+    bare basename token with no path segments should resolve to the
+    repo-root file, not whichever node id happens to sort first
+    alphabetically (found via operation-firewall dogfooding, 2026-07-31:
+    "README.md" matched hooks/README.md over the root file purely because
+    "hooks_readme" < "readme" as strings, with zero preference for path
+    depth)."""
+    _write(tmp_path / "README.md", "# root\n")
+    _write(tmp_path / "hooks" / "README.md", "# hooks\n")
+    result = _extract(tmp_path, "disabled")
+    g = build_graph(result.nodes, result.edges)
+
+    by_name = query(g, "calls README.md")
+    assert by_name["match"]["type"] == "name"
+    matched_node = by_name["match"]["node"]
+    assert g.nodes[matched_node]["source_file"].replace("\\", "/") == "README.md"
 
 
 def test_not_found_error_suggests_close_candidates(tmp_path: Path) -> None:

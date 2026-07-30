@@ -66,11 +66,33 @@ def test_scoped_cells_ignore_other_languages():
     assert "python" not in block["health"]["calls"]
 
 
-def test_language_fallback_is_graph_wide():
+def test_language_fallback_is_graph_wide_only_for_an_explicit_none():
+    """languages=None ("no filter") still grades against every language --
+    but this is now reached only by an explicit None, never by a caller's
+    computed-and-empty list. No production call site passes None today
+    (every real caller derives its filter via languages_for_nodes), so this
+    exercises the escape hatch directly rather than through a real path."""
     g = _merged(_graph_ratio(".py", 9, 1), _graph_ratio(".ts", 1, 9))
-    block = build_answer_block(g, relations=("calls",), languages=[], total=1)
+    block = build_answer_block(g, relations=("calls",), languages=None, total=1)
     assert set(block["languages"]) == {"python", "typescript"}
     assert block["grade"] == GRADE_ADVISORY  # ts cell degraded
+
+
+def test_empty_languages_means_not_applicable_not_graph_wide():
+    """languages=[] means the caller computed the matched nodes' languages
+    and found none apply (e.g. the match is a markdown/config file, not
+    code) -- distinct from None. It must return None (nothing to grade),
+    never silently borrow an unrelated language's degraded health.
+
+    Regression for operation-firewall dogfooding, 2026-07-31: a `README.md`
+    query matched a non-code file, languages_for_nodes returned [], and the
+    old `if languages else sorted(by_language)` fallback graded the query
+    against the whole graph's python/rust health -- an unrelated,
+    unmeasured file came back "inconclusive" and polluted the incident
+    ledger."""
+    g = _merged(_graph_ratio(".py", 9, 1), _graph_ratio(".ts", 1, 9))
+    block = build_answer_block(g, relations=("calls",), languages=[], total=1)
+    assert block is None
 
 
 def test_missing_cells_are_omitted_and_do_not_degrade():

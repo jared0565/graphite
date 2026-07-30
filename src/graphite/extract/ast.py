@@ -69,12 +69,33 @@ _EXTERNAL_GLOBALS: frozenset[str] = frozenset({
     "setTimeout", "setInterval", "clearTimeout", "clearInterval",
     "fetch", "queueMicrotask", "structuredClone", "atob", "btoa",
     "crypto", "performance", "Buffer", "require",
-    # Python builtins absent from the drop-list
+    # Python builtins absent from the drop-list. This was a partial list of
+    # Python's builtin exception hierarchy (found incomplete via operation
+    # -firewall dogfooding, 2026-07-31: SystemExit and FileNotFoundError were
+    # missing, so `raise FileNotFoundError(...)` classified LOCAL_CALL against
+    # a synthesized unknown target instead of EXTERNAL_CALL like its sibling
+    # ValueError) -- now the full builtin exception/warning hierarchy, not
+    # just the names one dogfooding pass happened to exercise.
     "ValueError", "OSError", "AssertionError", "KeyError", "IndexError",
     "RuntimeError", "NotImplementedError", "StopIteration",
     "frozenset", "bytearray", "complex", "object", "Exception",
     "BaseException", "property", "staticmethod", "classmethod",
     "slice", "divmod", "format",
+    "SystemExit", "GeneratorExit", "KeyboardInterrupt",
+    "ArithmeticError", "FloatingPointError", "OverflowError", "ZeroDivisionError",
+    "AttributeError", "BufferError", "EOFError",
+    "ImportError", "ModuleNotFoundError", "LookupError", "MemoryError",
+    "NameError", "UnboundLocalError", "RecursionError", "SystemError",
+    "UnicodeError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeTranslateError",
+    "IndentationError", "TabError",
+    "BlockingIOError", "ChildProcessError", "ConnectionError", "BrokenPipeError",
+    "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError",
+    "FileExistsError", "FileNotFoundError", "InterruptedError", "IsADirectoryError",
+    "NotADirectoryError", "PermissionError", "ProcessLookupError", "TimeoutError",
+    "Warning", "DeprecationWarning", "PendingDeprecationWarning", "RuntimeWarning",
+    "UserWarning", "FutureWarning", "ImportWarning", "UnicodeWarning",
+    "BytesWarning", "ResourceWarning",
+    "BaseExceptionGroup", "ExceptionGroup",
 })
 
 

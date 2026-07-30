@@ -454,21 +454,25 @@ def _impact(g: Any, changes: list[str], depth: int) -> dict[str, Any]:
 
     health = resolution_health(g)
     total = len(impacted_files) + len(likely_tests)
+    matched_languages = languages_for_nodes(g, start_nodes)
     try:
         block = build_answer_block(
             g,
             relations=("calls", "imports"),
-            languages=languages_for_nodes(g, start_nodes),
+            languages=matched_languages,
             total=total,
             empty_meaning="no impacted files or tests reachable through bound edges",
         )
     except Exception:
         block = None
-    inconclusive = (
-        block["grade"] == GRADE_INCONCLUSIVE
-        if block is not None
-        else (not impacted_files and not likely_tests and not health["healthy"])
-    )
+    if block is not None:
+        inconclusive = block["grade"] == GRADE_INCONCLUSIVE
+    elif start_nodes and not matched_languages:
+        # Matched real nodes, but none have an applicable code language (e.g.
+        # markdown/config) -- nothing to grade, not a resolution gap.
+        inconclusive = False
+    else:
+        inconclusive = not impacted_files and not likely_tests and not health["healthy"]
     result = {
         "changed": changes,
         "matched_nodes": sorted(start_nodes),

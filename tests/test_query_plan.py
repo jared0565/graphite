@@ -293,12 +293,18 @@ def test_stats_has_no_answer_block():
     assert "answer" not in result
 
 
-def test_no_path_error_carries_answer_block():
+def test_no_path_error_has_no_answer_block():
+    """no_path carries no resolved seeds (the reaches handler doesn't
+    surface match info on error), so languages_for_nodes([]) now means
+    "nothing to scope against" rather than "fall back to the whole graph".
+    Before the operation-firewall dogfooding fix (2026-07-31), this
+    silently graded against every unrelated language in the graph and
+    produced a coincidental-looking answer block; now it correctly carries
+    none at all."""
     g = _contract_graph()
     result = execute_plan(g, make_plan("reaches", [("source", "b_fn"), ("target", "a_fn")], {}))
     assert result["error_code"] == "no_path"
-    assert result["answer"]["relations"] == ["calls"]
-    assert result["answer"]["empty_meaning"] == "no call path found within depth"
+    assert "answer" not in result
 
 
 def test_neighbor_listing_entries_carry_source_file():
@@ -331,6 +337,23 @@ def test_legacy_inconclusive_upgrades_to_scoped(monkeypatch):
     assert result["answer"]["grade"] == "inconclusive"
     assert result["inconclusive"] is True
     assert result["resolution_health"]["healthy"] is True  # aggregate masks; scoped does not
+
+
+def test_query_on_non_code_node_is_not_inconclusive_despite_unhealthy_graph():
+    """Same regression as the context/impact mirror tests, through
+    execute_plan: a query whose only matched node has no applicable code
+    language (e.g. a markdown file) must not inherit a degraded language's
+    health from elsewhere in the graph."""
+    g = _contract_graph()
+    # Degrade python calls elsewhere so the aggregate is genuinely unhealthy.
+    g.add_node("unbound_target", kind="unknown")
+    g.add_edge("a_fn", "unbound_target", relation="calls", source_file="a.py")
+    g.add_node("readme", kind="file", name="README.md", source_file="README.md")
+
+    result = execute_plan(g, make_plan("callers", [("node", "readme")], {}))
+    assert result["resolution_health"]["healthy"] is False  # graph really is degraded
+    assert result["inconclusive"] is False
+    assert "answer" not in result
 
 
 def test_execute_plan_fail_open_when_answer_computation_raises(monkeypatch):

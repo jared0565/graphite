@@ -386,6 +386,24 @@ def test_impact_result_carries_answer_block():
     assert result["impacted_files"] == ["src/b.py"]
 
 
+def test_impact_on_non_code_file_is_not_inconclusive_despite_unhealthy_graph():
+    """Same regression as test_context.py's mirror test, through cli._impact:
+    a query whose only matched node has no applicable code language (e.g.
+    README.md) must not inherit an unrelated file's degraded health."""
+    from graphite import cli
+
+    g = nx.DiGraph()
+    g.add_node("src", kind="function", source_file="a.py")
+    g.add_node("tgt", kind="unknown", source_file="b.py")
+    g.add_edge("src", "tgt", relation="calls", source_file="a.py")  # unbound -> graph unhealthy
+    g.add_node("readme", kind="file", name="README.md", source_file="README.md")
+
+    result = cli._impact(g, ["README.md"], 2)
+    assert result["resolution_health"]["healthy"] is False  # graph really is degraded
+    assert result["inconclusive"] is False
+    assert "answer" not in result
+
+
 def test_impact_inconclusive_upgrades_to_scoped():
     from graphite import cli
 

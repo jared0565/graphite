@@ -166,6 +166,26 @@ def test_context_build_carries_answer_block():
     assert context["answer"]["grade"] == "decision_grade"
 
 
+def test_context_on_non_code_file_is_not_inconclusive_despite_unhealthy_graph():
+    """Regression for operation-firewall dogfooding, 2026-07-31: a query
+    whose only matched node is a non-code file (markdown, config -- no
+    calls/imports of its own) must not inherit an unrelated language's
+    degraded health from elsewhere in the graph. languages_for_nodes
+    returning [] means "nothing applicable here", not "grade against
+    everything" -- the old `if languages else sorted(by_language)` fallback
+    made a README.md query inherit degraded python/rust health from
+    unrelated files and come back inconclusive."""
+    from graphite.context import build_context
+
+    g = _trust_graph(healthy=False)  # elsewhere in the graph: degraded python
+    g.add_node("readme", kind="file", name="README.md", source_file="README.md")
+
+    context = build_context(g, ["readme"])
+    assert context["resolution_health"]["healthy"] is False  # graph really is degraded
+    assert context["inconclusive"] is False
+    assert "answer" not in context
+
+
 def test_context_markdown_advisory_line_on_nonempty_degraded():
     """Same scenario as cli.py's test_cmd_impact_human_advisory_line_on_nonempty_degraded
     (tests/test_health.py), through the context markdown renderer: non-empty

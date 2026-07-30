@@ -126,14 +126,33 @@ def build_answer_block(
     total: int,
     empty_meaning: str | None = None,
 ) -> dict[str, Any] | None:
-    """The `answer` block for one graph answer, or None (fail-open)."""
+    """The `answer` block for one graph answer, or None (fail-open).
+
+    ``languages=None`` means "no filter, grade against every language in the
+    graph" -- distinct from ``languages=()``/``[]``, which means the caller
+    computed the matched nodes' languages and found none apply (e.g. the
+    matched nodes are markdown/config files, not code). The two must not
+    collapse to the same branch: no real caller passes ``None`` today (every
+    call site derives its filter from the matched nodes via
+    ``languages_for_nodes``), so treating an empty list as "no filter" meant
+    a query about a non-code file silently graded against the WHOLE graph's
+    unrelated-language health instead of having nothing to grade at all
+    (found via operation-firewall dogfooding, 2026-07-31: a `README.md`
+    query inherited Rust's and Python's degraded health and came back
+    inconclusive, polluting the incident ledger over a file that structurally
+    has no calls or imports). When no language applies, there is nothing to
+    grade -- return None (fail-open), the same as the no-relations case just
+    above, rather than a spuriously degraded or inconclusive block.
+    """
     try:
         if not relations:
+            return None
+        if languages is not None and not languages:
             return None
         health = resolution_health(g)
         by_language = health.get("by_language") or {}
         threshold = health.get("threshold", RESOLUTION_HEALTHY_RATIO)
-        langs = sorted(languages) if languages else sorted(by_language)
+        langs = sorted(languages) if languages is not None else sorted(by_language)
         cells: dict[str, dict[str, dict[str, Any]]] = {}
         degraded = False
         for relation in relations:
