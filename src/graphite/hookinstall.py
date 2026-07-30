@@ -24,9 +24,15 @@ import stat
 import subprocess
 from pathlib import Path
 
+from .config import default_projects_root
 from .hookshim import CHAINED_SUFFIX, MARKER_START, TRIGGERS, render_trigger_shim
 
 DEFAULT_HOOKS_DIRNAME = ".githooks"
+
+# Distinct from the unrelated "template" used for GRAPHITE.md/instruction-doc
+# versioning (`init.py`'s DOC_VERSION) -- "hooks" is spelled out so the two
+# concepts never look like the same thing on disk.
+DEFAULT_TEMPLATE_DIRNAME = ".graphite-hooks-template"
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -145,3 +151,51 @@ def uninstall_hooks(root: Path) -> list[str]:
             _make_executable(slot)
         removed.append(hook)
     return removed
+
+
+def default_template_root() -> Path:
+    """Where `graphite hooks --install-template` writes by default.
+
+    Mirrors the machine-state convention already used for daemon state --
+    `<default_projects_root>/.graphite-daemon` (see `config.default_projects_root`,
+    `cli._incidents_ledger_dir`) -- rather than inventing a new location.
+    Never reads or writes real global git config; that stays the human's step.
+    """
+    return default_projects_root() / DEFAULT_TEMPLATE_DIRNAME
+
+
+def install_template(template_root: Path, interpreter: Path) -> list[Path]:
+    """Write graphite's trigger shims into a git `init.templateDir` layout.
+
+    Git copies `<templateDir>/hooks/<name>` into `.git/hooks/<name>` on every
+    future `git init`/`git clone` on this machine once a human points
+    `init.templateDir` at `template_root` -- the `hooks/` subdirectory is
+    required, since that is what git actually copies from. This function
+    itself never touches git config, real or otherwise, and only ever writes
+    under `template_root`.
+
+    Unlike `install_hooks`, there is no relocation, no `.local` chaining and
+    no `core.hooksPath` write: there is nothing pre-existing to migrate in a
+    template directory, and git's own template-copy mechanism is what wires a
+    fresh repo up. The written bytes are exactly `render_trigger_shim`'s --
+    no separate rendering path for the template case.
+
+    This shim runs in *every* new clone on the machine, onboarded with
+    `GRAPHITE.md` or not, so it must fail open. `hook_entry.main()` already
+    does: it returns 0 silently when no `GRAPHITE.md` is found walking up
+    from cwd. That existing behaviour is what makes reusing the same shim
+    here safe -- a machine-wide template hook that errors would break every
+    unrelated repo on the machine.
+
+    Regeneration is idempotent for the same `(template_root, interpreter)`:
+    `render_trigger_shim` is pure and there is no chaining state to disturb.
+    """
+    hooks_subdir = template_root / "hooks"
+    hooks_subdir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for hook in TRIGGERS:
+        path = hooks_subdir / hook
+        path.write_bytes(render_trigger_shim(hook, interpreter))
+        _make_executable(path)
+        written.append(path)
+    return written

@@ -48,6 +48,7 @@ from .freshness import check_graph_freshness
 from .graph import build_graph, graph_to_json
 from .graph_io import MAX_GRAPH_BYTES, GraphReadError, load_validated_graph_bundle
 from .health import persisted_resolution, ratio_percent, resolution_health
+from . import hookinstall
 from .incident_ledger import record_incident, repo_ledger_dir
 from .ingest import collect_files
 from .init import init_project, platform_choices, resolve_platform_selection
@@ -148,6 +149,10 @@ _ACTIVATION_EXEMPT_COMMANDS = frozenset({
     "daemon-startup-status",
     "daemon-uninstall-startup-windows",
     "agent-hook",
+    # `hooks --install-template` writes into a machine-wide template
+    # directory (see `hookinstall.default_template_root`), not the cwd repo --
+    # same reasoning as the daemon commands above.
+    "hooks",
     # `activate` marks the path it was GIVEN, with the real agent name. Letting
     # the backstop also fire would additionally mark the caller's cwd -- which
     # for an editor task is whatever directory the editor happened to launch in.
@@ -947,6 +952,33 @@ def cmd_init(args: argparse.Namespace) -> int:
         if validation["requested"]:
             print(f"  - validation: {'ok' if validation.get('ok') else 'failed'}")
     return 1 if ts_activation.fatal or validation.get("ok") is False else 0
+
+
+def cmd_hooks(args: argparse.Namespace) -> int:
+    if not args.install_template:
+        print("[graphite] hooks: nothing to do -- pass --install-template", file=sys.stderr)
+        return 1
+    template_root = hookinstall.default_template_root().resolve()
+    interpreter = Path(sys.executable)
+    written = hookinstall.install_template(template_root, interpreter)
+    # graphite writes the template files but never touches real global git
+    # config itself -- that command is printed for a human to run by hand.
+    activate_cmd = f'git config --global init.templateDir "{template_root}"'
+    if args.json:
+        print(json.dumps({
+            "template_root": str(template_root),
+            "hooks": [str(p) for p in written],
+            "activate_command": activate_cmd,
+        }, ensure_ascii=False, indent=2))
+    else:
+        print(f"[graphite] template hooks written: {template_root}")
+        for p in written:
+            print(f"  - {p}")
+        print("[graphite] this covers FUTURE `git init`/`git clone` calls on this machine only,")
+        print("[graphite] and only once you run this yourself -- graphite never runs it for you:")
+        print(f"  {activate_cmd}")
+    return 0
+
 
 def cmd_audit_replacement(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
@@ -2367,6 +2399,21 @@ def main(argv: list[str] | None = None) -> int:
     p_init.add_argument("--no-agent-hooks", action="store_true", help="Skip Claude Code hook wiring in .claude/settings.json")
     p_init.add_argument("--no-hooks", action="store_true", help="Skip git hook installation (post-commit/post-merge/post-rewrite trampolines)")
     p_init.set_defaults(func=cmd_init)
+
+    p_hooks = sub.add_parser("hooks", help="Manage graphite's git-hook trampolines")
+    p_hooks.add_argument(
+        "--install-template",
+        action="store_true",
+        help=(
+            "Write graphite's trigger shims into a git init.templateDir layout "
+            "(default: <projects-root>/.graphite-hooks-template) so future "
+            "`git init`/`git clone` calls on this machine self-arm. Prints the "
+            "`git config --global init.templateDir` command to run by hand; "
+            "never runs it automatically."
+        ),
+    )
+    p_hooks.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_hooks.set_defaults(func=cmd_hooks)
 
     p_bootstrap = sub.add_parser("bootstrap", help="Make a project Graphite-ready and optionally build its graph")
     p_bootstrap.add_argument("path", help="Project path")
