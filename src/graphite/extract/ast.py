@@ -1263,7 +1263,13 @@ def _extract_go(file_id: str, rel_path: str, source: bytes, tree: Any) -> Extrac
     return result
 
 
-def _extract_rust(file_id: str, rel_path: str, source: bytes, tree: Any) -> ExtractionResult:
+def _extract_rust(
+    file_id: str,
+    rel_path: str,
+    source: bytes,
+    tree: Any,
+    source_index: SourceIndex | None = None,
+) -> ExtractionResult:
     """Heuristic Rust extraction: fns, impl methods, types, use decls, calls.
 
     `x.method()` (field_expression) and `Type::assoc()` (scoped_identifier)
@@ -1290,6 +1296,23 @@ def _extract_rust(file_id: str, rel_path: str, source: bytes, tree: Any) -> Extr
             return None
         raw = raw.split("{")[0].split(" as ")[0].strip().rstrip(":").strip()
         return raw or None
+
+    def _inline_mod_depth(node: Any) -> int:
+        """How many inline `mod { ... }` blocks enclose this node.
+
+        `super::` inside an inline module still refers to *this* file, at any
+        nesting depth, so a `#[cfg(test)] mod tests { use super::X; }` must not
+        be resolved against the parent directory. Read from the ancestor chain
+        rather than threaded through walk(), which would touch every recursive
+        call site for one rarely-needed number.
+        """
+        depth = 0
+        current = node.parent
+        while current is not None:
+            if current.type == "mod_item" and current.child_by_field_name("body") is not None:
+                depth += 1
+            current = current.parent
+        return depth
 
     def walk(node: Any, parent_id: str | None, scope_id: str, in_impl: bool) -> None:
         t = node.type
@@ -1321,11 +1344,45 @@ def _extract_rust(file_id: str, rel_path: str, source: bytes, tree: Any) -> Extr
         elif t == "use_declaration":
             target = _use_target(node)
             if target:
-                # No resolver for Rust `use` targets — default EXTRACTED
-                # confidence, not EXTERNAL_IMPORT (see matching Go note
-                # above: EXTERNAL_IMPORT means "a resolver tried and
-                # confirmed external", which never happens here).
-                result.edges.append(_edge(file_id, _make_id(target), "imports", rel_path, _line(node)))
+                resolution = (
+                    source_index.resolve_rust_use(rel_path, target, _inline_mod_depth(node))
+                    if source_index is not None
+                    else None
+                )
+                if resolution is not None and resolution.rel_path is not None:
+                    # _file_node_id, NOT _make_id: the target must be the id the
+                    # file node was created under, or the edge stays unbound.
+                    if resolution.rel_path != rel_path:
+                        # A file importing itself carries no dependency.
+                        result.edges.append(
+                            _edge(
+                                file_id,
+                                _file_node_id(resolution.rel_path),
+                                "imports",
+                                rel_path,
+                                _line(node),
+                            )
+                        )
+                elif resolution is not None and resolution.external:
+                    # Confirmed external (allowlisted root or declared Cargo
+                    # dependency) -- excluded from the imports ratio.
+                    result.edges.append(
+                        _edge(
+                            file_id,
+                            _make_id(target),
+                            "imports",
+                            rel_path,
+                            _line(node),
+                            confidence="EXTERNAL_IMPORT",
+                        )
+                    )
+                else:
+                    # Unresolved, or no index at all: default confidence, so the
+                    # miss stays visible to resolution_health rather than being
+                    # laundered as external.
+                    result.edges.append(
+                        _edge(file_id, _make_id(target), "imports", rel_path, _line(node))
+                    )
         elif t == "call_expression":
             func = node.child_by_field_name("function")
             if func is not None:
@@ -1454,9 +1511,10 @@ def extract_file(entry: FileEntry, cfg: Config, cache: Cache | None = None, sour
             return ExtractionResult(error=f"parse_error: {e}")
         if entry.language == "python":
             result = _extract_python(file_id, rel_path, source, tree, source_index)
+        elif entry.language == "rust":
+            result = _extract_rust(file_id, rel_path, source, tree, source_index)
         else:
-            extractor = {"go": _extract_go, "rust": _extract_rust}[entry.language]
-            result = extractor(file_id, rel_path, source, tree)
+            result = _extract_go(file_id, rel_path, source, tree)
     else:
         result = _extract_generic(file_id, rel_path, source, entry.language or "unknown")
 

@@ -163,9 +163,68 @@ def test_rust_use_declarations_become_import_edges(tmp_path: Path) -> None:
     _rust_fixture(tmp_path)
     result = _extract(tmp_path)
     imports = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "imports"}
+    confidence = {
+        e["target"]: e.get("confidence")
+        for e in result.edges
+        if e["relation"] == "imports" and e["source"] == "src_app"
+    }
 
+    # std is *confirmed* external: unbound synthetic target, tagged so the
+    # health ratio excludes it rather than counting it as a resolver failure.
     assert ("src_app", "std_collections_hashmap") in imports
-    assert ("src_app", "crate_store_store") in imports
+    assert confidence["std_collections_hashmap"] == "EXTERNAL_IMPORT"
+
+    # crate::store::Store now binds to the real file node -- this assertion
+    # used to read "crate_store_store", a synthetic id that matched no node.
+    # The fixture ships no Cargo.toml, so this also covers the nearest-`src`
+    # fallback in _rust_crate_for.
+    assert ("src_app", "src_store") in imports
+    assert confidence["src_store"] != "EXTERNAL_IMPORT"
+
+
+def _rust_workspace_fixture(tmp_path: Path) -> None:
+    _write(tmp_path / "crates" / "a" / "Cargo.toml", '[package]\nname = "a"\n[dependencies]\nserde = "1"\n')
+    _write(tmp_path / "crates" / "b" / "Cargo.toml", '[package]\nname = "b"\n')
+    _write(tmp_path / "crates" / "b" / "src" / "lib.rs", "pub struct Rule;\n")
+    _write(
+        tmp_path / "crates" / "a" / "src" / "lib.rs",
+        "use std::collections::BTreeSet;\n"
+        "use serde::Serialize;\n"
+        "use b::Rule;\n"
+        "use typo_crate::Thing;\n",
+    )
+
+
+def test_rust_use_binds_in_repo_and_tags_only_confirmed_external(tmp_path: Path) -> None:
+    _rust_workspace_fixture(tmp_path)
+    result = _extract(tmp_path)
+    confidence = {
+        e["target"]: e.get("confidence")
+        for e in result.edges
+        if e["relation"] == "imports" and e["source"] == "crates_a_src_lib"
+    }
+
+    # A sibling workspace crate binds to its real lib.rs node.
+    assert "crates_b_src_lib" in confidence
+    assert confidence["crates_b_src_lib"] != "EXTERNAL_IMPORT"
+    # Allowlisted root and a declared Cargo dependency are confirmed external.
+    assert confidence["std_collections_btreeset"] == "EXTERNAL_IMPORT"
+    assert confidence["serde_serialize"] == "EXTERNAL_IMPORT"
+    # The anti-laundering guard: an unresolvable target must stay counted
+    # against the ratio, never be excused as "external".
+    assert confidence["typo_crate_thing"] != "EXTERNAL_IMPORT"
+
+
+def test_rust_use_super_in_inline_test_module_emits_no_self_edge(tmp_path: Path) -> None:
+    _write(tmp_path / "crates" / "a" / "Cargo.toml", '[package]\nname = "a"\n')
+    _write(
+        tmp_path / "crates" / "a" / "src" / "lib.rs",
+        "pub struct Rule;\n#[cfg(test)]\nmod tests {\n    use super::Rule;\n}\n",
+    )
+    result = _extract(tmp_path)
+
+    # A file importing itself carries no dependency information.
+    assert [e for e in result.edges if e["relation"] == "imports"] == []
 
 
 def test_go_rust_query_verbs_work_end_to_end(tmp_path: Path) -> None:
