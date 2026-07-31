@@ -257,6 +257,23 @@ class SourceIndex:
                     return normalized
         return None
 
+    def resolve_rust_mod(self, importer_rel_path: str, mod_name: str) -> str | None:
+        """Resolve a `mod foo;` declaration to the file it pulls in.
+
+        Unambiguous, unlike `use`: exactly two legal layouts. This is Rust's
+        file-inclusion mechanism and the only structural link between the files
+        of a multi-file crate.
+        """
+        if not mod_name:
+            return None
+        base_dir = _rust_module_dir(importer_rel_path)
+        base = f"{base_dir}/{mod_name}" if base_dir else mod_name
+        for candidate in _rust_module_candidates(base):
+            normalized = posixpath.normpath(candidate).lstrip("./")
+            if normalized in self.rel_paths:
+                return normalized
+        return None
+
     def resolve_rust_use(
         self, importer_rel_path: str, use_path: str, inline_mod_depth: int = 0
     ) -> RustUseResolution:

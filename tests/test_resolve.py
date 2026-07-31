@@ -165,3 +165,34 @@ def test_resolve_rust_use_crate_falls_back_to_nearest_src_without_a_manifest(
     assert index.resolve_rust_use(
         "src/app.rs", "crate::store::Store"
     ) == RustUseResolution("src/store.rs", False)
+
+
+def test_resolve_rust_mod_from_lib_finds_a_sibling_file(tmp_path: Path) -> None:
+    index = _index(tmp_path, FILES, CRATES)
+    assert (
+        index.resolve_rust_mod("crates/ofw-policy/src/lib.rs", "rule")
+        == "crates/ofw-policy/src/rule.rs"
+    )
+
+
+def test_resolve_rust_mod_from_a_file_module_descends_into_its_directory(tmp_path: Path) -> None:
+    files = FILES | {"crates/ofw-policy/src/rule/kind.rs"}
+    index = _index(tmp_path, files, CRATES)
+    assert (
+        index.resolve_rust_mod("crates/ofw-policy/src/rule.rs", "kind")
+        == "crates/ofw-policy/src/rule/kind.rs"
+    )
+
+
+def test_resolve_rust_mod_accepts_the_mod_rs_layout(tmp_path: Path) -> None:
+    files = FILES | {"crates/ofw-policy/src/net/mod.rs"}
+    index = _index(tmp_path, files, CRATES)
+    assert (
+        index.resolve_rust_mod("crates/ofw-policy/src/lib.rs", "net")
+        == "crates/ofw-policy/src/net/mod.rs"
+    )
+
+
+def test_resolve_rust_mod_returns_none_when_absent(tmp_path: Path) -> None:
+    index = _index(tmp_path, FILES, CRATES)
+    assert index.resolve_rust_mod("crates/ofw-policy/src/lib.rs", "missing") is None
