@@ -21,7 +21,7 @@ from .daemon_health import HealthOptions, evaluate_daemon_health
 from .freshness import FreshnessLimitError, check_graph_freshness
 from .git import GitError, GitRunner
 from .hookinstall import DEFAULT_HOOKS_DIRNAME, hooks_dir
-from .init import managed_doc_paths
+from .init import gitignored_managed_paths, managed_doc_paths
 from .hookshim import MARKER_START, TRIGGERS
 from .llm import canonical_provider_name
 from .validation import validate_graph_bundle
@@ -244,10 +244,44 @@ def check_managed_docs(root: Path) -> DoctorCheck:
     # what makes that harmless, since a field that is not a managed path simply
     # never matches.
     dirty = sorted({record[3:] for record in decoded.split("\0") if len(record) > 3} & watched)
-    details = {"onboarded": True, "watched": sorted(watched), "uncommitted": dirty}
-    if not dirty:
+
+    # `git status` omits ignored files ENTIRELY, so everything above is blind to
+    # the worse failure: `init` writing a managed file into a path `.gitignore`
+    # already denies. Measured live in `BytesAI Learning` (2026-07-31), whose
+    # `.gitignore` denies `.claude/` -- the file carrying the graph-first hook
+    # was reported fine while its five neighbours were listed as uncommitted.
+    #
+    # `--ignored=matching` on status does NOT fix this: it still collapses the
+    # report to the ignored DIRECTORY (`.claude/`), which never matches the
+    # watched path. And `check-ignore` alone is wrong in the other direction --
+    # it answers "does a pattern match?", which is true but inert for an
+    # already-tracked file (`demo-store2`'s `CLAUDE.md` is both).
+    #
+    # `ls-files --others --ignored` is the conjunction itself: `--others`
+    # restricts to untracked, `--ignored` to ignored. Tracked-and-matched drops
+    # out by git's own semantics rather than by a rule reimplemented here.
+    # Same helper `init` repairs with, so the detector and the fix cannot drift
+    # into disagreeing about what "unreachable" means.
+    unreachable = list(gitignored_managed_paths(root, sorted(watched)))
+
+    # Disjoint by construction -- an ignored file never appears in `status`.
+    dirty = [path for path in dirty if path not in set(unreachable)]
+    details = {"onboarded": True, "watched": sorted(watched), "uncommitted": dirty, "unreachable": unreachable}
+    if not dirty and not unreachable:
         return DoctorCheck(code, label, "ready", "Every graphite-managed file matches the committed version.", details)
-    return DoctorCheck(code, label, "degraded", f"{len(dirty)} graphite-managed file(s) differ from the committed version; clones and CI get the committed one.", details, ("Commit the files listed in details.uncommitted -- a working tree that looks correct does not make them correct for anyone else.",))
+
+    # Reported apart from `uncommitted` because the remediation differs and the
+    # committing one is actively wrong here: `git add` on an ignored path is a
+    # no-op, so an operator who follows it sees nothing change and concludes
+    # the probe is broken.
+    summaries, steps = [], []
+    if unreachable:
+        summaries.append(f"{len(unreachable)} graphite-managed file(s) sit in gitignored paths and can never reach a clone")
+        steps.append("For details.unreachable, allow the path in .gitignore (e.g. `!/.claude/settings.json`) and then commit it -- `git add` alone is a no-op while the rule stands.")
+    if dirty:
+        summaries.append(f"{len(dirty)} differ from the committed version; clones and CI get the committed one")
+        steps.append("Commit the files listed in details.uncommitted -- a working tree that looks correct does not make them correct for anyone else.")
+    return DoctorCheck(code, label, "degraded", "; ".join(summaries) + ".", details, tuple(steps))
 
 
 def _read_json_bounded(path: Path, limit: int) -> Any:

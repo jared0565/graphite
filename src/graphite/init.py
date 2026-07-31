@@ -11,6 +11,7 @@ from typing import Any, Iterable, TextIO
 
 from .agent_settings import ensure_claude_settings
 from .bootstrap import ensure_gitignore, daemon_visibility
+from .git import GitError, GitRunner
 # Imported as a module, not `from .hookinstall import install_hooks`: this
 # file also has an `install_hooks` *parameter* below, and that local name
 # would shadow a bare function import. `hookinstall.install_hooks(...)` stays
@@ -334,7 +335,14 @@ def init_project(
         }
 
     ensure_vscode_activation_task(root / ".vscode" / "tasks.json")
-    allowlist = ensure_gitignore_allowlist(root / ".gitignore", instruction_paths)
+    # Measured after the files are written -- `ls-files --others` only sees
+    # what exists on disk, and a file init just created is exactly the one at
+    # risk of being swallowed.
+    allowlist = ensure_gitignore_allowlist(
+        root / ".gitignore",
+        instruction_paths,
+        swallowed=gitignored_managed_paths(root, instruction_paths),
+    )
     daemon = daemon_visibility(root, daemon_base=daemon_base)
     return InitResult(
         project_root=root,
@@ -463,18 +471,66 @@ def ensure_platform_file(path: Path, *, spec: PlatformSpec, adopt: bool = False)
     return {"platform": spec.key, "path": str(path), "changed": new_text is not None, "action": action}
 
 
-def ensure_gitignore_allowlist(path: Path, rel_paths: Iterable[Path]) -> dict[str, Any]:
+def gitignored_managed_paths(root: Path, rel_paths: Iterable[Path]) -> tuple[str, ...]:
+    """Managed paths Git will never hand to a clone: untracked AND ignored.
+
+    The conjunction matters in both directions, and each half alone is a bug
+    that was measured live on 2026-07-31. `git status` -- even with
+    `--ignored=matching` -- collapses the report to the ignored DIRECTORY
+    (`.claude/`), which never matches the managed path, so it reported
+    `BytesAI Learning`'s hook file as fine. `git check-ignore` alone answers
+    "does a pattern match?", which is true but inert for an already-tracked
+    file, so it would have condemned `demo-store2`'s tracked `CLAUDE.md`.
+
+    `ls-files --others --ignored` is the conjunction itself: `--others`
+    restricts to untracked, `--ignored` to ignored. Tracked-and-matched drops
+    out by Git's own semantics rather than by a rule reimplemented here.
+
+    Fails open (empty) on any Git trouble: a repo that cannot be interrogated
+    is not evidence of a swallowed file, and this result gates a `.gitignore`
+    rewrite.
+    """
+    wanted = {Path(rel).as_posix() for rel in rel_paths}
+    if not wanted:
+        return ()
+    try:
+        result = GitRunner(root).run(
+            ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", *sorted(wanted)],
+            timeout_seconds=10.0,
+            max_stdout_bytes=1024 * 1024,
+        )
+        if result.returncode != 0:
+            return ()
+        found = {entry for entry in result.stdout.decode("utf-8").split("\0") if entry}
+    except (GitError, OSError, UnicodeDecodeError):
+        return ()
+    return tuple(sorted(found & wanted))
+
+
+def ensure_gitignore_allowlist(path: Path, rel_paths: Iterable[Path], *, swallowed: Iterable[Path] = ()) -> dict[str, Any]:
     if not path.exists():
         return {"path": str(path), "changed": False, "added": [], "reason": "missing gitignore"}
     original = path.read_text(encoding="utf-8")
     lines = original.splitlines()
     default_deny = any(line.strip() == "/*" for line in lines)
-    if not default_deny:
+    # `default_deny` is a prediction -- a `/*` gitignore will swallow managed
+    # files, so allowlist them all up front. `swallowed` is a measurement:
+    # these specific files are being swallowed right now, by whatever rule.
+    #
+    # Measuring as well as predicting is what closes the `BytesAI Learning`
+    # case: an ordinary allow-by-default gitignore with a plain `.claude/`
+    # deny is not default-deny, so init wrote the file carrying the
+    # graph-first hook into a path Git would never take -- and reported
+    # success. Repair only what is measured, so a repo that merely looks
+    # unusual keeps its .gitignore untouched.
+    swallowed = tuple(swallowed)
+    if not default_deny and not swallowed:
         return {"path": str(path), "changed": False, "added": [], "reason": "not default-deny"}
+    targets = list(rel_paths) if default_deny else [Path(rel) for rel in swallowed]
 
     existing = {line.strip() for line in lines}
     added: list[str] = []
-    for rel in rel_paths:
+    for rel in targets:
         for pattern in _allowlist_patterns(rel):
             if pattern not in existing and pattern not in added:
                 added.append(pattern)
@@ -487,7 +543,7 @@ def ensure_gitignore_allowlist(path: Path, rel_paths: Iterable[Path]) -> dict[st
             new_text += "\n"
         new_text += "\n".join(added) + "\n"
         atomic_write_text(path, new_text)
-    return {"path": str(path), "changed": bool(added), "added": added, "reason": "default-deny"}
+    return {"path": str(path), "changed": bool(added), "added": added, "reason": "default-deny" if default_deny else "swallowed"}
 
 
 def _prompt_for_platforms(*, stdin: TextIO | None, stdout: TextIO | None) -> tuple[str, ...]:

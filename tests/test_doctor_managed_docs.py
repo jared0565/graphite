@@ -16,7 +16,12 @@ import subprocess
 from pathlib import Path
 
 from graphite.doctor import check_managed_docs
-from graphite.init import PLATFORMS, managed_doc_paths
+from graphite.init import (
+    PLATFORMS,
+    ensure_gitignore_allowlist,
+    gitignored_managed_paths,
+    managed_doc_paths,
+)
 
 
 # S603/S607 justification for this module's three `git` invocations: every
@@ -108,6 +113,129 @@ def test_optional_when_git_is_unavailable(tmp_path: Path) -> None:
     check = check_managed_docs(tmp_path)
 
     assert check.status == "optional"
+
+
+def test_reports_a_managed_file_that_gitignore_makes_unreachable(tmp_path: Path) -> None:
+    """The false-clean this probe shipped with, measured live in `BytesAI
+    Learning` on 2026-07-31: `.gitignore` denies `.claude/`, so `init` wrote
+    `.claude/settings.json` -- the file carrying the graph-first hook -- into a
+    path git will never take. `git status --porcelain` omits ignored files
+    entirely, so the probe called that file fine while listing its five
+    neighbours as uncommitted.
+
+    Worse than uncommitted, and reported separately for that reason: an
+    uncommitted file is one `git add` from correct, while this one silently
+    re-ignores itself forever. The old remediation is actively wrong here --
+    committing it produces no change at all.
+    """
+    root = _repo(tmp_path)
+    (root / ".gitignore").write_text(".claude/\n", encoding="utf-8")
+    (root / ".claude").mkdir()
+    (root / ".claude" / "settings.json").write_text("{}", encoding="utf-8")
+    _commit_all(root)
+
+    check = check_managed_docs(root)
+
+    assert check.status == "degraded"
+    assert check.details["unreachable"] == (".claude/settings.json",)
+    # Not double-reported: it is not "uncommitted", it is un-committable.
+    assert ".claude/settings.json" not in check.details["uncommitted"]
+    assert any("gitignore" in step for step in check.remediation)
+
+
+def test_a_tracked_file_matching_an_ignore_rule_is_not_unreachable(tmp_path: Path) -> None:
+    """`git check-ignore` answers "does a pattern match this path?", not "can a
+    clone get it?" -- and those differ for an already-tracked file, where the
+    ignore rule is inert. Measured live in `demo-store2`, whose `CLAUDE.md` is
+    both tracked and ignore-matched. Reporting it would be a false positive in
+    the opposite direction of the bug above, in the same function.
+    """
+    root = _repo(tmp_path)
+    (root / "CLAUDE.md").write_text("pointer", encoding="utf-8")
+    _commit_all(root)
+    # Added after the file is tracked, exactly as demo-store2's was.
+    (root / ".gitignore").write_text("CLAUDE.md\n", encoding="utf-8")
+    _commit_all(root)
+
+    check = check_managed_docs(root)
+
+    assert check.details["unreachable"] == ()
+    assert check.status == "ready"
+
+
+def test_a_repo_with_nothing_ignored_still_gets_a_real_answer(tmp_path: Path) -> None:
+    """`git check-ignore` exits 1 when NOTHING matches -- the healthy case.
+    Reusing the `returncode != 0` guard the rest of this probe uses would drop
+    every clean repo into the "could not be read from Git" branch, which is
+    itself a false-clean.
+    """
+    root = _repo(tmp_path)
+    _commit_all(root)
+
+    check = check_managed_docs(root)
+
+    assert check.status == "ready"
+    assert check.details["unreachable"] == ()
+    assert "could not be read" not in check.summary
+
+
+def test_init_allowlists_a_managed_path_an_ordinary_gitignore_swallows(tmp_path: Path) -> None:
+    """The cause behind the probe above, not just the symptom.
+
+    `ensure_gitignore_allowlist` used to act only on a *default-deny* gitignore
+    (a bare `/*` line). `BytesAI Learning` has an ordinary allow-by-default
+    gitignore with a plain `.claude/` deny, so the repair never fired and
+    `init` wrote `.claude/settings.json` into a path Git would never take --
+    reporting success. Prediction (`/*`) now has a measurement alongside it.
+    """
+    root = _repo(tmp_path)
+    (root / ".gitignore").write_text("node_modules/\n.claude/\n", encoding="utf-8")
+    (root / ".claude").mkdir()
+    (root / ".claude" / "settings.json").write_text("{}", encoding="utf-8")
+    _commit_all(root)
+    assert gitignored_managed_paths(root, [Path(".claude/settings.json")]) == (".claude/settings.json",)
+
+    result = ensure_gitignore_allowlist(
+        root / ".gitignore",
+        [Path(".claude/settings.json")],
+        swallowed=gitignored_managed_paths(root, [Path(".claude/settings.json")]),
+    )
+
+    assert result["changed"] is True
+    assert result["reason"] == "swallowed"
+    # The sandwich is preserved: settings.local.json may hold machine-local
+    # secrets, so the directory is re-denied and only settings.json allowed.
+    assert result["added"] == ["!/.claude/", "/.claude/*", "!/.claude/settings.json"]
+    assert gitignored_managed_paths(root, [Path(".claude/settings.json")]) == ()
+
+
+def test_init_leaves_an_ordinary_gitignore_alone_when_nothing_is_swallowed(tmp_path: Path) -> None:
+    """Repair only what is measured. A repo whose gitignore merely looks
+    unusual keeps it untouched -- rewriting someone's ignore rules on a guess
+    is a worse failure than the one being fixed."""
+    root = _repo(tmp_path)
+    (root / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    (root / "CLAUDE.md").write_text("pointer", encoding="utf-8")
+    _commit_all(root)
+
+    before = (root / ".gitignore").read_text(encoding="utf-8")
+    result = ensure_gitignore_allowlist(
+        root / ".gitignore",
+        [Path("CLAUDE.md")],
+        swallowed=gitignored_managed_paths(root, [Path("CLAUDE.md")]),
+    )
+
+    assert result["changed"] is False
+    assert result["reason"] == "not default-deny"
+    assert (root / ".gitignore").read_text(encoding="utf-8") == before
+
+
+def test_gitignored_managed_paths_fails_open_outside_a_repo(tmp_path: Path) -> None:
+    """It gates a .gitignore rewrite, so "cannot tell" must mean "change
+    nothing", never "assume swallowed"."""
+    (tmp_path / "CLAUDE.md").write_text("x", encoding="utf-8")
+
+    assert gitignored_managed_paths(tmp_path, [Path("CLAUDE.md")]) == ()
 
 
 def test_managed_doc_paths_covers_every_platform(tmp_path: Path) -> None:
