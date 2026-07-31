@@ -21,6 +21,7 @@ from .daemon_health import HealthOptions, evaluate_daemon_health
 from .freshness import FreshnessLimitError, check_graph_freshness
 from .git import GitError, GitRunner
 from .hookinstall import DEFAULT_HOOKS_DIRNAME, hooks_dir
+from .init import managed_doc_paths
 from .hookshim import MARKER_START, TRIGGERS
 from .llm import canonical_provider_name
 from .validation import validate_graph_bundle
@@ -203,6 +204,50 @@ def _scoped_output(root: Path, cfg: Config) -> Path:
 
 def _artifact_size(path: Path) -> int:
     return path.stat().st_size
+
+
+def check_managed_docs(root: Path) -> DoctorCheck:
+    """Graphite-managed files that exist on disk but differ from what Git has.
+
+    Why this is a probe and not a comment (aramid interop round 24,
+    2026-07-31): *a generated file left uncommitted is worse than a stale one,
+    because the staleness is invisible from the machine that generated it.*
+    `init` writes these files into the working tree; if nobody commits them the
+    author sees a correct repo while every clone and every CI checkout gets the
+    previous version. Measured live -- six graphite-managed files sat
+    uncommitted in aramid's repo for a day, and graphite had no way to say so.
+
+    Reported `degraded`, never `blocked`: the repo still works, and doctor
+    inventing a hard failure that no gate would produce is its own kind of lie
+    (aramid's `probe_deps` reasoning). A repo with no `GRAPHITE.md` is
+    deliberately not onboarded and is not a finding, matching `check_hooks`.
+    """
+    code, label = "managed-docs", "Managed docs"
+    if not (root / "GRAPHITE.md").is_file():
+        return DoctorCheck(code, label, "optional", "Repository is not onboarded onto graphite; no managed files to track.", {"onboarded": False, "uncommitted": []})
+
+    watched = {path.as_posix() for path in managed_doc_paths() if (root / path).is_file()}
+    if not watched:
+        return DoctorCheck(code, label, "ready", "No graphite-managed files are present.", {"onboarded": True, "watched": [], "uncommitted": []})
+
+    try:
+        result = GitRunner(root).run(["status", "--porcelain", "-z", "--", *sorted(watched)], timeout_seconds=10.0, max_stdout_bytes=1024 * 1024)
+        if result.returncode != 0:
+            raise GitError("Git command failed")
+        decoded = result.stdout.decode("utf-8")
+    except (GitError, OSError, UnicodeDecodeError):
+        return DoctorCheck(code, label, "optional", "Managed-file commit state could not be read from Git.", {"onboarded": True, "watched": sorted(watched), "uncommitted": []}, ("Verify Git 2.38+ and repository access.",))
+
+    # `-z` records are `XY <path>`, NUL-terminated and never quoted -- which is
+    # exactly why `-z` is used rather than parsing the quoted default format. A
+    # rename adds a second, bare-path field; intersecting against `watched` is
+    # what makes that harmless, since a field that is not a managed path simply
+    # never matches.
+    dirty = sorted({record[3:] for record in decoded.split("\0") if len(record) > 3} & watched)
+    details = {"onboarded": True, "watched": sorted(watched), "uncommitted": dirty}
+    if not dirty:
+        return DoctorCheck(code, label, "ready", "Every graphite-managed file matches the committed version.", details)
+    return DoctorCheck(code, label, "degraded", f"{len(dirty)} graphite-managed file(s) differ from the committed version; clones and CI get the committed one.", details, ("Commit the files listed in details.uncommitted -- a working tree that looks correct does not make them correct for anyone else.",))
 
 
 def _read_json_bounded(path: Path, limit: int) -> Any:
@@ -511,7 +556,7 @@ def _incidents_check(root: Path) -> DoctorCheck:
 
 
 def _fast_checks(root: Path, cfg: Config, daemon_base: Path | None) -> list[DoctorCheck]:
-    checks: list[tuple[str, str, Callable[[], DoctorCheck]]] = [("python", "Python", check_python), ("git", "Git", lambda: check_git(root)), ("hooks", "Hooks", lambda: check_hooks(root)), ("graph", "Graph", lambda: check_graph(root, cfg)), ("daemon", "Daemon", lambda: check_daemon(root, daemon_base or root)), ("mcp", "MCP", check_mcp), ("typescript", "TypeScript", lambda: check_typescript(root)), ("llm", "LLM", lambda: check_llm_config(cfg)), ("incidents", "Incident ledger", lambda: _incidents_check(root))]
+    checks: list[tuple[str, str, Callable[[], DoctorCheck]]] = [("python", "Python", check_python), ("git", "Git", lambda: check_git(root)), ("hooks", "Hooks", lambda: check_hooks(root)), ("managed-docs", "Managed docs", lambda: check_managed_docs(root)), ("graph", "Graph", lambda: check_graph(root, cfg)), ("daemon", "Daemon", lambda: check_daemon(root, daemon_base or root)), ("mcp", "MCP", check_mcp), ("typescript", "TypeScript", lambda: check_typescript(root)), ("llm", "LLM", lambda: check_llm_config(cfg)), ("incidents", "Incident ledger", lambda: _incidents_check(root))]
     results = []
     for code, label, check in checks:
         try:

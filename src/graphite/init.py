@@ -160,6 +160,28 @@ ALIASES: dict[str, str] = {
 }
 
 
+def managed_doc_paths() -> tuple[Path, ...]:
+    """Every repo-relative path `init` may generate, as the one source of
+    truth for "graphite wrote this file".
+
+    Derived from `PLATFORMS` rather than listed by hand so that adding a
+    platform cannot silently leave its file unwatched by
+    `doctor.check_managed_docs` -- the same one-true-registry argument
+    `ensure_platform_file` already relies on. `GRAPHITE.md` and
+    `.claude/settings.json` are added explicitly because they are written
+    outside the platform loop (`run_init` steps for the shared doc and the
+    agent-hook settings).
+
+    Returns the full candidate set, not the set present in any given repo:
+    callers filter by existence, because a platform a repo never selected is
+    absent and that is not a finding.
+    """
+    paths = {Path("GRAPHITE.md"), Path(".claude/settings.json")}
+    for spec in PLATFORMS.values():
+        paths.update(Path(rel) for rel in spec.files)
+    return tuple(sorted(paths, key=lambda path: path.as_posix()))
+
+
 @dataclass(frozen=True)
 class InitResult:
     project_root: Path
