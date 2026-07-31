@@ -393,6 +393,41 @@ def _match_alias(pattern: str, import_name: str) -> str | None:
 # resolution_health.
 _RUST_EXTERNAL_ROOTS: Final = frozenset({"std", "core", "alloc", "proc_macro"})
 _CARGO_DEPENDENCY_TABLES: Final = ("dependencies", "dev-dependencies", "build-dependencies")
+_RUST_MODULE_ROOT_FILES: Final = frozenset({"lib.rs", "main.rs", "mod.rs"})
+
+
+def _rust_module_dir(rel_path: str) -> str:
+    """Directory Rust searches for this file's child modules.
+
+    `lib.rs`/`main.rs`/`mod.rs` are their module's root, so their children sit
+    beside them. Any other `foo.rs` owns a sibling directory `foo/`.
+    """
+    path = PurePosixPath(rel_path)
+    parent_raw = path.parent.as_posix()
+    parent = "" if parent_raw == "." else parent_raw
+    if path.name in _RUST_MODULE_ROOT_FILES:
+        return parent
+    return f"{parent}/{path.stem}" if parent else path.stem
+
+
+def _rust_module_candidates(base: str) -> list[str]:
+    """The two legal on-disk layouts for a Rust module."""
+    return [f"{base}.rs", f"{base}/mod.rs"]
+
+
+def _rust_module_segments(segments: list[str]) -> list[str]:
+    """Leading segments of a `use` path that can be modules.
+
+    A `use` path blends module path and item name with no lexical boundary.
+    Rust modules are snake_case and items CamelCase, so an uppercase initial
+    ends the module portion.
+    """
+    modules: list[str] = []
+    for segment in segments:
+        if segment[:1].isupper():
+            break
+        modules.append(segment)
+    return modules
 
 
 def _normalize_crate_name(raw: str) -> str:

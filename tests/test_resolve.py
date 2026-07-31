@@ -7,6 +7,9 @@ from graphite.resolve import (
     _load_cargo_crates,
     _load_cargo_dependencies,
     _normalize_crate_name,
+    _rust_module_candidates,
+    _rust_module_dir,
+    _rust_module_segments,
 )
 
 
@@ -53,3 +56,24 @@ def test_load_cargo_dependencies_unions_all_tables(tmp_path: Path) -> None:
     assert _load_cargo_dependencies(tmp_path, rel_paths) == frozenset(
         {"serde", "proptest", "cc", "tokio_util"}
     )
+
+
+def test_rust_module_dir_root_files_use_their_own_directory() -> None:
+    assert _rust_module_dir("crates/a/src/lib.rs") == "crates/a/src"
+    assert _rust_module_dir("crates/a/src/main.rs") == "crates/a/src"
+    assert _rust_module_dir("crates/a/src/net/mod.rs") == "crates/a/src/net"
+
+
+def test_rust_module_dir_file_module_uses_a_directory_named_after_it() -> None:
+    assert _rust_module_dir("crates/a/src/policy.rs") == "crates/a/src/policy"
+
+
+def test_rust_module_candidates_covers_both_layouts() -> None:
+    assert _rust_module_candidates("src/policy") == ["src/policy.rs", "src/policy/mod.rs"]
+
+
+def test_rust_module_segments_stops_at_the_first_item_segment() -> None:
+    # Modules are snake_case, items are CamelCase -- Rule is an item, not a dir.
+    assert _rust_module_segments(["policy", "rule", "Rule"]) == ["policy", "rule"]
+    assert _rust_module_segments(["Rule"]) == []
+    assert _rust_module_segments(["policy", "rule"]) == ["policy", "rule"]
