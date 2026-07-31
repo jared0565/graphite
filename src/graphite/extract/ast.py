@@ -1341,6 +1341,30 @@ def _extract_rust(
             impl_type = _text(node.child_by_field_name("type"))
             impl_parent = _make_id(file_id, impl_type.split("<")[0]) if impl_type else parent_id
             walk_children(node, impl_parent, scope_id, True)
+        elif t == "mod_item":
+            body = node.child_by_field_name("body")
+            if body is None:
+                # `mod foo;` -- a file module. This is Rust's file-inclusion
+                # mechanism and the only structural link between the files of a
+                # multi-file crate, so without it such a crate has no
+                # module-structure edges at all.
+                mod_name = _short_name(_text(node.child_by_field_name("name")))
+                if mod_name and source_index is not None:
+                    resolved = source_index.resolve_rust_mod(rel_path, mod_name)
+                    if resolved is not None and resolved != rel_path:
+                        result.edges.append(
+                            _edge(
+                                file_id,
+                                _file_node_id(resolved),
+                                "imports",
+                                rel_path,
+                                _line(node),
+                            )
+                        )
+            else:
+                # Inline `mod foo { ... }` -- same file, no edge. Nesting depth
+                # is read from the ancestor chain by _inline_mod_depth.
+                walk_children(node, parent_id, scope_id, in_impl)
         elif t == "use_declaration":
             target = _use_target(node)
             if target:

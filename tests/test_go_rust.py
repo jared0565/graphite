@@ -227,6 +227,28 @@ def test_rust_use_super_in_inline_test_module_emits_no_self_edge(tmp_path: Path)
     assert [e for e in result.edges if e["relation"] == "imports"] == []
 
 
+def test_rust_mod_declaration_links_to_the_module_file(tmp_path: Path) -> None:
+    """`mod foo;` is Rust's file-inclusion mechanism and must produce an edge."""
+    _write(tmp_path / "crates" / "a" / "Cargo.toml", '[package]\nname = "a"\n')
+    _write(tmp_path / "crates" / "a" / "src" / "lib.rs", "mod rule;\n")
+    _write(tmp_path / "crates" / "a" / "src" / "rule.rs", "pub struct Rule;\n")
+    result = _extract(tmp_path)
+
+    imports = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "imports"}
+    assert ("crates_a_src_lib", "crates_a_src_rule") in imports
+
+
+def test_rust_inline_mod_emits_no_module_edge(tmp_path: Path) -> None:
+    _write(tmp_path / "crates" / "a" / "Cargo.toml", '[package]\nname = "a"\n')
+    _write(
+        tmp_path / "crates" / "a" / "src" / "lib.rs",
+        "mod tests {\n    pub fn helper() {}\n}\n",
+    )
+    result = _extract(tmp_path)
+
+    assert [e for e in result.edges if e["relation"] == "imports"] == []
+
+
 def test_go_rust_query_verbs_work_end_to_end(tmp_path: Path) -> None:
     _go_fixture(tmp_path)
     _rust_fixture(tmp_path)
