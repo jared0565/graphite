@@ -20,7 +20,7 @@ from .daemon import read_daemon_status
 from .daemon_health import HealthOptions, evaluate_daemon_health
 from .freshness import FreshnessLimitError, check_graph_freshness
 from .git import GitError, GitRunner
-from .hookinstall import DEFAULT_HOOKS_DIRNAME, hook_shim_present, hooks_dir, managed_hook_paths
+from .hookinstall import DEFAULT_HOOKS_DIRNAME, hook_shim_present, hooks_dir
 from .init import gitignored_managed_paths, managed_doc_paths
 from .hookshim import TRIGGERS
 from .llm import canonical_provider_name
@@ -217,8 +217,12 @@ def check_managed_docs(root: Path) -> DoctorCheck:
     if not (root / "GRAPHITE.md").is_file():
         return DoctorCheck(code, label, "optional", "Repository is not onboarded onto graphite; no managed files to track.", {"onboarded": False, "uncommitted": []})
 
+    # Hook trampolines are deliberately absent: they are machine-local (an
+    # embedded absolute interpreter path), distributed by git template rather
+    # than by the repo, and gitignored. Reporting them here on 2026-07-31 was
+    # advice that would have committed another machine's Python location.
+    # `check_hooks` covers whether they are installed and enforced.
     watched = {path.as_posix() for path in managed_doc_paths() if (root / path).is_file()}
-    watched |= set(managed_hook_paths(root))
     if not watched:
         return DoctorCheck(code, label, "ready", "No graphite-managed files are present.", {"onboarded": True, "watched": [], "uncommitted": []})
 

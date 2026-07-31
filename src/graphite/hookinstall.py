@@ -71,35 +71,6 @@ def hook_shim_present(path: Path) -> bool:
         return False
 
 
-def managed_hook_paths(root: Path) -> tuple[str, ...]:
-    """Hook files graphite *authored*, as repo-relative posix paths.
-
-    Marker-based rather than a directory glob, and that is load-bearing in two
-    directions rather than a convenience:
-
-    * A `.local` sibling is the pre-existing hook graphite chained to. It is
-      machine-local by construction and carries no marker; reporting it as
-      graphite's would tell an operator to commit someone else's private hook.
-    * A hook graphite does not trigger on is relocated *byte-identically*, with
-      no marker, per this module's stated interop rule. Graphite moved it but
-      did not write it -- in graphite's own repo those are aramid's
-      `pre-commit` and `pre-push`. Claiming them would have doctor reporting
-      another tool's gate as graphite's file to commit.
-
-    Returns nothing when hooks live anywhere but the default directory. A
-    custom `core.hooksPath` means another tool (husky et al.) owns hook policy
-    here: graphite installs into their directory by design, but it does not get
-    to speak for its contents, and `ensure_gitignore_allowlist` must never
-    rewrite ignore rules for a directory it does not own. An absolute path
-    outside the repo additionally cannot be committed to it, so reporting it
-    would be advice nobody can act on.
-    """
-    hdir = hooks_dir(root)
-    if hdir != root / DEFAULT_HOOKS_DIRNAME:
-        return ()
-    return tuple(f"{DEFAULT_HOOKS_DIRNAME}/{hook}" for hook in TRIGGERS if hook_shim_present(hdir / hook))
-
-
 def _make_executable(path: Path) -> None:
     """Best-effort on a bare Windows filesystem, but it matters the moment the
     repo is cloned onto WSL or a Linux CI runner."""

@@ -19,6 +19,22 @@ GRAPHITE_GITIGNORE_LINES: tuple[str, ...] = (
     "**/.cache/graphite/",
     "**/.graphite/",
     ".graphite-daemon/",
+    # Hook trampolines are MACHINE-LOCAL, not repository content: the shim
+    # `hookshim.render_trigger_shim` writes embeds an absolute interpreter path
+    # (`INTERP="/c/Python314/python.exe"` on the machine that ran `init`).
+    # Committing one bakes another machine's Python location into the repo, and
+    # every `init` on a different box produces a spurious diff.
+    #
+    # They are distributed per machine instead -- `graphite hooks template`
+    # (a16b00f) installs a git template so fresh clones get hooks without the
+    # repo carrying them. Evidence this was always the intent: no repo on this
+    # machine has ever tracked a file under `.githooks/`.
+    #
+    # Ignored rather than left merely untracked so the intent is stated. On
+    # 2026-07-31 `doctor` briefly reported these as "generated but never
+    # committed" and `init` allowlisted them out of a default-deny gitignore --
+    # advice that would have committed a machine-specific path.
+    ".githooks/",
 )
 
 GRAPHITE_AGENTS_HEADER = "## Automatic Graphite Consult"

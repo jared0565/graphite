@@ -17,7 +17,7 @@ from .git import GitError, GitRunner
 # would shadow a bare function import. `hookinstall.install_hooks(...)` stays
 # unambiguous either way.
 from . import hookinstall
-from .hookinstall import DEFAULT_HOOKS_DIRNAME, managed_hook_paths
+from .hookinstall import DEFAULT_HOOKS_DIRNAME
 from .io import atomic_write_text
 
 # Bump whenever GRAPHITE_DOC, SHARED_POINTER, or CURSOR_POINTER changes;
@@ -351,14 +351,12 @@ def init_project(
     # Measured after the files are written -- `ls-files --others` only sees
     # what exists on disk, and a file init just created is exactly the one at
     # risk of being swallowed.
-    # `init` also writes the VS Code task and the hook trampolines, and a repo
-    # that ignores those paths swallows them exactly as it would an instruction
-    # file. Measured (not predicted) for the hooks, because
-    # `managed_hook_paths` returns nothing when another tool owns the hooks
-    # directory -- graphite installs into husky's directory by design but does
-    # not get to rewrite ignore rules for it.
+    # `init` also writes the VS Code task, and a repo that ignores `.vscode/`
+    # swallows it exactly as it would an instruction file. `tasks.json` is
+    # portable -- `python -m graphite activate .`, no absolute paths -- so
+    # committing it is correct. The hook trampolines are NOT included: they
+    # embed this machine's interpreter path and are ignored, not committed.
     managed_paths = [*instruction_paths, Path(".vscode/tasks.json")]
-    managed_paths += [Path(rel) for rel in managed_hook_paths(root)]
     allowlist = ensure_gitignore_allowlist(
         root / ".gitignore",
         managed_paths,
@@ -633,16 +631,27 @@ def _append_section(original: str, section: str) -> str:
 #   .claude/   holds settings.local.json -- machine-local permissions, possibly
 #              secrets.
 #   .vscode/   holds settings.json and launch.json, routinely user-specific.
-#   .githooks/ holds `.local` chained hooks (the pre-existing hook graphite
-#              chained to, private by construction) and hooks graphite
-#              relocated byte-identically but did not author.
-_SANDWICHED_DIRS = frozenset({".claude", ".vscode", DEFAULT_HOOKS_DIRNAME})
+#
+# `.githooks/` is deliberately NOT here and is not allowlisted at all: the
+# trampolines are machine-local (they embed an absolute interpreter path) and
+# are distributed by git template rather than by the repository. See
+# `bootstrap.GRAPHITE_GITIGNORE_LINES`, which ignores them.
+_SANDWICHED_DIRS = frozenset({".claude", ".vscode"})
 
 
 def _allowlist_patterns(rel: Path) -> list[str]:
     rel = Path(*[part for part in rel.parts if part not in ("", ".")])
     parts = rel.parts
     if not parts:
+        return []
+    if parts[0] == DEFAULT_HOOKS_DIRNAME:
+        # Refused here rather than only by not passing hook paths in, because
+        # a guard that lives in one caller is a guard the next caller removes.
+        # Trampolines embed an absolute interpreter path and are distributed by
+        # git template, so un-ignoring them invites committing one machine's
+        # Python location -- and a bare `!/.githooks/` would additionally expose
+        # `post-commit.local`, the private hook graphite chained to but never
+        # wrote. Both were briefly true on 2026-07-31.
         return []
     if len(parts) == 2 and parts[0] in _SANDWICHED_DIRS:
         directory = parts[0]

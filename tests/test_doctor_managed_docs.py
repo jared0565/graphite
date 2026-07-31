@@ -15,8 +15,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from graphite.bootstrap import ensure_gitignore
 from graphite.doctor import check_managed_docs
-from graphite.hookinstall import managed_hook_paths
 from graphite.hookshim import CHAINED_SUFFIX, MARKER_START
 from graphite.init import (
     PLATFORMS,
@@ -263,59 +263,25 @@ def test_reports_the_vscode_task_generated_but_never_committed(tmp_path: Path) -
     assert ".vscode/tasks.json" in check.details["uncommitted"]
 
 
-def test_reports_a_graphite_hook_trampoline_never_committed(tmp_path: Path) -> None:
+def test_hook_trampolines_are_never_reported_as_uncommitted(tmp_path: Path) -> None:
+    """Hook trampolines are MACHINE-LOCAL, not repository content, and briefly
+    on 2026-07-31 this check said otherwise.
+
+    `render_trigger_shim` embeds an absolute interpreter path -- in graphite's
+    own `.githooks/post-commit`, `INTERP="/c/Python314/python.exe"`. Reporting
+    it "generated but never committed" is advice that bakes one machine's
+    Python location into the repo and makes every `init` on a different box
+    produce a spurious diff.
+
+    They are distributed per machine by git template (`a16b00f`) instead, which
+    is why no repo on this machine has ever tracked a file under `.githooks/`.
+    `check_hooks` is what reports whether they are installed and enforced;
+    this probe is about files that belong in git.
+    """
     root = _repo(tmp_path)
     _commit_all(root)
     _trampoline(root / ".githooks" / "post-commit")
-
-    check = check_managed_docs(root)
-
-    assert ".githooks/post-commit" in check.details["uncommitted"]
-
-
-def test_a_chained_local_hook_is_never_watched(tmp_path: Path) -> None:
-    """`.local` is the pre-existing hook graphite chained to. It is machine-local
-    by construction and committing it would publish another tool's -- or the
-    user's -- private hook. It carries no graphite marker, which is exactly why
-    keying on the marker is the right predicate rather than globbing the dir."""
-    root = _repo(tmp_path)
-    _commit_all(root)
-    _trampoline(root / ".githooks" / "post-commit")
-    (root / ".githooks" / f"post-commit{CHAINED_SUFFIX}").write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
-
-    check = check_managed_docs(root)
-
-    assert ".githooks/post-commit" in check.details["uncommitted"]
-    assert f".githooks/post-commit{CHAINED_SUFFIX}" not in check.details["uncommitted"]
-
-
-def test_a_relocated_foreign_hook_is_not_claimed(tmp_path: Path) -> None:
-    """hookinstall relocates a hook graphite does not trigger on *byte-identically*,
-    with no marker -- graphite moved it but did not author it. In graphite's own
-    repo those are aramid's `pre-commit`/`pre-push`. Reporting them would have
-    doctor telling the operator to commit another tool's files as graphite's."""
-    root = _repo(tmp_path)
-    _commit_all(root)
-    (root / ".githooks").mkdir()
-    (root / ".githooks" / "pre-push").write_text("#!/bin/sh\naramid check\n", encoding="utf-8")
-
-    check = check_managed_docs(root)
-
-    assert check.status == "ready"
-    assert check.details["uncommitted"] == ()
-
-
-def test_a_hooks_dir_outside_the_repo_is_not_reported(tmp_path: Path) -> None:
-    """`hooks_dir` honours an absolute `core.hooksPath`. A file outside the repo
-    cannot be committed to it, so reporting it would be advice nobody can act on."""
-    root = _repo(tmp_path)
-    _commit_all(root)
-    outside = tmp_path.parent / "external-hooks"
-    _trampoline(outside / "post-commit")
-    subprocess.run(  # noqa: S603
-        ["git", "-C", str(root), "config", "core.hooksPath", str(outside)],  # noqa: S607
-        check=True,
-    )
+    (root / ".githooks" / f"post-commit{CHAINED_SUFFIX}").write_text("#!/bin/sh\nmine\n", encoding="utf-8")
 
     check = check_managed_docs(root)
 
@@ -340,42 +306,51 @@ def _repair(root: Path, paths: list[Path]) -> dict:
     )
 
 
-def test_default_deny_repo_gets_vscode_and_hooks_allowlisted(tmp_path: Path) -> None:
+def test_default_deny_repo_gets_the_vscode_task_allowlisted(tmp_path: Path) -> None:
     """demo-store2's shape: `/*` denies everything and graphite's allowlist
-    covered only the six instruction files, so `.vscode/tasks.json` and the hook
-    trampolines it also writes were unreachable."""
+    covered only the six instruction files, so `.vscode/tasks.json` -- which
+    `init` also writes, and which IS portable (`python -m graphite activate .`,
+    no absolute paths) -- was unreachable."""
     root = _repo(tmp_path)
     (root / ".gitignore").write_text("/*\n!/.gitignore\n!/GRAPHITE.md\n", encoding="utf-8")
-    _trampoline(root / ".githooks" / "post-commit")
     (root / ".vscode").mkdir()
     (root / ".vscode" / "tasks.json").write_text("{}", encoding="utf-8")
     _commit_all(root)
-    targets = [Path(".vscode/tasks.json"), Path(".githooks/post-commit")]
     assert _is_ignored(root, ".vscode/tasks.json")
 
-    _repair(root, targets)
+    _repair(root, [Path(".vscode/tasks.json")])
 
     assert not _is_ignored(root, ".vscode/tasks.json")
-    assert not _is_ignored(root, ".githooks/post-commit")
 
 
-def test_the_chained_local_hook_stays_ignored_after_the_repair(tmp_path: Path) -> None:
-    """The load-bearing property. A bare `!/.githooks/` un-ignore would publish
-    `post-commit.local` -- a private hook graphite chained to, not one it wrote.
-    Same reasoning the `.claude/` sandwich already encodes for
-    `settings.local.json`."""
+def test_the_hooks_directory_is_never_allowlisted(tmp_path: Path) -> None:
+    """The counterpart to the probe change: `init` must not un-ignore
+    `.githooks/` out of a default-deny gitignore. Doing so invites committing a
+    trampoline carrying this machine's interpreter path, and would also expose
+    `post-commit.local` -- the private hook graphite chained to but never
+    wrote."""
     root = _repo(tmp_path)
     (root / ".gitignore").write_text("/*\n!/.gitignore\n!/GRAPHITE.md\n", encoding="utf-8")
     _trampoline(root / ".githooks" / "post-commit")
     (root / ".githooks" / f"post-commit{CHAINED_SUFFIX}").write_text("#!/bin/sh\nsecret\n", encoding="utf-8")
     _commit_all(root)
 
-    _repair(root, [Path(".githooks/post-commit")])
+    _repair(root, [Path(".vscode/tasks.json"), Path(".githooks/post-commit")])
 
-    assert not _is_ignored(root, ".githooks/post-commit")
-    assert _is_ignored(root, f".githooks/post-commit{CHAINED_SUFFIX}"), (
-        "the chained private hook must stay ignored"
-    )
+    assert _is_ignored(root, ".githooks/post-commit"), "trampolines stay machine-local"
+    assert _is_ignored(root, f".githooks/post-commit{CHAINED_SUFFIX}")
+
+
+def test_the_ignore_block_states_that_hooks_are_machine_local(tmp_path: Path) -> None:
+    """Ignored rather than merely untracked, so the intent is written down. No
+    repo on this machine has ever tracked a file under `.githooks/`; that was
+    an unstated convention until it briefly got contradicted."""
+    path = tmp_path / ".gitignore"
+    path.write_text("node_modules/\n", encoding="utf-8")
+
+    ensure_gitignore(path)
+
+    assert ".githooks/" in path.read_text(encoding="utf-8").splitlines()
 
 
 def test_a_partial_pre_existing_sandwich_is_repaired_not_half_repaired(tmp_path: Path) -> None:
@@ -396,34 +371,17 @@ def test_a_partial_pre_existing_sandwich_is_repaired_not_half_repaired(tmp_path:
     """
     root = _repo(tmp_path)
     (root / ".gitignore").write_text(
-        "/*\n!/.gitignore\n!/GRAPHITE.md\n!/.githooks/post-commit\n", encoding="utf-8"
+        "/*\n!/.gitignore\n!/GRAPHITE.md\n!/.vscode/tasks.json\n", encoding="utf-8"
     )
     _commit_all(root)
-    _trampoline(root / ".githooks" / "post-commit")
-    (root / ".githooks" / f"post-commit{CHAINED_SUFFIX}").write_text("#!/bin/sh\nsecret\n", encoding="utf-8")
+    (root / ".vscode").mkdir()
+    (root / ".vscode" / "tasks.json").write_text("{}", encoding="utf-8")
+    (root / ".vscode" / "settings.local.json").write_text("{}", encoding="utf-8")
 
-    _repair(root, [Path(".githooks/post-commit")])
+    _repair(root, [Path(".vscode/tasks.json")])
 
-    assert not _is_ignored(root, ".githooks/post-commit"), "the repair must actually reach the file"
-    assert _is_ignored(root, f".githooks/post-commit{CHAINED_SUFFIX}")
-
-
-def test_a_foreign_hooks_directory_is_never_allowlisted(tmp_path: Path) -> None:
-    """If `core.hooksPath` is husky's `.husky/`, graphite rewriting the ignore
-    rules for a directory husky owns is exactly the overreach it should not
-    commit. Report it unreachable; leave the rules alone."""
-    root = _repo(tmp_path)
-    (root / ".gitignore").write_text("/*\n!/.gitignore\n!/GRAPHITE.md\n", encoding="utf-8")
-    _trampoline(root / ".husky" / "post-commit")
-    _commit_all(root)
-    subprocess.run(  # noqa: S603
-        ["git", "-C", str(root), "config", "core.hooksPath", ".husky"],  # noqa: S607
-        check=True,
-    )
-    before = (root / ".gitignore").read_text(encoding="utf-8")
-
-    assert managed_hook_paths(root) == ()
-    assert (root / ".gitignore").read_text(encoding="utf-8") == before
+    assert not _is_ignored(root, ".vscode/tasks.json"), "the repair must actually reach the file"
+    assert _is_ignored(root, ".vscode/settings.local.json"), "and must not expose its neighbours"
 
 
 def test_the_repair_is_idempotent(tmp_path: Path) -> None:
