@@ -320,7 +320,19 @@ def run_bounded_process(
         try:
             process.stdin.write(input_data)
             process.stdin.flush()
-        except (BrokenPipeError, OSError, ValueError):
+        except BrokenPipeError:
+            # The child stopped reading -- it exited, or closed stdin -- before
+            # we finished writing. That is legitimate rather than a transport
+            # fault: `_MCP_BOOTSTRAP` rejects invalid bindings with
+            # SystemExit(70) *before* its first stdin read, so a correctly
+            # refusing bootstrap never reads the input we are still sending.
+            # The child's exit status is the verdict; bytes it declined to read
+            # are not evidence of anything. Reporting this as `input_failed`
+            # discarded the real return code whenever the write lost that race,
+            # which is the intermittent `probe input failed` in issue #29.
+            # BrokenPipeError subclasses OSError, so it must be caught first.
+            pass
+        except (OSError, ValueError):
             if writer_failed is not None:
                 writer_failed.set()
         finally:

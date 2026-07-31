@@ -891,6 +891,34 @@ def test_deep_bounded_runner_limits_stdin_and_times_out_nonreader(tmp_path: Path
     assert time.monotonic() - started < 1.5
 
 
+def test_deep_bounded_runner_tolerates_child_exiting_before_reading_stdin(tmp_path: Path) -> None:
+    """A child that exits without consuming stdin is not a transport failure.
+
+    `_MCP_BOOTSTRAP` validates its argv bindings and raises `SystemExit(70)`
+    *before* its first `sys.stdin.buffer.readline()`, so a rejecting bootstrap
+    legitimately never reads the input the probe is still writing. Losing that
+    race used to surface as `input_failed`, masking the child's real exit
+    status -- the intermittent `probe input failed` in CI (issue #29). The
+    child's return code is the verdict; bytes it chose not to read are not
+    evidence of anything.
+
+    The payload must exceed the pipe buffer so the write is still in flight
+    when the child exits; a small payload lands in the buffer and the race
+    never happens.
+    """
+    from graphite.probe_process import run_bounded_process
+
+    result = run_bounded_process(
+        [sys.executable, "-c", "raise SystemExit(70)"],
+        cwd=tmp_path,
+        stdin=b"x" * (1024 * 1024),
+        timeout_seconds=15,
+        check=False,
+    )
+
+    assert result.returncode == 70
+
+
 def test_probe_transport_rechecks_late_writer_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import graphite.probe_process as transport
 
@@ -898,7 +926,13 @@ def test_probe_transport_rechecks_late_writer_failure(monkeypatch: pytest.Monkey
     class InputPipe:
         def write(self, data: bytes) -> int:
             release.wait(1)
-            raise BrokenPipeError("RAW late input")
+            # A genuine transport fault, deliberately NOT BrokenPipeError: a
+            # broken pipe means the child stopped reading, which is legitimate
+            # and is now tolerated (see
+            # test_deep_bounded_runner_tolerates_child_exiting_before_reading_stdin).
+            # What this test pins is the *late* recheck -- the writer fails
+            # after cleanup has started -- and that the raw text never leaks.
+            raise OSError("RAW late input")
         def flush(self) -> None: pass
         def close(self) -> None: pass
     class OutputPipe:
