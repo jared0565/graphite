@@ -4,10 +4,11 @@ from __future__ import annotations
 import hashlib
 import json
 import posixpath
+import tomllib
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import Final, Iterable
 
 from .config import Config
 from .ts_bridge import TypeScriptCompilerEdge, TypeScriptCompilerIndex, build_typescript_index
@@ -65,6 +66,11 @@ class SourceIndex:
     # package.json found in the scan — lets bare imports like "@repo/utils"
     # resolve to the workspace source file instead of an external phantom.
     workspace_packages: tuple[tuple[str, str, str], ...] = ()
+    # (crate ident, crate dir rel path, src root rel path) per Cargo.toml in the
+    # scan, so `use other_crate::…` binds to that crate's source instead of a
+    # phantom, and declared dependencies can be told apart from typos.
+    cargo_crates: tuple[tuple[str, str, str], ...] = ()
+    cargo_dependencies: frozenset[str] = frozenset()
 
     @classmethod
     def from_entries(cls, entries: Iterable[object], cfg: Config | None = None) -> "SourceIndex":
@@ -86,6 +92,8 @@ class SourceIndex:
             path_aliases=_load_tsconfig_aliases(root, frozenset(rel_paths)),
             typescript=ts_index,
             workspace_packages=_load_workspace_packages(root, frozenset(rel_paths)),
+            cargo_crates=_load_cargo_crates(root, frozenset(rel_paths)),
+            cargo_dependencies=_load_cargo_dependencies(root, frozenset(rel_paths)),
         )
 
     def file_set_digest(self) -> str:
@@ -376,3 +384,75 @@ def _match_alias(pattern: str, import_name: str) -> str | None:
     if not import_name.startswith(prefix) or not import_name.endswith(suffix):
         return None
     return import_name[len(prefix): len(import_name) - len(suffix) if suffix else len(import_name)]
+
+
+# --- Rust ------------------------------------------------------------------
+# Roots that always leave the repo. Kept deliberately small: EXTERNAL_IMPORT
+# means "a resolver confirmed this is external", never "we failed to resolve
+# it" -- tagging misses as external would hide real phantom linkage from
+# resolution_health.
+_RUST_EXTERNAL_ROOTS: Final = frozenset({"std", "core", "alloc", "proc_macro"})
+_CARGO_DEPENDENCY_TABLES: Final = ("dependencies", "dev-dependencies", "build-dependencies")
+
+
+def _normalize_crate_name(raw: str) -> str:
+    """Cargo maps a package name's hyphens to underscores for the crate ident."""
+    return raw.strip().replace("-", "_")
+
+
+def _read_cargo_manifest(root: Path, rel: str) -> dict[str, object] | None:
+    """Parse one Cargo.toml. Total: unreadable or malformed yields None.
+
+    Extraction must never fail because a repo ships a bad manifest.
+    """
+    try:
+        return tomllib.loads((root / rel).read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+
+
+def _cargo_manifest_paths(rel_paths: frozenset[str]) -> list[str]:
+    return sorted(rel for rel in rel_paths if PurePosixPath(rel).name == "Cargo.toml")
+
+
+def _load_cargo_crates(root: Path, rel_paths: frozenset[str]) -> tuple[tuple[str, str, str], ...]:
+    """(crate ident, crate dir, src root) per real package manifest in the scan."""
+    crates: list[tuple[str, str, str]] = []
+    for rel in _cargo_manifest_paths(rel_paths):
+        data = _read_cargo_manifest(root, rel)
+        if data is None:
+            continue
+        package = data.get("package")
+        if not isinstance(package, dict):
+            continue  # virtual/workspace-only manifest declares no crate
+        name = package.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        parent = PurePosixPath(rel).parent.as_posix()
+        crate_dir = "" if parent == "." else parent
+        src_root = f"{crate_dir}/src" if crate_dir else "src"
+        crates.append((_normalize_crate_name(name), crate_dir, src_root))
+    return tuple(crates)
+
+
+def _load_cargo_dependencies(root: Path, rel_paths: frozenset[str]) -> frozenset[str]:
+    """Declared dependency idents across every manifest, including workspace ones."""
+    names: set[str] = set()
+    for rel in _cargo_manifest_paths(rel_paths):
+        data = _read_cargo_manifest(root, rel)
+        if data is None:
+            continue
+        scopes: list[object] = [data]
+        workspace = data.get("workspace")
+        if isinstance(workspace, dict):
+            scopes.append(workspace)
+        for scope in scopes:
+            if not isinstance(scope, dict):
+                continue
+            for table in _CARGO_DEPENDENCY_TABLES:
+                section = scope.get(table)
+                if isinstance(section, dict):
+                    names.update(
+                        _normalize_crate_name(key) for key in section if isinstance(key, str)
+                    )
+    return frozenset(names)
