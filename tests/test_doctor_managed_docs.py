@@ -16,6 +16,7 @@ import subprocess
 from pathlib import Path
 
 from graphite.doctor import check_managed_docs
+from graphite.hookinstall import managed_hook_paths
 from graphite.hookshim import CHAINED_SUFFIX, MARKER_START
 from graphite.init import (
     PLATFORMS,
@@ -320,6 +321,126 @@ def test_a_hooks_dir_outside_the_repo_is_not_reported(tmp_path: Path) -> None:
 
     assert check.status == "ready"
     assert check.details["uncommitted"] == ()
+
+
+def _is_ignored(root: Path, rel: str) -> bool:
+    """Ask git, not the pattern list. Pattern inspection passes on a wrong
+    ORDERING; git evaluating the real file does not."""
+    result = subprocess.run(  # noqa: S603
+        ["git", "-C", str(root), "ls-files", "--others", "--ignored",  # noqa: S607
+         "--exclude-standard", "--", rel],
+        capture_output=True, text=True, check=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def _repair(root: Path, paths: list[Path]) -> dict:
+    return ensure_gitignore_allowlist(
+        root / ".gitignore", paths, swallowed=gitignored_managed_paths(root, paths)
+    )
+
+
+def test_default_deny_repo_gets_vscode_and_hooks_allowlisted(tmp_path: Path) -> None:
+    """demo-store2's shape: `/*` denies everything and graphite's allowlist
+    covered only the six instruction files, so `.vscode/tasks.json` and the hook
+    trampolines it also writes were unreachable."""
+    root = _repo(tmp_path)
+    (root / ".gitignore").write_text("/*\n!/.gitignore\n!/GRAPHITE.md\n", encoding="utf-8")
+    _trampoline(root / ".githooks" / "post-commit")
+    (root / ".vscode").mkdir()
+    (root / ".vscode" / "tasks.json").write_text("{}", encoding="utf-8")
+    _commit_all(root)
+    targets = [Path(".vscode/tasks.json"), Path(".githooks/post-commit")]
+    assert _is_ignored(root, ".vscode/tasks.json")
+
+    _repair(root, targets)
+
+    assert not _is_ignored(root, ".vscode/tasks.json")
+    assert not _is_ignored(root, ".githooks/post-commit")
+
+
+def test_the_chained_local_hook_stays_ignored_after_the_repair(tmp_path: Path) -> None:
+    """The load-bearing property. A bare `!/.githooks/` un-ignore would publish
+    `post-commit.local` -- a private hook graphite chained to, not one it wrote.
+    Same reasoning the `.claude/` sandwich already encodes for
+    `settings.local.json`."""
+    root = _repo(tmp_path)
+    (root / ".gitignore").write_text("/*\n!/.gitignore\n!/GRAPHITE.md\n", encoding="utf-8")
+    _trampoline(root / ".githooks" / "post-commit")
+    (root / ".githooks" / f"post-commit{CHAINED_SUFFIX}").write_text("#!/bin/sh\nsecret\n", encoding="utf-8")
+    _commit_all(root)
+
+    _repair(root, [Path(".githooks/post-commit")])
+
+    assert not _is_ignored(root, ".githooks/post-commit")
+    assert _is_ignored(root, f".githooks/post-commit{CHAINED_SUFFIX}"), (
+        "the chained private hook must stay ignored"
+    )
+
+
+def test_a_partial_pre_existing_sandwich_is_repaired_not_half_repaired(tmp_path: Path) -> None:
+    """A sandwich is emitted whole or not at all, never deduped pattern-by-
+    pattern against what is already in the file.
+
+    The demonstrable failure -- verified by mutation, not assumed: with
+    `!/.githooks/post-commit` already present and the two directory patterns
+    missing, a per-pattern dedup skips the file negation and appends only
+    `!/.githooks/` and `/.githooks/*`. gitignore is last-match-wins, so the
+    freshly-appended `/.githooks/*` now beats the older negation and the file
+    the repair exists to rescue stays ignored. The repair silently fails.
+
+    (The *opposite* hazard -- a half-sandwich exposing `.local` -- turns out
+    not to be constructible: a trailing-slash pattern matches directories only,
+    so an appended `!/.githooks/` never out-matches an earlier `/.githooks/*`
+    for a file inside. Tested below in its own right anyway.)
+    """
+    root = _repo(tmp_path)
+    (root / ".gitignore").write_text(
+        "/*\n!/.gitignore\n!/GRAPHITE.md\n!/.githooks/post-commit\n", encoding="utf-8"
+    )
+    _commit_all(root)
+    _trampoline(root / ".githooks" / "post-commit")
+    (root / ".githooks" / f"post-commit{CHAINED_SUFFIX}").write_text("#!/bin/sh\nsecret\n", encoding="utf-8")
+
+    _repair(root, [Path(".githooks/post-commit")])
+
+    assert not _is_ignored(root, ".githooks/post-commit"), "the repair must actually reach the file"
+    assert _is_ignored(root, f".githooks/post-commit{CHAINED_SUFFIX}")
+
+
+def test_a_foreign_hooks_directory_is_never_allowlisted(tmp_path: Path) -> None:
+    """If `core.hooksPath` is husky's `.husky/`, graphite rewriting the ignore
+    rules for a directory husky owns is exactly the overreach it should not
+    commit. Report it unreachable; leave the rules alone."""
+    root = _repo(tmp_path)
+    (root / ".gitignore").write_text("/*\n!/.gitignore\n!/GRAPHITE.md\n", encoding="utf-8")
+    _trampoline(root / ".husky" / "post-commit")
+    _commit_all(root)
+    subprocess.run(  # noqa: S603
+        ["git", "-C", str(root), "config", "core.hooksPath", ".husky"],  # noqa: S607
+        check=True,
+    )
+    before = (root / ".gitignore").read_text(encoding="utf-8")
+
+    assert managed_hook_paths(root) == ()
+    assert (root / ".gitignore").read_text(encoding="utf-8") == before
+
+
+def test_the_repair_is_idempotent(tmp_path: Path) -> None:
+    """Driven by measurement, so a second run has nothing swallowed to fix and
+    must not churn the file."""
+    root = _repo(tmp_path)
+    (root / ".gitignore").write_text("/*\n!/.gitignore\n!/GRAPHITE.md\n", encoding="utf-8")
+    (root / ".vscode").mkdir()
+    (root / ".vscode" / "tasks.json").write_text("{}", encoding="utf-8")
+    _commit_all(root)
+    _repair(root, [Path(".vscode/tasks.json")])
+    after_first = (root / ".gitignore").read_text(encoding="utf-8")
+
+    second = _repair(root, [Path(".vscode/tasks.json")])
+
+    assert second["changed"] is False
+    assert (root / ".gitignore").read_text(encoding="utf-8") == after_first
 
 
 def test_managed_doc_paths_covers_every_platform(tmp_path: Path) -> None:

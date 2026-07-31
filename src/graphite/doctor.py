@@ -20,9 +20,9 @@ from .daemon import read_daemon_status
 from .daemon_health import HealthOptions, evaluate_daemon_health
 from .freshness import FreshnessLimitError, check_graph_freshness
 from .git import GitError, GitRunner
-from .hookinstall import DEFAULT_HOOKS_DIRNAME, hooks_dir
+from .hookinstall import DEFAULT_HOOKS_DIRNAME, hook_shim_present, hooks_dir, managed_hook_paths
 from .init import gitignored_managed_paths, managed_doc_paths
-from .hookshim import MARKER_START, TRIGGERS
+from .hookshim import TRIGGERS
 from .llm import canonical_provider_name
 from .validation import validate_graph_bundle
 
@@ -164,15 +164,6 @@ def _hooks_path_configured(root: Path) -> bool:
         return False
 
 
-def _hook_shim_present(path: Path) -> bool:
-    if not path.is_file():
-        return False
-    try:
-        return MARKER_START.encode() in path.read_bytes()
-    except OSError:
-        return False
-
-
 def check_hooks(root: Path) -> DoctorCheck:
     """Are graphite's git hooks not just installed, but actually enforced.
 
@@ -184,7 +175,7 @@ def check_hooks(root: Path) -> DoctorCheck:
         return DoctorCheck("hooks", "Hooks", "optional", "Repository is not onboarded onto graphite; hook enforcement does not apply.", {"onboarded": False})
 
     hdir = hooks_dir(root)
-    installed = all(_hook_shim_present(hdir / hook) for hook in TRIGGERS)
+    installed = all(hook_shim_present(hdir / hook) for hook in TRIGGERS)
     configured = _hooks_path_configured(root)
     custom_hooks_dir = hdir != root / DEFAULT_HOOKS_DIRNAME
     details = {"onboarded": True, "custom_hooks_dir": custom_hooks_dir, "hookspath_configured": configured, "trampolines_installed": installed}
@@ -204,39 +195,6 @@ def _scoped_output(root: Path, cfg: Config) -> Path:
 
 def _artifact_size(path: Path) -> int:
     return path.stat().st_size
-
-
-def managed_hook_paths(root: Path) -> tuple[str, ...]:
-    """Hook files graphite *authored*, as repo-relative posix paths.
-
-    Not in `init.managed_doc_paths` because the hooks directory is not a fixed
-    repo-relative path: `hooks_dir` honours an existing `core.hooksPath`, which
-    may point anywhere, including outside the repository.
-
-    Authorship is decided by the graphite marker, reusing `_hook_shim_present`,
-    and that predicate is load-bearing in two directions rather than a
-    convenience:
-
-    * A `.local` sibling is the pre-existing hook graphite chained to. It is
-      machine-local by construction and carries no marker; telling an operator
-      to commit it would publish someone else's private hook.
-    * A hook graphite does not trigger on is *relocated byte-identically*, with
-      no marker (`hookinstall`'s stated interop rule). Graphite moved it but did
-      not write it -- in graphite's own repo those are aramid's `pre-commit` and
-      `pre-push`. Claiming them would have doctor reporting another tool's files
-      as graphite's to commit.
-
-    Globbing the directory would get both of those wrong, which is why this
-    keys on content rather than on filenames.
-    """
-    hdir = hooks_dir(root)
-    try:
-        relative = hdir.resolve().relative_to(root.resolve())
-    except (ValueError, OSError):
-        # An absolute `core.hooksPath` outside the repo cannot be committed to
-        # it. Reporting it would be advice nobody can act on.
-        return ()
-    return tuple(f"{relative.as_posix()}/{hook}" for hook in TRIGGERS if _hook_shim_present(hdir / hook))
 
 
 def check_managed_docs(root: Path) -> DoctorCheck:

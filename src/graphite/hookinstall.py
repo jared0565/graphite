@@ -56,6 +56,50 @@ def hooks_dir(root: Path) -> Path:
     return candidate if candidate.is_absolute() else root / candidate
 
 
+def hook_shim_present(path: Path) -> bool:
+    """Did graphite write this hook file? Decided by the in-file marker.
+
+    The single marker predicate for the whole codebase. It lived in `doctor`
+    until 2026-07-31; two copies in two modules is how the relocated-hook rule
+    below drifts apart from the code that enforces it.
+    """
+    if not path.is_file():
+        return False
+    try:
+        return MARKER_START.encode() in path.read_bytes()
+    except OSError:
+        return False
+
+
+def managed_hook_paths(root: Path) -> tuple[str, ...]:
+    """Hook files graphite *authored*, as repo-relative posix paths.
+
+    Marker-based rather than a directory glob, and that is load-bearing in two
+    directions rather than a convenience:
+
+    * A `.local` sibling is the pre-existing hook graphite chained to. It is
+      machine-local by construction and carries no marker; reporting it as
+      graphite's would tell an operator to commit someone else's private hook.
+    * A hook graphite does not trigger on is relocated *byte-identically*, with
+      no marker, per this module's stated interop rule. Graphite moved it but
+      did not write it -- in graphite's own repo those are aramid's
+      `pre-commit` and `pre-push`. Claiming them would have doctor reporting
+      another tool's gate as graphite's file to commit.
+
+    Returns nothing when hooks live anywhere but the default directory. A
+    custom `core.hooksPath` means another tool (husky et al.) owns hook policy
+    here: graphite installs into their directory by design, but it does not get
+    to speak for its contents, and `ensure_gitignore_allowlist` must never
+    rewrite ignore rules for a directory it does not own. An absolute path
+    outside the repo additionally cannot be committed to it, so reporting it
+    would be advice nobody can act on.
+    """
+    hdir = hooks_dir(root)
+    if hdir != root / DEFAULT_HOOKS_DIRNAME:
+        return ()
+    return tuple(f"{DEFAULT_HOOKS_DIRNAME}/{hook}" for hook in TRIGGERS if hook_shim_present(hdir / hook))
+
+
 def _make_executable(path: Path) -> None:
     """Best-effort on a bare Windows filesystem, but it matters the moment the
     repo is cloned onto WSL or a Linux CI runner."""

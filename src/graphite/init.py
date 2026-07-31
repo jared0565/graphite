@@ -17,6 +17,7 @@ from .git import GitError, GitRunner
 # would shadow a bare function import. `hookinstall.install_hooks(...)` stays
 # unambiguous either way.
 from . import hookinstall
+from .hookinstall import DEFAULT_HOOKS_DIRNAME, managed_hook_paths
 from .io import atomic_write_text
 
 # Bump whenever GRAPHITE_DOC, SHARED_POINTER, or CURSOR_POINTER changes;
@@ -350,10 +351,18 @@ def init_project(
     # Measured after the files are written -- `ls-files --others` only sees
     # what exists on disk, and a file init just created is exactly the one at
     # risk of being swallowed.
+    # `init` also writes the VS Code task and the hook trampolines, and a repo
+    # that ignores those paths swallows them exactly as it would an instruction
+    # file. Measured (not predicted) for the hooks, because
+    # `managed_hook_paths` returns nothing when another tool owns the hooks
+    # directory -- graphite installs into husky's directory by design but does
+    # not get to rewrite ignore rules for it.
+    managed_paths = [*instruction_paths, Path(".vscode/tasks.json")]
+    managed_paths += [Path(rel) for rel in managed_hook_paths(root)]
     allowlist = ensure_gitignore_allowlist(
         root / ".gitignore",
-        instruction_paths,
-        swallowed=gitignored_managed_paths(root, instruction_paths),
+        managed_paths,
+        swallowed=gitignored_managed_paths(root, managed_paths),
     )
     daemon = daemon_visibility(root, daemon_base=daemon_base)
     return InitResult(
@@ -538,13 +547,31 @@ def ensure_gitignore_allowlist(path: Path, rel_paths: Iterable[Path], *, swallow
     swallowed = tuple(swallowed)
     if not default_deny and not swallowed:
         return {"path": str(path), "changed": False, "added": [], "reason": "not default-deny"}
-    targets = list(rel_paths) if default_deny else [Path(rel) for rel in swallowed]
+    targets: list[Path] = list(rel_paths) if default_deny else []
+    for rel in swallowed:
+        candidate = Path(rel)
+        if candidate not in targets:
+            targets.append(candidate)
 
     existing = {line.strip() for line in lines}
     added: list[str] = []
+    # A sandwich is emitted WHOLE or not at all, and deduped only within this
+    # run -- never against patterns already in the file. gitignore is
+    # last-match-wins, so appending the complete unit is what guarantees the
+    # re-ignore lands before the file negation. Skipping a pattern merely
+    # because it appears somewhere earlier inverts the sandwich: with
+    # `/.githooks/*` already present, emitting only `!/.githooks/` and
+    # `!/.githooks/post-commit` puts the directory un-ignore last and exposes
+    # `post-commit.local`, the private hook the sandwich exists to protect.
+    #
+    # Idempotent because the guard is "are they ALL already here" -- once the
+    # unit has been appended, a later run skips it and writes nothing.
     for rel in targets:
-        for pattern in _allowlist_patterns(rel):
-            if pattern not in existing and pattern not in added:
+        patterns = _allowlist_patterns(rel)
+        if not patterns or all(pattern in existing for pattern in patterns):
+            continue
+        for pattern in patterns:
+            if pattern not in added:
                 added.append(pattern)
 
     if added:
@@ -599,18 +626,27 @@ def _append_section(original: str, section: str) -> str:
     return new_text
 
 
+# Directories where a bare "!/dir/" un-ignore would expose more than the one
+# file graphite needs committed, so the patterns are sandwiched instead:
+# un-ignore the directory, re-ignore its contents, un-ignore only our file.
+#
+#   .claude/   holds settings.local.json -- machine-local permissions, possibly
+#              secrets.
+#   .vscode/   holds settings.json and launch.json, routinely user-specific.
+#   .githooks/ holds `.local` chained hooks (the pre-existing hook graphite
+#              chained to, private by construction) and hooks graphite
+#              relocated byte-identically but did not author.
+_SANDWICHED_DIRS = frozenset({".claude", ".vscode", DEFAULT_HOOKS_DIRNAME})
+
+
 def _allowlist_patterns(rel: Path) -> list[str]:
     rel = Path(*[part for part in rel.parts if part not in ("", ".")])
     parts = rel.parts
     if not parts:
         return []
-    if parts[0] == ".claude":
-        # .claude/ can hold settings.local.json (machine-local permissions,
-        # possibly secrets). A bare "!/.claude/" un-ignore in a default-deny
-        # gitignore would expose everything under the directory, not just
-        # settings.json. Sandwich: un-ignore the dir, re-ignore its contents,
-        # then un-ignore only the committed settings file.
-        return ["!/.claude/", "/.claude/*", "!/.claude/settings.json"]
+    if len(parts) == 2 and parts[0] in _SANDWICHED_DIRS:
+        directory = parts[0]
+        return [f"!/{directory}/", f"/{directory}/*", f"!/{directory}/{parts[1]}"]
     patterns: list[str] = []
     if len(parts) > 1:
         current: list[str] = []
