@@ -90,7 +90,18 @@ def ensure_claude_settings(root: Path, *, mode: str | None = None) -> dict[str, 
     hooks = dict(hooks_value) if isinstance(hooks_value, dict) else {}
     desired = {
         "PreToolUse": {
-            "matcher": "Grep|Glob",
+            # The shells are matched because the previous matcher, "Grep|Glob",
+            # named TOOLS rather than behaviour: `grep -rn ...` through the Bash
+            # tool and `Select-String` through the PowerShell tool never reached
+            # the hook at all, and consumer agents reported taking exactly those
+            # routes for cross-file work. Enforcing on the Grep tool alone
+            # enforces a naming convention, not a rule.
+            #
+            # `agent_hooks.handle_pre_tool_use` returns None for every shell
+            # command that is not a repo-wide search, so matching the shells
+            # here costs one fail-open hook invocation per command and never
+            # interferes with ordinary work.
+            "matcher": "Grep|Glob|Bash|PowerShell",
             "hooks": [{"type": "command", "command": _pre_tool_use_command(resolved)}],
         },
         "SessionStart": {

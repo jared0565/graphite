@@ -449,3 +449,162 @@ def test_session_start_stale_without_a_reason_still_reports_stale(tmp_path: Path
 
     assert "STALE" in ctx
     assert "python -m graphite build ." in ctx
+
+
+# --------------------------------------------------------------- bash route --
+# The reported bypass (2026-07-31): the PreToolUse matcher was "Grep|Glob", so
+# `grep` run through the Bash tool never reached this hook at all. Two consumer
+# agents independently reported using that route for cross-file searches.
+
+
+def _bash_payload(root: Path, command: str) -> dict:
+    return {"cwd": str(root), "tool_name": "Bash", "tool_input": {"command": command}}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -rn target_symbol .",
+        "grep -rln 'target_symbol' src/",
+        "rg target_symbol",
+        "rg -n --hidden target_symbol .",
+        "git grep target_symbol",
+        "egrep -r target_symbol .",
+        "cd subdir && grep -rn target_symbol .",
+        "ls; grep -rn target_symbol .",
+    ],
+)
+def test_strict_denies_cross_file_search_run_through_bash(built_repo: Path, command: str) -> None:
+    out = handle_pre_tool_use(_bash_payload(built_repo, command), "strict")
+
+    hook = out["hookSpecificOutput"]
+    assert hook["permissionDecision"] == "deny"
+    assert "target_symbol" in hook["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls | grep target_symbol",
+        "cat alpha.py | grep -n target_symbol",
+        'python -m graphite query "callers target_symbol" | grep name',
+        "git log --oneline | grep target_symbol",
+    ],
+)
+def test_search_downstream_of_a_pipe_is_filtering_not_searching(built_repo: Path, command: str) -> None:
+    """`... | grep x` filters another command's output. Denying it would break
+    the graph queries this hook exists to encourage -- the graphite commands in
+    the denial message are themselves piped into grep constantly."""
+    out = handle_pre_tool_use(_bash_payload(built_repo, command), "strict")
+
+    assert out is None or "permissionDecision" not in out.get("hookSpecificOutput", {})
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["git status", "pytest -q", "python -m graphite build .", "ls -la", "cat alpha.py"],
+)
+def test_ordinary_bash_passes_through_silently(built_repo: Path, command: str) -> None:
+    """Not even a reminder. The hook fires on EVERY Bash call once the matcher
+    covers Bash, so nagging non-searches is how a real warning gets ignored."""
+    assert handle_pre_tool_use(_bash_payload(built_repo, command), "strict") is None
+
+
+def test_bash_search_scoped_to_one_existing_file_is_allowed(built_repo: Path) -> None:
+    out = handle_pre_tool_use(_bash_payload(built_repo, "grep -n target_symbol alpha.py"), "strict")
+
+    assert out is None or "permissionDecision" not in out.get("hookSpecificOutput", {})
+
+
+def test_bash_search_for_unknown_token_is_not_denied(built_repo: Path) -> None:
+    out = handle_pre_tool_use(_bash_payload(built_repo, "grep -rn no_such_symbol_here ."), "strict")
+
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+
+
+def test_bash_route_is_silent_without_a_graph(tmp_path: Path) -> None:
+    assert handle_pre_tool_use(_bash_payload(tmp_path, "grep -rn x ."), "strict") is None
+
+
+def test_malformed_bash_command_fails_open(built_repo: Path) -> None:
+    """An unbalanced quote must never break the user's shell."""
+    assert handle_pre_tool_use(_bash_payload(built_repo, "grep -rn 'unclosed"), "strict") is None
+
+
+# --------------------------------------------------- powershell / Select-String --
+# Same bypass, second shell. The PowerShell tool is a separate tool name, so it
+# needs the same matcher entry; Select-String is its grep.
+
+
+def _ps_payload(root: Path, command: str) -> dict:
+    return {"cwd": str(root), "tool_name": "PowerShell", "tool_input": {"command": command}}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Select-String -Pattern target_symbol -Path .",
+        "Select-String target_symbol *.py",
+        "sls target_symbol",
+        "SELECT-STRING -Pattern target_symbol -Path .",
+        "Get-Content x; Select-String -Pattern target_symbol -Path .",
+    ],
+)
+def test_strict_denies_select_string_through_powershell(built_repo: Path, command: str) -> None:
+    out = handle_pre_tool_use(_ps_payload(built_repo, command), "strict")
+
+    hook = out["hookSpecificOutput"]
+    assert hook["permissionDecision"] == "deny"
+    assert "target_symbol" in hook["permissionDecisionReason"]
+
+
+def test_named_pattern_parameter_is_read_even_when_path_comes_first(built_repo: Path) -> None:
+    """`-Path . -Pattern x` puts a non-flag token (the path) before the pattern.
+    Taking the first positional would read the path and silently allow the
+    search, so -Pattern is honoured explicitly."""
+    out = handle_pre_tool_use(
+        _ps_payload(built_repo, "Select-String -Path . -Pattern target_symbol"), "strict"
+    )
+
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_grep_dash_e_pattern_is_read_explicitly(built_repo: Path) -> None:
+    """Same hazard on the bash side: `grep -e PAT path`."""
+    out = handle_pre_tool_use(_bash_payload(built_repo, "grep -r -e target_symbol ."), "strict")
+
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Get-ChildItem -Recurse | Select-String target_symbol",
+        "git log | sls target_symbol",
+    ],
+)
+def test_select_string_downstream_of_a_pipe_is_filtering(built_repo: Path, command: str) -> None:
+    out = handle_pre_tool_use(_ps_payload(built_repo, command), "strict")
+
+    assert out is None or "permissionDecision" not in out.get("hookSpecificOutput", {})
+
+
+@pytest.mark.parametrize("command", ["Get-ChildItem", "git status", "pytest -q"])
+def test_ordinary_powershell_passes_through_silently(built_repo: Path, command: str) -> None:
+    assert handle_pre_tool_use(_ps_payload(built_repo, command), "strict") is None
+
+
+def test_select_string_scoped_to_one_file_is_allowed(built_repo: Path) -> None:
+    out = handle_pre_tool_use(
+        _ps_payload(built_repo, "Select-String -Pattern target_symbol -Path alpha.py"), "strict"
+    )
+
+    assert out is None or "permissionDecision" not in out.get("hookSpecificOutput", {})
+
+
+def test_filename_lookups_are_never_denied(built_repo: Path) -> None:
+    """The contract explicitly allows filename lookups -- `find -name` is not a
+    cross-file content search and must not be treated as one."""
+    out = handle_pre_tool_use(_bash_payload(built_repo, "find . -name 'target_symbol*'"), "strict")
+
+    assert out is None or "permissionDecision" not in out.get("hookSpecificOutput", {})

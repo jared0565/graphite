@@ -27,7 +27,7 @@ def test_fresh_install_writes_both_events_remind_mode(tmp_path: Path) -> None:
     assert result["action"] == "created"
     assert result["mode"] == "remind"
     assert _commands(settings, "PreToolUse") == ["python -m graphite agent-hook pre-tool-use --mode remind"]
-    assert settings["hooks"]["PreToolUse"][0]["matcher"] == "Grep|Glob"
+    assert settings["hooks"]["PreToolUse"][0]["matcher"] == "Grep|Glob|Bash|PowerShell"
     assert _commands(settings, "SessionStart") == ["python -m graphite agent-hook session-start"]
 
 
@@ -91,7 +91,7 @@ def test_replaces_stale_graphite_entries_on_reinit(tmp_path: Path) -> None:
     assert result["changed"] is True
     commands = _commands(settings, "PreToolUse")
     assert commands == ["python -m graphite agent-hook pre-tool-use --mode remind"]
-    assert settings["hooks"]["PreToolUse"][0]["matcher"] == "Grep|Glob"
+    assert settings["hooks"]["PreToolUse"][0]["matcher"] == "Grep|Glob|Bash|PowerShell"
 
 
 def test_mode_preserved_without_explicit_request(tmp_path: Path) -> None:

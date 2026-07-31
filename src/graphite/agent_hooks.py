@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import threading
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import savings as savings_model
@@ -176,6 +177,136 @@ def _graph_symbol(root: Path, tokens: list[str]) -> tuple[str, str] | None:
     return None
 
 
+# Search binaries reachable from the Bash tool. The PreToolUse matcher was
+# "Grep|Glob" -- tool NAMES -- so `grep` run through Bash bypassed this hook
+# entirely, and consumer agents reported using exactly that route for
+# cross-file work. Enforcing on the Grep tool alone enforces a naming
+# convention, not a rule.
+_SEARCH_COMMANDS = frozenset({
+    "grep", "egrep", "fgrep", "rg", "ag", "ack", "findstr",
+    # PowerShell's grep, plus its alias. The PowerShell tool is a separate
+    # tool name from Bash, so it needs its own matcher entry as well.
+    "select-string", "sls",
+})
+# `find -name` is deliberately absent: a filename lookup is not a cross-file
+# content search, and the graph-first contract explicitly permits it.
+_SHELL_OPERATORS = frozenset({"|", "||", "&&", "&", ";", "|&"})
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Flags whose VALUE is the pattern. Without these, `grep -e PAT path` and
+# PowerShell's `-Path . -Pattern PAT` put a non-pattern token first and the
+# positional guess silently reads the wrong one -- which fails open, i.e. the
+# search is allowed through. Honouring them explicitly is what closes that.
+_PATTERN_FLAGS = frozenset({"-e", "--regexp", "-pattern", "--pattern"})
+
+
+def _bash_command_heads(command: str) -> list[list[str]]:
+    """argv of each command in `command` that is NOT downstream of a pipe.
+
+    A search downstream of a pipe filters another command's output rather than
+    searching the repository -- `graphite query ... | grep name` is the obvious
+    case, and denying it would break the very commands the denial message
+    recommends. Everything after a `|` is therefore dropped, while `&&`, `||`,
+    `;` and `&` start a genuinely new command that is checked on its own.
+    """
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return []  # unbalanced quotes: fail open, never break the user's shell
+    heads: list[list[str]] = []
+    current: list[str] = []
+    piped = False
+    for token in tokens:
+        if token in _SHELL_OPERATORS:
+            if current and not piped:
+                heads.append(current)
+            # `||` is or-else, not a pipe -- only `|` and `|&` feed stdout on.
+            piped = token in ("|", "|&")
+            current = []
+            continue
+        current.append(token)
+    if current and not piped:
+        heads.append(current)
+    return heads
+
+
+def _bash_search_pattern(command: str) -> tuple[str, list[str]] | None:
+    """`(pattern, path arguments)` when `command` searches the repo, else None.
+
+    Deliberately conservative: the first non-flag argument is taken as the
+    pattern, which is the positional order of every tool in
+    `_BASH_SEARCH_TOOLS`. A flag that takes a separate value (`grep -e X`,
+    `rg --glob X`) can mis-identify the pattern, and that is the safe
+    direction -- a mis-read pattern simply fails to match a graph symbol and
+    nothing is denied.
+    """
+    for argv in _bash_command_heads(command):
+        while argv and _ENV_ASSIGNMENT_RE.match(argv[0]):
+            argv = argv[1:]
+        if not argv:
+            continue
+        name = PurePosixPath(argv[0].replace("\\", "/")).name.lower()
+        if name.endswith(".exe"):
+            name = name[:-4]
+        rest = argv[1:]
+        if name == "git" and rest and rest[0] == "grep":
+            name, rest = "grep", rest[1:]
+        if name not in _SEARCH_COMMANDS:
+            continue
+        lowered = [token.lower() for token in rest]
+        for index, token in enumerate(lowered):
+            if token in _PATTERN_FLAGS and index + 1 < len(rest):
+                paths = [
+                    value
+                    for position, value in enumerate(rest)
+                    if position not in (index, index + 1) and not value.startswith("-")
+                ]
+                return rest[index + 1], paths
+        positional = [token for token in rest if not token.startswith("-")]
+        if not positional:
+            continue
+        return positional[0], positional[1:]
+    return None
+
+
+def _is_single_file_scope(root: Path, paths: list[str]) -> bool:
+    """Every named path exists and is a file. Literal-text searches scoped to
+    one file are always allowed -- the graph answers relationships, not what a
+    specific file literally contains."""
+    if not paths:
+        return False
+    for target in paths:
+        candidate = Path(target)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        if not candidate.is_file():
+            return False
+    return True
+
+
+def _denial_for(root: Path, pattern: str, paths: list[str]) -> str | None:
+    """Shared by the Grep and Bash routes so both enforce the same rule."""
+    if not pattern:
+        return None
+    if _is_single_file_scope(root, paths):
+        return None
+    tokens = _pattern_tokens(pattern)
+    if not tokens:
+        return None
+    match = _graph_symbol(root, tokens)
+    if match is None:
+        return None
+    node_id, token = match
+    return (
+        f"graphite-first (strict): '{token}' is a symbol in this repo's code graph "
+        f"({node_id}). Use the graph instead of cross-file grep: "
+        f'python -m graphite query "callers {token}" | python -m graphite query "calls {token}" | '
+        f'python -m graphite search "{token}" | python -m graphite context <file>. '
+        "Literal-text searches scoped to a single file path are always allowed."
+    )
+
+
 def _strict_denial(payload: dict[str, Any], root: Path) -> str | None:
     try:
         tool_input = payload.get("tool_input")
@@ -185,26 +316,8 @@ def _strict_denial(payload: dict[str, Any], root: Path) -> str | None:
         if not isinstance(pattern, str) or not pattern:
             return None
         target = tool_input.get("path")
-        if isinstance(target, str) and target:
-            candidate = Path(target)
-            if not candidate.is_absolute():
-                candidate = root / candidate
-            if candidate.is_file():
-                return None  # single-file scoped searches are always allowed
-        tokens = _pattern_tokens(pattern)
-        if not tokens:
-            return None
-        match = _graph_symbol(root, tokens)
-        if match is None:
-            return None
-        node_id, token = match
-        return (
-            f"graphite-first (strict): '{token}' is a symbol in this repo's code graph "
-            f"({node_id}). Use the graph instead of cross-file grep: "
-            f'python -m graphite query "callers {token}" | python -m graphite query "calls {token}" | '
-            f'python -m graphite search "{token}" | python -m graphite context <file>. '
-            "Literal-text searches scoped to a single file path are always allowed."
-        )
+        paths = [target] if isinstance(target, str) and target else []
+        return _denial_for(root, pattern, paths)
     except Exception:
         return None
 
@@ -314,38 +427,53 @@ def handle_stop(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 def handle_pre_tool_use(payload: dict[str, Any], mode: str) -> dict[str, Any] | None:
     try:
-        if payload.get("tool_name") not in ("Grep", "Glob"):
+        tool_name = payload.get("tool_name")
+        if tool_name not in ("Grep", "Glob", "Bash", "PowerShell"):
             return None
         root = _payload_root(payload)
         if not (root / "graph-out" / "graph.json").is_file():
             return None
-        if mode == "strict" and payload.get("tool_name") == "Grep":
+        denial: str | None = None
+        if tool_name in ("Bash", "PowerShell"):
+            # The matcher now routes EVERY Bash call here, so anything that is
+            # not a repo-wide search must leave silently -- not even a
+            # reminder. Nagging `git status` is how a real warning gets
+            # ignored, which is the same rule check_hooks applies to repos
+            # that never onboarded.
+            tool_input = payload.get("tool_input")
+            command = tool_input.get("command") if isinstance(tool_input, dict) else None
+            found = _bash_search_pattern(command) if isinstance(command, str) else None
+            if found is None:
+                return None
+            if mode == "strict":
+                denial = _denial_for(root, found[0], found[1])
+        elif mode == "strict" and tool_name == "Grep":
             denial = _strict_denial(payload, root)
-            if denial is not None:
-                health = persisted_resolution(
-                    root,
-                    on_error=lambda exc: record_incident(
-                        repo_ledger_dir(root),
-                        klass="build",
-                        code="artifact_malformed",
-                        subject=".graphite_analysis.json",
-                        detail=str(exc),
-                    ),
-                )
-                if isinstance(health, dict) and health.get("healthy") is True:
-                    return {
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": denial,
-                        }
-                    }
+        if denial is not None:
+            health = persisted_resolution(
+                root,
+                on_error=lambda exc: record_incident(
+                    repo_ledger_dir(root),
+                    klass="build",
+                    code="artifact_malformed",
+                    subject=".graphite_analysis.json",
+                    detail=str(exc),
+                ),
+            )
+            if isinstance(health, dict) and health.get("healthy") is True:
                 return {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
-                        "additionalContext": PRE_TOOL_REMINDER + STRICT_SUSPENSION_NOTE,
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": denial,
                     }
                 }
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "additionalContext": PRE_TOOL_REMINDER + STRICT_SUSPENSION_NOTE,
+                }
+            }
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
