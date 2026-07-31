@@ -206,6 +206,39 @@ def _artifact_size(path: Path) -> int:
     return path.stat().st_size
 
 
+def managed_hook_paths(root: Path) -> tuple[str, ...]:
+    """Hook files graphite *authored*, as repo-relative posix paths.
+
+    Not in `init.managed_doc_paths` because the hooks directory is not a fixed
+    repo-relative path: `hooks_dir` honours an existing `core.hooksPath`, which
+    may point anywhere, including outside the repository.
+
+    Authorship is decided by the graphite marker, reusing `_hook_shim_present`,
+    and that predicate is load-bearing in two directions rather than a
+    convenience:
+
+    * A `.local` sibling is the pre-existing hook graphite chained to. It is
+      machine-local by construction and carries no marker; telling an operator
+      to commit it would publish someone else's private hook.
+    * A hook graphite does not trigger on is *relocated byte-identically*, with
+      no marker (`hookinstall`'s stated interop rule). Graphite moved it but did
+      not write it -- in graphite's own repo those are aramid's `pre-commit` and
+      `pre-push`. Claiming them would have doctor reporting another tool's files
+      as graphite's to commit.
+
+    Globbing the directory would get both of those wrong, which is why this
+    keys on content rather than on filenames.
+    """
+    hdir = hooks_dir(root)
+    try:
+        relative = hdir.resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        # An absolute `core.hooksPath` outside the repo cannot be committed to
+        # it. Reporting it would be advice nobody can act on.
+        return ()
+    return tuple(f"{relative.as_posix()}/{hook}" for hook in TRIGGERS if _hook_shim_present(hdir / hook))
+
+
 def check_managed_docs(root: Path) -> DoctorCheck:
     """Graphite-managed files that exist on disk but differ from what Git has.
 
@@ -227,6 +260,7 @@ def check_managed_docs(root: Path) -> DoctorCheck:
         return DoctorCheck(code, label, "optional", "Repository is not onboarded onto graphite; no managed files to track.", {"onboarded": False, "uncommitted": []})
 
     watched = {path.as_posix() for path in managed_doc_paths() if (root / path).is_file()}
+    watched |= set(managed_hook_paths(root))
     if not watched:
         return DoctorCheck(code, label, "ready", "No graphite-managed files are present.", {"onboarded": True, "watched": [], "uncommitted": []})
 

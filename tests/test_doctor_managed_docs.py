@@ -16,6 +16,7 @@ import subprocess
 from pathlib import Path
 
 from graphite.doctor import check_managed_docs
+from graphite.hookshim import CHAINED_SUFFIX, MARKER_START
 from graphite.init import (
     PLATFORMS,
     ensure_gitignore_allowlist,
@@ -236,6 +237,89 @@ def test_gitignored_managed_paths_fails_open_outside_a_repo(tmp_path: Path) -> N
     (tmp_path / "CLAUDE.md").write_text("x", encoding="utf-8")
 
     assert gitignored_managed_paths(tmp_path, [Path("CLAUDE.md")]) == ()
+
+
+def _trampoline(path: Path) -> None:
+    """A hook file shaped like one graphite wrote: carries the marker."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\n{MARKER_START}\nexec graphite ...\n", encoding="utf-8")
+
+
+def test_reports_the_vscode_task_generated_but_never_committed(tmp_path: Path) -> None:
+    """`init` writes `.vscode/tasks.json` (init.py, ensure_vscode_activation_task)
+    and it was NOT watched. Measured live 2026-07-31: the file sat untracked in
+    aramid's repo since 07-28 while this very check ran on this machine and
+    reported nothing -- which is also how I came to claim, three rounds running,
+    that graphite had never written there."""
+    root = _repo(tmp_path)
+    _commit_all(root)
+    (root / ".vscode").mkdir()
+    (root / ".vscode" / "tasks.json").write_text("{}", encoding="utf-8")
+
+    check = check_managed_docs(root)
+
+    assert check.status == "degraded"
+    assert ".vscode/tasks.json" in check.details["uncommitted"]
+
+
+def test_reports_a_graphite_hook_trampoline_never_committed(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    _commit_all(root)
+    _trampoline(root / ".githooks" / "post-commit")
+
+    check = check_managed_docs(root)
+
+    assert ".githooks/post-commit" in check.details["uncommitted"]
+
+
+def test_a_chained_local_hook_is_never_watched(tmp_path: Path) -> None:
+    """`.local` is the pre-existing hook graphite chained to. It is machine-local
+    by construction and committing it would publish another tool's -- or the
+    user's -- private hook. It carries no graphite marker, which is exactly why
+    keying on the marker is the right predicate rather than globbing the dir."""
+    root = _repo(tmp_path)
+    _commit_all(root)
+    _trampoline(root / ".githooks" / "post-commit")
+    (root / ".githooks" / f"post-commit{CHAINED_SUFFIX}").write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+
+    check = check_managed_docs(root)
+
+    assert ".githooks/post-commit" in check.details["uncommitted"]
+    assert f".githooks/post-commit{CHAINED_SUFFIX}" not in check.details["uncommitted"]
+
+
+def test_a_relocated_foreign_hook_is_not_claimed(tmp_path: Path) -> None:
+    """hookinstall relocates a hook graphite does not trigger on *byte-identically*,
+    with no marker -- graphite moved it but did not author it. In graphite's own
+    repo those are aramid's `pre-commit`/`pre-push`. Reporting them would have
+    doctor telling the operator to commit another tool's files as graphite's."""
+    root = _repo(tmp_path)
+    _commit_all(root)
+    (root / ".githooks").mkdir()
+    (root / ".githooks" / "pre-push").write_text("#!/bin/sh\naramid check\n", encoding="utf-8")
+
+    check = check_managed_docs(root)
+
+    assert check.status == "ready"
+    assert check.details["uncommitted"] == ()
+
+
+def test_a_hooks_dir_outside_the_repo_is_not_reported(tmp_path: Path) -> None:
+    """`hooks_dir` honours an absolute `core.hooksPath`. A file outside the repo
+    cannot be committed to it, so reporting it would be advice nobody can act on."""
+    root = _repo(tmp_path)
+    _commit_all(root)
+    outside = tmp_path.parent / "external-hooks"
+    _trampoline(outside / "post-commit")
+    subprocess.run(  # noqa: S603
+        ["git", "-C", str(root), "config", "core.hooksPath", str(outside)],  # noqa: S607
+        check=True,
+    )
+
+    check = check_managed_docs(root)
+
+    assert check.status == "ready"
+    assert check.details["uncommitted"] == ()
 
 
 def test_managed_doc_paths_covers_every_platform(tmp_path: Path) -> None:

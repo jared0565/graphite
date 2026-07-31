@@ -171,13 +171,25 @@ def managed_doc_paths() -> tuple[Path, ...]:
     `ensure_platform_file` already relies on. `GRAPHITE.md` and
     `.claude/settings.json` are added explicitly because they are written
     outside the platform loop (`run_init` steps for the shared doc and the
-    agent-hook settings).
+    agent-hook settings), and `.vscode/tasks.json` likewise
+    (`ensure_vscode_activation_task`).
+
+    `.vscode/tasks.json` was missing here until 2026-07-31, and the cost was
+    concrete: `graphite init` wrote it into aramid's repo on 07-28 and it sat
+    untracked for three days on a machine running this very check, which is how
+    graphite came to assert three rounds running that it had never written
+    there. A registry that omits a path is indistinguishable from a clean repo.
+
+    Git hooks are deliberately NOT here -- their directory is not a fixed
+    repo-relative path (`hookinstall.hooks_dir` honours an existing
+    `core.hooksPath`), so they need a root to resolve. See
+    `doctor.managed_hook_paths`.
 
     Returns the full candidate set, not the set present in any given repo:
     callers filter by existence, because a platform a repo never selected is
     absent and that is not a finding.
     """
-    paths = {Path("GRAPHITE.md"), Path(".claude/settings.json")}
+    paths = {Path("GRAPHITE.md"), Path(".claude/settings.json"), Path(".vscode/tasks.json")}
     for spec in PLATFORMS.values():
         paths.update(Path(rel) for rel in spec.files)
     return tuple(sorted(paths, key=lambda path: path.as_posix()))
