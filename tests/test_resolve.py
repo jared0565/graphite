@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from graphite.resolve import (
+    RustUseResolution,
+    SourceIndex,
     _load_cargo_crates,
     _load_cargo_dependencies,
     _normalize_crate_name,
@@ -11,6 +13,32 @@ from graphite.resolve import (
     _rust_module_dir,
     _rust_module_segments,
 )
+
+CRATES = (
+    ("ofw_policy", "crates/ofw-policy", "crates/ofw-policy/src"),
+    ("ofw_contracts", "crates/ofw-contracts", "crates/ofw-contracts/src"),
+)
+FILES = {
+    "crates/ofw-policy/src/lib.rs",
+    "crates/ofw-policy/src/rule.rs",
+    "crates/ofw-contracts/src/lib.rs",
+}
+
+
+def _index(
+    tmp_path: Path,
+    rel_paths: set[str],
+    crates: tuple[tuple[str, str, str], ...] = (),
+    deps: frozenset[str] = frozenset(),
+) -> SourceIndex:
+    return SourceIndex(
+        root=tmp_path,
+        rel_paths=frozenset(rel_paths),
+        path_aliases=(),
+        typescript=None,
+        cargo_crates=crates,
+        cargo_dependencies=deps,
+    )
 
 
 def _write(root: Path, rel: str, text: str) -> None:
@@ -77,3 +105,63 @@ def test_rust_module_segments_stops_at_the_first_item_segment() -> None:
     assert _rust_module_segments(["policy", "rule", "Rule"]) == ["policy", "rule"]
     assert _rust_module_segments(["Rule"]) == []
     assert _rust_module_segments(["policy", "rule"]) == ["policy", "rule"]
+
+
+def test_resolve_rust_use_tags_allowlisted_roots_external(tmp_path: Path) -> None:
+    index = _index(tmp_path, FILES, CRATES)
+    assert index.resolve_rust_use(
+        "crates/ofw-policy/src/lib.rs", "std::collections::BTreeSet"
+    ) == RustUseResolution(None, True)
+
+
+def test_resolve_rust_use_tags_declared_dependencies_external(tmp_path: Path) -> None:
+    index = _index(tmp_path, FILES, CRATES, frozenset({"serde"}))
+    assert index.resolve_rust_use(
+        "crates/ofw-policy/src/lib.rs", "serde::Serialize"
+    ) == RustUseResolution(None, True)
+
+
+def test_resolve_rust_use_leaves_an_unknown_root_unresolved(tmp_path: Path) -> None:
+    # The guard against laundering a real miss as "external".
+    index = _index(tmp_path, FILES, CRATES, frozenset({"serde"}))
+    assert index.resolve_rust_use(
+        "crates/ofw-policy/src/lib.rs", "typo_crate::Thing"
+    ) == RustUseResolution(None, False)
+
+
+def test_resolve_rust_use_binds_a_sibling_workspace_crate(tmp_path: Path) -> None:
+    index = _index(tmp_path, FILES, CRATES)
+    assert index.resolve_rust_use(
+        "crates/ofw-policy/src/lib.rs", "ofw_contracts::Rule"
+    ) == RustUseResolution("crates/ofw-contracts/src/lib.rs", False)
+
+
+def test_resolve_rust_use_binds_crate_relative_module(tmp_path: Path) -> None:
+    index = _index(tmp_path, FILES, CRATES)
+    assert index.resolve_rust_use(
+        "crates/ofw-policy/src/lib.rs", "crate::rule::Rule"
+    ) == RustUseResolution("crates/ofw-policy/src/rule.rs", False)
+
+
+def test_resolve_rust_use_super_inside_an_inline_module_is_the_same_file(tmp_path: Path) -> None:
+    index = _index(tmp_path, FILES, CRATES)
+    assert index.resolve_rust_use(
+        "crates/ofw-policy/src/lib.rs", "super::Rule", inline_mod_depth=1
+    ) == RustUseResolution("crates/ofw-policy/src/lib.rs", False)
+
+
+def test_resolve_rust_use_super_at_file_scope_is_the_parent_module(tmp_path: Path) -> None:
+    index = _index(tmp_path, FILES, CRATES)
+    assert index.resolve_rust_use(
+        "crates/ofw-policy/src/rule.rs", "super::Thing", inline_mod_depth=0
+    ) == RustUseResolution("crates/ofw-policy/src/lib.rs", False)
+
+
+def test_resolve_rust_use_crate_falls_back_to_nearest_src_without_a_manifest(
+    tmp_path: Path,
+) -> None:
+    """A repo whose Cargo.toml was not scanned must still resolve `crate::`."""
+    index = _index(tmp_path, {"src/app.rs", "src/store.rs"}, crates=())
+    assert index.resolve_rust_use(
+        "src/app.rs", "crate::store::Store"
+    ) == RustUseResolution("src/store.rs", False)

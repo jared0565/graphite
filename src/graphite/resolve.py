@@ -52,6 +52,20 @@ class ResolvedImport:
 
 
 @dataclass(frozen=True)
+class RustUseResolution:
+    """Outcome of resolving one Rust `use` path.
+
+    Three distinct states, and the difference matters to resolution_health:
+    bound (`rel_path` set), confirmed external, or unresolved. Only a
+    *confirmed* external may be tagged EXTERNAL_IMPORT; an unresolved target
+    must keep default confidence so it stays counted against the ratio.
+    """
+
+    rel_path: str | None
+    external: bool
+
+
+@dataclass(frozen=True)
 class SourceIndex:
     """Known project files plus tsconfig path aliases and optional TS compiler resolution."""
 
@@ -200,6 +214,80 @@ class SourceIndex:
             if normalized in self.rel_paths:
                 return normalized
         return None
+
+    def _rust_crate_for(self, rel_path: str) -> tuple[str, str, str] | None:
+        """Innermost crate containing this file (longest matching crate dir).
+
+        Falls back to the nearest `src/` ancestor when no manifest matches, so
+        `crate::` still resolves in a repo whose Cargo.toml was not scanned.
+        Without this, crate-relative imports silently fail to bind.
+        """
+        best: tuple[str, str, str] | None = None
+        for entry in self.cargo_crates:
+            crate_dir = entry[1]
+            if crate_dir and not rel_path.startswith(f"{crate_dir}/"):
+                continue
+            if best is None or len(crate_dir) > len(best[1]):
+                best = entry
+        if best is not None:
+            return best
+        parts = PurePosixPath(rel_path).parts
+        if "src" in parts:
+            index = len(parts) - 1 - parts[::-1].index("src")
+            return ("", "/".join(parts[:index]), "/".join(parts[: index + 1]))
+        return None
+
+    def _rust_walk(self, anchor: str, rest: list[str]) -> str | None:
+        """Longest-module-prefix-first search for a file under `anchor`."""
+        modules = _rust_module_segments(rest)
+        for depth in range(len(modules), -1, -1):
+            parts = modules[:depth]
+            if parts:
+                joined = "/".join(parts)
+                base = f"{anchor}/{joined}" if anchor else joined
+                candidates = _rust_module_candidates(base)
+            else:
+                candidates = [
+                    f"{anchor}/{name}" if anchor else name
+                    for name in ("lib.rs", "mod.rs", "main.rs")
+                ]
+            for candidate in candidates:
+                normalized = posixpath.normpath(candidate).lstrip("./")
+                if normalized in self.rel_paths:
+                    return normalized
+        return None
+
+    def resolve_rust_use(
+        self, importer_rel_path: str, use_path: str, inline_mod_depth: int = 0
+    ) -> RustUseResolution:
+        """Lexically resolve a Rust `use` path. See RustUseResolution."""
+        segments = [s for s in use_path.replace(" ", "").split("::") if s]
+        if not segments:
+            return _RUST_UNRESOLVED
+        head, rest = segments[0], segments[1:]
+        if head in _RUST_EXTERNAL_ROOTS:
+            return _RUST_EXTERNAL
+
+        if head == "crate":
+            crate = self._rust_crate_for(importer_rel_path)
+            if crate is None:
+                return _RUST_UNRESOLVED
+            anchor = crate[2]
+        elif head == "self":
+            anchor = _rust_module_dir(importer_rel_path)
+        elif head == "super":
+            if inline_mod_depth > 0:
+                # `super` from inside an inline `mod` block is still this file.
+                return RustUseResolution(importer_rel_path, False)
+            parent_raw = PurePosixPath(_rust_module_dir(importer_rel_path)).parent.as_posix()
+            anchor = "" if parent_raw == "." else parent_raw
+        else:
+            target = next((c for c in self.cargo_crates if c[0] == head), None)
+            if target is None:
+                return _RUST_EXTERNAL if head in self.cargo_dependencies else _RUST_UNRESOLVED
+            return RustUseResolution(self._rust_walk(target[2], rest), False)
+
+        return RustUseResolution(self._rust_walk(anchor, rest), False)
 
 
 def should_keep_call_target(called: str) -> bool:
@@ -394,6 +482,8 @@ def _match_alias(pattern: str, import_name: str) -> str | None:
 _RUST_EXTERNAL_ROOTS: Final = frozenset({"std", "core", "alloc", "proc_macro"})
 _CARGO_DEPENDENCY_TABLES: Final = ("dependencies", "dev-dependencies", "build-dependencies")
 _RUST_MODULE_ROOT_FILES: Final = frozenset({"lib.rs", "main.rs", "mod.rs"})
+_RUST_UNRESOLVED: Final = RustUseResolution(None, False)
+_RUST_EXTERNAL: Final = RustUseResolution(None, True)
 
 
 def _rust_module_dir(rel_path: str) -> str:
