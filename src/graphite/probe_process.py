@@ -63,6 +63,15 @@ class ProbeProcessResult:
     stdout: bytes
     stderr: bytes
     duration_seconds: float
+    # Input-side evidence. A child may legitimately stop reading before we
+    # finish writing (see write_input), which is tolerated -- but that leaves a
+    # short stream indistinguishable, from the outside, from a child that read
+    # everything and chose to answer less. These two fields keep that
+    # distinction observable so a failing probe can say which happened.
+    # Defaulted so the many positional constructions in tests stay valid, and
+    # so a hand-built result reads as "input delivered in full".
+    input_bytes: int = 0
+    input_complete: bool = True
 
 
 def sanitized_probe_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -293,6 +302,7 @@ def run_bounded_process(
     overflow: threading.Event | None = None
     io_failed: threading.Event | None = None
     writer_failed: threading.Event | None = None
+    input_truncated: threading.Event | None = None
     cleanup_started: threading.Event | None = None
     workers: list[threading.Thread] = []
     worker_pipes: list[tuple[threading.Thread, Any]] = []
@@ -331,7 +341,10 @@ def run_bounded_process(
             # discarded the real return code whenever the write lost that race,
             # which is the intermittent `probe input failed` in issue #29.
             # BrokenPipeError subclasses OSError, so it must be caught first.
-            pass
+            # Tolerating it silently would erase the only signal that the child
+            # saw a short stream, so record it as evidence instead.
+            if input_truncated is not None:
+                input_truncated.set()
         except (OSError, ValueError):
             if writer_failed is not None:
                 writer_failed.set()
@@ -345,6 +358,7 @@ def run_bounded_process(
         overflow = threading.Event()
         io_failed = threading.Event()
         writer_failed = threading.Event()
+        input_truncated = threading.Event()
         cleanup_started = threading.Event()
         for name, pipe in (("stdout", process.stdout), ("stderr", process.stderr)):
             thread = threading.Thread(target=read_pipe, args=(name, pipe), daemon=True)
@@ -410,6 +424,8 @@ def run_bounded_process(
         bytes(outputs["stdout"]),
         bytes(outputs["stderr"]),
         time.monotonic() - started,
+        len(input_data) if input_data is not None else 0,
+        input_truncated is None or not input_truncated.is_set(),
     )
 
 

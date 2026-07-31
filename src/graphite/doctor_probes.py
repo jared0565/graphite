@@ -703,6 +703,15 @@ def _record_probe_diagnostics(root: Path, failure: str, result: object = None) -
         detail = " | ".join(
             (
                 f"returncode={getattr(result, 'returncode', '<none>')}",
+                # Input-side evidence, and the point of recording it: a short
+                # response transcript is ambiguous on its own. `input_complete`
+                # False means the child stopped reading and therefore saw an
+                # early EOF -- it never got the whole request stream. True means
+                # it received everything and still answered less, which is a
+                # different bug in a different place. Without this the two are
+                # indistinguishable from the outside (graphite issue #29).
+                f"input_bytes={getattr(result, 'input_bytes', '<none>')}",
+                f"input_complete={getattr(result, 'input_complete', '<none>')}",
                 f"stdout={_stream_excerpt(getattr(result, 'stdout', b''))!r}",
                 f"stderr={_stream_excerpt(getattr(result, 'stderr', b''))!r}",
             )

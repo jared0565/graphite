@@ -917,6 +917,58 @@ def test_deep_bounded_runner_tolerates_child_exiting_before_reading_stdin(tmp_pa
     )
 
     assert result.returncode == 70
+    # Tolerating the broken pipe must not erase it: the child saw a short
+    # stream, and a later failing probe needs to be able to say so.
+    assert result.input_complete is False
+    assert result.input_bytes == 1024 * 1024
+
+
+def test_deep_bounded_runner_reports_input_delivered_in_full(tmp_path: Path) -> None:
+    """A child that consumes all of stdin is reported as a complete delivery.
+
+    The negative case alone would pass against a field hardcoded to False, so
+    pin the positive one too.
+    """
+    from graphite.probe_process import run_bounded_process
+
+    payload = b"x" * 4096
+    result = run_bounded_process(
+        [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+        cwd=tmp_path,
+        stdin=payload,
+        timeout_seconds=15,
+    )
+
+    assert result.returncode == 0
+    assert result.input_complete is True
+    assert result.input_bytes == len(payload)
+
+
+def test_probe_diagnostics_record_input_side_evidence(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A short response transcript is ambiguous without the input-side facts.
+
+    `input_complete=False` means the child never received the whole request
+    stream, so a missing response is explained. `True` means it got everything
+    and still answered less -- a different bug in a different place. Issue #29
+    stalled precisely because the captured diagnostic could not tell these
+    apart.
+    """
+    import graphite.doctor_probes as probes
+    from graphite.probe_process import ProbeProcessResult
+
+    truncated = ProbeProcessResult(
+        0, b'{"jsonrpc":"2.0","id":1}\n', b"", 0.01, input_bytes=4096, input_complete=False
+    )
+    probes._record_probe_diagnostics(tmp_path, "invalid_response", truncated)
+    err = capsys.readouterr().err
+    assert "input_bytes=4096" in err
+    assert "input_complete=False" in err
+
+    probes._record_probe_diagnostics(tmp_path, "invalid_response", ProbeProcessResult(0, b"", b"", 0.01))
+    assert "input_complete=True" in capsys.readouterr().err
 
 
 def test_probe_transport_rechecks_late_writer_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
