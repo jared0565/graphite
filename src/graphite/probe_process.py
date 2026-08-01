@@ -248,6 +248,7 @@ def run_bounded_process(
     check: bool = True,
     environment: Mapping[str, str] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    stdin_close_delay_seconds: float = 0.0,
 ) -> ProbeProcessResult:
     """Run one isolated process tree under a single hard transport deadline.
 
@@ -349,6 +350,21 @@ def run_bounded_process(
             if writer_failed is not None:
                 writer_failed.set()
         finally:
+            # EXPERIMENT (issue #29): closing stdin is what the child sees as
+            # EOF. Every surviving explanation for the missing `tools/list`
+            # response has EOF arriving too early, so delaying this close is a
+            # one-variable test of that whole class of cause -- it changes WHEN
+            # EOF arrives and nothing else.
+            #
+            # Judged against a measured 50% failure rate (10 dispatches on an
+            # unchanged sha, 5 failed), so 10 clean runs has p ~ 0.5^10 ~ 0.001
+            # under the null. That baseline is what makes this a test rather
+            # than the "watch CI go green and hope" that judged every previous
+            # attempt at this bug -- green was already the majority outcome.
+            #
+            # Default 0.0, so no other caller's behaviour changes.
+            if stdin_close_delay_seconds > 0:
+                time.sleep(stdin_close_delay_seconds)
             try:
                 process.stdin.close()
             except (OSError, ValueError):

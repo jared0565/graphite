@@ -56,6 +56,17 @@ _LLM_TIMEOUT_MAX_SECONDS = 60.0
 _REQUIRED_MCP_TOOLS = frozenset(
     {"graphite_query", "graphite_summary", "graphite_community", "graphite_refresh"}
 )
+#: EXPERIMENT (#29). Upper bound on the delay before the child sees EOF.
+#: Comfortably longer than the whole handshake, which is milliseconds, while
+#: staying far inside the real 20s probe budget.
+_MCP_STDIN_CLOSE_DELAY_CAP_SECONDS = 0.75
+#: ...but never more than this share of whatever budget the caller actually gave
+#: us. A flat delay broke two `real_transport` tests that assert the probe
+#: returns in under a second on a deliberately tiny timeout: it turned their
+#: expected `nonzero`/`invalid_response` verdicts into `timeout`. Left that way
+#: every CI run would have failed for a reason unrelated to #29, and the
+#: 10-dispatch measurement this exists to make would have been unreadable.
+_MCP_STDIN_CLOSE_DELAY_BUDGET_SHARE = 0.05
 _TYPESCRIPT_SCRIPT = (
     "try{require.resolve('typescript')}catch(error){"
     "if(error&&error.code==='MODULE_NOT_FOUND'){"
@@ -1524,6 +1535,13 @@ def probe_mcp(
             stdin=stdin,
             timeout_seconds=remaining,
             max_output_bytes=_MCP_OUTPUT_LIMIT_BYTES,
+            # EXPERIMENT (#29): see probe_process.write_input. Delays only the
+            # EOF the child sees, nothing else. Revert or keep on the evidence
+            # from 10 dispatches against the measured 50% baseline.
+            stdin_close_delay_seconds=min(
+                _MCP_STDIN_CLOSE_DELAY_CAP_SECONDS,
+                remaining * _MCP_STDIN_CLOSE_DELAY_BUDGET_SHARE,
+            ),
         )
     except ProbeProcessError as exc:
         # No `result` on this path -- run_bounded_process raises before
