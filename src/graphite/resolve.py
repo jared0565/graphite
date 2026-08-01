@@ -84,7 +84,11 @@ class SourceIndex:
     # scan, so `use other_crate::…` binds to that crate's source instead of a
     # phantom, and declared dependencies can be told apart from typos.
     cargo_crates: tuple[tuple[str, str, str], ...] = ()
+    # Union across all manifests. FALLBACK ONLY, for a file no manifest claims.
     cargo_dependencies: frozenset[str] = frozenset()
+    # (crate dir, declared idents) per manifest -- the authoritative answer to
+    # "did THIS file's crate declare that dependency". See issue #38.
+    cargo_crate_dependencies: tuple[tuple[str, frozenset[str]], ...] = ()
 
     @classmethod
     def from_entries(cls, entries: Iterable[object], cfg: Config | None = None) -> "SourceIndex":
@@ -108,6 +112,7 @@ class SourceIndex:
             workspace_packages=_load_workspace_packages(root, frozenset(rel_paths)),
             cargo_crates=_load_cargo_crates(root, frozenset(rel_paths)),
             cargo_dependencies=_load_cargo_dependencies(root, frozenset(rel_paths)),
+            cargo_crate_dependencies=_load_cargo_crate_dependencies(root, frozenset(rel_paths)),
         )
 
     def file_set_digest(self) -> str:
@@ -274,6 +279,25 @@ class SourceIndex:
                 return normalized
         return None
 
+    def _rust_declares(self, importer_rel_path: str, name: str) -> bool:
+        """Did the importing file's own crate declare this dependency?
+
+        Asking per-crate rather than repo-wide is issue #38: an import tagged
+        external is excluded from the resolution-health ratio, so letting a
+        sibling crate's dependency vouch for an undeclared import removed a real
+        miss from the denominator instead of counting it.
+
+        Falls back to the union when no manifest claims the file, so a repo whose
+        Cargo.toml was never scanned keeps resolving exactly as before rather
+        than regressing to "everything unresolved".
+        """
+        crate = self._rust_crate_for(importer_rel_path)
+        if crate is not None:
+            for crate_dir, declared in self.cargo_crate_dependencies:
+                if crate_dir == crate[1]:
+                    return name in declared
+        return name in self.cargo_dependencies
+
     def resolve_rust_use(
         self, importer_rel_path: str, use_path: str, inline_mod_depth: int = 0
     ) -> RustUseResolution:
@@ -301,7 +325,8 @@ class SourceIndex:
         else:
             target = next((c for c in self.cargo_crates if c[0] == head), None)
             if target is None:
-                return _RUST_EXTERNAL if head in self.cargo_dependencies else _RUST_UNRESOLVED
+                declared = self._rust_declares(importer_rel_path, head)
+                return _RUST_EXTERNAL if declared else _RUST_UNRESOLVED
             return RustUseResolution(self._rust_walk(target[2], rest), False)
 
         return RustUseResolution(self._rust_walk(anchor, rest), False)
@@ -577,24 +602,59 @@ def _load_cargo_crates(root: Path, rel_paths: frozenset[str]) -> tuple[tuple[str
     return tuple(crates)
 
 
+def _dependency_names(scope: object) -> set[str]:
+    """Dependency idents declared in one manifest scope."""
+    names: set[str] = set()
+    if not isinstance(scope, dict):
+        return names
+    for table in _CARGO_DEPENDENCY_TABLES:
+        section = scope.get(table)
+        if isinstance(section, dict):
+            names.update(_normalize_crate_name(key) for key in section if isinstance(key, str))
+    return names
+
+
 def _load_cargo_dependencies(root: Path, rel_paths: frozenset[str]) -> frozenset[str]:
-    """Declared dependency idents across every manifest, including workspace ones."""
+    """Union of declared dependency idents across every manifest.
+
+    Kept only as the fallback for a file that cannot be attributed to a crate.
+    Do NOT use it to decide whether a specific file's import is declared -- see
+    `_load_cargo_crate_dependencies` and issue #38.
+    """
     names: set[str] = set()
     for rel in _cargo_manifest_paths(rel_paths):
         data = _read_cargo_manifest(root, rel)
         if data is None:
             continue
-        scopes: list[object] = [data]
-        workspace = data.get("workspace")
-        if isinstance(workspace, dict):
-            scopes.append(workspace)
-        for scope in scopes:
-            if not isinstance(scope, dict):
-                continue
-            for table in _CARGO_DEPENDENCY_TABLES:
-                section = scope.get(table)
-                if isinstance(section, dict):
-                    names.update(
-                        _normalize_crate_name(key) for key in section if isinstance(key, str)
-                    )
+        names |= _dependency_names(data)
+        names |= _dependency_names(data.get("workspace"))
     return frozenset(names)
+
+
+def _load_cargo_crate_dependencies(
+    root: Path, rel_paths: frozenset[str]
+) -> tuple[tuple[str, frozenset[str]], ...]:
+    """Declared dependency idents **per crate**, as (crate dir, idents).
+
+    Issue #38: the union above let one crate's dependency vouch for another
+    crate's undeclared import. Since an import classified external is EXCLUDED
+    from the resolution-health denominator, that quietly removed a broken import
+    from the ratio instead of counting it against -- inflating the number strict
+    graph-first enforcement gates on.
+
+    Workspace-level `[workspace.dependencies]` IS folded into every crate's set.
+    `dep = { workspace = true }` is legitimate inheritance, and those
+    declarations are shared by design; only cross-crate leakage is the defect.
+    The cost is that a member using a workspace dependency it never opted into
+    still reads as external -- narrower than the union, and deliberate.
+    """
+    workspace: set[str] = set()
+    per_crate: list[tuple[str, set[str]]] = []
+    for rel in _cargo_manifest_paths(rel_paths):
+        data = _read_cargo_manifest(root, rel)
+        if data is None:
+            continue
+        workspace |= _dependency_names(data.get("workspace"))
+        parent = PurePosixPath(rel).parent.as_posix()
+        per_crate.append(("" if parent == "." else parent, _dependency_names(data)))
+    return tuple((crate_dir, frozenset(names | workspace)) for crate_dir, names in per_crate)

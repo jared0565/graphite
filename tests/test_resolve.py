@@ -6,6 +6,7 @@ from pathlib import Path
 from graphite.resolve import (
     RustUseResolution,
     SourceIndex,
+    _load_cargo_crate_dependencies,
     _load_cargo_crates,
     _load_cargo_dependencies,
     _normalize_crate_name,
@@ -30,6 +31,7 @@ def _index(
     rel_paths: set[str],
     crates: tuple[tuple[str, str, str], ...] = (),
     deps: frozenset[str] = frozenset(),
+    crate_deps: tuple[tuple[str, frozenset[str]], ...] = (),
 ) -> SourceIndex:
     return SourceIndex(
         root=tmp_path,
@@ -38,6 +40,7 @@ def _index(
         typescript=None,
         cargo_crates=crates,
         cargo_dependencies=deps,
+        cargo_crate_dependencies=crate_deps,
     )
 
 
@@ -119,6 +122,94 @@ def test_resolve_rust_use_tags_declared_dependencies_external(tmp_path: Path) ->
     assert index.resolve_rust_use(
         "crates/ofw-policy/src/lib.rs", "serde::Serialize"
     ) == RustUseResolution(None, True)
+
+
+# --- issue #38: dependency attribution is per-crate, not repo-wide -----------
+
+
+def test_a_crates_dependency_does_not_leak_to_a_sibling_crate(tmp_path: Path) -> None:
+    """The defect. `serde` is declared by ofw-policy only, so ofw-contracts
+    importing it is an UNDECLARED import and must count as unresolved.
+
+    Classifying it external would drop it from the resolution-health denominator
+    -- externals are excluded from the ratio -- so a broken import would inflate
+    the health number that strict graph-first enforcement gates on.
+    """
+    index = _index(
+        tmp_path,
+        FILES,
+        CRATES,
+        deps=frozenset({"serde"}),
+        crate_deps=(
+            ("crates/ofw-policy", frozenset({"serde"})),
+            ("crates/ofw-contracts", frozenset()),
+        ),
+    )
+
+    assert index.resolve_rust_use(
+        "crates/ofw-contracts/src/lib.rs", "serde::Serialize"
+    ) == RustUseResolution(None, False)
+
+
+def test_the_crate_that_declares_it_still_tags_external(tmp_path: Path) -> None:
+    index = _index(
+        tmp_path,
+        FILES,
+        CRATES,
+        deps=frozenset({"serde"}),
+        crate_deps=(
+            ("crates/ofw-policy", frozenset({"serde"})),
+            ("crates/ofw-contracts", frozenset()),
+        ),
+    )
+
+    assert index.resolve_rust_use(
+        "crates/ofw-policy/src/lib.rs", "serde::Serialize"
+    ) == RustUseResolution(None, True)
+
+
+def test_a_file_outside_any_known_crate_falls_back_to_the_union(tmp_path: Path) -> None:
+    """Repos whose manifests were not scanned must not regress to "everything
+    unresolved" -- the fallback keeps them working exactly as before."""
+    index = _index(
+        tmp_path,
+        FILES | {"scratch/main.rs"},
+        (),
+        deps=frozenset({"serde"}),
+        crate_deps=(),
+    )
+
+    assert index.resolve_rust_use(
+        "scratch/main.rs", "serde::Serialize"
+    ) == RustUseResolution(None, True)
+
+
+def test_workspace_dependencies_are_inheritable_by_every_member(tmp_path: Path) -> None:
+    """`dep = { workspace = true }` is legitimate, so a workspace-level
+    declaration must remain usable by members. Only CROSS-CRATE leakage is the
+    bug -- workspace deps are shared by design."""
+    _write(
+        tmp_path,
+        "Cargo.toml",
+        '[workspace]\nmembers = ["crates/a"]\n\n[workspace.dependencies]\ntokio-util = "0.7"\n',
+    )
+    _write(tmp_path, "crates/a/Cargo.toml", '[package]\nname = "a"\n')
+    rel_paths = frozenset({"Cargo.toml", "crates/a/Cargo.toml"})
+
+    per_crate = dict(_load_cargo_crate_dependencies(tmp_path, rel_paths))
+
+    assert "tokio_util" in per_crate["crates/a"]
+
+
+def test_per_crate_dependencies_are_kept_apart(tmp_path: Path) -> None:
+    _write(tmp_path, "crates/a/Cargo.toml", '[package]\nname = "a"\n\n[dependencies]\nserde = "1"\n')
+    _write(tmp_path, "crates/b/Cargo.toml", '[package]\nname = "b"\n\n[dependencies]\nrand = "0.8"\n')
+    rel_paths = frozenset({"crates/a/Cargo.toml", "crates/b/Cargo.toml"})
+
+    per_crate = dict(_load_cargo_crate_dependencies(tmp_path, rel_paths))
+
+    assert per_crate["crates/a"] == frozenset({"serde"})
+    assert per_crate["crates/b"] == frozenset({"rand"})
 
 
 def test_resolve_rust_use_leaves_an_unknown_root_unresolved(tmp_path: Path) -> None:
