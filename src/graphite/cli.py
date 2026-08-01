@@ -810,6 +810,54 @@ def _print_typescript_activation(activation: ActivationResult) -> None:
         print("    5. Rerun graphite doctor or onboarding to confirm detection.")
 
 
+def _onboarding_validation(args: argparse.Namespace, cfg: Any) -> dict[str, Any]:
+    """Judge the graph after `init`/`bootstrap`, or say why there is nothing to judge.
+
+    `ok` is deliberately three-valued:
+
+      True  -- a graph exists and validated
+      False -- a graph was expected and is missing or invalid  (exit 1)
+      None  -- nothing to validate                             (exit 0)
+
+    The None case is the fix. `--no-build` with no pre-existing graph used to
+    report `ok: False, error: graph not found`, so `graphite init . --no-build
+    --yes --strict` -- the command the managed template and every onboarding
+    round tell agents to run -- returned exit 1 on a first-time repo after
+    writing every file correctly. "I did not build the graph you told me not to
+    build" is not a validation failure.
+
+    A missing graph WITHOUT `--no-build` is still False: a build that was
+    supposed to run and produced nothing is a real failure and must keep failing.
+
+    Shared by both onboarding commands because they carried byte-identical
+    copies of this block, which is how they would drift apart again.
+    """
+    validation: dict[str, Any] = {"requested": not args.no_validate, "ok": None}
+    if args.no_validate:
+        return validation
+
+    graph_path = cfg.output_dir / "graph.json"
+    if graph_path.exists():
+        with open(graph_path, "r", encoding="utf-8") as f:
+            validation.update(validate_graph_bundle(json.load(f)))
+    elif args.no_build:
+        validation.update({"ok": None, "skipped": "no_graph_no_build"})
+    else:
+        validation.update({"ok": False, "error": f"graph not found: {graph_path}"})
+    return validation
+
+
+def _print_onboarding_validation(validation: dict[str, Any]) -> None:
+    if not validation["requested"]:
+        return
+    if validation.get("ok") is None:
+        # Say why, rather than printing a bare "ok" that implies a graph was
+        # checked when none exists.
+        print("  - validation: skipped (no graph to validate; --no-build)")
+    else:
+        print(f"  - validation: {'ok' if validation.get('ok') else 'failed'}")
+
+
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
     daemon_base = Path(args.daemon_base).resolve() if args.daemon_base else None
@@ -820,7 +868,6 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     # use of it inside this function.
     ts_activation = _activate_typescript_for_onboarding(args, root, cfg)
     build: dict[str, Any] = {"requested": not args.no_build, "ok": None}
-    validation: dict[str, Any] = {"requested": not args.no_validate, "ok": None}
 
     if not args.no_build:
         if args.json:
@@ -830,14 +877,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             _build_project(root, cfg)
         build["ok"] = True
 
-    if not args.no_validate:
-        graph_path = cfg.output_dir / "graph.json"
-        if graph_path.exists():
-            with open(graph_path, "r", encoding="utf-8") as f:
-                validation_report = validate_graph_bundle(json.load(f))
-            validation.update(validation_report)
-        else:
-            validation.update({"ok": False, "error": f"graph not found: {graph_path}"})
+    validation = _onboarding_validation(args, cfg)
 
     payload = {
         **result,
@@ -859,8 +899,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         _print_typescript_activation(ts_activation)
         if build["requested"]:
             print(f"  - build: {'ok' if build['ok'] else 'failed'}")
-        if validation["requested"]:
-            print(f"  - validation: {'ok' if validation.get('ok') else 'failed'}")
+        _print_onboarding_validation(validation)
     return 1 if ts_activation.fatal or validation.get("ok") is False else 0
 
 
@@ -901,7 +940,6 @@ def cmd_init(args: argparse.Namespace) -> int:
     # use of it inside this function.
     ts_activation = _activate_typescript_for_onboarding(args, root, cfg)
     build: dict[str, Any] = {"requested": not args.no_build, "ok": None}
-    validation: dict[str, Any] = {"requested": not args.no_validate, "ok": None}
 
     if not args.no_build:
         if args.json:
@@ -911,14 +949,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             _build_project(root, cfg)
         build["ok"] = True
 
-    if not args.no_validate:
-        graph_path = cfg.output_dir / "graph.json"
-        if graph_path.exists():
-            with open(graph_path, "r", encoding="utf-8") as f:
-                validation_report = validate_graph_bundle(json.load(f))
-            validation.update(validation_report)
-        else:
-            validation.update({"ok": False, "error": f"graph not found: {graph_path}"})
+    validation = _onboarding_validation(args, cfg)
 
     payload = {
         **result,
@@ -962,8 +993,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         _print_typescript_activation(ts_activation)
         if build["requested"]:
             print(f"  - build: {'ok' if build['ok'] else 'failed'}")
-        if validation["requested"]:
-            print(f"  - validation: {'ok' if validation.get('ok') else 'failed'}")
+        _print_onboarding_validation(validation)
     return 1 if ts_activation.fatal or validation.get("ok") is False else 0
 
 
