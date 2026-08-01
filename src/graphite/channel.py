@@ -510,7 +510,7 @@ def inbox(root: Path, project_root: Path) -> list[Round]:
     root = require_channel(root)
     agent = derive_identity(root, project_root)
 
-    pending: list[Round] = []
+    pending: list[tuple[int, Round]] = []
     for entry in list_rounds(root):
         if entry.number is None or agent not in entry.to:
             continue
@@ -519,12 +519,11 @@ def inbox(root: Path, project_root: Path) -> list[Round]:
             for event in status_events(root, entry.number)
         )
         if not already:
-            pending.append(entry)
+            pending.append((entry.number, entry))
 
-    for entry in pending:
-        assert entry.number is not None
-        _write_status_event(root, entry.number, "delivered", agent, broker=True)
-    return pending
+    for number, _entry in pending:
+        _write_status_event(root, number, "delivered", agent, broker=True)
+    return [entry for _number, entry in pending]
 
 
 # --- audit report -----------------------------------------------------------

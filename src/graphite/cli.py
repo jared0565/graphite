@@ -1111,6 +1111,10 @@ def cmd_channel(args: argparse.Namespace) -> int:
     channel)` yields a usable path either way and the exit code carries the
     status -- otherwise a caller `cd`s into an error message.
     """
+    action = getattr(args, "action", None)
+    if action:
+        return _cmd_channel_action(args, action)
+
     path = (default_projects_root() / CHANNEL_DIRNAME).resolve()
     exists = path.is_dir()
     is_git_repo = (path / ".git").exists()
@@ -1138,6 +1142,69 @@ def cmd_channel(args: argparse.Namespace) -> int:
         print(f"[graphite] channel at {path} is not a git repository, so changes there are unauditable", file=sys.stderr)
         return 1
     return 0
+
+
+def _cmd_channel_action(args: argparse.Namespace, action: str) -> int:
+    """Human-facing channel surface.
+
+    Kept behind an optional positional so the bare `graphite channel` keeps
+    printing only the path: round 42 told every consumer to use
+    `$(python -m graphite channel)`, and a subcommand that changed the bare form
+    would break the callers that did as they were told.
+    """
+    from . import channel as channel_mod
+
+    try:
+        root = channel_mod.require_channel()
+    except channel_mod.ChannelError as exc:
+        print(f"[graphite] {exc}", file=sys.stderr)
+        return 1
+
+    if action == "report":
+        data = channel_mod.build_report(root)
+        print(json.dumps(data, indent=2) if args.json else channel_mod.render_report(data))
+        # The verdict rides on the exit code so this can gate something, rather
+        # than being a wall of text somebody has to read carefully.
+        return 0 if data["ok"] else 1
+
+    if action == "list":
+        entries = channel_mod.list_rounds(root)
+        if args.json:
+            print(json.dumps(
+                [
+                    {
+                        "round": e.number,
+                        "title": e.title,
+                        "author": e.author,
+                        "to": e.to,
+                        "posted": e.posted,
+                        "legacy": e.legacy,
+                    }
+                    for e in entries
+                ],
+                indent=2,
+            ))
+        else:
+            for entry in entries:
+                label = f"round {entry.number}" if entry.number is not None else "round ?"
+                who = entry.author or "(legacy)"
+                print(f"{label:<10} {who:<16} {entry.title}")
+        return 0
+
+    if action == "show":
+        if args.number is None:
+            print("[graphite] channel show needs a round number", file=sys.stderr)
+            return 2
+        try:
+            entry = channel_mod.read_round(root, args.number)
+        except channel_mod.ChannelError as exc:
+            print(f"[graphite] {exc}", file=sys.stderr)
+            return 1
+        print(entry.body)
+        return 0
+
+    print(f"[graphite] unknown channel action: {action}", file=sys.stderr)
+    return 2
 
 
 def cmd_capabilities(args: argparse.Namespace) -> int:
@@ -2543,6 +2610,14 @@ def main(argv: list[str] | None = None) -> int:
         "channel",
         help="Print the path of the shared agent channel (the one repo-isolation exception)",
     )
+    p_channel.add_argument(
+        "action",
+        nargs="?",
+        choices=["report", "list", "show"],
+        default=None,
+        help="report: audited view of the whole channel; list: rounds; show: one round's body",
+    )
+    p_channel.add_argument("number", nargs="?", type=int, default=None, help="Round number for `show`")
     p_channel.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_channel.set_defaults(func=cmd_channel)
 

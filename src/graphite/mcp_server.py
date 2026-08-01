@@ -124,6 +124,191 @@ class GraphiteMCPServer:
         }
 
 
+    # --- agent channel -----------------------------------------------------
+    #
+    # The only tools here that write outside the selected project. They exist
+    # because some agents are sandboxed to their own workspace and cannot reach
+    # the shared channel at all -- so access is mediated rather than granted.
+    #
+    # None of them take an author. Identity is derived from `self.project_root`,
+    # the repo this server was launched in, because every agent commits under
+    # the operator's git identity and the trailer is therefore the only answer
+    # to "who wrote this".
+
+    def _channel_call(self, fn, *args, **kwargs) -> dict[str, Any]:
+        from .channel import ChannelError, require_channel
+
+        try:
+            root = require_channel()
+            return fn(root, *args, **kwargs)
+        except ChannelError as exc:
+            return {"error": exc.code, "message": str(exc)}
+
+    def channel_post_tool(
+        self,
+        *,
+        title: str,
+        body: str,
+        to: list[str] | None = None,
+        supersedes: int | None = None,
+    ) -> dict[str, Any]:
+        from .channel import post_round
+
+        return self._channel_call(
+            lambda root: post_round(
+                root,
+                self.project_root,
+                title=title,
+                body=body,
+                to=to or [],
+                supersedes=supersedes,
+            )
+        )
+
+    def channel_inbox_tool(self) -> dict[str, Any]:
+        from .channel import inbox
+
+        return self._channel_call(
+            lambda root: {
+                "ok": True,
+                "rounds": [
+                    {
+                        "round": entry.number,
+                        "title": entry.title,
+                        "author": entry.author,
+                        "posted": entry.posted,
+                        "body": entry.body,
+                    }
+                    for entry in inbox(root, self.project_root)
+                ],
+            }
+        )
+
+    def channel_status_tool(
+        self, *, number: int, status: str, reason: str | None = None
+    ) -> dict[str, Any]:
+        from .channel import record_status
+
+        return self._channel_call(
+            lambda root: record_status(root, self.project_root, number, status, reason=reason)
+        )
+
+    def channel_list_tool(self) -> dict[str, Any]:
+        from .channel import current_status, list_rounds
+
+        def _run(root):
+            entries = list_rounds(root)
+            return {
+                "ok": True,
+                "rounds": [
+                    {
+                        "round": entry.number,
+                        "title": entry.title,
+                        "author": entry.author,
+                        "to": entry.to,
+                        "posted": entry.posted,
+                        "legacy": entry.legacy,
+                        "status": (
+                            (current_status(root, entry.number) or {}).get("status")
+                            if entry.number is not None
+                            else None
+                        ),
+                    }
+                    for entry in entries
+                ],
+            }
+
+        return self._channel_call(_run)
+
+    def channel_read_tool(self, *, number: int) -> dict[str, Any]:
+        from .channel import current_status, read_round
+
+        def _run(root):
+            entry = read_round(root, number)
+            return {
+                "ok": True,
+                "round": entry.number,
+                "title": entry.title,
+                "author": entry.author,
+                "to": entry.to,
+                "posted": entry.posted,
+                "body": entry.body,
+                "status": (current_status(root, entry.number) or {}).get("status"),
+            }
+
+        return self._channel_call(_run)
+
+
+def channel_tool_definitions() -> list[Tool]:
+    """Advertised so agents can discover them; a tool nobody can find is the
+    problem this was built to solve."""
+    return [
+        Tool(
+            name="graphite_channel_inbox",
+            description=(
+                "Messages addressed to you that you have not been handed yet. Call this at "
+                "the start of a session. Delivery is recorded as they are returned."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="graphite_channel_post",
+            description=(
+                "Post a new round to the shared agent channel. You are identified by the "
+                "repository this server runs in; you cannot post as another agent. Rounds are "
+                "immutable -- correct one by posting another with `supersedes`."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "One-line subject"},
+                    "body": {"type": "string", "description": "Markdown body"},
+                    "to": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Recipient agent ids, e.g. ['aramid-agent']",
+                    },
+                    "supersedes": {"type": "integer", "description": "Round this replaces"},
+                },
+                "required": ["title", "body"],
+            },
+        ),
+        Tool(
+            name="graphite_channel_status",
+            description=(
+                "Update a message's status: acknowledged, blocked (give a reason), done, or "
+                "withdrawn if you wrote it. Only the recipient may acknowledge/block/complete."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "number": {"type": "integer"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["acknowledged", "blocked", "done", "withdrawn"],
+                    },
+                    "reason": {"type": "string"},
+                },
+                "required": ["number", "status"],
+            },
+        ),
+        Tool(
+            name="graphite_channel_list",
+            description="List every round in the channel with its author and current status.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="graphite_channel_read",
+            description="Read one round by number.",
+            inputSchema={
+                "type": "object",
+                "properties": {"number": {"type": "integer"}},
+                "required": ["number"],
+            },
+        ),
+    ]
+
+
 def _result(content: dict[str, Any]) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(content, ensure_ascii=False, indent=2))]
 
@@ -173,10 +358,30 @@ def main() -> int:
                 description="Rebuild graph-out/graph.json and reload it.",
                 inputSchema={"type": "object", "properties": {}},
             ),
+            *channel_tool_definitions(),
         ]
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        if name == "graphite_channel_inbox":
+            return _result(graphite.channel_inbox_tool())
+        if name == "graphite_channel_post":
+            return _result(graphite.channel_post_tool(
+                title=arguments.get("title", ""),
+                body=arguments.get("body", ""),
+                to=arguments.get("to") or [],
+                supersedes=arguments.get("supersedes"),
+            ))
+        if name == "graphite_channel_status":
+            return _result(graphite.channel_status_tool(
+                number=arguments.get("number", 0),
+                status=arguments.get("status", ""),
+                reason=arguments.get("reason"),
+            ))
+        if name == "graphite_channel_list":
+            return _result(graphite.channel_list_tool())
+        if name == "graphite_channel_read":
+            return _result(graphite.channel_read_tool(number=arguments.get("number", 0)))
         if name == "graphite_query":
             return _result(graphite.query_tool(arguments.get("query", "")))
         if name == "graphite_community":
