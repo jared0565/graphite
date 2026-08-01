@@ -24,7 +24,7 @@ from .io import atomic_write_text
 # test_template_change_requires_doc_version_bump pins the pairing. Files
 # written before versioning existed count as version 1 ("legacy unversioned")
 # and are never rewritten automatically.
-DOC_VERSION = 10
+DOC_VERSION = 11
 
 MANAGED_BEGIN = f"<!-- graphite:managed version={DOC_VERSION} -->"
 MANAGED_END = "<!-- graphite:managed-end -->"
@@ -73,6 +73,21 @@ relationship questions: every answer carries its own `answer.grade`, so trust
 that rather than guessing whether the graph is current. If an answer comes back
 `inconclusive` or insufficient, fall back to search and say that you did.
 
+## Repository Isolation
+
+**Your repository is your world.** Do not read, write, or run commands in any other repository — including its `graph-out/`. This holds even when the other repo sits on the same machine, is a dependency of this one, or plainly contains the answer you need.
+
+Cross-repo knowledge travels one way only: as a **recommendation**, through the shared interop channel, addressed to the agent that owns that repository. That agent decides and acts. A defect you find elsewhere is a request, never a patch — and never a read.
+
+- Do not open another repo's source, tests, config, or `graph.json`. Each repo's graph describes that repo and belongs to its agent.
+- Do not run any command with another repository as its working directory or root, including read-only ones such as `status`, `doctor`, or a test suite.
+- Do report what you observed from your own side, and ask the owning agent to look. Say plainly which parts you could not verify.
+- Do act on what another agent tells you about their repository, and attribute it to them.
+
+**If you need a fact from another repo, ask for it.** A claim clearly labelled unverified is safer than a verified one obtained out of bounds — the boundary is the control, and stepping over it to be thorough defeats it.
+
+Graphite invoked as a *tool* against an onboarded repository (`graphite init`, template rollout) is the operator's tooling rather than an agent crossing a boundary. That exemption belongs to the operator running the command, not to you.
+
 ## Canonical Graph Isolation
 
 `scan`, `build`, `report`, `check`, `validate`, `query`, `context`, `impact`,
@@ -90,12 +105,15 @@ canonical `graph-out` artifacts.
 - If `python -m graphite check .` reports stale output, rebuild before relying on context or impact data.
 - Canonical Graphite operations run locally and never use LLM or network inference.
 - For TypeScript resolver issues, use `python -m graphite --typescript-resolver disabled build .` only as a fallback.
+- Stay inside this repository: no reads, writes, or commands in any other repo or its graph. Findings about another repo go to its agent as a recommendation.
 """
 
 SHARED_POINTER_HEADER = "## Shared Graphite Instructions"
 SHARED_POINTER = """## Shared Graphite Instructions
 
 Graphite-first is required in this repo. Follow `GRAPHITE.md` before making non-trivial code changes: for cross-file questions (who-calls, where-defined, impact, data flow, structure) run the Graphite commands first; grep/glob are for literal text and filename lookups only. Fall back to manual search only after a Graphite answer proved insufficient, and say so. Use the existing `graph-out/graph.json` as the shared project graph, and do not edit `graph-out/` manually.
+
+**Stay inside this repository.** Do not read, write, or run commands in any other repo, including its graph. Findings about another repo go to its agent as a recommendation through the interop channel; that agent decides and acts. See `GRAPHITE.md` section "Repository Isolation".
 """
 
 CURSOR_POINTER = """---

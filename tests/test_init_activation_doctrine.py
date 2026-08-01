@@ -38,8 +38,28 @@ def test_doctrine_routes_agents_to_answer_grade() -> None:
     assert "graphite check ." in init_mod.GRAPHITE_DOC
 
 
-def test_doc_version_is_10() -> None:
-    assert init_mod.DOC_VERSION == 10
+def test_doc_version_is_11() -> None:
+    assert init_mod.DOC_VERSION == 11
+
+
+def test_doctrine_states_repository_isolation() -> None:
+    """Operator rule, 2026-08-01: an agent's world is its own repository --
+    source, files, AND graph. Cross-repo knowledge moves only as a
+    recommendation through the interop channel, and the owning repo's agent
+    acts on it. Pinned in the template because that is the only mechanism that
+    reaches the other six repos' agents.
+    """
+    doc = init_mod.GRAPHITE_DOC
+    assert "## Repository Isolation" in doc
+    assert "Your repository is your world" in doc
+    # The graph is explicitly in scope: reading another repo's graph.json was
+    # the specific thing that prompted the rule.
+    assert "graph-out/" in doc.split("## Repository Isolation")[1].split("## Canonical")[0]
+    # Read-only is NOT a loophole -- `doctor`/`status` are named so nobody
+    # reasons their way to "it was only a read".
+    assert "read-only" in doc
+    # And the pointer every agent actually sees must carry it too.
+    assert "Stay inside this repository" in init_mod.SHARED_POINTER
 
 
 def test_init_defaults_to_strict_hooks(tmp_path: Path) -> None:
