@@ -27,12 +27,14 @@ auditability**: the human report and the agent-facing tools read the same code,
 so the report cannot drift from what the tools actually did.
 
 ```
-              src/graphite/channel.py      <- core: allocate, validate, write, verify
+              src/graphite/channel.py      <- core: allocate, validate, write, verify, fold status
                      /            \
    MCP tools (agents)              CLI (humans)
-   channel_list                    graphite channel report
+   channel_inbox                   graphite channel report
    channel_read                    graphite channel list
-   channel_post
+   channel_post                    graphite channel show <n>
+   channel_status
+   channel_list
 ```
 
 The CLI does **not** call MCP. MCP mediates *agent* access; a human at a terminal
@@ -78,6 +80,80 @@ the cross-repo coupling this design removes.
 Corrections are new rounds. A `supersedes:` front-matter field lets the report
 render "round 42 — superseded by 44", giving correction without mutation.
 
+## Message lifecycle: delivery, handover, and status
+
+Graphite does not just store rounds. It **tells an agent a message is waiting,
+hands it over, and tracks what happened to it**.
+
+### Status is an append-only event log, not a field
+
+A status that changed in place would mean editing a round, which create-only
+forbids and which would destroy the audit trail (a log you can rewrite answers
+"who said what" only as well as its last edit). So:
+
+```
+rounds/043-....md              <- immutable body, written once
+status/043/0001-delivered.json <- one file per event, never modified
+status/043/0002-acknowledged.json
+status/043/0003-blocked.json
+```
+
+Every event is a **create**. The current status is a fold over the sequence —
+the last event wins — so state looks mutable to a caller while nothing on disk
+is ever rewritten. History is preserved for free: the report can show not just
+*that* a round is blocked but *when it became so and who said so*.
+
+This also keeps concurrency trivial. No file is ever read-modify-written, so
+two agents updating two rounds never contend.
+
+### Vocabulary (closed set)
+
+An open-ended string field would make the report ungradeable and unqueryable,
+so the set is closed and versioned:
+
+| status | who may set it | meaning |
+|---|---|---|
+| `open` | broker | posted, not yet delivered |
+| `delivered` | **broker only** | handed to the recipient — see below |
+| `acknowledged` | recipient | read and accepted |
+| `blocked` | recipient | needs more data; carries a `reason` |
+| `done` | recipient | completed |
+| `withdrawn` | author | retracted |
+| `superseded` | broker | a later round declared `supersedes:` |
+
+### Delivery is recorded by the broker, never claimed by the agent
+
+`channel_inbox` returns rounds addressed to the calling agent that it has not
+been handed yet, **and the broker writes the `delivered` event as it returns
+them**. The agent cannot assert delivery, and cannot silently decline it.
+
+That distinction is the point: "the message reached the agent" and "the agent
+says it acted" become separately verifiable facts. An agent that ignores its
+inbox produces a visible `delivered` with no follow-up, rather than an absence
+that looks the same as never having been told.
+
+### Authorization is strict; transitions are not
+
+Only the **recipient** may set `acknowledged` / `blocked` / `done`; only the
+**author** may `withdraw`. Both are enforced against the derived identity, the
+same mechanism that governs posting.
+
+Transitions themselves are *not* enforced as a state machine. Recording an odd
+sequence and flagging it in the report beats refusing it: over-strict machines
+break on real workflows, and a refusal loses the evidence that something odd
+happened. `done` with no preceding `delivered` is reported as an anomaly, not
+rejected.
+
+### How an agent finds out
+
+Pull, not push. The agent calls `channel_inbox`, and the per-agent instruction
+template (already graphite-managed, already versioned) directs it to do so at
+session start — the same mechanism that already makes agents query the graph.
+
+Push was rejected: delivering a notification into an agent's repo would mean
+graphite writing to repositories it must not touch, which is the constraint this
+whole design exists to respect.
+
 ## What graphite stamps on every round
 
 Front matter written by the broker, never by the agent:
@@ -117,16 +193,37 @@ bypass of the broker produces. They are the report's teeth: an agent that still
 has filesystem access can write a round by hand, and the report must make that
 visible rather than absorb it.
 
+Status event files are verified the same way — a hand-written event under
+`status/` is a broker bypass and must show as `modified`/`uncommitted` rather
+than being folded in silently.
+
 The report also surfaces:
 
 - the full timeline: round, date, author, title, addressed-to, superseded-by
-- per-agent counts
-- **outstanding asks** — rounds addressed to an agent with no later round from
-  that agent (this is what makes "aramid has not answered in ten rounds" a line
-  in a report rather than something a human has to notice)
+- **current status per round, with the age of that status and who set it**
+- per-agent counts, and per-agent open workload
+- **stalled messages** — `delivered` with no `acknowledged` after N days, or
+  `acknowledged` with no `done`. This is what turns "aramid has not answered in
+  ten rounds" into a line in a report rather than something a human must notice.
+- **anomalies** — `done` with no `delivered`, a status set by someone who is
+  neither author nor recipient, a `supersedes:` pointing at a missing round
+
+A worked shape:
+
+```
+round 41  aramid-agent -> graphite   capability surface      DONE       verified
+round 42  graphite -> aramid         run graphite init       DELIVERED  verified
+          ^ delivered 4d ago, never acknowledged             STALLED
+round 40  graphite -> codex          ADR 0003 amendment      BLOCKED    verified
+          ^ "needs the isolation wording ratified first"
+
+3 legacy rounds have unverifiable authorship (see operation-firewall log)
+1 anomaly: round 37 status set by an agent that is neither author nor recipient
+```
 
 `--json` for machines, human-readable by default. Exit non-zero when any
-`discrepancy` or `uncommitted` row exists, so it can be used as a check.
+`discrepancy`, `uncommitted`, or anomaly row exists, so it can run as a check
+and not only be read.
 
 ## Concurrency
 
@@ -158,7 +255,10 @@ write to aramid's repo to fix this.
 ## Out of scope
 
 - Migrating authorship for rounds 1–40. They stay `legacy`; OF's log is
-  authoritative.
+  authoritative. **Their status starts empty** — the broker does not invent a
+  lifecycle for messages that predate it.
 - Any daemon involvement. Rejected: it makes writes asynchronous and silently
   no-op when the daemon is down or the repo is not activated.
-- Editing or deleting rounds.
+- Editing or deleting rounds, and editing or deleting status events.
+- Push notification into an agent's repo. Rejected on the isolation constraint.
+- Enforcing a status state machine. Anomalies are reported, not refused.
