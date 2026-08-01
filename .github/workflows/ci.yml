@@ -4,9 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual trigger exists to measure #29's failure rate. Without it, sampling
+  # meant pushing empty commits to main, which is why the rate was never
+  # measured and every argument about "is it deterministic" stayed an argument.
+  workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # push/PR still coalesce -- a superseded commit's run is wasted work.
+  # workflow_dispatch must NOT: sampling needs N runs to survive together, and
+  # under a shared group each dispatch would cancel the one before it, leaving
+  # a sample size of 1 that looks like a completed measurement.
+  group: ci-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
   cancel-in-progress: true
 
 jobs:
