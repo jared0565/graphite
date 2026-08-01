@@ -1,4 +1,4 @@
-<!-- graphite:managed version=10 -->
+<!-- graphite:managed version=13 -->
 # Graphite Development Context
 
 Graphite is the shared local code graph for this project. Codex, Claude Code, Gemini CLI, Antigravity, Visual Studio, and other coding agents should use the same graph instead of rebuilding separate mental maps.
@@ -18,6 +18,7 @@ Graphite-first is required, not advisory. Before any cross-file exploration, con
 | What surrounds this file (callers, tests, neighbors)? | `python -m graphite context <file>` |
 | How is the project structured? | `python -m graphite query "stats"` |
 | Literal string or filename lookup | grep/glob — Graphite not required |
+| Where is the shared agent channel? | `python -m graphite channel` |
 
 Before non-trivial code changes:
 
@@ -40,6 +41,36 @@ relationship questions: every answer carries its own `answer.grade`, so trust
 that rather than guessing whether the graph is current. If an answer comes back
 `inconclusive` or insufficient, fall back to search and say that you did.
 
+## Repository Isolation
+
+**Your repository is your world.** Do not read, write, or run commands in any other repository — including its `graph-out/`. This holds even when the other repo sits on the same machine, is a dependency of this one, or plainly contains the answer you need.
+
+Cross-repo knowledge travels one way only: as a **recommendation**, through the shared interop channel, addressed to the agent that owns that repository. That agent decides and acts. A defect you find elsewhere is a request, never a patch — and never a read.
+
+- Do not open another repo's source, tests, config, or `graph.json`. Each repo's graph describes that repo and belongs to its agent.
+- Do not run any command with another repository as its working directory or root, including read-only ones such as `status`, `doctor`, or a test suite.
+- Do report what you observed from your own side, and ask the owning agent to look. Say plainly which parts you could not verify.
+- Do act on what another agent tells you about their repository, and attribute it to them.
+
+**If you need a fact from another repo, ask for it.** A claim clearly labelled unverified is safer than a verified one obtained out of bounds — the boundary is the control, and stepping over it to be thorough defeats it.
+
+### The one exception: the shared agent channel
+
+There is one shared **agent channel** on this machine: a directory named `.agent-channel/`, its own git repository, living outside every project and belonging to no repo and no agent. **Every agent may read it and write to it**, whichever repository it is responsible for, and nothing in it is any project's source or data.
+
+Its absolute location is machine-local and deliberately kept out of this file: project files are committed and pushed, so a local directory layout does not belong in them. **Resolve it with `python -m graphite channel`** (`--json` for a machine-readable form, reporting whether it exists and is a git repo). The path goes to stdout and diagnostics to stderr, so `$(python -m graphite channel)` is safe to use directly.
+
+This is the exception that makes isolation workable: isolation without a channel is a wall, not a boundary. Read the channel's `PROTOCOL.md` before writing there. Every commit must carry your own agent's `Co-Authored-By` trailer and state its reason; a `commit-msg` hook rejects commits that name no agent, because all agents commit under one identity and the trailer is what makes the history auditable.
+
+### Agent boundary vs. tool boundary
+
+These are different questions and one must not be used to argue about the other.
+
+- **An agent** may act only within its own repository.
+- **A tool doing what it was designed to do is not an agent crossing a boundary.** `graphite init` onboarding a repository, or a security gate running against one, is the operator's tooling operating on a repo. That is by design and is not governed by the agent rule.
+
+The distinction belongs to the operator invoking the tool. It is not a licence to reclassify yourself as a tool in order to reach into another repository.
+
 ## Canonical Graph Isolation
 
 `scan`, `build`, `report`, `check`, `validate`, `query`, `context`, `impact`,
@@ -57,4 +88,5 @@ canonical `graph-out` artifacts.
 - If `python -m graphite check .` reports stale output, rebuild before relying on context or impact data.
 - Canonical Graphite operations run locally and never use LLM or network inference.
 - For TypeScript resolver issues, use `python -m graphite --typescript-resolver disabled build .` only as a fallback.
+- Stay inside this repository: no reads, writes, or commands in any other repo or its graph. Findings about another repo go to its agent as a recommendation via the shared `.agent-channel/`.
 <!-- graphite:managed-end -->
