@@ -24,7 +24,7 @@ from .io import atomic_write_text
 # test_template_change_requires_doc_version_bump pins the pairing. Files
 # written before versioning existed count as version 1 ("legacy unversioned")
 # and are never rewritten automatically.
-DOC_VERSION = 11
+DOC_VERSION = 12
 
 MANAGED_BEGIN = f"<!-- graphite:managed version={DOC_VERSION} -->"
 MANAGED_END = "<!-- graphite:managed-end -->"
@@ -86,7 +86,22 @@ Cross-repo knowledge travels one way only: as a **recommendation**, through the 
 
 **If you need a fact from another repo, ask for it.** A claim clearly labelled unverified is safer than a verified one obtained out of bounds — the boundary is the control, and stepping over it to be thorough defeats it.
 
-Graphite invoked as a *tool* against an onboarded repository (`graphite init`, template rollout) is the operator's tooling rather than an agent crossing a boundary. That exemption belongs to the operator running the command, not to you.
+### The one exception: the shared agent channel
+
+There is one shared **agent channel** on this machine: a directory named `.agent-channel/`, its own git repository, living outside every project and belonging to no repo and no agent. **Every agent may read it and write to it**, whichever repository it is responsible for, and nothing in it is any project's source or data.
+
+Its absolute location is machine-local and deliberately kept out of this file: project files are committed and pushed, so a local directory layout does not belong in them. Ask the operator for the path, or look for `.agent-channel/` beside the repositories.
+
+This is the exception that makes isolation workable: isolation without a channel is a wall, not a boundary. Read the channel's `PROTOCOL.md` before writing there. Every commit must carry your own agent's `Co-Authored-By` trailer and state its reason; a `commit-msg` hook rejects commits that name no agent, because all agents commit under one identity and the trailer is what makes the history auditable.
+
+### Agent boundary vs. tool boundary
+
+These are different questions and one must not be used to argue about the other.
+
+- **An agent** may act only within its own repository.
+- **A tool doing what it was designed to do is not an agent crossing a boundary.** `graphite init` onboarding a repository, or a security gate running against one, is the operator's tooling operating on a repo. That is by design and is not governed by the agent rule.
+
+The distinction belongs to the operator invoking the tool. It is not a licence to reclassify yourself as a tool in order to reach into another repository.
 
 ## Canonical Graph Isolation
 
@@ -105,7 +120,7 @@ canonical `graph-out` artifacts.
 - If `python -m graphite check .` reports stale output, rebuild before relying on context or impact data.
 - Canonical Graphite operations run locally and never use LLM or network inference.
 - For TypeScript resolver issues, use `python -m graphite --typescript-resolver disabled build .` only as a fallback.
-- Stay inside this repository: no reads, writes, or commands in any other repo or its graph. Findings about another repo go to its agent as a recommendation.
+- Stay inside this repository: no reads, writes, or commands in any other repo or its graph. Findings about another repo go to its agent as a recommendation via the shared `.agent-channel/`.
 """
 
 SHARED_POINTER_HEADER = "## Shared Graphite Instructions"
@@ -113,7 +128,7 @@ SHARED_POINTER = """## Shared Graphite Instructions
 
 Graphite-first is required in this repo. Follow `GRAPHITE.md` before making non-trivial code changes: for cross-file questions (who-calls, where-defined, impact, data flow, structure) run the Graphite commands first; grep/glob are for literal text and filename lookups only. Fall back to manual search only after a Graphite answer proved insufficient, and say so. Use the existing `graph-out/graph.json` as the shared project graph, and do not edit `graph-out/` manually.
 
-**Stay inside this repository.** Do not read, write, or run commands in any other repo, including its graph. Findings about another repo go to its agent as a recommendation through the interop channel; that agent decides and acts. See `GRAPHITE.md` section "Repository Isolation".
+**Stay inside this repository.** Do not read, write, or run commands in any other repo, including its graph. Findings about another repo go to its agent as a recommendation through the shared `.agent-channel/` (see its `PROTOCOL.md`); that agent decides and acts. A tool doing its designed job is a separate question from an agent's boundary. See `GRAPHITE.md` section "Repository Isolation".
 """
 
 CURSOR_POINTER = """---

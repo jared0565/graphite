@@ -38,8 +38,8 @@ def test_doctrine_routes_agents_to_answer_grade() -> None:
     assert "graphite check ." in init_mod.GRAPHITE_DOC
 
 
-def test_doc_version_is_11() -> None:
-    assert init_mod.DOC_VERSION == 11
+def test_doc_version_is_12() -> None:
+    assert init_mod.DOC_VERSION == 12
 
 
 def test_doctrine_states_repository_isolation() -> None:
@@ -60,6 +60,23 @@ def test_doctrine_states_repository_isolation() -> None:
     assert "read-only" in doc
     # And the pointer every agent actually sees must carry it too.
     assert "Stay inside this repository" in init_mod.SHARED_POINTER
+
+
+def test_the_channel_is_named_but_never_by_absolute_path() -> None:
+    """The channel exception must be discoverable WITHOUT leaking the operator's
+    directory layout.
+
+    GRAPHITE.md and the pointer files are committed and pushed in consumer
+    repos, so an absolute path written here ends up published on their remotes.
+    I did exactly that on 2026-08-01 and only `test_graphite_doc_uses_shell_
+    agnostic_invocation` caught it -- this test states the reason so the next
+    edit does not have to rediscover it.
+    """
+    for text in (init_mod.GRAPHITE_DOC, init_mod.SHARED_POINTER, init_mod.CURSOR_POINTER):
+        assert ".agent-channel" not in text or "F:" not in text
+        assert "\\Projects\\" not in text
+    assert ".agent-channel" in init_mod.GRAPHITE_DOC
+    assert ".agent-channel" in init_mod.SHARED_POINTER
 
 
 def test_init_defaults_to_strict_hooks(tmp_path: Path) -> None:
