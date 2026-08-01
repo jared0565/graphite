@@ -3245,6 +3245,35 @@ def test_mcp_deep_probe_rejects_excessive_lines_and_nesting_before_json_decode(
     assert called is False
 
 
+# --- issue #29 quarantine ----------------------------------------------------
+#
+# The two tests below drive the real MCP server over stdio and fail ~50% of the
+# time on the CI runner. That is measured, not estimated: 10 `workflow_dispatch`
+# runs on an unchanged sha failed 5 times, and 10 more with the EOF-timing
+# experiment applied failed exactly as often (#29 comments 5151407667 and
+# 5151672712). Three candidate mechanisms have been refuted; the only remaining
+# lead needs instrumentation inside the sandboxed bootstrap.
+#
+# Quarantined from the GATING path, NOT from running. `strict=False` means a
+# failure reports xfail and a pass reports xpass, so neither fails the build --
+# and the summary's "N xfailed, M xpassed" line IS the flake rate, visible on
+# every run without anyone dispatching a sample for it.
+#
+# Deliberately conditioned on CI rather than applied unconditionally. Locally
+# these pass reliably, so a real regression in `probe_mcp` still fails a
+# developer's run and the pre-push gate. An unconditional xfail would hide the
+# exact breakage these tests exist to catch -- which is the cost of quarantine,
+# and the part worth not paying.
+#
+# Remove when #29 is fixed.
+_ISSUE_29_QUARANTINE = pytest.mark.xfail(
+    os.environ.get("CI") == "true",
+    reason="graphite#29: real MCP server answers initialize and drops tools/list, ~50% on CI",
+    strict=False,
+)
+
+
+@_ISSUE_29_QUARANTINE
 def test_mcp_deep_probe_real_server_ignores_project_import_shadows(tmp_path: Path) -> None:
     import graphite.doctor_probes as probes
 
@@ -3271,6 +3300,7 @@ def test_mcp_deep_probe_real_server_ignores_project_import_shadows(tmp_path: Pat
     assert not sentinel.exists()
 
 
+@_ISSUE_29_QUARANTINE
 def test_mcp_deep_probe_real_server_supports_trusted_source_inside_selected_repo() -> None:
     import graphite.doctor_probes as probes
 
