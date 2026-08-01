@@ -152,16 +152,163 @@ def write_registry(root: Path, mapping: dict[str, str]) -> None:
     )
 
 
+_AGENT_ID = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*-agent$")
+
+#: The channel's `commit-msg` gate, derived from `agents.json` rather than a
+#: hardcoded list.
+#:
+#: The original carried its own allowlist of agent names, which meant
+#: registering a newcomer produced a repo that resolved an identity and was then
+#: rejected on every commit -- registration that lies. Two records that drift is
+#: the failure; there is one record on purpose.
+#:
+#: It also requires the NAME and ADDRESS to be the same agent. The old
+#: alternation `(codex|aramid|graphite)-agent <(codex|aramid|graphite)@...>`
+#: matched the two halves independently, so `codex-agent <aramid@agents.local>`
+#: passed.
+#:
+#: Fails closed: a missing or unparseable registry rejects rather than waving
+#: commits through.
+COMMIT_MSG_HOOK = '''#!/bin/sh
+# Agent channel audit gate. GRAPHITE-MANAGED -- edit via `graphite channel`.
+#
+# Every change here must say WHICH AGENT made it. The committer identity is the
+# operator's for all agents, so without a trailer the history cannot answer
+# "who wrote this" -- which is the whole audit requirement.
+#
+# Rejects rather than warns: a warning on a commit is a warning nobody reads.
+# There is deliberately no --no-verify guidance; if a commit cannot name an
+# agent, it does not belong in the channel.
+
+MSG_FILE="$1"
+ROOT="$(git rev-parse --show-toplevel)"
+
+if python - "$MSG_FILE" "$ROOT/agents.json" <<'PYEOF'
+import json, re, sys
+
+try:
+    message = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+    agents = set(json.load(open(sys.argv[2], encoding="utf-8")).values())
+except Exception:
+    sys.exit(1)
+
+for agent in agents:
+    local = agent[: -len("-agent")] if agent.endswith("-agent") else agent
+    pattern = r"^Co-Authored-By: %s <%s@agents\\.local>$" % (
+        re.escape(agent),
+        re.escape(local),
+    )
+    if re.search(pattern, message, re.MULTILINE):
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+then
+    exit 0
+fi
+
+cat >&2 <<'EOF'
+[agent-channel] REJECTED: this commit names no agent.
+
+Every commit in the channel must carry the trailer of the agent that wrote it,
+so history can answer "who changed this, and why":
+
+    Co-Authored-By: <name>-agent <name@agents.local>
+
+Only your own, and only an agent registered in agents.json. Register one with:
+
+    python -m graphite channel register <repo-path> <name>-agent
+
+The commit message must also state the reason for the change.
+See PROTOCOL.md, "Audit requirements".
+EOF
+exit 1
+'''
+
+
+def ensure_channel_hook(root: Path) -> dict:
+    """Install/refresh the audit gate and point `core.hooksPath` at it."""
+    hooks = root / ".githooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    path = hooks / "commit-msg"
+    path.write_text(COMMIT_MSG_HOOK, encoding="utf-8", newline="\n")
+    path.chmod(0o755)
+    _git(root, "config", "core.hooksPath", ".githooks", check=False)
+    return {"path": str(path), "changed": True}
+
+
+def register_agent(root: Path, project_root: Path, agent: str) -> dict:
+    """Bind a repository to an agent identity, and commit the change.
+
+    This is the operator-side half the broker shipped without. `init` writes
+    `.mcp.json` and doctrine telling an agent to call `channel_inbox`, but an
+    unregistered repo is refused -- so without a registration command a newly
+    onboarded agent is told to use tools that reject it, and the only remedy is
+    hand-editing JSON in a repo it cannot reach. "Ask the operator" is not a
+    mechanism; this is.
+    """
+    root = require_channel(root)
+    if not isinstance(agent, str) or not _AGENT_ID.match(agent):
+        raise ChannelError(
+            "invalid_agent_id",
+            f"{agent!r} must look like `name-agent` (lowercase, hyphen-separated)",
+        )
+
+    with _Lock(root):
+        registry_path = root / REGISTRY_FILENAME
+        raw: dict[str, str] = {}
+        if registry_path.is_file():
+            try:
+                loaded = json.loads(registry_path.read_text(encoding="utf-8"))
+            except ValueError as exc:
+                raise ChannelError("registry_unreadable", str(exc)) from exc
+            if isinstance(loaded, dict):
+                raw = {str(k): str(v) for k, v in loaded.items()}
+
+        key = Path(project_root).resolve().as_posix()
+        previous = None
+        for existing in list(raw):
+            if _normalize(Path(existing)) == _normalize(Path(project_root)):
+                previous = raw.pop(existing)
+        raw[key] = agent
+        write_registry(root, raw)
+
+        # The gate must be able to accept the newcomer, or this registration is
+        # a lie. Refreshing it here keeps the two in step by construction.
+        ensure_channel_hook(root)
+
+        commit = _commit(
+            root,
+            [REGISTRY_FILENAME, ".githooks/commit-msg"],
+            f"register {agent} for {Path(project_root).name}",
+            # Graphite made this change, so graphite is credited -- attributing
+            # it to the agent being registered would read as "codex registered
+            # itself", which is false and is exactly the kind of claim the
+            # trailer exists to keep honest.
+            #
+            # The exception is bootstrapping: in a channel where graphite-agent
+            # is not yet registered, the hook would reject a graphite trailer,
+            # so the first registration is signed by whoever it registers. That
+            # is the one commit whose author is structurally unverifiable, and
+            # it is unavoidable -- someone has to write the first row.
+            "graphite-agent" if "graphite-agent" in raw.values() else agent,
+        )
+
+    return {"ok": True, "agent": agent, "path": key, "previous": previous, "commit": commit}
+
+
 def derive_identity(root: Path, project_root: Path) -> str:
     """Map the repo the broker runs in to an agent identity, or refuse."""
     registry = read_registry(root)
     key = _normalize(project_root)
     agent = registry.get(key)
     if agent is None:
+        # Name the command, not the file. "Add it to agents.json" is advice a
+        # sandboxed agent cannot act on -- the channel is the one place it
+        # cannot reach, which is the whole reason the broker exists.
         raise ChannelError(
             "unregistered_project",
-            f"{project_root} is not a registered agent repository; "
-            f"add it to {REGISTRY_FILENAME} in the channel",
+            f"{project_root} is not a registered agent repository. "
+            f"Ask the operator to run: graphite channel register {project_root} <name>-agent",
         )
     return agent
 
@@ -689,6 +836,10 @@ def build_report(
         "stalled": [r for r in rows if r["stalled"]],
         "anomalies": anomalies,
         "by_agent": by_agent,
+        # Who may write at all. Without this the operator can see what was said
+        # but not who is able to say anything -- and an agent that was onboarded
+        # but never registered is silently mute rather than visibly absent.
+        "registry": dict(sorted(read_registry(root).items())),
         "counts": {
             "total": len(rows),
             "legacy": sum(1 for r in rows if r["verification"] == "legacy"),
@@ -717,6 +868,13 @@ def render_report(data: dict) -> str:
             lines.append(f"{'':<10}   ^ STALLED — {status.lower()} since {row['status_at']}, no follow-up")
         if row["reason"]:
             lines.append(f"{'':<10}   \"{row['reason']}\"")
+
+    registry = data.get("registry") or {}
+    lines += ["", f"Registered agents ({len(registry)}) — only these can write:"]
+    for path, agent in registry.items():
+        lines.append(f"  {agent:<16} {path}")
+    if not registry:
+        lines.append("  (none — no agent can post; graphite channel register <repo> <name>-agent)")
 
     legacy = data["counts"]["legacy"]
     if legacy:

@@ -1,0 +1,180 @@
+"""Registering an agent has to make it actually able to post.
+
+The channel's `commit-msg` hook originally carried a hardcoded allowlist of
+agent names. Adding a row to `agents.json` without touching that list would
+produce a repo that resolves an identity and is then rejected by the hook on
+every commit -- registration that lies. The hook now derives from `agents.json`,
+so there is one record rather than two that drift.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from graphite import channel
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603
+        ["git", "-C", str(root), *args],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _channel_with_hook(tmp_path: Path) -> Path:
+    root = tmp_path / ".agent-channel"
+    (root / "rounds").mkdir(parents=True)
+    _git(tmp_path, "init", "-q", str(root))
+    _git(root, "config", "user.email", "operator@example.com")
+    _git(root, "config", "user.name", "Operator")
+    (root / "PROTOCOL.md").write_text("# Protocol\n", encoding="utf-8")
+    channel.write_registry(root, {})
+    channel.ensure_channel_hook(root)
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "--no-verify", "-m", "seed")
+    return root
+
+
+def test_registering_lets_the_agent_actually_post(tmp_path: Path) -> None:
+    """The end-to-end property. Passing this requires the hook to accept an
+    agent it has never heard of, which is the whole point."""
+    root = _channel_with_hook(tmp_path)
+    newcomer = tmp_path / "newcomer"
+    newcomer.mkdir()
+
+    channel.register_agent(root, newcomer, "codex-agent")
+
+    posted = channel.post_round(root, newcomer, title="Hello", body="first post")
+    assert posted["author"] == "codex-agent"
+    assert _git(root, "status", "--porcelain").stdout.strip() == ""
+
+
+def test_an_unregistered_repo_still_cannot_post(tmp_path: Path) -> None:
+    root = _channel_with_hook(tmp_path)
+    stranger = tmp_path / "stranger"
+    stranger.mkdir()
+
+    with pytest.raises(channel.ChannelError) as exc:
+        channel.post_round(root, stranger, title="x", body="y")
+    assert exc.value.code == "unregistered_project"
+
+
+def test_the_hook_rejects_a_commit_naming_no_agent(tmp_path: Path) -> None:
+    """Falsifiability: if this passed, the hook would not be gating anything."""
+    root = _channel_with_hook(tmp_path)
+    (root / "rounds" / "x.md").write_text("x\n", encoding="utf-8")
+    _git(root, "add", "-A")
+
+    result = _git(root, "commit", "-m", "no trailer here")
+
+    assert result.returncode != 0
+    assert "names no agent" in (result.stderr + result.stdout)
+
+
+def test_the_hook_rejects_an_agent_that_is_not_registered(tmp_path: Path) -> None:
+    root = _channel_with_hook(tmp_path)
+    channel.register_agent(root, tmp_path / "a", "aramid-agent")
+    (root / "rounds" / "x.md").write_text("x\n", encoding="utf-8")
+    _git(root, "add", "-A")
+
+    result = _git(
+        root, "commit", "-m", "subject\n\nCo-Authored-By: ghost-agent <ghost@agents.local>\n"
+    )
+
+    assert result.returncode != 0
+
+
+def test_the_hook_rejects_a_mismatched_name_and_address(tmp_path: Path) -> None:
+    """The original hardcoded regex allowed `codex-agent <aramid@agents.local>`
+    because it alternated the two halves independently. Deriving the pair from
+    the registry closes that."""
+    root = _channel_with_hook(tmp_path)
+    channel.register_agent(root, tmp_path / "a", "aramid-agent")
+    channel.register_agent(root, tmp_path / "c", "codex-agent")
+    (root / "rounds" / "x.md").write_text("x\n", encoding="utf-8")
+    _git(root, "add", "-A")
+
+    result = _git(
+        root, "commit", "-m", "subject\n\nCo-Authored-By: codex-agent <aramid@agents.local>\n"
+    )
+
+    assert result.returncode != 0
+
+
+def test_a_malformed_registry_fails_closed(tmp_path: Path) -> None:
+    """An unreadable registry must reject, never wave commits through."""
+    root = _channel_with_hook(tmp_path)
+    (root / "agents.json").write_text("{not json", encoding="utf-8")
+    (root / "rounds" / "x.md").write_text("x\n", encoding="utf-8")
+    _git(root, "add", "-A")
+
+    result = _git(
+        root, "commit", "-m", "subject\n\nCo-Authored-By: graphite-agent <graphite@agents.local>\n"
+    )
+
+    assert result.returncode != 0
+
+
+def test_a_malformed_agent_id_is_refused(tmp_path: Path) -> None:
+    root = _channel_with_hook(tmp_path)
+
+    for bad in ("Codex-Agent", "codex", "codex agent", "", "../evil-agent"):
+        with pytest.raises(channel.ChannelError) as exc:
+            channel.register_agent(root, tmp_path / "x", bad)
+        assert exc.value.code == "invalid_agent_id", bad
+
+
+def test_registering_the_same_repo_again_updates_it(tmp_path: Path) -> None:
+    root = _channel_with_hook(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    channel.register_agent(root, repo, "codex-agent")
+    result = channel.register_agent(root, repo, "aramid-agent")
+
+    assert result["previous"] == "codex-agent"
+    assert channel.derive_identity(root, repo) == "aramid-agent"
+
+
+def test_registration_is_credited_to_graphite_not_the_new_agent(tmp_path: Path) -> None:
+    """Graphite performed the registration. Crediting the agent being registered
+    would read as "codex registered itself", which is false -- and the trailer
+    exists precisely to keep that kind of claim honest."""
+    root = _channel_with_hook(tmp_path)
+    channel.register_agent(root, tmp_path / "g", "graphite-agent")
+
+    channel.register_agent(root, tmp_path / "repo", "codex-agent")
+
+    assert _git(root, "status", "--porcelain").stdout.strip() == ""
+    message = _git(root, "log", "-1", "--format=%B").stdout
+    assert "graphite-agent" in message
+    assert "codex-agent <codex@" not in message
+    assert json.loads((root / "agents.json").read_text(encoding="utf-8"))
+
+
+def test_the_bootstrap_registration_is_signed_by_whoever_it_registers(tmp_path: Path) -> None:
+    """In an empty channel graphite is not yet registered, so the hook would
+    reject a graphite trailer. Someone has to write the first row; that one
+    commit is structurally unverifiable and the fallback is deliberate."""
+    root = _channel_with_hook(tmp_path)
+
+    channel.register_agent(root, tmp_path / "repo", "codex-agent")
+
+    assert "codex-agent" in _git(root, "log", "-1", "--format=%B").stdout
+
+
+def test_cli_register(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    from graphite.cli import main
+
+    monkeypatch.setenv("GRAPHITE_PROJECTS_ROOT", str(tmp_path))
+    _channel_with_hook(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    assert main(["channel", "register", str(repo), "codex-agent"]) == 0
+    assert "codex-agent" in capsys.readouterr().out

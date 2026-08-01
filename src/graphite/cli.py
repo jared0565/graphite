@@ -1191,12 +1191,32 @@ def _cmd_channel_action(args: argparse.Namespace, action: str) -> int:
                 print(f"{label:<10} {who:<16} {entry.title}")
         return 0
 
+    if action == "register":
+        if not args.target or not args.agent:
+            print("[graphite] channel register needs <repo-path> <name>-agent", file=sys.stderr)
+            return 2
+        try:
+            result = channel_mod.register_agent(root, Path(args.target), args.agent)
+        except channel_mod.ChannelError as exc:
+            print(f"[graphite] {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            moved = f" (was {result['previous']})" if result["previous"] else ""
+            print(f"registered {result['agent']} for {result['path']}{moved}")
+        return 0
+
     if action == "show":
-        if args.number is None:
+        try:
+            number = int(args.target) if args.target is not None else None
+        except ValueError:
+            number = None
+        if number is None:
             print("[graphite] channel show needs a round number", file=sys.stderr)
             return 2
         try:
-            entry = channel_mod.read_round(root, args.number)
+            entry = channel_mod.read_round(root, number)
         except channel_mod.ChannelError as exc:
             print(f"[graphite] {exc}", file=sys.stderr)
             return 1
@@ -2613,11 +2633,20 @@ def main(argv: list[str] | None = None) -> int:
     p_channel.add_argument(
         "action",
         nargs="?",
-        choices=["report", "list", "show"],
+        choices=["report", "list", "show", "register"],
         default=None,
-        help="report: audited view of the whole channel; list: rounds; show: one round's body",
+        help=(
+            "report: audited view of the whole channel; list: rounds; "
+            "show: one round's body; register: bind a repo to an agent identity"
+        ),
     )
-    p_channel.add_argument("number", nargs="?", type=int, default=None, help="Round number for `show`")
+    p_channel.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help="Round number for `show`, or repository path for `register`",
+    )
+    p_channel.add_argument("agent", nargs="?", default=None, help="Agent id for `register`")
     p_channel.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_channel.set_defaults(func=cmd_channel)
 
