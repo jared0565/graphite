@@ -38,8 +38,8 @@ def test_doctrine_routes_agents_to_answer_grade() -> None:
     assert "graphite check ." in init_mod.GRAPHITE_DOC
 
 
-def test_doc_version_is_12() -> None:
-    assert init_mod.DOC_VERSION == 12
+def test_doc_version_is_13() -> None:
+    assert init_mod.DOC_VERSION == 13
 
 
 def test_doctrine_states_repository_isolation() -> None:

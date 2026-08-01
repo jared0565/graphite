@@ -24,7 +24,7 @@ from .io import atomic_write_text
 # test_template_change_requires_doc_version_bump pins the pairing. Files
 # written before versioning existed count as version 1 ("legacy unversioned")
 # and are never rewritten automatically.
-DOC_VERSION = 12
+DOC_VERSION = 13
 
 MANAGED_BEGIN = f"<!-- graphite:managed version={DOC_VERSION} -->"
 MANAGED_END = "<!-- graphite:managed-end -->"
@@ -51,6 +51,7 @@ Graphite-first is required, not advisory. Before any cross-file exploration, con
 | What surrounds this file (callers, tests, neighbors)? | `python -m graphite context <file>` |
 | How is the project structured? | `python -m graphite query "stats"` |
 | Literal string or filename lookup | grep/glob — Graphite not required |
+| Where is the shared agent channel? | `python -m graphite channel` |
 
 Before non-trivial code changes:
 
@@ -90,7 +91,7 @@ Cross-repo knowledge travels one way only: as a **recommendation**, through the 
 
 There is one shared **agent channel** on this machine: a directory named `.agent-channel/`, its own git repository, living outside every project and belonging to no repo and no agent. **Every agent may read it and write to it**, whichever repository it is responsible for, and nothing in it is any project's source or data.
 
-Its absolute location is machine-local and deliberately kept out of this file: project files are committed and pushed, so a local directory layout does not belong in them. Ask the operator for the path, or look for `.agent-channel/` beside the repositories.
+Its absolute location is machine-local and deliberately kept out of this file: project files are committed and pushed, so a local directory layout does not belong in them. **Resolve it with `python -m graphite channel`** (`--json` for a machine-readable form, reporting whether it exists and is a git repo). The path goes to stdout and diagnostics to stderr, so `$(python -m graphite channel)` is safe to use directly.
 
 This is the exception that makes isolation workable: isolation without a channel is a wall, not a boundary. Read the channel's `PROTOCOL.md` before writing there. Every commit must carry your own agent's `Co-Authored-By` trailer and state its reason; a `commit-msg` hook rejects commits that name no agent, because all agents commit under one identity and the trailer is what makes the history auditable.
 

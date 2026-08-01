@@ -126,6 +126,11 @@ _CANONICAL_COMMANDS = frozenset(
         "query",
         "search",
         "capabilities",
+        # Agents discover commands through `capabilities`, so a channel command
+        # absent from it is a channel agents cannot locate -- which is exactly
+        # the problem it exists to solve. Inference-free and read-only: it
+        # resolves a path from config and stats it.
+        "channel",
         "impact",
         "context",
         "watch",
@@ -149,6 +154,10 @@ _ACTIVATION_EXEMPT_COMMANDS = frozenset({
     "daemon-startup-status",
     "daemon-uninstall-startup-windows",
     "agent-hook",
+    # `channel` answers a question about machine layout, not about the repo you
+    # happen to be standing in -- registering activation would make an unrelated
+    # repo look "open" to the daemon.
+    "channel",
     # `hooks --install-template` writes into a machine-wide template
     # directory (see `hookinstall.default_template_root`), not the cwd repo --
     # same reasoning as the daemon commands above.
@@ -1079,6 +1088,55 @@ def cmd_search(args: argparse.Namespace) -> int:
             print(f"  - {item['id']} [{item['kind']}, {item['match_type']}]{location}")
     if result.get("ok"):
         _record_canonical_usage("search", result, started)
+    return 0
+
+
+CHANNEL_DIRNAME = ".agent-channel"
+
+
+def cmd_channel(args: argparse.Namespace) -> int:
+    """Resolve the shared agent channel's path from machine-local config.
+
+    The channel is the one exception to repository isolation, so every agent
+    needs to find it -- but its absolute path must never be written into
+    `GRAPHITE.md` or any other managed instruction file. Those are committed and
+    pushed in consumer repos, so a local directory layout would land on their
+    remotes. (Written in on 2026-08-01; a guard caught it before release.)
+
+    So agents resolve it at runtime instead, from the same
+    `default_projects_root` that honours `GRAPHITE_PROJECTS_ROOT` ahead of any
+    machine-specific fallback.
+
+    The path always goes to stdout and diagnostics to stderr, so `$(graphite
+    channel)` yields a usable path either way and the exit code carries the
+    status -- otherwise a caller `cd`s into an error message.
+    """
+    path = (default_projects_root() / CHANNEL_DIRNAME).resolve()
+    exists = path.is_dir()
+    is_git_repo = (path / ".git").exists()
+    has_protocol = (path / "PROTOCOL.md").is_file()
+
+    if args.json:
+        print(json.dumps({
+            "ok": exists and is_git_repo,
+            "schema_version": 1,
+            "path": str(path),
+            "exists": exists,
+            "is_git_repo": is_git_repo,
+            "has_protocol": has_protocol,
+        }, indent=2))
+    else:
+        print(str(path))
+
+    if not exists:
+        print(f"[graphite] channel not found at {path}", file=sys.stderr)
+        return 1
+    if not is_git_repo:
+        # A plain directory has no history and no attribution, so it cannot
+        # satisfy the audit requirement the channel exists to carry. Saying
+        # "found" here would imply a setup that is not actually in place.
+        print(f"[graphite] channel at {path} is not a git repository, so changes there are unauditable", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -2480,6 +2538,13 @@ def main(argv: list[str] | None = None) -> int:
     p_capabilities = sub.add_parser("capabilities", help="List supported operations, query verbs, and limits")
     p_capabilities.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_capabilities.set_defaults(func=cmd_capabilities)
+
+    p_channel = sub.add_parser(
+        "channel",
+        help="Print the path of the shared agent channel (the one repo-isolation exception)",
+    )
+    p_channel.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_channel.set_defaults(func=cmd_channel)
 
     p_activate = sub.add_parser(
         "activate",
