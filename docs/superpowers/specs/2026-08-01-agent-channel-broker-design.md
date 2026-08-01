@@ -222,8 +222,21 @@ round 40  graphite -> codex          ADR 0003 amendment      BLOCKED    verified
 ```
 
 `--json` for machines, human-readable by default. Exit non-zero when any
-`discrepancy`, `uncommitted`, or anomaly row exists, so it can run as a check
-and not only be read.
+`uncommitted`, `modified`, `discrepancy`, or anomaly row exists, so it can run
+as a check and not only be read.
+
+**`legacy` is deliberately outside that failing set.** 39 rounds predate the
+broker and always will; counting them would leave the check permanently red, and
+a check that is always red is one nobody reads.
+
+**Verification reads a file's ORIGINAL committed content, not its current text.**
+Implementing it the obvious way left a hole the tests caught: overwriting a
+brokered round erases its front matter, so the author reads as absent and the row
+grades `legacy` — tampering laundering itself into the one grade that does not
+fail. Taking the author from the file's first commit removes the move, because
+what a round was at creation is not something a later edit can change. For the
+same reason a tracked file with uncommitted changes grades `modified`: without
+that, editing a round and simply not committing leaves every other signal clean.
 
 ## Concurrency
 

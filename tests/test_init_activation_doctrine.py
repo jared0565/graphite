@@ -38,8 +38,46 @@ def test_doctrine_routes_agents_to_answer_grade() -> None:
     assert "graphite check ." in init_mod.GRAPHITE_DOC
 
 
-def test_doc_version_is_13() -> None:
-    assert init_mod.DOC_VERSION == 13
+def test_doc_version_is_14() -> None:
+    assert init_mod.DOC_VERSION == 14
+
+
+def test_doctrine_routes_agents_to_the_channel_broker(tmp_path: Path) -> None:
+    """Agents sandboxed to their workspace can only reach the channel through
+    the MCP tools, so the template has to name them -- and `init` has to write
+    the server config, or the tools exist and nobody is wired to them."""
+    doc = init_mod.GRAPHITE_DOC
+    assert "graphite_channel_inbox" in doc
+    assert "graphite_channel_post" in doc
+    assert "python -m graphite channel report" in doc
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init(repo)
+
+    config = json.loads((repo / ".mcp.json").read_text(encoding="utf-8"))
+    server = config["mcpServers"]["graphite"]
+    assert server["args"] == ["-m", "graphite.mcp"]
+    # An absolute interpreter path would publish this machine's layout onto
+    # consumer remotes AND break everywhere else. Same trap as the hook
+    # trampolines, which are gitignored for exactly this reason.
+    assert ":" not in server["command"] and "\\" not in server["command"]
+
+
+def test_existing_mcp_servers_are_preserved(tmp_path: Path) -> None:
+    """#13's lesson again: never destroy hand-written config."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"other": {"command": "node", "args": ["x.js"]}}}),
+        encoding="utf-8",
+    )
+
+    _init(repo)
+
+    config = json.loads((repo / ".mcp.json").read_text(encoding="utf-8"))
+    assert "other" in config["mcpServers"]
+    assert "graphite" in config["mcpServers"]
 
 
 def test_doctrine_states_repository_isolation() -> None:

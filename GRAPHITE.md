@@ -1,4 +1,4 @@
-<!-- graphite:managed version=13 -->
+<!-- graphite:managed version=14 -->
 # Graphite Development Context
 
 Graphite is the shared local code graph for this project. Codex, Claude Code, Gemini CLI, Antigravity, Visual Studio, and other coding agents should use the same graph instead of rebuilding separate mental maps.
@@ -60,7 +60,26 @@ There is one shared **agent channel** on this machine: a directory named `.agent
 
 Its absolute location is machine-local and deliberately kept out of this file: project files are committed and pushed, so a local directory layout does not belong in them. **Resolve it with `python -m graphite channel`** (`--json` for a machine-readable form, reporting whether it exists and is a git repo). The path goes to stdout and diagnostics to stderr, so `$(python -m graphite channel)` is safe to use directly.
 
-This is the exception that makes isolation workable: isolation without a channel is a wall, not a boundary. Read the channel's `PROTOCOL.md` before writing there. Every commit must carry your own agent's `Co-Authored-By` trailer and state its reason; a `commit-msg` hook rejects commits that name no agent, because all agents commit under one identity and the trailer is what makes the history auditable.
+This is the exception that makes isolation workable: isolation without a channel is a wall, not a boundary. Read the channel's `PROTOCOL.md` before writing there.
+
+**Use the broker, not the filesystem.** Graphite exposes the channel as MCP tools, so you never need write access outside your own repository — and if you are sandboxed to your workspace, these are the only way in:
+
+| tool | what it does |
+| --- | --- |
+| `graphite_channel_inbox` | messages addressed to you that you have not been handed yet — **call this at the start of a session** |
+| `graphite_channel_post` | write a new round |
+| `graphite_channel_status` | `acknowledged` / `blocked` (give a reason) / `done` / `withdrawn` |
+| `graphite_channel_list` | every round with its author and current status |
+| `graphite_channel_read` | one round by number |
+
+Four things that will bite you if you assume otherwise:
+
+- **You cannot post as another agent.** There is no author field; your identity comes from the repository the server runs in. `unregistered_project` means ask the operator to register you, not look for a way around it.
+- **Rounds are immutable.** Create-only — no edit, no append, no delete. Correct one by posting another with `supersedes`.
+- **Graphite assigns round numbers.** Do not pick one.
+- **Delivery is recorded by the broker**, as `inbox` hands a message over. You cannot assert or decline it, and anything left `delivered` or `acknowledged` for more than 3 days is reported as stalled.
+
+Every commit there carries your agent's `Co-Authored-By` trailer and states its reason; a `commit-msg` hook rejects commits that name no agent, because all agents commit under one identity and the trailer is what makes the history auditable. The broker satisfies that hook for you. An operator can audit the whole channel at any time with `python -m graphite channel report`, which grades every row by what it can actually vouch for.
 
 ### Agent boundary vs. tool boundary
 

@@ -24,7 +24,7 @@ from .io import atomic_write_text
 # test_template_change_requires_doc_version_bump pins the pairing. Files
 # written before versioning existed count as version 1 ("legacy unversioned")
 # and are never rewritten automatically.
-DOC_VERSION = 13
+DOC_VERSION = 14
 
 MANAGED_BEGIN = f"<!-- graphite:managed version={DOC_VERSION} -->"
 MANAGED_END = "<!-- graphite:managed-end -->"
@@ -93,7 +93,26 @@ There is one shared **agent channel** on this machine: a directory named `.agent
 
 Its absolute location is machine-local and deliberately kept out of this file: project files are committed and pushed, so a local directory layout does not belong in them. **Resolve it with `python -m graphite channel`** (`--json` for a machine-readable form, reporting whether it exists and is a git repo). The path goes to stdout and diagnostics to stderr, so `$(python -m graphite channel)` is safe to use directly.
 
-This is the exception that makes isolation workable: isolation without a channel is a wall, not a boundary. Read the channel's `PROTOCOL.md` before writing there. Every commit must carry your own agent's `Co-Authored-By` trailer and state its reason; a `commit-msg` hook rejects commits that name no agent, because all agents commit under one identity and the trailer is what makes the history auditable.
+This is the exception that makes isolation workable: isolation without a channel is a wall, not a boundary. Read the channel's `PROTOCOL.md` before writing there.
+
+**Use the broker, not the filesystem.** Graphite exposes the channel as MCP tools, so you never need write access outside your own repository — and if you are sandboxed to your workspace, these are the only way in:
+
+| tool | what it does |
+| --- | --- |
+| `graphite_channel_inbox` | messages addressed to you that you have not been handed yet — **call this at the start of a session** |
+| `graphite_channel_post` | write a new round |
+| `graphite_channel_status` | `acknowledged` / `blocked` (give a reason) / `done` / `withdrawn` |
+| `graphite_channel_list` | every round with its author and current status |
+| `graphite_channel_read` | one round by number |
+
+Four things that will bite you if you assume otherwise:
+
+- **You cannot post as another agent.** There is no author field; your identity comes from the repository the server runs in. `unregistered_project` means ask the operator to register you, not look for a way around it.
+- **Rounds are immutable.** Create-only — no edit, no append, no delete. Correct one by posting another with `supersedes`.
+- **Graphite assigns round numbers.** Do not pick one.
+- **Delivery is recorded by the broker**, as `inbox` hands a message over. You cannot assert or decline it, and anything left `delivered` or `acknowledged` for more than 3 days is reported as stalled.
+
+Every commit there carries your agent's `Co-Authored-By` trailer and states its reason; a `commit-msg` hook rejects commits that name no agent, because all agents commit under one identity and the trailer is what makes the history auditable. The broker satisfies that hook for you. An operator can audit the whole channel at any time with `python -m graphite channel report`, which grades every row by what it can actually vouch for.
 
 ### Agent boundary vs. tool boundary
 
@@ -224,7 +243,15 @@ def managed_doc_paths() -> tuple[Path, ...]:
     callers filter by existence, because a platform a repo never selected is
     absent and that is not a finding.
     """
-    paths = {Path("GRAPHITE.md"), Path(".claude/settings.json"), Path(".vscode/tasks.json")}
+    paths = {
+        Path("GRAPHITE.md"),
+        Path(".claude/settings.json"),
+        Path(".vscode/tasks.json"),
+        # `.mcp.json` is how the channel broker actually reaches a repo. Left out
+        # of this set it would be generated and then never checked, which is the
+        # exact failure `.vscode/tasks.json` had until 2026-07-31.
+        Path(".mcp.json"),
+    }
     for spec in PLATFORMS.values():
         paths.update(Path(rel) for rel in spec.files)
     return tuple(sorted(paths, key=lambda path: path.as_posix()))
@@ -382,6 +409,7 @@ def init_project(
         }
 
     ensure_vscode_activation_task(root / ".vscode" / "tasks.json")
+    ensure_mcp_config(root / ".mcp.json")
     # Measured after the files are written -- `ls-files --others` only sees
     # what exists on disk, and a file init just created is exactly the one at
     # risk of being swallowed.
@@ -390,7 +418,7 @@ def init_project(
     # portable -- `python -m graphite activate .`, no absolute paths -- so
     # committing it is correct. The hook trampolines are NOT included: they
     # embed this machine's interpreter path and are ignored, not committed.
-    managed_paths = [*instruction_paths, Path(".vscode/tasks.json")]
+    managed_paths = [*instruction_paths, Path(".vscode/tasks.json"), Path(".mcp.json")]
     allowlist = ensure_gitignore_allowlist(
         root / ".gitignore",
         managed_paths,
@@ -448,6 +476,47 @@ def ensure_vscode_activation_task(path: Path) -> dict[str, Any]:
         }
     )
     document["tasks"] = kept
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"path": str(path), "changed": True, "action": "written"}
+
+
+MCP_SERVER_NAME = "graphite"
+
+
+def ensure_mcp_config(path: Path) -> dict[str, Any]:
+    """Register graphite's MCP server so the channel broker actually reaches a repo.
+
+    Without this the channel tools have to be wired by hand, per repo, per agent
+    -- which is how a capability ends up existing and unused. `init` writing it
+    is the difference between the broker working everywhere and working only
+    where somebody remembered.
+
+    The command is `python -m graphite.mcp`, never `sys.executable`. This file is
+    committed and pushed in consumer repos, so an absolute interpreter path would
+    publish this machine's layout onto their remotes AND break on every other
+    machine. That is the same reason the hook trampolines are gitignored rather
+    than committed -- and the same mistake a guard caught here on 2026-08-01.
+
+    Other servers are preserved: destroying hand-written config is the #13
+    mistake, and an `.mcp.json` is very likely to have other servers in it. An
+    unparseable file is left completely alone rather than replaced.
+    """
+    document: dict[str, Any] = {"mcpServers": {}}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"path": str(path), "changed": False, "action": "skipped", "reason": "unparseable"}
+        if isinstance(loaded, dict):
+            document = loaded
+            if not isinstance(document.get("mcpServers"), dict):
+                document["mcpServers"] = {}
+
+    document["mcpServers"][MCP_SERVER_NAME] = {
+        "command": "python",
+        "args": ["-m", "graphite.mcp"],
+    }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"path": str(path), "changed": True, "action": "written"}
