@@ -1247,6 +1247,61 @@ def test_probe_transport_rechecks_late_writer_failure(monkeypatch: pytest.Monkey
         transport.run_bounded_process(["python"], cwd=tmp_path, stdin=b"small", timeout_seconds=1)
     assert exc_info.value.code == "input_failed"
     assert "RAW" not in str(exc_info.value)
+    # No number to report when the OSError carries none, and "unknown" must not
+    # be rendered as a code -- `os=None` would read like a real errno 0.
+    assert exc_info.value.os_error is None
+    assert "os=" not in str(exc_info.value)
+
+
+def test_probe_transport_reports_the_numeric_code_of_a_writer_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`input_failed` must carry the OS error number that caused it.
+
+    The code alone cannot distinguish a genuine pipe fault from our own
+    `_cancel_synchronous_io` aborting the writer's in-flight write during
+    cleanup -- and those need opposite handling. graphite#41 is stuck at exactly
+    that fork, and #29 lost four rounds to the same blindness: a classified
+    error that discards the one fact which discriminates.
+
+    A number is safe to surface where a message is not: it carries no path, no
+    argv and no environment.
+    """
+    import graphite.probe_process as transport
+
+    release = threading.Event()
+
+    class InputPipe:
+        def write(self, data: bytes) -> int:
+            release.wait(1)
+            raise OSError(22, "RAW strerror with a path in it")
+
+        def flush(self) -> None: pass
+        def close(self) -> None: pass
+
+    class OutputPipe:
+        def read(self, size: int) -> bytes: return b""
+        def close(self) -> None: pass
+
+    class Process:
+        pid = 123
+        returncode = 0
+        stdin = InputPipe()
+        stdout = OutputPipe()
+        stderr = OutputPipe()
+        def wait(self, timeout: float) -> int: return 0
+        def kill(self) -> None: self.returncode = -9
+
+    monkeypatch.setattr(transport, "_launch_process", lambda *a, **k: Process())
+    monkeypatch.setattr(transport, "_terminate_process_tree", lambda process, deadline: release.set())
+    with pytest.raises(transport.ProbeProcessError) as exc_info:
+        transport.run_bounded_process(["python"], cwd=tmp_path, stdin=b"small", timeout_seconds=1)
+
+    assert exc_info.value.code == "input_failed"
+    assert exc_info.value.os_error == 22
+    assert "os=22" in str(exc_info.value)
+    # The number travels; the strerror never does.
+    assert "RAW" not in str(exc_info.value)
 
 
 def test_probe_transport_cleans_process_tree_after_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

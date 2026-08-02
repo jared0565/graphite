@@ -53,11 +53,28 @@ _ESSENTIAL_ENV = (
 
 
 class ProbeProcessError(Exception):
-    """A classified transport failure containing no process or environment data."""
+    """A classified transport failure containing no process or environment data.
 
-    def __init__(self, code: str) -> None:
+    ``os_error`` is the OS error number behind the classification, when there
+    was one. A number is safe to surface where a message is not: it carries no
+    path, no argv and no environment, whereas ``strerror`` routinely embeds a
+    filename.
+
+    It exists because the code alone cannot distinguish causes that need
+    opposite handling -- notably a genuine pipe fault from this module's own
+    `_cancel_synchronous_io` aborting a worker's in-flight I/O during cleanup
+    (graphite#41). Issue #29 lost several rounds to exactly this: an error
+    classified down to a label that discarded the fact which discriminated.
+    """
+
+    def __init__(self, code: str, os_error: int | None = None) -> None:
         self.code = code if code in _SAFE_ERROR_CODES else "unexpected"
+        # Coerced, never trusted: an OSError subclass can carry anything in
+        # `errno`, and only an int may reach the message.
+        self.os_error = os_error if isinstance(os_error, int) and not isinstance(os_error, bool) else None
         message = "probe input failed" if self.code == "input_failed" else f"probe process failed: {self.code}"
+        if self.os_error is not None:
+            message = f"{message} (os={self.os_error})"
         super().__init__(message)
 
 
@@ -365,6 +382,9 @@ def run_bounded_process(
     stdin_close_lock = threading.Lock()
     stdin_is_closed = [False]
     write_completed = threading.Event()
+    # The OS error number behind an `input_failed`, carried back from the writer
+    # thread so the classification does not discard it (graphite#41).
+    writer_error: list[int | None] = [None]
 
     def close_stdin() -> None:
         with stdin_close_lock:
@@ -403,8 +423,11 @@ def run_bounded_process(
             defer = False
             if input_truncated is not None:
                 input_truncated.set()
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
             defer = False
+            # winerror first: on Windows an aborted synchronous I/O reports
+            # there, and `errno` is the coarser translation of it.
+            writer_error[0] = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
             if writer_failed is not None:
                 writer_failed.set()
         finally:
@@ -512,7 +535,9 @@ def run_bounded_process(
     elif failure_code is None and any(thread.is_alive() for thread in workers):
         failure_code = "timeout"
     if failure_code is not None:
-        raise ProbeProcessError(failure_code)
+        raise ProbeProcessError(
+            failure_code, writer_error[0] if failure_code == "input_failed" else None
+        )
     if process.returncode is None or (check and process.returncode != 0):
         raise ProbeProcessError("nonzero")
     closed_at = stdin_closed_at[0]
