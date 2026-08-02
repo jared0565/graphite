@@ -3964,3 +3964,52 @@ def test_manifest_build_does_not_resolve_far_more_paths_than_it_records(
     assert calls["n"] < entries * 4, (
         f"{calls['n']} resolve() calls for {entries} recorded entries"
     )
+
+
+def test_deep_bounded_runner_reports_how_long_the_child_outlived_stdin_close(
+    tmp_path: Path,
+) -> None:
+    """#29 evidence: does the child die *because* stdin closed?
+
+    `write_input` closes stdin the instant the payload is written. The observed
+    failure is a child that answers `initialize`, never answers `tools/list`,
+    and exits cleanly -- consistent with EOF being read as end-of-session and
+    teardown beating the messages already buffered. Distinguishing that from an
+    unrelated early exit needs the interval between the close and the exit, so
+    the runner has to report it.
+    """
+    from graphite.probe_process import run_bounded_process
+
+    result = run_bounded_process(
+        [sys.executable, "-c", "import sys, time; sys.stdin.buffer.read(); time.sleep(0.5)"],
+        cwd=tmp_path,
+        stdin=b"payload\n",
+        timeout_seconds=20,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    # The child deliberately outlives the close by ~0.5s.
+    assert result.stdin_close_to_exit_seconds >= 0.25
+
+
+def test_deep_bounded_runner_reports_a_prompt_exit_after_stdin_close(
+    tmp_path: Path,
+) -> None:
+    """The positive case alone would pass against a hardcoded large value.
+
+    A child that exits as soon as it sees EOF must report a small interval, or
+    the field cannot discriminate the #29 shape from a slow shutdown.
+    """
+    from graphite.probe_process import run_bounded_process
+
+    result = run_bounded_process(
+        [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+        cwd=tmp_path,
+        stdin=b"payload\n",
+        timeout_seconds=20,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdin_close_to_exit_seconds < 0.25

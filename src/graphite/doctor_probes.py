@@ -737,6 +737,13 @@ def _record_probe_diagnostics(root: Path, failure: str, result: object = None) -
                 # indistinguishable from the outside (graphite issue #29).
                 f"input_bytes={getattr(result, 'input_bytes', '<none>')}",
                 f"input_complete={getattr(result, 'input_complete', '<none>')}",
+                # Seconds the child outlived the close of its stdin. The probe
+                # closes stdin the instant the payload is written, so a value
+                # near zero alongside a truncated transcript says the child died
+                # *of* the EOF -- teardown beating the messages it had already
+                # received -- rather than failing for its own reasons. -1 means
+                # not measured, not instant.
+                f"outlived_close_s={getattr(result, 'stdin_close_to_exit_seconds', '<none>')}",
                 f"stdout={_stream_excerpt(getattr(result, 'stdout', b''))!r}",
                 f"stderr={_stream_excerpt(getattr(result, 'stderr', b''))!r}",
             )

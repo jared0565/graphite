@@ -72,6 +72,18 @@ class ProbeProcessResult:
     # so a hand-built result reads as "input delivered in full".
     input_bytes: int = 0
     input_complete: bool = True
+    # Seconds between closing the child's stdin and the child exiting.
+    #
+    # `write_input` closes stdin the moment the payload is written, so a server
+    # that reads EOF as end-of-session can tear down while messages it already
+    # received are still unprocessed -- answering `initialize`, never answering
+    # `tools/list`, and exiting 0 (issue #29). A near-zero interval says the
+    # close and the exit are the same event; a larger one says the child died
+    # of something else. Without it the two are indistinguishable from outside.
+    #
+    # -1.0 when there was no stdin to close, so "not measured" cannot be
+    # mistaken for "died instantly".
+    stdin_close_to_exit_seconds: float = -1.0
 
 
 def sanitized_probe_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -324,6 +336,11 @@ def run_bounded_process(
             if cleanup_started is not None and not cleanup_started.is_set() and io_failed is not None:
                 io_failed.set()
 
+    # One-slot mailboxes: the writer runs on its own thread, so the timestamp
+    # has to cross back without another lock.
+    stdin_closed_at: list[float | None] = [None]
+    exited_at: list[float | None] = [None]
+
     def write_input() -> None:
         if input_data is None or process.stdin is None:
             return
@@ -353,6 +370,9 @@ def run_bounded_process(
                 process.stdin.close()
             except (OSError, ValueError):
                 pass
+            # Stamped after the close returns, so the interval measures the
+            # child's life beyond EOF rather than our own write time.
+            stdin_closed_at[0] = time.monotonic()
 
     try:
         overflow = threading.Event()
@@ -391,6 +411,7 @@ def run_bounded_process(
                 break
             try:
                 process.wait(timeout=min(0.05, remaining))
+                exited_at[0] = time.monotonic()
                 break
             except subprocess.TimeoutExpired:
                 continue
@@ -419,6 +440,16 @@ def run_bounded_process(
         raise ProbeProcessError(failure_code)
     if process.returncode is None or (check and process.returncode != 0):
         raise ProbeProcessError("nonzero")
+    closed_at = stdin_closed_at[0]
+    finished_at = exited_at[0]
+    # Both stamps are required: a child with no stdin, or one reaped on a path
+    # that never observed the exit, has no interval to report and must say so
+    # rather than claim an instant death.
+    outlived_close = (
+        max(0.0, finished_at - closed_at)
+        if closed_at is not None and finished_at is not None
+        else -1.0
+    )
     return ProbeProcessResult(
         process.returncode,
         bytes(outputs["stdout"]),
@@ -426,6 +457,7 @@ def run_bounded_process(
         time.monotonic() - started,
         len(input_data) if input_data is not None else 0,
         input_truncated is None or not input_truncated.is_set(),
+        outlived_close,
     )
 
 
