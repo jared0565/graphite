@@ -971,6 +971,131 @@ def test_probe_diagnostics_record_input_side_evidence(
     assert "input_complete=True" in capsys.readouterr().err
 
 
+def test_probe_diagnostics_excerpt_stderr_from_its_tail(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The child's stderr must be excerpted from the END, not the beginning.
+
+    stdout is excerpted head-first because the first responses are the ones
+    under test. stderr is the opposite: it carries the child's own log, and the
+    interesting entries are the LAST ones it managed to emit before it stopped.
+    Head-truncating it drops exactly the evidence the diagnostic exists to
+    capture -- a probe would report the startup chatter and cut off at the
+    failure (graphite issue #29).
+    """
+    import graphite.doctor_probes as probes
+    from graphite.probe_process import ProbeProcessResult
+
+    noise = b"x" * 4000
+    stderr = noise + b"server:Response sent"
+    probes._record_probe_diagnostics(
+        tmp_path, "invalid_response", ProbeProcessResult(0, b"", stderr, 0.01)
+    )
+    err = capsys.readouterr().err
+
+    assert "server:Response sent" in err
+    # And it must say what it dropped, so a truncated tail is never mistaken
+    # for the whole of the child's stderr.
+    assert "more chars" in err
+
+
+def test_probe_diagnostics_detail_stays_within_the_ledger_cap(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Both excerpts together must fit the ledger's 2048-char record cap.
+
+    stdout and stderr are excerpted independently, so raising either cap can
+    silently push the joined detail past the cap and get it truncated by the
+    ledger instead -- losing the tail this change exists to preserve.
+    """
+    import graphite.doctor_probes as probes
+    from graphite.probe_process import ProbeProcessResult
+
+    huge = ProbeProcessResult(0, b"o" * 100_000, b"e" * 100_000, 0.01, input_bytes=1)
+    probes._record_probe_diagnostics(tmp_path, "invalid_response", huge)
+    line = capsys.readouterr().err.strip()
+
+    assert len(line) <= 2048
+
+
+def test_mcp_child_log_setup_routes_mcp_logs_to_stderr() -> None:
+    """The probe child must surface the MCP library's own log to stderr.
+
+    Every #29 mechanism so far was inferred from adjacent evidence because the
+    child never said anything: `returncode=0`, empty stderr, and a transcript
+    holding only the `initialize` reply. The library logs the facts that
+    discriminate the remaining hypotheses ("Dispatching request of type ...",
+    "Response sent", "Request N cancelled"), and nothing was listening.
+    """
+    import graphite.doctor_probes as probes
+
+    # Run it the way the child does -- an isolated `-I -S` interpreter -- rather
+    # than exec'ing it in-process. That also proves it works without site
+    # packages and without mutating this process's logging config.
+    emitted = probes._MCP_CHILD_LOG_SETUP + (
+        'import logging\nlogging.getLogger("mcp.server.lowlevel.server").debug("Response sent")\n'
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", emitted],
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    # Child loggers must reach it, and DEBUG must not be filtered out -- the two
+    # most useful records ("Response sent", "Dispatching request") are DEBUG.
+    # The bare module name is kept as a prefix so the line stays attributable.
+    assert "server:Response sent" in result.stderr.decode("utf-8", "replace")
+
+
+def test_mcp_child_log_setup_bounds_its_own_stderr_volume() -> None:
+    """The child's log must be hard-bounded, or the diagnostic breaks the probe.
+
+    `_parse_mcp_responses` rejects the transcript when stdout plus stderr
+    exceeds the 32KB output limit, and `run_bounded_process` fails the whole
+    probe with `output_limit` past the same bound. An unbounded debug log would
+    therefore manufacture the very failure it was added to explain.
+    """
+    import graphite.doctor_probes as probes
+
+    flood = probes._MCP_CHILD_LOG_SETUP + (
+        "import logging\n"
+        'log = logging.getLogger("mcp.server")\n'
+        "for index in range(5000):\n"
+        '    log.debug("chatter %s %s", index, "y" * 500)\n'
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", flood],
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    # Normalise the platform newline the child's text stream adds, so the bound
+    # is compared against what the handler actually accounted for.
+    written = result.stderr.decode("utf-8", "replace").replace("\r\n", "\n")
+    assert 0 < len(written) <= probes._MCP_CHILD_LOG_BUDGET
+
+
+def test_mcp_bootstrap_installs_the_child_log_setup() -> None:
+    """The setup has to be wired into the bootstrap, not merely defined.
+
+    Without this the two tests above would keep passing against a constant the
+    child never executes.
+    """
+    import graphite.doctor_probes as probes
+
+    assert probes._MCP_CHILD_LOG_SETUP in probes._MCP_BOOTSTRAP
+    # Before the handoff, or the server starts with nothing listening.
+    assert probes._MCP_BOOTSTRAP.index(probes._MCP_CHILD_LOG_SETUP) < probes._MCP_BOOTSTRAP.index(
+        'runpy.run_module("graphite.mcp"'
+    )
+
+
 def test_probe_transport_rechecks_late_writer_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import graphite.probe_process as transport
 

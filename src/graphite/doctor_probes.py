@@ -212,6 +212,48 @@ envelope = {
 }
 sys.stdout.write(json.dumps(envelope, separators=(",", ":")))
 """
+# Hard ceiling on what the child may write to stderr. Not belt-and-braces: the
+# transcript is rejected when stdout plus stderr passes _MCP_OUTPUT_LIMIT_BYTES,
+# and `run_bounded_process` fails the probe outright on the same bound, so an
+# unbounded debug log would manufacture the failure it was added to explain.
+_MCP_CHILD_LOG_BUDGET = 3000
+# Route the MCP library's own log to stderr before handing off to the server.
+#
+# Issue #29's failure mode is `returncode=0`, empty stderr, and a transcript
+# holding only the `initialize` reply -- the child never says why it stopped, so
+# every mechanism proposed for it so far was inferred from adjacent evidence and
+# four were refuted by measurement. The library already logs the facts that
+# separate the survivors ("Dispatching request of type ...", "Response sent",
+# "Request N cancelled - duplicate response suppressed"); nothing was listening.
+#
+# Kept out of the transport itself deliberately. Wrapping `sys.stdin.buffer` or
+# `sys.stdout.buffer` to count bytes would perturb the very timing under
+# observation; a log handler does not sit in the data path.
+_MCP_CHILD_LOG_SETUP = f"""\
+import logging as _logging
+import sys as _sys
+class _BoundedProbeLog(_logging.Handler):
+    def __init__(self, budget):
+        _logging.Handler.__init__(self)
+        self.budget = budget
+    def emit(self, record):
+        if self.budget <= 0:
+            return
+        try:
+            text = record.name.rpartition(".")[2] + ":" + record.getMessage()
+            line = text[:160].replace("\\r", " ").replace("\\n", " ") + "\\n"
+            if len(line) > self.budget:
+                line = line[: self.budget]
+            self.budget -= len(line)
+            _sys.stderr.write(line)
+            _sys.stderr.flush()
+        except Exception:
+            self.budget = 0
+_probe_log = _logging.getLogger("mcp")
+_probe_log.handlers[:] = [_BoundedProbeLog({_MCP_CHILD_LOG_BUDGET})]
+_probe_log.setLevel(_logging.DEBUG)
+_probe_log.propagate = False
+"""
 _MCP_BOOTSTRAP = """\
 import json
 import os
@@ -433,6 +475,7 @@ if (
 mcp_spec = PathFinder.find_spec("graphite.mcp", list(graphite_spec.submodule_search_locations))
 if mcp_spec is None or mcp_spec.origin is None or pathlib.Path(mcp_spec.origin).resolve(strict=True) != expected_graphite_mcp:
     raise SystemExit(70)
+""" + _MCP_CHILD_LOG_SETUP + """\
 runpy.run_module("graphite.mcp", run_name="__main__")
 """
 _TYPESCRIPT_REMEDIATION = (
@@ -701,16 +744,34 @@ def probe_core_pipeline(
 # that cap: an unbounded string still gets built, hashed and passed around
 # before the ledger ever sees it, and a server can emit megabytes.
 _PROBE_DIAGNOSTIC_STREAM_CHARS = 600
+# stderr gets its own, larger allowance because it carries the child's log
+# rather than a couple of JSON envelopes. Both together, plus the scalar fields
+# and the repr quoting, stay under MAX_DETAIL_CHARS -- pinned by
+# test_probe_diagnostics_detail_stays_within_the_ledger_cap, because raising
+# either cap in isolation would push the joined detail past the ledger's own
+# truncation and silently cost the tail this exists to keep.
+_PROBE_DIAGNOSTIC_STDERR_CHARS = 700
 
 
-def _stream_excerpt(raw: object) -> str:
+def _stream_excerpt(raw: object, *, limit: int = _PROBE_DIAGNOSTIC_STREAM_CHARS, tail: bool = False) -> str:
+    """Excerpt a captured stream, from the head by default or from the tail.
+
+    Which end to keep is not cosmetic. stdout holds the response transcript and
+    the responses under test are the first ones, so the head is what matters.
+    stderr holds the child's own log, where the useful entries are the LAST it
+    managed to emit before it stopped -- head-truncating it reports the startup
+    chatter and cuts off exactly at the failure.
+    """
     if isinstance(raw, bytes):
         text = raw.decode("utf-8", "replace")
     else:
         text = str(raw or "")
-    if len(text) <= _PROBE_DIAGNOSTIC_STREAM_CHARS:
+    if len(text) <= limit:
         return text
-    return f"{text[:_PROBE_DIAGNOSTIC_STREAM_CHARS]}...[{len(text) - _PROBE_DIAGNOSTIC_STREAM_CHARS} more chars]"
+    dropped = len(text) - limit
+    if tail:
+        return f"[{dropped} more chars]...{text[-limit:]}"
+    return f"{text[:limit]}...[{dropped} more chars]"
 
 
 def _record_probe_diagnostics(root: Path, failure: str, result: object = None) -> None:
@@ -737,15 +798,26 @@ def _record_probe_diagnostics(root: Path, failure: str, result: object = None) -
                 # indistinguishable from the outside (graphite issue #29).
                 f"input_bytes={getattr(result, 'input_bytes', '<none>')}",
                 f"input_complete={getattr(result, 'input_complete', '<none>')}",
-                # Seconds the child outlived the close of its stdin. The probe
-                # closes stdin the instant the payload is written, so a value
-                # near zero alongside a truncated transcript says the child died
-                # *of* the EOF -- teardown beating the messages it had already
-                # received -- rather than failing for its own reasons. -1 means
+                # Seconds the child outlived the close of its stdin. -1 means
                 # not measured, not instant.
+                #
+                # Read it as a liveness fact and nothing more. It was added to
+                # test whether the child died *of* the EOF, and it CANNOT answer
+                # that: the probe closes stdin the instant the payload is
+                # written, so the interval is dominated by binding validation
+                # and imports that finish before the server reads a byte, and a
+                # teardown race in the final milliseconds is invisible inside
+                # it. Measured -- a *passing* probe reports 5.14s against
+                # 2.08/2.34/4.69s on the #29 failures, so large-vs-small here
+                # discriminates nothing. The child's own log below is what
+                # separates those cases.
                 f"outlived_close_s={getattr(result, 'stdin_close_to_exit_seconds', '<none>')}",
                 f"stdout={_stream_excerpt(getattr(result, 'stdout', b''))!r}",
-                f"stderr={_stream_excerpt(getattr(result, 'stderr', b''))!r}",
+                # Tail, not head: this is the child's own MCP log, and the
+                # entries that discriminate a dropped response from a lost one
+                # are the last it emitted.
+                f"stderr="
+                f"{_stream_excerpt(getattr(result, 'stderr', b''), limit=_PROBE_DIAGNOSTIC_STDERR_CHARS, tail=True)!r}",
             )
         )
         record_incident(
