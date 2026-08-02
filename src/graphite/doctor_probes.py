@@ -1676,6 +1676,26 @@ def _parse_mcp_responses(output: bytes, stderr: bytes) -> dict[int, dict[str, An
     return responses
 
 
+def _mcp_transcript_complete(stdout: bytes) -> bool:
+    """True once BOTH expected replies are on stdout, so stdin may be closed.
+
+    This is what makes the deferred close a fix for graphite#29 rather than a
+    delay of it. `initialize` alone is precisely the transcript every observed
+    failure captured -- the server answers it inline in its receive loop, then
+    hands `tools/list` to a concurrent task that races the same loop tearing the
+    write side down on EOF. Accepting one reply as "done" would close stdin at
+    exactly the moment that race is lost.
+
+    Reuses the real parser rather than scanning for ids, so a half-written line
+    is not mistaken for an answer: it raises, and raising means "not yet".
+    """
+    try:
+        responses = _parse_mcp_responses(stdout, b"")
+    except Exception:
+        return False
+    return 1 in responses and 2 in responses
+
+
 def probe_mcp(
     root: Path,
     *,
@@ -1769,6 +1789,11 @@ def probe_mcp(
             stdin=stdin,
             timeout_seconds=remaining,
             max_output_bytes=_MCP_OUTPUT_LIMIT_BYTES,
+            # Hold stdin open until both replies are in. The server treats EOF
+            # as end-of-session, so closing it the moment the payload is
+            # written lets teardown race a reply that is still in flight
+            # (graphite#29).
+            stdin_close_when=_mcp_transcript_complete,
         )
     except ProbeProcessError as exc:
         # No `result` on this path -- run_bounded_process raises before

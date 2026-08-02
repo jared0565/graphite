@@ -944,6 +944,124 @@ def test_deep_bounded_runner_reports_input_delivered_in_full(tmp_path: Path) -> 
     assert result.input_bytes == len(payload)
 
 
+def test_deep_bounded_runner_defers_stdin_close_until_the_transcript_is_ready(
+    tmp_path: Path,
+) -> None:
+    """stdin must stay open until the caller says it has what it needs.
+
+    Closing it the instant the payload is written makes EOF arrive while the
+    child is still working. An MCP server treats that EOF as end-of-session and
+    tears the write side down, so a reply already in flight is never emitted --
+    `initialize` answered, `tools/list` dropped, exit 0 (graphite issue #29).
+
+    The child reports how long after startup it observed EOF. Deferred, that
+    cannot be earlier than the marker the predicate waits for.
+    """
+    from graphite.probe_process import run_bounded_process
+
+    child = (
+        "import sys, time\n"
+        "start = time.monotonic()\n"
+        "sys.stdout.write('first\\n'); sys.stdout.flush()\n"
+        "time.sleep(0.8)\n"
+        "sys.stdout.write('go\\n'); sys.stdout.flush()\n"
+        "sys.stdin.buffer.read()\n"
+        "sys.stdout.write('eof_after=%.2f\\n' % (time.monotonic() - start))\n"
+        "sys.stdout.flush()\n"
+    )
+
+    result = run_bounded_process(
+        [sys.executable, "-c", child],
+        cwd=tmp_path,
+        stdin=b"payload\n",
+        timeout_seconds=30,
+        stdin_close_when=lambda out: b"go\n" in out,
+    )
+
+    assert result.returncode == 0, result.stderr
+    text = result.stdout.decode()
+    observed = float(text.split("eof_after=")[1].split("\n")[0])
+    # Closed immediately this reads ~0.0; deferred it cannot precede the marker.
+    assert observed >= 0.7, text
+
+
+def test_deep_bounded_runner_force_closes_stdin_when_the_predicate_never_fires(
+    tmp_path: Path,
+) -> None:
+    """A predicate that never passes must not strand the child on an open pipe.
+
+    Deferring the close trades one failure for a worse one if it can defer
+    forever: a child blocked reading stdin never exits, and a probe that would
+    have failed fast and explained itself becomes an opaque `timeout`. The close
+    is therefore bounded by the run's own budget, not by the predicate.
+    """
+    from graphite.probe_process import run_bounded_process
+
+    child = "import sys\nsys.stdin.buffer.read()\nsys.stdout.write('done\\n')\nsys.stdout.flush()\n"
+
+    result = run_bounded_process(
+        [sys.executable, "-c", child],
+        cwd=tmp_path,
+        stdin=b"payload\n",
+        timeout_seconds=8,
+        stdin_close_when=lambda out: b"never" in out,
+    )
+
+    assert result.returncode == 0
+    assert b"done" in result.stdout
+
+
+def test_deep_bounded_runner_closes_stdin_immediately_without_a_predicate(
+    tmp_path: Path,
+) -> None:
+    """The default is unchanged: no predicate means close as soon as it is written.
+
+    Pins the opposite of the deferral test, so a change that defers
+    unconditionally -- which would slow every other probe by its whole budget --
+    fails here rather than in production.
+    """
+    from graphite.probe_process import run_bounded_process
+
+    child = (
+        "import sys, time\n"
+        "start = time.monotonic()\n"
+        "sys.stdin.buffer.read()\n"
+        "sys.stdout.write('eof_after=%.2f\\n' % (time.monotonic() - start))\n"
+        "sys.stdout.flush()\n"
+    )
+
+    result = run_bounded_process(
+        [sys.executable, "-c", child],
+        cwd=tmp_path,
+        stdin=b"payload\n",
+        timeout_seconds=30,
+    )
+
+    assert result.returncode == 0
+    observed = float(result.stdout.decode().split("eof_after=")[1].split("\n")[0])
+    assert observed < 0.5, result.stdout
+
+
+def test_mcp_transcript_predicate_waits_for_both_response_ids() -> None:
+    """The probe must hold stdin open until BOTH replies are on stdout.
+
+    This is the condition that makes the deferral fix #29 rather than merely
+    delay it: `initialize` alone is exactly the transcript every failure
+    captured, so treating it as complete would close stdin at precisely the
+    moment the race is lost.
+    """
+    import graphite.doctor_probes as probes
+
+    initialize_only = b'{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"graphite"}}}\n'
+    both = initialize_only + b'{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}\n'
+
+    assert probes._mcp_transcript_complete(b"") is False
+    assert probes._mcp_transcript_complete(initialize_only) is False
+    # A half-written second line must not count as an answer either.
+    assert probes._mcp_transcript_complete(initialize_only + b'{"jsonrpc":"2.0","id":2,"resu') is False
+    assert probes._mcp_transcript_complete(both) is True
+
+
 def test_probe_diagnostics_record_input_side_evidence(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

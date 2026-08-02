@@ -18,6 +18,10 @@ OUTPUT_LIMIT_BYTES = 32 * 1024
 INPUT_LIMIT_BYTES = 1024 * 1024
 _CLEANUP_SECONDS = 1.0
 _GRACEFUL_CLEANUP_SECONDS = 0.1
+# Time left to the child to notice EOF and exit after a deferred stdin close is
+# forced. Only reached when the caller's predicate never passes -- the healthy
+# path closes as soon as the transcript is complete, long before this.
+_STDIN_CLOSE_RESERVE_SECONDS = 2.0
 _SAFE_ERROR_CODES = frozenset(
     {
         "timeout",
@@ -260,11 +264,25 @@ def run_bounded_process(
     check: bool = True,
     environment: Mapping[str, str] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    stdin_close_when: Callable[[bytes], bool] | None = None,
 ) -> ProbeProcessResult:
     """Run one isolated process tree under a single hard transport deadline.
 
     ``environment=None`` selects the sanitized probe default. An explicit mapping is the
     complete, non-inheriting child environment, including when the mapping is empty.
+
+    ``stdin_close_when`` defers closing the child's stdin until the predicate
+    accepts the stdout captured so far. Default ``None`` keeps the original
+    behaviour -- close as soon as the payload is written -- because for a child
+    that reads to EOF before doing anything, deferring would waste the whole
+    budget.
+
+    It exists because an immediate close makes EOF arrive while the child is
+    still working, and a request/response server reads EOF as end-of-session:
+    it tears down the write side with a reply still in flight, answering the
+    first request and silently dropping the second (graphite#29). The close is
+    still bounded by the run's own deadline, so a predicate that never passes
+    degrades to the old timing rather than hanging.
     """
     if (
         not math.isfinite(timeout_seconds)
@@ -341,9 +359,31 @@ def run_bounded_process(
     stdin_closed_at: list[float | None] = [None]
     exited_at: list[float | None] = [None]
 
+    # The close can now come from either the writer thread (immediate) or the
+    # polling loop (deferred), so it needs to be idempotent and serialized --
+    # two closes would race on the timestamp and on the handle.
+    stdin_close_lock = threading.Lock()
+    stdin_is_closed = [False]
+    write_completed = threading.Event()
+
+    def close_stdin() -> None:
+        with stdin_close_lock:
+            if stdin_is_closed[0]:
+                return
+            stdin_is_closed[0] = True
+            try:
+                if process.stdin is not None:
+                    process.stdin.close()
+            except (OSError, ValueError):
+                pass
+            # Stamped after the close returns, so the interval measures the
+            # child's life beyond EOF rather than our own write time.
+            stdin_closed_at[0] = time.monotonic()
+
     def write_input() -> None:
         if input_data is None or process.stdin is None:
             return
+        defer = stdin_close_when is not None
         try:
             process.stdin.write(input_data)
             process.stdin.flush()
@@ -360,19 +400,22 @@ def run_bounded_process(
             # BrokenPipeError subclasses OSError, so it must be caught first.
             # Tolerating it silently would erase the only signal that the child
             # saw a short stream, so record it as evidence instead.
+            defer = False
             if input_truncated is not None:
                 input_truncated.set()
         except (OSError, ValueError):
+            defer = False
             if writer_failed is not None:
                 writer_failed.set()
         finally:
-            try:
-                process.stdin.close()
-            except (OSError, ValueError):
-                pass
-            # Stamped after the close returns, so the interval measures the
-            # child's life beyond EOF rather than our own write time.
-            stdin_closed_at[0] = time.monotonic()
+            # Only a fully delivered payload is worth waiting on. If the write
+            # broke or failed there is nothing more to send, so hold nothing
+            # open -- deferring past a failed write would just delay the
+            # child's EOF for a response that is never coming.
+            if defer:
+                write_completed.set()
+            else:
+                close_stdin()
 
     try:
         overflow = threading.Event()
@@ -391,7 +434,27 @@ def run_bounded_process(
         worker_pipes.append((writer, process.stdin))
         cleanup_reserve = min(_CLEANUP_SECONDS, max(0.05, timeout_seconds * 0.4))
         execution_deadline = deadline - cleanup_reserve
+        # Latest moment a deferred close may still leave the child room to see
+        # EOF and exit inside the execution window.
+        stdin_close_deadline = execution_deadline - min(
+            _STDIN_CLOSE_RESERVE_SECONDS, max(0.05, timeout_seconds * 0.25)
+        )
         while failure_code is None:
+            if stdin_close_when is not None and write_completed.is_set() and not stdin_is_closed[0]:
+                if time.monotonic() >= stdin_close_deadline:
+                    close_stdin()
+                else:
+                    try:
+                        # A torn read can only ever yield a prefix of what the
+                        # reader has appended, which reads as "not complete
+                        # yet" and is retried on the next tick -- so no lock is
+                        # needed against the reader thread here.
+                        if stdin_close_when(bytes(outputs["stdout"])):
+                            close_stdin()
+                    except Exception:
+                        # A predicate that raises must not strand the child on
+                        # an open pipe; fall back to the old timing.
+                        close_stdin()
             try:
                 if cancellation():
                     failure_code = "cancelled"
@@ -421,6 +484,18 @@ def run_bounded_process(
     except Exception:
         failure_code = "io_failed"
     finally:
+        # Never leave a deferred close outstanding: a child blocked reading an
+        # open pipe would otherwise have to be killed on a path where letting it
+        # see EOF and exit on its own is cleaner and faster.
+        #
+        # Strictly gated on the writer having finished. Closing the handle while
+        # that thread is still inside `write` blocks until the write drains --
+        # which against a child that never reads means waiting out the full
+        # payload, turning a 0.25s timeout into seconds. Non-deferred runs are
+        # untouched; their close already happened on the writer thread, and
+        # `_cleanup_process_transport` handles a writer still stuck in one.
+        if stdin_close_when is not None and write_completed.is_set():
+            close_stdin()
         if cleanup_started is not None:
             cleanup_started.set()
         if not _cleanup_process_transport(process, workers, worker_pipes, deadline):
@@ -445,9 +520,14 @@ def run_bounded_process(
     # Both stamps are required: a child with no stdin, or one reaped on a path
     # that never observed the exit, has no interval to report and must say so
     # rather than claim an instant death.
+    # A close that lands AFTER the exit is also "not measured": with a deferred
+    # close the child can exit on its own while stdin is still open, and it then
+    # never saw the EOF at all. Reporting 0.0 there would read as "died the
+    # instant its stdin closed" -- the exact conclusion this field exists to
+    # support or refute.
     outlived_close = (
         max(0.0, finished_at - closed_at)
-        if closed_at is not None and finished_at is not None
+        if closed_at is not None and finished_at is not None and closed_at <= finished_at
         else -1.0
     )
     return ProbeProcessResult(
