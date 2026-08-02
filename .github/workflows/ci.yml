@@ -51,20 +51,22 @@ jobs:
         run: python -m pip install -e ".[dev,mcp]"
       - name: Lint
         run: python -m ruff check .
-      # Sampling-only diagnostic for #29. The quarantine makes the pair `xfail`
-      # on CI, which counts failures but swallows the reason -- every mechanism
-      # so far was inferred from adjacent evidence rather than observed. This
-      # runs them with `--runxfail` so the assertion and the probe's `details`
-      # code (`timeout` vs `invalid_response` vs something new) land in the log.
+      # Cold-cache sample of the #29 pair, dispatch only.
       #
-      # Runs BEFORE the suite on purpose: the fault is cold-cache sensitive, and
-      # 2700 tests first would warm the filesystem and hide it.
+      # `--runxfail` is gone with the quarantine (fixed in 7db0d40); these tests
+      # now gate in the `Test` step below like everything else. What this keeps
+      # is the ORDERING: the fault was cold-cache sensitive, and running 2700
+      # tests first warms the filesystem enough to hide it. Running the pair
+      # before the suite preserves a genuinely cold sample on demand.
       #
-      # `continue-on-error` because a failure here is the point, not a verdict:
-      # this step must never decide a run's conclusion.
-      - name: Diagnose flaky deep-probe (dispatch only)
+      # `continue-on-error` because this step must never decide a run's
+      # conclusion -- the gating verdict belongs to `Test`. A failure here is
+      # evidence, and the probe prints its `[graphite-probe]` diagnostic line
+      # (returncode, input_complete, outlived_close_s, and the child's own MCP
+      # log) to stderr, which pytest surfaces for a failing test.
+      - name: Sample deep-probe cold (dispatch only)
         if: github.event_name == 'workflow_dispatch'
         continue-on-error: true
-        run: python -m pytest tests/test_doctor.py -k real_server --runxfail -rA -q
+        run: python -m pytest tests/test_doctor.py -k real_server -rA -q
       - name: Test
         run: python -m pytest -q

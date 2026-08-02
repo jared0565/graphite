@@ -3500,49 +3500,43 @@ def test_mcp_deep_probe_rejects_excessive_lines_and_nesting_before_json_decode(
     assert called is False
 
 
-# --- issue #29 quarantine ----------------------------------------------------
+# --- real-server deep probe (issue #29, formerly quarantined) ----------------
 #
-# The two tests below drive the real MCP server over stdio and fail ~50% of the
-# time on the CI runner. That is measured, not estimated: 10 `workflow_dispatch`
-# runs on an unchanged sha failed 5 times, and 10 more with the EOF-timing
-# experiment applied failed exactly as often (#29 comments 5151407667 and
-# 5151672712). Three candidate mechanisms have been refuted; the only remaining
-# lead needs instrumentation inside the sandboxed bootstrap.
+# These two drive the real MCP server over stdio. They spent time under an
+# `xfail(CI, strict=False)` quarantine while #29 was open, failing ~38% of CI
+# executions (13 of 34). They are GATING again as of the fix in `7db0d40`.
 #
-# Quarantined from the GATING path, NOT from running. `strict=False` means a
-# failure reports xfail and a pass reports xpass, so neither fails the build --
-# and the summary's "N xfailed, M xpassed" line IS the flake rate, visible on
-# every run without anyone dispatching a sample for it.
+# Three causes were found and fixed, and the order matters because each was
+# hidden by the one before it:
 #
-# Deliberately conditioned on CI rather than applied unconditionally. Locally
-# these pass reliably, so a real regression in `probe_mcp` still fails a
-# developer's run and the pre-push gate. An unconditional xfail would hide the
-# exact breakage these tests exist to catch -- which is the cost of quarantine,
-# and the part worth not paying.
+#   1. The bootstrap read its manifest with `sys.stdin.buffer.readline()`, which
+#      over-read the protocol input into a buffer the server's own fd-0 reader
+#      could never see (`cb82b73`). Deterministic under mcp 2.x.
+#   2. A cold manifest build ate the whole 20s budget and reported `timeout`
+#      before starting a child -- separate budgets plus a resolve memo
+#      (`c7985c5`).
+#   3. The real one: the probe closed the child's stdin the instant the payload
+#      was written, so EOF landed while the child was still starting up. mcp's
+#      receive loop closes the WRITE stream on that EOF, dropping a reply still
+#      in flight. `initialize` is answered inline inside the receive loop and so
+#      could never be lost; `tools/list` is dispatched to a concurrent task and
+#      so could. stdin is now held open until both response ids arrive.
 #
-# Remove when #29 is fixed.
+# Measured after: 8 dispatch runs, 32 executions, 0 failures. P(that | the rate
+# were still 38%) = 2.3e-07. `outlived_close_s` fell 5.14s -> 0.18s (mcp 1.23.3)
+# and 5.04s -> 0.23s (2.0.0), which is the mechanism check rather than the
+# outcome: the close now follows the child's work instead of preceding it.
 #
-# The "drops tools/list" mechanism is FIXED: the bootstrap read its manifest
-# with `sys.stdin.buffer.readline()`, which over-read the protocol input into a
-# buffer the MCP server's own fd-0 reader could not see. The manifest is now
-# length-prefixed and read off the raw stream. Locally that moved these two
-# from 5/10 to 9/10.
+# Do not re-quarantine these without a mechanism. The lesson this issue actually
+# taught is that a quarantine sized for a flake silently absorbed a hard
+# regression -- widening the mcp bound made both fail deterministically, and CI
+# would have gone green over a broken deep probe. If they flake again, they are
+# telling the truth about something.
 #
-# The quarantine STAYS because the surviving failure is a different bug with a
-# different signature: `timeout` / `returncode=<none>` / `input_bytes=<none>`,
-# raised at the `remaining <= 0` pre-flight before any subprocess starts,
-# because a cold manifest build (~8.7s over 1758 files) eats too much of the
-# 20s budget. It reproduces only on a cold run -- and CI runners are always
-# cold. Do not remove this until that is fixed, or main goes red again.
-_ISSUE_29_QUARANTINE = pytest.mark.xfail(
-    os.environ.get("CI") == "true",
-    reason="graphite#29: cold manifest build exhausts the 20s probe budget (the "
-    "stdin over-read half is fixed; this is the timeout half)",
-    strict=False,
-)
+# Local green is not evidence for this pair: they passed 10/10 on mcp 1.23.3 and
+# 10/10 on 2.0.0 while CI was failing ~38%. Sample with `workflow_dispatch`.
 
 
-@_ISSUE_29_QUARANTINE
 def test_mcp_deep_probe_real_server_ignores_project_import_shadows(tmp_path: Path) -> None:
     import graphite.doctor_probes as probes
 
@@ -3569,7 +3563,6 @@ def test_mcp_deep_probe_real_server_ignores_project_import_shadows(tmp_path: Pat
     assert not sentinel.exists()
 
 
-@_ISSUE_29_QUARANTINE
 def test_mcp_deep_probe_real_server_supports_trusted_source_inside_selected_repo() -> None:
     import graphite.doctor_probes as probes
 
