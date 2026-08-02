@@ -216,3 +216,59 @@ def test_a_legacy_round_without_front_matter_still_lists(tmp_path: Path) -> None
     assert len(listed) == 1
     assert listed[0].author is None
     assert listed[0].legacy is True
+
+
+def test_git_does_not_hand_the_brokers_stdin_to_the_child(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The broker runs as a stdio MCP server, so its stdin IS the JSON-RPC pipe.
+
+    Letting git inherit it puts a child process's hands on the protocol stream:
+    it can block on it, and anything it reads is protocol the server never sees.
+    A live wedge traced to exactly this shape -- `git add` blocked for 45 minutes
+    at 0.03s CPU while holding the channel lock.
+    """
+    import graphite.channel as channel
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> object:
+        captured.update(kwargs)
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(channel.subprocess, "run", fake_run)
+    channel._git(tmp_path, "status")
+
+    assert captured.get("stdin") is subprocess.DEVNULL
+
+
+def test_git_refuses_rather_than_hanging_forever(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unbounded git call wedges every agent, not just the caller.
+
+    `_git` runs inside the channel lock, so a stall there is a channel-wide
+    outage that only a manual kill clears. A bounded failure is recoverable.
+    """
+    import graphite.channel as channel
+
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> object:
+        seen.update(kwargs)
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, (int, float)) and timeout > 0, "no timeout passed"
+        raise subprocess.TimeoutExpired(argv, float(timeout))
+
+    monkeypatch.setattr(channel.subprocess, "run", fake_run)
+
+    with pytest.raises(channel.ChannelError) as excinfo:
+        channel._git(tmp_path, "add", "--", "status/045/0001-delivered.json")
+
+    assert excinfo.value.code == "git_timeout"

@@ -58,6 +58,9 @@ AUTHOR_STATUSES = frozenset({"withdrawn"})
 _ROUND_IN_NAME = re.compile(r"round-(\d+)")
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 _LOCK_TIMEOUT_SECONDS = 30.0
+# Deliberately under the lock timeout: a git call that outlives the lock wait
+# would strand every other agent behind a holder that is already doomed.
+_GIT_TIMEOUT_SECONDS = 20.0
 
 
 class ChannelError(Exception):
@@ -422,12 +425,34 @@ def next_round_number(root: Path) -> int:
 
 
 def _git(root: Path, *args: str, check: bool = True) -> str:
-    result = subprocess.run(  # noqa: S603
-        ["git", "-C", str(root), *args],  # noqa: S607
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    """Run git for the channel, bounded and detached from the caller's stdin.
+
+    Both guards exist because this runs inside `_Lock`, where a stall is not one
+    caller's problem but a channel-wide outage that no timeout elsewhere can
+    clear:
+
+    - `stdin=DEVNULL`: the broker is a stdio MCP server, so its stdin is the
+      JSON-RPC pipe. A child that inherits it can block on it, and anything it
+      consumes is protocol the server never sees.
+    - `timeout`: a hung git otherwise holds the lock until someone kills it by
+      hand. Observed live -- `git add` blocked 45 minutes at 0.03s CPU, having
+      never reached `.git/index.lock`, with every other agent locked out behind
+      it.
+    """
+    try:
+        result = subprocess.run(  # noqa: S603
+            ["git", "-C", str(root), *args],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise ChannelError(
+            "git_timeout",
+            f"git {' '.join(args)} exceeded {_GIT_TIMEOUT_SECONDS:g}s in {root}",
+        ) from None
     if check and result.returncode != 0:
         raise ChannelError("git_failed", (result.stderr or result.stdout).strip())
     return result.stdout
