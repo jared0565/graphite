@@ -1197,10 +1197,15 @@ def _mcp_import_inventory(
         if distribution.files is None:
             raise ValueError
         raw_import_files: list[Path] = []
+        # Every declared file names the same handful of top-level components,
+        # and resolving one is a `_getfinalpathname` syscall -- the single
+        # largest cost in this build. Resolve each distinct component once.
+        examined_tops: set[str] = set()
         for declared in distribution.files:
             first = str(declared).replace("\\", "/").partition("/")[0]
             top_level = first.partition(".")[0] if first.endswith(suffixes) else first
-            if top_level.isidentifier() and first == top_level:
+            if top_level.isidentifier() and first == top_level and first not in examined_tops:
+                examined_tops.add(first)
                 try:
                     top_path = Path(distribution.locate_file(first)).resolve(strict=True)
                 except OSError:
@@ -1597,15 +1602,31 @@ def probe_mcp(
     *,
     python_executable: str = sys.executable,
     timeout_seconds: float = 20.0,
+    manifest_timeout_seconds: float | None = None,
     _runner: Callable[..., ProbeProcessResult] = run_bounded_process,
     _builder_script: str = _MCP_MANIFEST_BUILDER_BOOTSTRAP,
     _builder_runner: Callable[..., ProbeProcessResult] = run_bounded_process,
 ) -> DoctorCheck:
-    """Initialize the MCP server and inspect its read-only tool inventory."""
+    """Initialize the MCP server and inspect its read-only tool inventory.
+
+    The manifest build and the server probe get **separate** allowances. They
+    are different faults -- a slow local build is not an unresponsive child --
+    and sharing one deadline meant a cold build (~8.7s over 1758 files) could
+    spend the whole budget and report `timeout` without starting a child
+    (graphite#39). Worst-case wall time is therefore the sum of the two.
+
+    `manifest_timeout_seconds` defaults to `timeout_seconds` so a caller with a
+    single knob still bounds both phases: passing `timeout_seconds=0.05` must
+    keep the builder on a 0.05s leash, not hand it a separate generous one.
+    """
     started = time.monotonic()
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         return _degraded_probe("deep_mcp", "MCP", "invalid_timeout")
-    deadline = started + timeout_seconds
+    if manifest_timeout_seconds is None:
+        manifest_timeout_seconds = timeout_seconds
+    if not math.isfinite(manifest_timeout_seconds) or manifest_timeout_seconds <= 0:
+        return _degraded_probe("deep_mcp", "MCP", "invalid_timeout")
+    deadline = started + manifest_timeout_seconds
     requests = (
         {
             "jsonrpc": "2.0",
@@ -1647,9 +1668,9 @@ def probe_mcp(
         # protocol input where the MCP server's own fd-0 reader never finds it.
         manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
         stdin = b"%d\n" % len(manifest_bytes) + manifest_bytes + protocol_input
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise ProbeProcessError("timeout")
+        # Fresh clock: the server gets its full allowance no matter how long
+        # building the manifest took. See the note on separate budgets above.
+        remaining = timeout_seconds
         selected_binding = bindings["selected"]
         selected = Path(str(selected_binding["canonical"]))
         result = _runner(

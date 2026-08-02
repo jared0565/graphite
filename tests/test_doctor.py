@@ -3892,3 +3892,75 @@ def test_probe_stdin_length_prefixes_the_manifest(tmp_path: Path) -> None:
     # Everything after the manifest is protocol input, byte-addressable
     # without any scanning the child would have to buffer for.
     assert rest[length:].startswith(b'{"jsonrpc"')
+
+
+def test_manifest_build_time_does_not_consume_the_server_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A slow manifest build and an unresponsive child are different faults.
+
+    They shared one deadline, so a cold build (~8.7s over 1758 files) ate most
+    of the 20s budget and the probe reported `timeout` before ever starting a
+    child -- graphite#39. Each phase now gets its own allowance.
+    """
+    import graphite.doctor_probes as probes
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(probes.time, "monotonic", lambda: clock["now"])
+
+    original = probes._build_mcp_manifest_bounded
+
+    def slow_build(*args: object, **kwargs: object) -> object:
+        result = original(*args, **kwargs)
+        clock["now"] += 15.0  # the build burns 15 of the 20 seconds
+        return result
+
+    monkeypatch.setattr(probes, "_build_mcp_manifest_bounded", slow_build)
+
+    captured: dict[str, object] = {}
+
+    def runner(command: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return probes.ProbeProcessResult(0, b"", b"", 0.01)
+
+    probes.probe_mcp(tmp_path, timeout_seconds=20.0, _runner=runner)
+
+    assert captured["timeout_seconds"] == pytest.approx(20.0)
+
+
+def test_manifest_build_does_not_resolve_far_more_paths_than_it_records(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Path resolution is the dominant cost of the build (graphite#39).
+
+    On Windows every `resolve()` is a `_getfinalpathname` syscall. The top-level
+    package directory was resolved once per *declared file*, so a package with
+    500 files resolved its own root 500 times. Resolving a couple of paths per
+    recorded entry is inherent; resolving five times as many is waste.
+    """
+    import graphite.doctor_probes as probes
+
+    calls = {"n": 0}
+    original = Path.resolve
+
+    def counting(self: Path, *args: object, **kwargs: object) -> Path:
+        calls["n"] += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", counting)
+    probes._mcp_import_inventory.cache_clear()
+    try:
+        manifest = probes._mcp_import_manifest(tmp_path)
+    finally:
+        probes._mcp_import_inventory.cache_clear()
+
+    entries = sum(len(group["entries"]) for group in manifest["files"])
+    assert entries > 0
+    # A few resolves per recorded entry are inherent: one to bind the path, and
+    # one when the parent re-validates the manifest the builder subprocess
+    # produced -- that second pass is a security check against the child's
+    # claims, not waste. Resolving the same top-level directory once per
+    # declared file was waste, and put this ratio at 5.5.
+    assert calls["n"] < entries * 4, (
+        f"{calls['n']} resolve() calls for {entries} recorded entries"
+    )
