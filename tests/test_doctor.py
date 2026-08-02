@@ -1274,7 +1274,11 @@ def test_probe_transport_reports_the_numeric_code_of_a_writer_failure(
     class InputPipe:
         def write(self, data: bytes) -> int:
             release.wait(1)
-            raise OSError(22, "RAW strerror with a path in it")
+            # Deliberately NOT EINVAL: that number is now tolerated as Windows'
+            # spelling of a broken pipe (see
+            # test_probe_transport_tolerates_einval_as_a_broken_pipe). This
+            # test is about the number travelling, not about which number.
+            raise OSError(13, "RAW strerror with a path in it")
 
         def flush(self) -> None: pass
         def close(self) -> None: pass
@@ -1298,10 +1302,60 @@ def test_probe_transport_reports_the_numeric_code_of_a_writer_failure(
         transport.run_bounded_process(["python"], cwd=tmp_path, stdin=b"small", timeout_seconds=1)
 
     assert exc_info.value.code == "input_failed"
-    assert exc_info.value.os_error == 22
-    assert "os=22" in str(exc_info.value)
+    assert exc_info.value.os_error == 13
+    assert "os=13" in str(exc_info.value)
     # The number travels; the strerror never does.
     assert "RAW" not in str(exc_info.value)
+
+
+def test_probe_transport_tolerates_einval_as_a_broken_pipe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Windows spells "the reader is gone" as EINVAL as well as BrokenPipeError.
+
+    Measured, not assumed: 3 of 10 CI runs failed with `probe input failed
+    (os=22)` -- EINVAL -- across two different tests, one underlying transport
+    bug (graphite#41). Locally the same write raises `BrokenPipeError` 40/40,
+    which is why this never reproduced off CI.
+
+    A child that stopped reading is legitimate and already tolerated; the errno
+    it arrives under must not change the verdict. An OSError carrying no errno
+    is still a genuine fault -- pinned by
+    test_probe_transport_rechecks_late_writer_failure -- so this widens the
+    tolerance by exactly one number rather than swallowing the category.
+    """
+    import graphite.probe_process as transport
+
+    class InputPipe:
+        def write(self, data: bytes) -> int:
+            raise OSError(22, "Invalid argument")
+
+        def flush(self) -> None: pass
+        def close(self) -> None: pass
+
+    class OutputPipe:
+        def read(self, size: int) -> bytes: return b""
+        def close(self) -> None: pass
+
+    class Process:
+        pid = 123
+        returncode = 0
+        stdin = InputPipe()
+        stdout = OutputPipe()
+        stderr = OutputPipe()
+        def wait(self, timeout: float) -> int: return 0
+        def kill(self) -> None: self.returncode = -9
+
+    monkeypatch.setattr(transport, "_launch_process", lambda *a, **k: Process())
+
+    result = transport.run_bounded_process(
+        ["python"], cwd=tmp_path, stdin=b"small", timeout_seconds=5
+    )
+
+    assert result.returncode == 0
+    # Tolerated, but never erased: the child saw a short stream and a later
+    # failing probe has to be able to say so.
+    assert result.input_complete is False
 
 
 def test_probe_transport_cleans_process_tree_after_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

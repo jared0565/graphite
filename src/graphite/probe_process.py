@@ -1,6 +1,7 @@
 """Bounded subprocess transport with sanitized defaults or exact child environments."""
 from __future__ import annotations
 
+import errno
 import math
 import os
 import select
@@ -428,7 +429,20 @@ def run_bounded_process(
             # winerror first: on Windows an aborted synchronous I/O reports
             # there, and `errno` is the coarser translation of it.
             writer_error[0] = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
-            if writer_failed is not None:
+            if writer_error[0] == errno.EINVAL:
+                # Windows' other spelling of "the reader is gone". Measured:
+                # 3 of 10 CI runs failed as `input_failed (os=22)` across two
+                # different tests, while the same write raises BrokenPipeError
+                # 40/40 locally -- which is why it never reproduced off CI
+                # (graphite#41). Same condition as the branch above, so it gets
+                # the same verdict: legitimate, recorded, not a fault.
+                #
+                # Widened by exactly one number on purpose. An OSError carrying
+                # no errno stays a genuine transport fault, which
+                # test_probe_transport_rechecks_late_writer_failure pins.
+                if input_truncated is not None:
+                    input_truncated.set()
+            elif writer_failed is not None:
                 writer_failed.set()
         finally:
             # Only a fully delivered payload is worth waiting on. If the write
