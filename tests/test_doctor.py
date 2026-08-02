@@ -2616,12 +2616,18 @@ def test_mcp_deep_probe_initializes_and_lists_required_tools(tmp_path: Path) -> 
     assert captured["cwd"] == tmp_path
     assert 0 < captured["timeout_seconds"] <= 20
     assert captured["max_output_bytes"] == 1024 * 1024
-    lines = captured["stdin"].decode("utf-8").splitlines()
-    manifest = json.loads(lines[0])
+    # Length-prefixed framing: a digit header, then exactly that many manifest
+    # bytes, then the protocol input. The child must be able to find the
+    # boundary without scanning, or it buffers the protocol away from the
+    # server's own reader.
+    header, separator, rest = captured["stdin"].partition(b"\n")
+    assert separator == b"\n"
+    assert header.isdigit()
+    manifest = json.loads(rest[: int(header)])
     assert "networkx" in manifest["packages"]
     assert "mcp" in manifest["packages"]
     assert manifest["files"]
-    requests = [json.loads(line) for line in lines[1:]]
+    requests = [json.loads(line) for line in rest[int(header) :].splitlines()]
     assert requests[0]["method"] == "initialize"
     assert requests[0]["params"]["protocolVersion"] == "2024-11-05"
     assert requests[1]["method"] == "notifications/initialized"
@@ -2657,8 +2663,14 @@ def test_mcp_requirement_marker_evaluates_and_or_compounds() -> None:
     expected = sys.platform == "win32" and sys.version_info[:2] < (3, 14)
     assert applies("pywin32>=310; sys_platform == 'win32' and python_version < '3.14'") is expected
     assert applies("dep>=1; extra == 'test' and sys_platform == 'win32'") is False
+    # A single parenthesised comparison is now unwrapped and evaluated: real
+    # metadata pairs one with an `extra` marker, and raising took the whole
+    # distribution walk down with it.
+    wrapped = sys.platform == "win32" and sys.version_info[:2] < (3, 14)
+    assert applies("dep>=1; (sys_platform == 'win32') and python_version < '3.14'") is wrapped
+    # Genuinely nested boolean sub-expressions remain unsupported and fail closed.
     with pytest.raises(ValueError):
-        applies("dep>=1; (sys_platform == 'win32') and python_version < '3.14'")
+        applies("dep>=1; python_version >= '3' and (sys_platform == 'win32' or python_version < '3.14')")
 
 
 def test_mcp_deep_probe_rejects_user_site_dependency_shadow_without_execution(
@@ -3266,9 +3278,23 @@ def test_mcp_deep_probe_rejects_excessive_lines_and_nesting_before_json_decode(
 # and the part worth not paying.
 #
 # Remove when #29 is fixed.
+#
+# The "drops tools/list" mechanism is FIXED: the bootstrap read its manifest
+# with `sys.stdin.buffer.readline()`, which over-read the protocol input into a
+# buffer the MCP server's own fd-0 reader could not see. The manifest is now
+# length-prefixed and read off the raw stream. Locally that moved these two
+# from 5/10 to 9/10.
+#
+# The quarantine STAYS because the surviving failure is a different bug with a
+# different signature: `timeout` / `returncode=<none>` / `input_bytes=<none>`,
+# raised at the `remaining <= 0` pre-flight before any subprocess starts,
+# because a cold manifest build (~8.7s over 1758 files) eats too much of the
+# 20s budget. It reproduces only on a cold run -- and CI runners are always
+# cold. Do not remove this until that is fixed, or main goes red again.
 _ISSUE_29_QUARANTINE = pytest.mark.xfail(
     os.environ.get("CI") == "true",
-    reason="graphite#29: real MCP server answers initialize and drops tools/list, ~50% on CI",
+    reason="graphite#29: cold manifest build exhausts the 20s probe budget (the "
+    "stdin over-read half is fixed; this is the timeout half)",
     strict=False,
 )
 
@@ -3650,3 +3676,219 @@ def test_typescript_deep_probe_timeout_is_degraded(tmp_path: Path) -> None:
         _runner=timeout,
     )
     assert check.status == "degraded"
+
+
+def _write_dist_info(root: Path, name: str, version: str, *requires: str) -> None:
+    """Write a minimal installed-distribution record for closure tests."""
+    dist_info = root / f"{name}-{version}.dist-info"
+    dist_info.mkdir()
+    lines = ["Metadata-Version: 2.1", f"Name: {name}", f"Version: {version}"]
+    lines.extend(f"Requires-Dist: {requirement}" for requirement in requires)
+    (dist_info / "METADATA").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_extra_requested_by_a_dependent_enters_the_distribution_closure(
+    tmp_path: Path,
+) -> None:
+    """mcp 2.x needs `pyjwt[crypto]`; the extra's own deps must be bootstrappable.
+
+    The closure feeds an isolated `-I -S` subprocess, so a distribution missing
+    here is an ImportError at probe time, not a cosmetic omission.
+    """
+    import graphite.doctor_probes as probes
+
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    _write_dist_info(root, "mcp", "2.0.0", "pyjwt[crypto]>=2.9.0")
+    _write_dist_info(root, "networkx", "3.0")
+    _write_dist_info(root, "pyjwt", "2.9.0", 'cryptography>=3.4.0; extra == "crypto"')
+    _write_dist_info(root, "cryptography", "42.0.0")
+
+    closure = probes._mcp_distribution_closure((root,))
+
+    assert "cryptography" in closure
+
+
+def test_extra_no_dependent_requested_stays_out_of_the_closure(tmp_path: Path) -> None:
+    """The fail-closed boundary: an extra nobody asked for grants no reachability.
+
+    `_requirement_applies` used to reject every `extra` marker outright. Now that
+    it evaluates them, an unrequested extra must still contribute nothing --
+    otherwise the closure would bootstrap code the dependency graph never asked
+    for into the isolated probe subprocess.
+    """
+    import graphite.doctor_probes as probes
+
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    # mcp requests NO extras of pyjwt.
+    _write_dist_info(root, "mcp", "2.0.0", "pyjwt>=2.9.0")
+    _write_dist_info(root, "networkx", "3.0")
+    _write_dist_info(root, "pyjwt", "2.9.0", 'unrequested>=1.0; extra == "crypto"')
+    _write_dist_info(root, "unrequested", "1.0")
+
+    closure = probes._mcp_distribution_closure((root,))
+
+    assert "pyjwt" in closure
+    assert "unrequested" not in closure
+
+
+def test_parenthesised_condition_beside_an_extra_marker_is_evaluated(
+    tmp_path: Path,
+) -> None:
+    """Real metadata combines a parenthesised comparison with an `extra` marker.
+
+    While every `extra` marker was rejected outright these never reached the
+    comparison parser. Now that they do, a wrapped sub-condition must parse --
+    a ValueError here aborts the whole closure, not just one requirement.
+    """
+    import graphite.doctor_probes as probes
+
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    _write_dist_info(root, "mcp", "2.0.0", "pyjwt[crypto]>=2.9.0")
+    _write_dist_info(root, "networkx", "3.0")
+    _write_dist_info(
+        root,
+        "pyjwt",
+        "2.9.0",
+        f'cryptography>=3.4.0; (sys_platform == "{sys.platform}") and extra == "crypto"',
+    )
+    _write_dist_info(root, "cryptography", "42.0.0")
+
+    closure = probes._mcp_distribution_closure((root,))
+
+    assert "cryptography" in closure
+
+
+def test_unparseable_extra_marker_skips_the_requirement_without_aborting(
+    tmp_path: Path,
+) -> None:
+    """A nested marker must not take the whole closure down with it.
+
+    Real metadata contains markers like `(a and b) or extra == "x"`, which this
+    deliberately simple parser cannot evaluate. Before extras were understood,
+    every such marker was rejected outright and the walk continued. That must
+    remain true: skip the requirement, do not raise.
+    """
+    import graphite.doctor_probes as probes
+
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    _write_dist_info(root, "mcp", "2.0.0", "pyjwt[crypto]>=2.9.0")
+    _write_dist_info(root, "networkx", "3.0")
+    _write_dist_info(
+        root,
+        "pyjwt",
+        "2.9.0",
+        'nested>=1.0; (sys_platform != "nonesuch" and python_version < "9.9")'
+        ' or extra == "crypto"',
+    )
+    _write_dist_info(root, "nested", "1.0")
+
+    closure = probes._mcp_distribution_closure((root,))
+
+    assert "pyjwt" in closure
+    # Unevaluable -> contributes nothing, exactly as the blanket rejection did.
+    assert "nested" not in closure
+
+
+def test_python_full_version_marker_is_evaluated(tmp_path: Path) -> None:
+    """`cryptography` gates cffi on `python_full_version`; the closure walks it now."""
+    import graphite.doctor_probes as probes
+
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    _write_dist_info(root, "mcp", "2.0.0", "pyjwt>=2.9.0")
+    _write_dist_info(root, "networkx", "3.0")
+    _write_dist_info(root, "pyjwt", "2.9.0", 'cffi>=2.0.0; python_full_version >= "3.9"')
+    _write_dist_info(root, "cffi", "2.0.0")
+
+    closure = probes._mcp_distribution_closure((root,))
+
+    assert "cffi" in closure
+
+
+def test_python_full_version_star_match_is_evaluated(tmp_path: Path) -> None:
+    """A PEP 440 `3.8.*` wildcard must compare by prefix, not crash on int('*')."""
+    import graphite.doctor_probes as probes
+
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    _write_dist_info(root, "mcp", "2.0.0", "pyjwt>=2.9.0")
+    _write_dist_info(root, "networkx", "3.0")
+    _write_dist_info(root, "pyjwt", "2.9.0", 'legacy>=1.0; python_full_version == "3.8.*"')
+    _write_dist_info(root, "legacy", "1.0")
+
+    closure = probes._mcp_distribution_closure((root,))
+
+    assert sys.version_info[:2] != (3, 8), "test assumes it is not run on 3.8"
+    assert "legacy" not in closure
+
+
+def test_implementation_name_marker_is_evaluated(tmp_path: Path) -> None:
+    """`cffi` requires `pycparser; implementation_name != "PyPy"`.
+
+    On CPython that marker is true, so the dependency is genuinely needed --
+    skipping an unevaluable marker here would omit it and break the probe.
+    """
+    import graphite.doctor_probes as probes
+
+    root = tmp_path / "site-packages"
+    root.mkdir()
+    _write_dist_info(root, "mcp", "2.0.0", "cffi>=1.0")
+    _write_dist_info(root, "networkx", "3.0")
+    _write_dist_info(root, "cffi", "1.17.0", 'pycparser; implementation_name != "PyPy"')
+    _write_dist_info(root, "pycparser", "2.22")
+
+    closure = probes._mcp_distribution_closure((root,))
+
+    assert sys.implementation.name == "cpython", "test assumes CPython"
+    assert "pycparser" in closure
+
+
+def test_prerelease_python_full_version_does_not_abort_the_closure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`python_full_version` is `3.14.0rc1` on a pre-release interpreter.
+
+    That component is not an int. Raising here would propagate out of a
+    non-extra marker and abort the whole distribution walk, so the probe would
+    die on any interpreter Python ships as a release candidate.
+    """
+    import graphite.doctor_probes as probes
+
+    monkeypatch.setattr(probes.platform, "python_version", lambda: "3.14.0rc1")
+
+    assert probes._requirement_applies("dep>=1; python_full_version >= '3.9'") is True
+    assert probes._requirement_applies("dep>=1; python_full_version < '3.9'") is False
+
+
+def test_probe_stdin_length_prefixes_the_manifest(tmp_path: Path) -> None:
+    """The manifest must be framed by length, not by a trailing newline.
+
+    A newline frame forces the child to find the boundary with
+    `readline()`, which over-reads the protocol bytes into a private buffer
+    that the MCP server's own fd-0 reader can never see. A length prefix lets
+    the child read exactly the manifest off the raw stream and leave the
+    protocol input in the pipe.
+    """
+    import graphite.doctor_probes as probes
+
+    captured: dict[str, bytes] = {}
+
+    def runner(command: object, **kwargs: object) -> object:
+        captured["stdin"] = kwargs["stdin"]  # type: ignore[assignment]
+        return probes.ProbeProcessResult(0, b"", b"", 0.01)
+
+    probes.probe_mcp(tmp_path, _runner=runner)
+
+    header, separator, rest = captured["stdin"].partition(b"\n")
+    assert separator == b"\n"
+    assert header.isdigit(), f"manifest is not length-prefixed: {header[:60]!r}"
+    length = int(header)
+    manifest = json.loads(rest[:length])
+    assert set(manifest) == {"distributions", "files", "packages"}
+    # Everything after the manifest is protocol input, byte-addressable
+    # without any scanning the child would have to buffer for.
+    assert rest[length:].startswith(b'{"jsonrpc"')

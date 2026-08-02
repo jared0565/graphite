@@ -273,7 +273,32 @@ if (
     or expected_graphite_mcp.parent != trusted / "graphite"
 ):
     raise SystemExit(70)
-manifest = json.loads(sys.stdin.buffer.readline())
+stdin_raw = sys.stdin.buffer.raw
+def read_exact(count):
+    parts = []
+    while count > 0:
+        part = stdin_raw.read(count)
+        if not part:
+            raise SystemExit(70)
+        parts.append(part)
+        count -= len(part)
+    return b"".join(parts)
+# Read the length header a byte at a time and the manifest by exact size, both
+# straight off the raw stream. A buffered read would pull the protocol input in
+# behind the manifest, where only this object could reach it -- the MCP server
+# opens its own reader on fd 0 and would find EOF.
+header = b""
+while not header.endswith(b"\\n"):
+    byte = stdin_raw.read(1)
+    if not byte:
+        raise SystemExit(70)
+    header += byte
+    if len(header) > 24:
+        raise SystemExit(70)
+declared_length = header[:-1]
+if not declared_length.isdigit():
+    raise SystemExit(70)
+manifest = json.loads(read_exact(int(declared_length)))
 if not isinstance(manifest, dict) or set(manifest) != {"distributions", "files", "packages"}:
     raise SystemExit(70)
 raw_files = manifest["files"]
@@ -922,6 +947,8 @@ def _marker_value(name: str) -> str:
         "platform_python_implementation": platform.python_implementation(),
         "platform_system": platform.system(),
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "python_full_version": platform.python_version(),
+        "implementation_name": sys.implementation.name,
         "sys_platform": sys.platform,
     }
     if name not in values:
@@ -929,9 +956,30 @@ def _marker_value(name: str) -> str:
     return values[name]
 
 
+def _version_tuple(value: str) -> tuple[int, ...]:
+    """Leading numeric release components, e.g. `3.14.0rc1` -> `(3, 14, 0)`.
+
+    Pre-release suffixes are dropped rather than raising: `python_full_version`
+    reports them on release-candidate interpreters, and a ValueError from a
+    non-extra marker aborts the entire distribution walk.
+    """
+    parts: list[int] = []
+    for part in value.split("."):
+        digits = re.match(r"\d+", part)
+        if digits is None:
+            break
+        parts.append(int(digits.group(0)))
+        if digits.end() != len(part):
+            break
+    if not parts:
+        raise ValueError
+    return tuple(parts)
+
+
 def _marker_comparison_holds(condition: str) -> bool:
     match = re.fullmatch(
-        r"(python_version|sys_platform|platform_system|platform_python_implementation)"
+        r"(python_version|python_full_version|sys_platform|platform_system"
+        r"|platform_python_implementation|implementation_name)"
         r"\s*(==|!=|<=|>=|<|>)\s*(['\"])([^'\"]+)\3",
         condition,
     )
@@ -939,13 +987,20 @@ def _marker_comparison_holds(condition: str) -> bool:
         raise ValueError
     actual = _marker_value(match.group(1))
     expected = match.group(4)
-    if match.group(1) == "python_version":
-        actual_value: object = tuple(int(part) for part in actual.split("."))
-        expected_value: object = tuple(int(part) for part in expected.split("."))
+    operator = match.group(2)
+    if match.group(1) in {"python_version", "python_full_version"}:
+        if expected.endswith(".*"):
+            # PEP 440 prefix match; only equality operators are defined for it.
+            if operator not in {"==", "!="}:
+                raise ValueError
+            prefix = _version_tuple(expected[: -len(".*")])
+            matches = _version_tuple(actual)[: len(prefix)] == prefix
+            return matches if operator == "==" else not matches
+        actual_value: object = _version_tuple(actual)
+        expected_value: object = _version_tuple(expected)
     else:
         actual_value = actual
         expected_value = expected
-    operator = match.group(2)
     comparisons = {
         "==": actual_value == expected_value,
         "!=": actual_value != expected_value,
@@ -957,24 +1012,86 @@ def _marker_comparison_holds(condition: str) -> bool:
     return comparisons[operator]
 
 
-def _requirement_applies(raw_requirement: str) -> bool:
+def _requirement_extras(raw_requirement: str) -> frozenset[str]:
+    """Extras a requirement requests of its target: `pyjwt[crypto]` -> {"crypto"}.
+
+    Only the portion before any marker is inspected, so an `extra ==` marker on
+    the requirement itself is never mistaken for a bracket.
+    """
+    head, _, _ = raw_requirement.partition(";")
+    match = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*\s*\[([^\]]*)\]", head)
+    if match is None:
+        return frozenset()
+    requested = set()
+    for part in match.group(1).split(","):
+        name = part.strip()
+        if not name:
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            raise ValueError
+        requested.add(_normalized_distribution_name(name))
+    return frozenset(requested)
+
+
+def _extra_condition_holds(condition: str, active_extras: frozenset[str]) -> bool | None:
+    """Evaluate an `extra ==`/`!=` condition, or None if this is not one."""
+    match = re.fullmatch(r"extra\s*(==|!=)\s*(['\"])([^'\"]+)\2", condition)
+    if match is None:
+        return None
+    present = _normalized_distribution_name(match.group(3)) in active_extras
+    return present if match.group(1) == "==" else not present
+
+
+def _condition_holds(condition: str, active_extras: frozenset[str]) -> bool:
+    # A sub-condition can arrive parenthesised, e.g. the `(sys_platform ==
+    # "win32")` half of `(sys_platform == "win32") and extra == "crypto"`.
+    # Unwrap balanced pairs; anything still holding a boolean operator is a
+    # nested expression this parser deliberately does not support.
+    while condition.startswith("(") and condition.endswith(")"):
+        condition = condition[1:-1].strip()
+        if re.search(r"\s+(and|or)\s+", condition):
+            raise ValueError
+    extra_result = _extra_condition_holds(condition, active_extras)
+    if extra_result is not None:
+        return extra_result
+    if re.search(r"\bextra\b", condition):
+        # An `extra` reference we cannot parse. Fail closed rather than guess.
+        raise ValueError
+    return _marker_comparison_holds(condition)
+
+
+def _requirement_applies(
+    raw_requirement: str, active_extras: frozenset[str] = frozenset()
+) -> bool:
+    """Whether a requirement is live given the extras its dependent requested.
+
+    An `extra == "x"` marker holds only when a dependent actually asked for `x`
+    (`pyjwt[crypto]`). With no extras requested this stays exactly as
+    restrictive as the blanket rejection it replaced.
+    """
     _, separator, raw_marker = raw_requirement.partition(";")
     if not separator:
         return True
     marker = raw_marker.strip()
-    if re.search(r"\bextra\b", marker):
-        return False
     while marker.startswith("(") and marker.endswith(")"):
         marker = marker[1:-1].strip()
-    # PEP 508 precedence: `and` binds tighter than `or`. Parenthesised
+    # PEP 508 precedence: `and` binds tighter than `or`. Nested parenthesised
     # sub-expressions stay unsupported and fail closed via ValueError.
-    return any(
-        all(
-            _marker_comparison_holds(condition.strip())
-            for condition in re.split(r"\s+and\s+", clause)
+    try:
+        return any(
+            all(
+                _condition_holds(condition.strip(), active_extras)
+                for condition in re.split(r"\s+and\s+", clause)
+            )
+            for clause in re.split(r"\s+or\s+", marker)
         )
-        for clause in re.split(r"\s+or\s+", marker)
-    )
+    except ValueError:
+        if re.search(r"\bextra\b", marker):
+            # These never reached the parser while every `extra` marker was
+            # rejected outright. Keep rejecting the ones we cannot evaluate,
+            # rather than aborting the whole distribution walk.
+            return False
+        raise
 
 
 def _mcp_distribution_closure(
@@ -992,12 +1109,34 @@ def _mcp_distribution_closure(
             normalized = _normalized_distribution_name(declared_name)
             discovered.setdefault(normalized, []).append(distribution)
 
-    pending = ["mcp", "networkx"]
+    # Each entry carries the extras its dependent requested, because a
+    # distribution's requirement set is not fixed -- `pyjwt` alone and
+    # `pyjwt[crypto]` pull in different things.
+    pending: list[tuple[str, frozenset[str]]] = [
+        ("mcp", frozenset()),
+        ("networkx", frozenset()),
+    ]
     distributions: dict[str, metadata.Distribution] = {}
+    walked_extras: dict[str, frozenset[str]] = {}
     while pending:
-        requested = pending.pop()
+        requested, requested_extras = pending.pop()
         normalized = _normalized_distribution_name(requested)
+        already = walked_extras.get(normalized)
+        if already is not None and requested_extras <= already:
+            continue
+        active_extras = requested_extras if already is None else already | requested_extras
+        walked_extras[normalized] = active_extras
         if normalized in distributions:
+            # Seen before, but with fewer extras: re-walk its requirements
+            # against the wider set without re-resolving the distribution.
+            distribution = distributions[normalized]
+            for requirement in distribution.requires or ():
+                if not _requirement_applies(requirement, active_extras):
+                    continue
+                match = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", requirement)
+                if match is None:
+                    raise ValueError
+                pending.append((match.group(0), _requirement_extras(requirement)))
             continue
         if discovered is None:
             distribution = metadata.distribution(requested)
@@ -1011,12 +1150,12 @@ def _mcp_distribution_closure(
             raise ValueError
         distributions[normalized] = distribution
         for requirement in distribution.requires or ():
-            if not _requirement_applies(requirement):
+            if not _requirement_applies(requirement, active_extras):
                 continue
             match = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", requirement)
             if match is None:
                 raise ValueError
-            pending.append(match.group(0))
+            pending.append((match.group(0), _requirement_extras(requirement)))
     return distributions
 
 
@@ -1501,7 +1640,13 @@ def probe_mcp(
             builder_script=_builder_script,
             runner=_builder_runner,
         )
-        stdin = json.dumps(manifest, separators=(",", ":")).encode("utf-8") + b"\n" + protocol_input
+        # Length-prefixed, not newline-terminated. The child has to find the
+        # end of the manifest without consuming what follows it, and a
+        # `readline()` scan cannot: BufferedReader pulls a chunk past the
+        # newline into a buffer only that object can see, stranding the
+        # protocol input where the MCP server's own fd-0 reader never finds it.
+        manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+        stdin = b"%d\n" % len(manifest_bytes) + manifest_bytes + protocol_input
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ProbeProcessError("timeout")

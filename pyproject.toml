@@ -19,14 +19,16 @@ dependencies = [
 
 [project.optional-dependencies]
 local-llm = []
-# Upper-bounded deliberately. `mcp_server.py` uses the 1.x decorator API
-# (`@server.list_tools()` / `@server.call_tool()`); mcp 2.0.0 removed
-# `Server.list_tools`, so an unbounded `>=1.0` claimed a compatibility graphite
-# does not have. CI installs fresh and picked up 2.0.0, which broke three MCP
-# tests -- invisible for two days because a lint failure meant the Test step
-# never ran. Porting to the 2.x API is tracked separately; until then this
-# bound is the honest declaration.
-mcp = ["mcp>=1.0,<2"]
+# Both mcp lines are supported and measured. `_register_tool_handlers` speaks
+# 1.x (the `@server.list_tools()` decorators) and 2.x (`add_request_handler`),
+# serving identical tool definitions and dispatch, so the wire contract does
+# not depend on which is installed.
+#
+# The floor stays at 1.0 deliberately: semgrep pins `mcp==1.23.3` and
+# `.mcp.json` launches bare `python`, so a `>=2` floor would force a choice
+# between graphite's own MCP server and semgrep on the same interpreter.
+# The ceiling is 3 because 3.x is unexamined, not because 2.x is broken.
+mcp = ["mcp>=1.0,<3"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [project.scripts]

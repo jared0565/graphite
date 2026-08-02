@@ -313,84 +313,125 @@ def _result(content: dict[str, Any]) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(content, ensure_ascii=False, indent=2))]
 
 
+def _tool_definitions() -> list[Tool]:
+    return [
+        Tool(
+            name="graphite_query",
+            description="Query the Graphite knowledge graph. Supported queries: depends-on <node>, imported-by <node>, path <a> -> <b>, stats.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Graphite query string, e.g. 'depends-on db.ts'",
+                    }
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="graphite_community",
+            description="Describe the community/cluster a node belongs to, including fellow members.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "node_id": {
+                        "type": "string",
+                        "description": "Node id, name, or file path fragment, e.g. 'db.ts'",
+                    }
+                },
+                "required": ["node_id"],
+            },
+        ),
+        Tool(
+            name="graphite_summary",
+            description="Return high-level graph stats, god nodes, entry points, and top files.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="graphite_refresh",
+            description="Rebuild graph-out/graph.json and reload it.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        *channel_tool_definitions(),
+    ]
+
+
+def _dispatch(
+    graphite: GraphiteMCPServer, name: str, arguments: dict[str, Any]
+) -> list[TextContent]:
+    if name == "graphite_channel_inbox":
+        return _result(graphite.channel_inbox_tool())
+    if name == "graphite_channel_post":
+        return _result(graphite.channel_post_tool(
+            title=arguments.get("title", ""),
+            body=arguments.get("body", ""),
+            to=arguments.get("to") or [],
+            supersedes=arguments.get("supersedes"),
+        ))
+    if name == "graphite_channel_status":
+        return _result(graphite.channel_status_tool(
+            number=arguments.get("number", 0),
+            status=arguments.get("status", ""),
+            reason=arguments.get("reason"),
+        ))
+    if name == "graphite_channel_list":
+        return _result(graphite.channel_list_tool())
+    if name == "graphite_channel_read":
+        return _result(graphite.channel_read_tool(number=arguments.get("number", 0)))
+    if name == "graphite_query":
+        return _result(graphite.query_tool(arguments.get("query", "")))
+    if name == "graphite_community":
+        return _result(graphite.community_tool(arguments.get("node_id", "")))
+    if name == "graphite_summary":
+        return _result(graphite.summary_tool())
+    if name == "graphite_refresh":
+        return _result(graphite.refresh())
+    return _result({"error": f"Unknown tool: {name}"})
+
+
+def _register_tool_handlers(server: Any, graphite: GraphiteMCPServer) -> None:
+    """Wire tools/list and tools/call across both supported mcp lines.
+
+    mcp 2.x removed the `@server.list_tools()` / `@server.call_tool()`
+    decorators in favour of explicit `add_request_handler` registration. Both
+    paths serve the same tool definitions and the same dispatch, so the wire
+    contract is identical either way.
+    """
+    if hasattr(server, "list_tools"):  # mcp 1.x decorator API
+        @server.list_tools()
+        async def list_tools() -> list[Tool]:
+            return _tool_definitions()
+
+        @server.call_tool()
+        async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+            return _dispatch(graphite, name, arguments)
+
+        return
+
+    from mcp.types import (  # mcp 2.x handler-registration API
+        CallToolRequestParams,
+        CallToolResult,
+        ListToolsResult,
+        PaginatedRequestParams,
+    )
+
+    async def handle_list_tools(ctx: Any, params: Any) -> ListToolsResult:
+        return ListToolsResult(tools=_tool_definitions())
+
+    async def handle_call_tool(ctx: Any, params: Any) -> CallToolResult:
+        return CallToolResult(
+            content=_dispatch(graphite, params.name, params.arguments or {})
+        )
+
+    server.add_request_handler("tools/list", PaginatedRequestParams, handle_list_tools)
+    server.add_request_handler("tools/call", CallToolRequestParams, handle_call_tool)
+
+
 def main() -> int:
     server = Server("graphite")
     graphite = GraphiteMCPServer()
-
-    @server.list_tools()
-    async def list_tools() -> list[Tool]:
-        return [
-            Tool(
-                name="graphite_query",
-                description="Query the Graphite knowledge graph. Supported queries: depends-on <node>, imported-by <node>, path <a> -> <b>, stats.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Graphite query string, e.g. 'depends-on db.ts'",
-                        }
-                    },
-                    "required": ["query"],
-                },
-            ),
-            Tool(
-                name="graphite_community",
-                description="Describe the community/cluster a node belongs to, including fellow members.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "node_id": {
-                            "type": "string",
-                            "description": "Node id, name, or file path fragment, e.g. 'db.ts'",
-                        }
-                    },
-                    "required": ["node_id"],
-                },
-            ),
-            Tool(
-                name="graphite_summary",
-                description="Return high-level graph stats, god nodes, entry points, and top files.",
-                inputSchema={"type": "object", "properties": {}},
-            ),
-            Tool(
-                name="graphite_refresh",
-                description="Rebuild graph-out/graph.json and reload it.",
-                inputSchema={"type": "object", "properties": {}},
-            ),
-            *channel_tool_definitions(),
-        ]
-
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-        if name == "graphite_channel_inbox":
-            return _result(graphite.channel_inbox_tool())
-        if name == "graphite_channel_post":
-            return _result(graphite.channel_post_tool(
-                title=arguments.get("title", ""),
-                body=arguments.get("body", ""),
-                to=arguments.get("to") or [],
-                supersedes=arguments.get("supersedes"),
-            ))
-        if name == "graphite_channel_status":
-            return _result(graphite.channel_status_tool(
-                number=arguments.get("number", 0),
-                status=arguments.get("status", ""),
-                reason=arguments.get("reason"),
-            ))
-        if name == "graphite_channel_list":
-            return _result(graphite.channel_list_tool())
-        if name == "graphite_channel_read":
-            return _result(graphite.channel_read_tool(number=arguments.get("number", 0)))
-        if name == "graphite_query":
-            return _result(graphite.query_tool(arguments.get("query", "")))
-        if name == "graphite_community":
-            return _result(graphite.community_tool(arguments.get("node_id", "")))
-        if name == "graphite_summary":
-            return _result(graphite.summary_tool())
-        if name == "graphite_refresh":
-            return _result(graphite.refresh())
-        return _result({"error": f"Unknown tool: {name}"})
+    _register_tool_handlers(server, graphite)
 
     async def run() -> None:
         async with stdio_server() as (read_stream, write_stream):
