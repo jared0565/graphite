@@ -24,11 +24,18 @@ MAX_GIT_METADATA_BYTES: Final = 8 * 1024 * 1024
 
 
 class WorktreeError(RuntimeError):
-    """Stable, path-free worktree preparation failure."""
+    """Stable, path-free worktree preparation failure.
 
-    def __init__(self, code: str) -> None:
+    `cause` is a diagnostic carried in the MESSAGE only, and only ever an
+    exception class name. See `DiffPolicyError` for the reasoning; the two are
+    deliberately the same shape because the routing service catches them
+    together and cannot tell which one it is holding.
+    """
+
+    def __init__(self, code: str, cause: str | None = None) -> None:
         self.code = code
-        super().__init__(code)
+        self.cause = cause
+        super().__init__(f"{code} ({cause})" if cause else code)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,8 +94,9 @@ def _run(runner: GitRunner, arguments: list[str], *, maximum: int = MAX_GIT_META
         raise WorktreeError("git_timeout") from None
     except GitOutputLimitError:
         raise WorktreeError("git_output_limit") from None
-    except GitError:
-        raise WorktreeError("git_unavailable") from None
+    except GitError as exc:
+        # See the matching branch in `diff_policy._run_git` (graphite#37).
+        raise WorktreeError("git_unavailable", type(exc).__name__) from None
 
 
 def _decode_line(output: bytes, code: str) -> str:

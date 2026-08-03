@@ -220,6 +220,31 @@ def _service(
     return service, root, captured
 
 
+def test_a_git_failure_keeps_its_cause_all_the_way_to_the_routing_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The routing error is what reaches a CI log, and it is raised `from None`
+    from a `DiffPolicyError` that was itself raised `from None`. Without an
+    explicit hand-off the diagnostic dies at the second hop and the log shows a
+    bare `git_unavailable` -- which is exactly what graphite#37's one sighting
+    shows, and why it could not be taken further."""
+    from graphite.routing.diff_policy import DiffPolicyError
+
+    service, _root, _extras = _service(tmp_path, monkeypatch)
+
+    def _explode(*_arguments: object, **_keywords: object):
+        raise DiffPolicyError("git_unavailable", "GitLaunchError")
+
+    monkeypatch.setattr(service_module, "collect_diff_evidence", _explode)
+    prepared = service.prepare(_recommend(service))
+
+    with pytest.raises(RoutingServiceError) as excinfo:
+        service.run_approved(prepared, approval_granted=True)
+
+    assert excinfo.value.code == "git_unavailable", "the failure taxonomy must not shift"
+    assert "GitLaunchError" in str(excinfo.value)
+
+
 def _recommend(service: RoutingService):
     return service.recommend(
         objective="Implement the isolated formatting helper",

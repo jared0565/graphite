@@ -4,11 +4,80 @@ from pathlib import Path
 
 import pytest
 
-from graphite.routing.diff_policy import DiffPolicyError, inspect_diff_evidence
-from graphite.routing.worktree import WorktreeError, _validate_index
+from graphite.git import GitError, GitLaunchError, GitUnavailableError
+from graphite.routing.diff_policy import DiffPolicyError, _run_git, inspect_diff_evidence
+from graphite.routing.worktree import WorktreeError, _run, _validate_index
 
 
 BASELINE = "a" * 40
+
+
+class _RaisingRunner:
+    """A `GitRunner` stand-in that always fails the same way."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def run(self, *_arguments: object, **_keywords: object):
+        raise self._error
+
+
+# --- which Git failure was it? ----------------------------------------------
+#
+# `git_unavailable` is the bucket for a bare `GitError`, which is really
+# `GitUnavailableError` (no executable found), `GitLaunchError` (found but would
+# not start) and `GitUnsupportedVersionError` (started but its protected config
+# is unreadable) collapsed into one string. Those have completely different
+# causes and completely different fixes, and `from None` then discards the
+# exception that would tell them apart -- so the single CI sighting in
+# graphite#37 could not be diagnosed at all. The class name is safe to surface
+# where the message is not: no path, no argv, no environment.
+
+
+def test_git_unavailable_records_which_git_error_produced_it() -> None:
+    with pytest.raises(DiffPolicyError) as excinfo:
+        _run_git(_RaisingRunner(GitLaunchError("boom")), ["status"], maximum=64)
+
+    assert excinfo.value.code == "git_unavailable"
+    assert "GitLaunchError" in str(excinfo.value)
+
+
+def test_the_stable_code_is_not_where_the_diagnostic_goes() -> None:
+    """`code` feeds the failure taxonomy and is re-raised verbatim by the
+    routing service, so widening it would be a breaking change dressed up as a
+    diagnostic. The detail belongs in the message only."""
+    with pytest.raises(DiffPolicyError) as excinfo:
+        _run_git(_RaisingRunner(GitUnavailableError("nope")), ["status"], maximum=64)
+
+    assert excinfo.value.code == "git_unavailable"
+
+
+def test_the_git_error_message_never_reaches_the_diff_policy_error() -> None:
+    """The whole point of `from None` here is that Git's own text routinely
+    embeds a path. Surfacing the class must not smuggle the message out with
+    it."""
+    private_path = r"C:\Users\someone\private\checkout\git.exe"
+
+    with pytest.raises(DiffPolicyError) as excinfo:
+        _run_git(_RaisingRunner(GitLaunchError(private_path)), ["status"], maximum=64)
+
+    assert private_path not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None, "the sanitising `from None` was dropped"
+
+
+def test_worktree_git_failures_are_labelled_the_same_way() -> None:
+    with pytest.raises(WorktreeError) as excinfo:
+        _run(_RaisingRunner(GitError("boom")), ["status"])
+
+    assert excinfo.value.code == "git_unavailable"
+    assert "GitError" in str(excinfo.value)
+
+
+def test_an_error_with_no_cause_reads_exactly_as_its_code() -> None:
+    """Existing assertions anchor on `^byte_limit$`. A diagnostic that appended
+    empty parentheses to every error would break them for no information."""
+    assert str(DiffPolicyError("git_failed")) == "git_failed"
+    assert str(WorktreeError("git_timeout")) == "git_timeout"
 
 
 def _inspect(

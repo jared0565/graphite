@@ -62,11 +62,18 @@ from .worktree import (
 
 
 class RoutingServiceError(RuntimeError):
-    """Stable orchestration failure with no repository or provider diagnostics."""
+    """Stable orchestration failure with no repository or provider diagnostics.
 
-    def __init__(self, code: str) -> None:
+    `cause` is a diagnostic carried in the MESSAGE only, and only ever an
+    exception class name -- never a message, path or argv. This is the error
+    that reaches a CI log, so a detail that does not survive to here does not
+    exist as far as anyone debugging is concerned.
+    """
+
+    def __init__(self, code: str, cause: str | None = None) -> None:
         self.code = code
-        super().__init__(code)
+        self.cause = cause
+        super().__init__(f"{code} ({cause})" if cause else code)
 
 
 class AdapterResult(Protocol):
@@ -740,7 +747,12 @@ class RoutingService:
         except (DiffPolicyError, WorktreeError) as exc:
             code = getattr(exc, "code", "diff_blocked")
             self._fail(prepared, code, quarantine=True)
-            raise RoutingServiceError(code) from None
+            # Hand the diagnostic across explicitly. Both hops raise `from None`,
+            # so anything not passed by hand dies here and the log shows a bare
+            # code -- which is precisely what graphite#37's one sighting shows.
+            # `_fail` still records the unwidened `code`: the taxonomy is stable,
+            # the message is where the detail goes.
+            raise RoutingServiceError(code, getattr(exc, "cause", None)) from None
         if prepared.attempt_id in self._review_primary and evidence.changed_files != 0:
             self._fail(prepared, "review_mutation", quarantine=True)
             raise RoutingServiceError("review_mutation")

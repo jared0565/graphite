@@ -35,11 +35,21 @@ MAX_METADATA_BYTES: Final = 8 * 1024 * 1024
 
 
 class DiffPolicyError(RuntimeError):
-    """Stable unsafe-diff failure with no changed path in its text."""
+    """Stable unsafe-diff failure with no changed path in its text.
 
-    def __init__(self, code: str) -> None:
+    `cause` is a diagnostic that rides in the MESSAGE only; `code` stays exactly
+    what the caller passed. The routing service re-raises `code` verbatim as its
+    own failure taxonomy, so widening it would be a breaking change wearing a
+    diagnostic's clothes.
+
+    Only ever set it to an exception CLASS NAME. Git's own text routinely embeds
+    a path, which is the entire reason these are raised `from None`.
+    """
+
+    def __init__(self, code: str, cause: str | None = None) -> None:
         self.code = code
-        super().__init__(code)
+        self.cause = cause
+        super().__init__(f"{code} ({cause})" if cause else code)
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,8 +353,14 @@ def _run_git(
         raise DiffPolicyError("git_timeout") from None
     except GitOutputLimitError:
         raise DiffPolicyError("byte_limit") from None
-    except GitError:
-        raise DiffPolicyError("git_unavailable") from None
+    except GitError as exc:
+        # `git_unavailable` buckets GitUnavailableError (no executable found),
+        # GitLaunchError (found, would not start) and GitUnsupportedVersionError
+        # (started, protected config unreadable). Different causes, different
+        # fixes, and `from None` then discards the one fact that separates them
+        # -- graphite#37's single CI sighting could not be taken any further
+        # than the string. The class name carries no path, argv or environment.
+        raise DiffPolicyError("git_unavailable", type(exc).__name__) from None
     if result.returncode != 0:
         raise DiffPolicyError("git_failed")
     return result.stdout
