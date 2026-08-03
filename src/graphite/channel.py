@@ -26,11 +26,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 CHANNEL_DIRNAME = ".agent-channel"
 REGISTRY_FILENAME = "agents.json"
@@ -60,7 +62,32 @@ _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 _LOCK_TIMEOUT_SECONDS = 30.0
 # Deliberately under the lock timeout: a git call that outlives the lock wait
 # would strand every other agent behind a holder that is already doomed.
+#
+# Note this holds per CALL, not per critical section. `register_agent` runs
+# `ensure_channel_hook`'s config call plus a three-call `_commit`, so a
+# perfectly healthy holder can legitimately sit for ~80s -- well over the 30s a
+# waiter is willing to wait. A `lock_timeout` is therefore not by itself
+# evidence of a wedge.
 _GIT_TIMEOUT_SECONDS = 20.0
+
+#: How long before an unreleased lock is assumed abandoned.
+#:
+#: Staleness is TTL-only, following `buildlock.py` -- read its module docstring
+#: before "improving" this. `os.kill(pid, 0)` is the obvious liveness idiom and
+#: is WRONG here: on Windows, Python's `os.kill` ignores signal 0 and calls
+#: TerminateProcess, so the portable-looking probe kills the very process it is
+#: checking. The `pid` and `host` in the record are DIAGNOSTIC ONLY -- they tell
+#: an operator who to go look at; they are never probed.
+#:
+#: 300s is ~3.7x the ~80s worst-case LEGITIMATE hold derived above. The margin
+#: is lopsided on purpose: breaking a live lock puts two writers in the critical
+#: section, which is the exact failure this lock exists to prevent, and a torn
+#: status directory is worse than a wedge that clears itself five minutes later.
+_LOCK_STALE_SECONDS = 300.0
+
+#: Channel content whose orphaned presence changes behaviour. Everything else a
+#: dead holder might leave behind is inert.
+_RESIDUE_PREFIXES = (f"{STATUS_DIRNAME}/", f"{ROUNDS_DIRNAME}/", REGISTRY_FILENAME)
 
 
 class ChannelError(Exception):
@@ -256,7 +283,7 @@ def register_agent(root: Path, project_root: Path, agent: str) -> dict:
             f"{agent!r} must look like `name-agent` (lowercase, hyphen-separated)",
         )
 
-    with _Lock(root):
+    with _Lock(root) as lock:
         registry_path = root / REGISTRY_FILENAME
         raw: dict[str, str] = {}
         if registry_path.is_file():
@@ -296,7 +323,10 @@ def register_agent(root: Path, project_root: Path, agent: str) -> dict:
             "graphite-agent" if "graphite-agent" in raw.values() else agent,
         )
 
-    return {"ok": True, "agent": agent, "path": key, "previous": previous, "commit": commit}
+    result = {"ok": True, "agent": agent, "path": key, "previous": previous, "commit": commit}
+    if lock.recovered is not None:
+        result["lock_recovered"] = lock.recovered
+    return result
 
 
 def derive_identity(root: Path, project_root: Path) -> str:
@@ -465,29 +495,162 @@ def _commit(root: Path, paths: list[str], subject: str, agent: str) -> str:
     return _git(root, "rev-parse", "--short", "HEAD").strip()
 
 
+def _uncommitted_residue(root: Path) -> list[str]:
+    """Channel files an abandoned holder left behind uncommitted.
+
+    Automatic recovery makes this MORE important, not less. `status_events`
+    reads from DISK, so an orphaned `status/NNN/*.json` written by a holder that
+    died before committing silently suppresses redelivery of that round. While
+    clearing the lock was a manual act it came with an instruction to go and
+    look; once the lock clears itself, nobody is looking unless we say so.
+
+    Best-effort by construction: this runs while we hold nothing, and a failure
+    to scan must never block a recovery that is otherwise safe.
+    """
+    try:
+        # `--untracked-files=all`: bare `--porcelain` collapses a wholly
+        # untracked directory to `status/`, which is precisely the filename an
+        # operator needs in order to go and look at it.
+        porcelain = _git(root, "status", "--porcelain", "--untracked-files=all", check=False)
+    except ChannelError:
+        return []
+    residue = set()
+    for line in porcelain.splitlines():
+        path = line[3:].strip().strip('"')
+        if path.startswith(_RESIDUE_PREFIXES):
+            residue.add(path)
+    return sorted(residue)
+
+
 class _Lock:
     """Exclusive lock so concurrent allocations cannot collide on a number.
 
     Create-only writes keep the critical section tiny -- allocate, write, commit
     -- because nothing is ever read-modify-written.
+
+    A holder that is *killed* never runs `__exit__`, and the lock it leaves has
+    no expiry of its own: bounding `_git` covers a holder that stalls, not one
+    that dies. So the file carries `{pid, started_at, host}` and is broken once
+    it passes `_LOCK_STALE_SECONDS`.
     """
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        clock: Callable[[], float] = time.time,
+        stale_seconds: float = _LOCK_STALE_SECONDS,
+    ) -> None:
+        self.root = root
         self.path = root / ".channel.lock"
+        # `time.time`, never `time.monotonic`: the deadline below is monotonic
+        # and it is right there to copy, but monotonic values are meaningless
+        # across processes, which is the only comparison staleness makes.
+        self._clock = clock
+        self._stale_seconds = stale_seconds
+        self._record: dict | None = None
+        #: Set when this acquisition had to break an abandoned lock. Callers
+        #: surface it, because a silent recovery would hide both the crash and
+        #: whatever the dead holder left half-written.
+        self.recovered: dict | None = None
+
+    def _read_record(self) -> dict | None:
+        """The holder's record, or None if absent, unreadable, or not a dict."""
+        try:
+            loaded = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return loaded if isinstance(loaded, dict) else None
+
+    @staticmethod
+    def _identity(record: dict | None) -> tuple | None:
+        return None if record is None else (record.get("pid"), record.get("started_at"))
+
+    def _is_stale(self, record: dict | None) -> bool:
+        started = None if record is None else record.get("started_at")
+        if not isinstance(started, (int, float)) or isinstance(started, bool):
+            # No usable timestamp: absent, garbage, or a record still being
+            # written. Fall back to the file's own mtime rather than declaring
+            # it stale outright. `_acquire` creates the file with O_EXCL and
+            # writes the record immediately after, so "created, not yet written"
+            # is a normal state on the ORDINARY path -- calling unparseable
+            # content instantly stale would let a competing waiter break a lock
+            # that had just been legitimately taken, on every contended
+            # acquisition rather than only in some rare recovery. Garbage still
+            # ages out; it just ages out by the clock rather than at sight.
+            try:
+                started = self.path.stat().st_mtime
+            except OSError:
+                return True  # already gone: there is nothing left to protect
+        return (self._clock() - float(started)) > self._stale_seconds
+
+    def _acquire(self) -> bool:
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        record = {"pid": os.getpid(), "started_at": float(self._clock()), "host": socket.gethostname()}
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(record, handle)
+        self._record = record
+        return True
+
+    def _break_if_abandoned(self) -> bool:
+        """Remove an abandoned lock. True when this call removed one.
+
+        The record is read TWICE and both reads must agree. Several agents
+        wedged behind one dead holder all judge it stale at the same moment; the
+        first breaker unlinks and immediately re-creates the lock for itself,
+        and without the confirming read every other breaker would then unlink
+        that FRESH lock in turn and all of them would enter the critical section
+        together. Two writers here is the failure the lock exists to prevent.
+
+        What survives is a single-syscall window between the confirming read and
+        the unlink -- the same residual `buildlock` already ships with, and it
+        is reachable only if the holder we just judged dead releases within it.
+        """
+        first = self._read_record()
+        if not self._is_stale(first):
+            return False
+        if self._identity(self._read_record()) != self._identity(first):
+            return False
+        try:
+            self.path.unlink()
+        except OSError:
+            return False
+        held_for = None
+        started = (first or {}).get("started_at")
+        if isinstance(started, (int, float)) and not isinstance(started, bool):
+            held_for = round(self._clock() - float(started), 1)
+        self.recovered = {
+            "pid": (first or {}).get("pid"),
+            "host": (first or {}).get("host"),
+            "held_seconds": held_for,
+            "residue": _uncommitted_residue(self.root),
+        }
+        return True
 
     def __enter__(self) -> _Lock:
         deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
         while True:
-            try:
-                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
+            if self._acquire():
                 return self
-            except FileExistsError:
-                if time.monotonic() >= deadline:
-                    raise ChannelError("lock_timeout", f"channel lock held at {self.path}") from None
-                time.sleep(0.05)
+            if self._break_if_abandoned() and self._acquire():
+                return self
+            if time.monotonic() >= deadline:
+                held = self._identity(self._read_record())
+                raise ChannelError(
+                    "lock_timeout",
+                    f"channel lock held at {self.path} by {held}",
+                ) from None
+            time.sleep(0.05)
 
     def __exit__(self, *_exc: object) -> None:
+        # Release only what we still hold. If a break ever does overlap two
+        # holders, unlinking someone else's lock on the way out would turn that
+        # single overlap into a cascade.
+        if self._identity(self._read_record()) != self._identity(self._record):
+            return
         try:
             self.path.unlink()
         except FileNotFoundError:
@@ -522,7 +685,7 @@ def post_round(
     if not title.strip():
         raise ChannelError("empty_title", "a round needs a title")
 
-    with _Lock(root):
+    with _Lock(root) as lock:
         number = _force_number if _force_number is not None else next_round_number(root)
         stamped = _now()
         name = f"{stamped[:10]}-{agent.removesuffix('-agent')}-round-{number}-{_slug(title)}.md"
@@ -548,7 +711,7 @@ def post_round(
             agent,
         )
 
-    return {
+    result = {
         "ok": True,
         "round": number,
         "path": str(target),
@@ -556,6 +719,11 @@ def post_round(
         "commit": commit,
         "posted": stamped,
     }
+    # Only present when it happened. A key on every response would be noise,
+    # and this one has to read as an event.
+    if lock.recovered is not None:
+        result["lock_recovered"] = lock.recovered
+    return result
 
 
 # --- status: an append-only event log ---------------------------------------
@@ -601,7 +769,7 @@ def _write_status_event(
     broker: bool,
     reason: str | None = None,
 ) -> dict:
-    with _Lock(root):
+    with _Lock(root) as lock:
         directory = _status_dir(root, number)
         directory.mkdir(parents=True, exist_ok=True)
         seq = len(list(directory.glob("*.json"))) + 1
@@ -630,6 +798,10 @@ def _write_status_event(
             f"round {number}: {status}",
             actor,
         )
+    # Added after the write, like `commit` above, so it stays out of the on-disk
+    # event: this describes the acquisition, not what was recorded.
+    if lock.recovered is not None:
+        event["lock_recovered"] = lock.recovered
     return event
 
 
