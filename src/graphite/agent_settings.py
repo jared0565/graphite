@@ -13,7 +13,29 @@ from typing import Any
 
 from .io import atomic_write_text
 
-HOOK_COMMAND_PREFIX = "python -m graphite agent-hook"
+# `-P` omits the working directory from `sys.path` (3.11+). Without it,
+# `python -m graphite` puts the CWD at `sys.path[0]`, so a `graphite.py` -- or a
+# `graphite/` directory -- in a managed repo's root wins over the installed
+# package and the hook executes it. The pre-tool-use hook fires on EVERY tool
+# use, so such a file never has to be invoked by anyone: it runs on the next
+# agent action after it lands. `.claude/settings.json` is tracked in consumer
+# repos, so it would arrive through an ordinary reviewed commit, and `init`
+# ships this identical command line to every managed repo.
+#
+# Reported by aramid-agent (channel round 49) and reproduced here: with a
+# `graphite.py` in the CWD, bare `python -m graphite --version` ran the shadow
+# file; `python -P -m graphite --version` ran graphite.
+#
+# `-P` over PYTHONSAFEPATH=1 because it is visible in the command string itself,
+# which matters for a generated file an operator audits by reading.
+HOOK_COMMAND_PREFIX = "python -P -m graphite agent-hook"
+# Every prefix graphite has ever written. Load-bearing, not history: this string
+# is both what we WRITE and what we MATCH to find our own hooks. A matcher that
+# knew only the current spelling would fail to strip the legacy hook from an
+# already-onboarded repo (leaving two, the vulnerable one still firing) and
+# would make `existing_mode` return None, silently downgrading every strict repo
+# to DEFAULT_MODE on its next `init`. Never drop an entry; only ever append.
+_OWNED_COMMAND_PREFIXES = (HOOK_COMMAND_PREFIX, "python -m graphite agent-hook")
 DEFAULT_MODE = "remind"
 _MODES = ("remind", "strict")
 _SESSION_START_COMMAND = f"{HOOK_COMMAND_PREFIX} session-start"
@@ -25,7 +47,7 @@ def _pre_tool_use_command(mode: str) -> str:
 
 
 def _is_graphite_command(hook: Any) -> bool:
-    return isinstance(hook, dict) and str(hook.get("command", "")).startswith(HOOK_COMMAND_PREFIX)
+    return isinstance(hook, dict) and str(hook.get("command", "")).startswith(_OWNED_COMMAND_PREFIXES)
 
 
 def _strip_graphite(groups: Any) -> list[Any]:
@@ -67,7 +89,7 @@ def existing_mode(root: Path) -> str | None:
             continue
         for hook in entry.get("hooks", []) if isinstance(entry.get("hooks"), list) else []:
             command = str(hook.get("command", "")) if isinstance(hook, dict) else ""
-            if command.startswith(HOOK_COMMAND_PREFIX) and "pre-tool-use" in command:
+            if command.startswith(_OWNED_COMMAND_PREFIXES) and "pre-tool-use" in command:
                 return "strict" if "--mode strict" in command else "remind"
     return None
 

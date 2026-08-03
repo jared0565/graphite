@@ -374,7 +374,7 @@ def test_init_installs_agent_hook_wiring_and_allowlists_it(tmp_path: Path) -> No
         for entry in settings["hooks"]["PreToolUse"]
         for h in entry["hooks"]
     ]
-    assert "python -m graphite agent-hook pre-tool-use --mode strict" in commands
+    assert "python -P -m graphite agent-hook pre-tool-use --mode strict" in commands
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     lines = gitignore.splitlines()
     assert "!/.claude/" in lines
@@ -429,7 +429,7 @@ def test_init_wires_stop_hook(tmp_path: Path) -> None:
     init_project(tmp_path, platforms=["claude"])
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
     commands = [h["command"] for entry in settings["hooks"]["Stop"] for h in entry["hooks"]]
-    assert commands == ["python -m graphite agent-hook stop"]
+    assert commands == ["python -P -m graphite agent-hook stop"]
 
 
 def test_doc_version_is_14_and_template_documents_answer_contract():

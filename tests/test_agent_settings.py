@@ -26,9 +26,9 @@ def test_fresh_install_writes_both_events_remind_mode(tmp_path: Path) -> None:
     assert result["changed"] is True
     assert result["action"] == "created"
     assert result["mode"] == "remind"
-    assert _commands(settings, "PreToolUse") == ["python -m graphite agent-hook pre-tool-use --mode remind"]
+    assert _commands(settings, "PreToolUse") == ["python -P -m graphite agent-hook pre-tool-use --mode remind"]
     assert settings["hooks"]["PreToolUse"][0]["matcher"] == "Grep|Glob|Bash|PowerShell"
-    assert _commands(settings, "SessionStart") == ["python -m graphite agent-hook session-start"]
+    assert _commands(settings, "SessionStart") == ["python -P -m graphite agent-hook session-start"]
 
 
 def test_reinstall_is_idempotent(tmp_path: Path) -> None:
@@ -61,9 +61,9 @@ def test_preserves_foreign_settings_and_hooks(tmp_path: Path) -> None:
 
     assert settings["model"] == "opus"
     assert "echo custom" in _commands(settings, "PreToolUse")
-    assert any(c.startswith("python -m graphite agent-hook pre-tool-use") for c in _commands(settings, "PreToolUse"))
+    assert any(c.startswith("python -P -m graphite agent-hook pre-tool-use") for c in _commands(settings, "PreToolUse"))
     assert "echo bye" in _commands(settings, "Stop")
-    assert "python -m graphite agent-hook stop" in _commands(settings, "Stop")
+    assert "python -P -m graphite agent-hook stop" in _commands(settings, "Stop")
 
 
 def test_replaces_stale_graphite_entries_on_reinit(tmp_path: Path) -> None:
@@ -90,7 +90,7 @@ def test_replaces_stale_graphite_entries_on_reinit(tmp_path: Path) -> None:
 
     assert result["changed"] is True
     commands = _commands(settings, "PreToolUse")
-    assert commands == ["python -m graphite agent-hook pre-tool-use --mode remind"]
+    assert commands == ["python -P -m graphite agent-hook pre-tool-use --mode remind"]
     assert settings["hooks"]["PreToolUse"][0]["matcher"] == "Grep|Glob|Bash|PowerShell"
 
 
@@ -137,7 +137,7 @@ def test_non_dict_hooks_value_is_a_noop(tmp_path: Path) -> None:
 def test_fresh_install_wires_stop_hook(tmp_path: Path) -> None:
     ensure_claude_settings(tmp_path)
     settings = _settings(tmp_path)
-    assert _commands(settings, "Stop") == ["python -m graphite agent-hook stop"]
+    assert _commands(settings, "Stop") == ["python -P -m graphite agent-hook stop"]
 
 
 def test_spec_a_shaped_settings_gain_stop_on_reinit(tmp_path: Path) -> None:
@@ -167,5 +167,105 @@ def test_spec_a_shaped_settings_gain_stop_on_reinit(tmp_path: Path) -> None:
 
     assert result["changed"] is True
     assert result["mode"] == "strict"  # preserved across the upgrade
-    assert _commands(settings, "Stop") == ["python -m graphite agent-hook stop"]
+    assert _commands(settings, "Stop") == ["python -P -m graphite agent-hook stop"]
     assert "--mode strict" in _commands(settings, "PreToolUse")[0]
+
+
+# --- graphite#49: bare `python -m` lets a local graphite.py shadow the package -
+
+
+def test_hook_commands_omit_the_working_directory_from_sys_path(tmp_path: Path) -> None:
+    """Every generated hook must run the interpreter with `-P`.
+
+    `python -m X` puts the CWD at `sys.path[0]`, so a `graphite.py` in a repo
+    root wins over the installed package and the hook executes it instead. The
+    pre-tool-use hook fires on every tool use, so such a file never has to be
+    invoked by anyone -- it runs on the next agent action after it lands. And
+    `.claude/settings.json` is tracked, so it would arrive through an ordinary
+    reviewed commit.
+
+    Reproduced before fixing: with a `graphite.py` in the CWD, bare
+    `python -m graphite --version` printed the shadow file's output, while
+    `python -P -m graphite --version` printed graphite's usage.
+
+    Reported by aramid-agent, channel round 49.
+    """
+    ensure_claude_settings(tmp_path, mode="strict")
+    settings = _settings(tmp_path)
+
+    for event in ("PreToolUse", "SessionStart", "Stop"):
+        for command in _commands(settings, event):
+            assert command.startswith("python -P -m graphite agent-hook"), (event, command)
+
+
+def test_install_replaces_a_legacy_bare_hook_rather_than_duplicating_it(tmp_path: Path) -> None:
+    """The old command must still be recognised as graphite-owned, and stripped.
+
+    The command prefix is both what we WRITE and what we MATCH on to find our
+    own hooks. Changing it without teaching the matcher the old spelling would
+    leave every already-onboarded repo with the legacy hook unstripped and the
+    new one appended beside it -- two hooks, the vulnerable one still firing.
+    """
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    (claude / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Grep|Glob|Bash|PowerShell",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "python -m graphite agent-hook pre-tool-use --mode strict",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ensure_claude_settings(tmp_path)
+
+    commands = _commands(_settings(tmp_path), "PreToolUse")
+    assert commands == ["python -P -m graphite agent-hook pre-tool-use --mode strict"]
+
+
+def test_legacy_bare_hook_still_reports_its_mode(tmp_path: Path) -> None:
+    """A strict repo must not be silently downgraded to remind by the migration.
+
+    `ensure_claude_settings` resolves the mode as
+    `mode or existing_mode(root) or DEFAULT_MODE`, and DEFAULT_MODE is "remind".
+    So if the new prefix stopped matching the legacy command, `existing_mode`
+    would return None and every already-strict repo would quietly drop to
+    remind on the next `graphite init` -- a security downgrade produced by a
+    security fix, and invisible in the diff.
+    """
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    (claude / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "python -m graphite agent-hook pre-tool-use --mode strict",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert existing_mode(tmp_path) == "strict"
+    assert ensure_claude_settings(tmp_path)["mode"] == "strict"
