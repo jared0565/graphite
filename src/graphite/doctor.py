@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Literal, Mapping
 
+from .agent_settings import classify_hook_command, read_settings
 from .config import Config, default_projects_root
 from .daemon import read_daemon_status
 from .daemon_health import HealthOptions, evaluate_daemon_health
@@ -187,6 +188,67 @@ def check_hooks(root: Path) -> DoctorCheck:
     if installed and not configured:
         return DoctorCheck("hooks", "Hooks", "degraded", "Graphite's hook trampolines are installed but core.hooksPath is not set, so Git will not run them.", details, ("Run `git config core.hooksPath` to point at the installed hooks directory, or reinstall.",))
     return DoctorCheck("hooks", "Hooks", "degraded", "Git hooks are not installed for this onboarded repository.", details, ("Run `graphite init` to install git hooks.",))
+
+
+#: Claude Code's own hook events. An event name is a KEY read out of the
+#: consumer's settings file, so it is attacker-controllable; anything unknown is
+#: bucketed rather than echoed. That is what makes "details carry no absolute
+#: path" a property of this code instead of a property of well-behaved input.
+_AGENT_HOOK_EVENTS = frozenset({
+    "PreToolUse", "PostToolUse", "UserPromptSubmit", "Notification",
+    "SessionStart", "SessionEnd", "Stop", "SubagentStop", "PreCompact",
+})
+
+
+def check_agent_hooks(root: Path) -> DoctorCheck:
+    """Foreign `.claude/settings.json` hooks that invoke graphite shadowably.
+
+    graphite owns only the `agent-hook` commands it writes and leaves every
+    other hook byte-identical -- silently rewriting someone else's hook would be
+    worse than the bug. So a consumer's own hook keeps the exact defect
+    `67aafb2` and #43 removed from graphite's own. This reports them and never
+    repairs them (graphite#42).
+
+    Two rules hold the details together:
+
+    * **No command text, ever.** These commands are mostly absolute path, and
+      `check_hooks` already established that details carry none. The
+      classification is reported instead, which is inherently path-free.
+    * **Unreadable is not clean.** A malformed settings file is `degraded`, so
+      an absent finding can never be mistaken for a verified-safe one.
+    """
+    if not (root / "GRAPHITE.md").is_file():
+        return DoctorCheck("agent-hooks", "Agent hooks", "optional", "Repository is not onboarded onto graphite; agent hook wiring does not apply.", {"onboarded": False})
+
+    settings = read_settings(root)
+    if settings is None:
+        return DoctorCheck(
+            "agent-hooks", "Agent hooks", "degraded",
+            "`.claude/settings.json` could not be parsed, so its hooks were not inspected.",
+            {"onboarded": True, "settings_readable": False, "foreign_graphite_hooks": 0, "findings": ()},
+            ("Repair the JSON in `.claude/settings.json`, then re-run `graphite doctor`.",),
+        )
+
+    hooks = settings.get("hooks")
+    findings: list[dict[str, str]] = []
+    for event, groups in (hooks.items() if isinstance(hooks, dict) else ()):
+        label = event if isinstance(event, str) and event in _AGENT_HOOK_EVENTS else "other"
+        for entry in groups if isinstance(groups, list) else []:
+            nested = entry.get("hooks") if isinstance(entry, dict) else None
+            for hook in nested if isinstance(nested, list) else []:
+                form = classify_hook_command(hook.get("command")) if isinstance(hook, dict) else None
+                if form is not None:
+                    findings.append({"event": label, "form": form})
+
+    details = {"onboarded": True, "settings_readable": True, "foreign_graphite_hooks": len(findings), "findings": tuple(findings)}
+    if not findings:
+        return DoctorCheck("agent-hooks", "Agent hooks", "ready", "No hook outside graphite's own invokes it in a shadowable form.", details)
+    return DoctorCheck(
+        "agent-hooks", "Agent hooks", "degraded",
+        f"{len(findings)} hook(s) graphite does not own invoke it in a form a repo-local `graphite.py` can hijack, exiting 0 while doing nothing of graphite's.",
+        details,
+        ("Rewrite each as `python -P -m graphite ...`. A bare `graphite ...` console script cannot express the fix -- it has to change form.",),
+    )
 
 
 def _scoped_output(root: Path, cfg: Config) -> Path:
@@ -586,7 +648,7 @@ def _incidents_check(root: Path) -> DoctorCheck:
 
 
 def _fast_checks(root: Path, cfg: Config, daemon_base: Path | None) -> list[DoctorCheck]:
-    checks: list[tuple[str, str, Callable[[], DoctorCheck]]] = [("python", "Python", check_python), ("git", "Git", lambda: check_git(root)), ("hooks", "Hooks", lambda: check_hooks(root)), ("managed-docs", "Managed docs", lambda: check_managed_docs(root)), ("graph", "Graph", lambda: check_graph(root, cfg)), ("daemon", "Daemon", lambda: check_daemon(root, daemon_base or root)), ("mcp", "MCP", check_mcp), ("typescript", "TypeScript", lambda: check_typescript(root)), ("llm", "LLM", lambda: check_llm_config(cfg)), ("incidents", "Incident ledger", lambda: _incidents_check(root))]
+    checks: list[tuple[str, str, Callable[[], DoctorCheck]]] = [("python", "Python", check_python), ("git", "Git", lambda: check_git(root)), ("hooks", "Hooks", lambda: check_hooks(root)), ("agent-hooks", "Agent hooks", lambda: check_agent_hooks(root)), ("managed-docs", "Managed docs", lambda: check_managed_docs(root)), ("graph", "Graph", lambda: check_graph(root, cfg)), ("daemon", "Daemon", lambda: check_daemon(root, daemon_base or root)), ("mcp", "MCP", check_mcp), ("typescript", "TypeScript", lambda: check_typescript(root)), ("llm", "LLM", lambda: check_llm_config(cfg)), ("incidents", "Incident ledger", lambda: _incidents_check(root))]
     results = []
     for code, label, check in checks:
         try:
