@@ -4,7 +4,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from graphite.agent_settings import ensure_claude_settings, existing_mode
+from graphite.agent_settings import (
+    classify_hook_command,
+    ensure_claude_settings,
+    existing_mode,
+    read_settings,
+)
 
 
 def _settings(root: Path) -> dict:
@@ -269,3 +274,89 @@ def test_legacy_bare_hook_still_reports_its_mode(tmp_path: Path) -> None:
 
     assert existing_mode(tmp_path) == "strict"
     assert ensure_claude_settings(tmp_path)["mode"] == "strict"
+
+
+# --- read_settings: the tri-state is the contract -----------------------------
+#
+# `{}` absent and `None` malformed are DIFFERENT answers, and collapsing them is
+# how a corrupt file comes to read as a clean one. `doctor.check_agent_hooks`
+# turns `None` into a `degraded` finding precisely so that "no findings" can
+# never mean "could not look" -- so these two return values are load-bearing,
+# not an implementation detail.
+
+
+def test_read_settings_returns_empty_dict_when_absent(tmp_path: Path) -> None:
+    assert read_settings(tmp_path) == {}
+
+
+def test_read_settings_returns_the_parsed_mapping(tmp_path: Path) -> None:
+    ensure_claude_settings(tmp_path)
+
+    settings = read_settings(tmp_path)
+
+    assert isinstance(settings, dict)
+    assert "hooks" in settings
+
+
+def test_read_settings_returns_none_for_malformed_json(tmp_path: Path) -> None:
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text("{not json", encoding="utf-8")
+
+    assert read_settings(tmp_path) is None
+
+
+def test_read_settings_returns_none_for_valid_json_that_is_not_a_mapping(tmp_path: Path) -> None:
+    """`[]` parses fine and would then blow up on `.get`. Distinguished from
+    absent, because a settings file that is a list is corrupt, not empty."""
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text("[1, 2]", encoding="utf-8")
+
+    assert read_settings(tmp_path) is None
+
+
+def test_read_settings_returns_none_when_the_path_cannot_be_read(tmp_path: Path) -> None:
+    # A directory where the file should be: `exists()` is True, `read_text`
+    # raises OSError. Unreadable must not be reported as absent.
+    (tmp_path / ".claude" / "settings.json").mkdir(parents=True)
+
+    assert read_settings(tmp_path) is None
+
+
+# --- classify_hook_command: the branches the doctor tests do not reach --------
+
+
+def test_classify_declines_to_guess_at_an_unparseable_command() -> None:
+    """Unbalanced quotes. Reporting a command we could not lex would be a
+    finding built on a guess."""
+    assert classify_hook_command('graphite build "unterminated') is None
+
+
+def test_classify_ignores_empty_and_non_string_commands() -> None:
+    for command in ("", "   ", None, 42, ["graphite"]):
+        assert classify_hook_command(command) is None, command
+
+
+def test_classify_sees_through_an_absolute_interpreter_path() -> None:
+    """The head is a path, not the bare name `python` -- the stem is what
+    matters, or every hook written with a full interpreter path goes unchecked."""
+    assert classify_hook_command(r"C:\Python314\python.exe -m graphite build .") == "python_m_without_P"
+
+
+def test_classify_does_not_match_a_module_that_merely_starts_with_graphite() -> None:
+    """`graphitex` is somebody else's package. Prefix-matching the module name
+    would report a hook that has nothing to do with us."""
+    assert classify_hook_command("python -m graphitex build .") is None
+
+
+def test_classify_handles_a_dangling_dash_m() -> None:
+    assert classify_hook_command("python -m") is None
+
+
+def test_classify_accepts_the_windows_console_script_spelling() -> None:
+    assert classify_hook_command("graphite.exe build .") == "console_script"
+
+
+def test_classify_treats_a_graphite_submodule_invocation_as_ours_to_flag() -> None:
+    """`-m graphite.hook_entry` is the trampoline's form (graphite#43). Shadowed
+    identically, so the module's ROOT package is what decides."""
+    assert classify_hook_command("python -m graphite.hook_entry") == "python_m_without_P"
