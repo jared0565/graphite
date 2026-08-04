@@ -52,6 +52,13 @@ def render_trigger_shim(hook: str, interpreter: Path) -> bytes:
     * **Never a bare `python`.** This machine exposes several interpreters to
       hook `sh`, including the WindowsApps store stub, so the absolute path is
       baked in with `py -3` as the only fallback.
+    * **`-P` on both arms, always** (graphite#43). `python -m X` puts the CWD at
+      `sys.path[0]` and git runs hooks from the top of the working tree, so a
+      `graphite.py` or `graphite/` at a managed repo's root otherwise wins over
+      the installed package. The redirect and `|| true` below make that hijack
+      invisible, and the module-shaped shadow *executes* on the way to its
+      `ModuleNotFoundError` -- so erroring out is not a mitigation. Both arms
+      need it independently; one flagless arm is the whole way in.
 
     All three triggers are `post-*`, where git ignores the exit code, so the
     chained hook's failure is swallowed with `|| true` and the shim ends with
@@ -68,9 +75,9 @@ def render_trigger_shim(hook: str, interpreter: Path) -> bytes:
         "fi",
         f'INTERP="{interp}"',
         'if [ -x "$INTERP" ]; then',
-        '    "$INTERP" -m graphite.hook_entry >/dev/null 2>&1 || true',
+        '    "$INTERP" -P -m graphite.hook_entry >/dev/null 2>&1 || true',
         "elif command -v py >/dev/null 2>&1; then",
-        "    py -3 -m graphite.hook_entry >/dev/null 2>&1 || true",
+        "    py -3 -P -m graphite.hook_entry >/dev/null 2>&1 || true",
         "fi",
         MARKER_END,
         "exit 0",
