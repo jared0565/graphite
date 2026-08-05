@@ -2333,7 +2333,17 @@ def test_core_deep_probe_uses_one_total_budget_and_maps_cleanup_error(tmp_path: 
     ])
     def run(*args: object, timeout_seconds: float, **kwargs: object) -> object:
         timeouts.append(timeout_seconds)
-        time.sleep(0.01)
+        # Must exceed the COARSEST monotonic tick on any supported interpreter,
+        # not just this one. The budget is clock-derived, so a sleep shorter than
+        # one tick lets two successive reads land in the same tick and the strict
+        # `>` below compares a float to itself.
+        #
+        # Measured: Windows `time.monotonic()` is `GetTickCount64()` at ~15.6ms
+        # resolution on 3.11/3.12, and `QueryPerformanceCounter()` at 1e-07 from
+        # 3.13. The old 0.01 sleep sat UNDER the 3.11/3.12 tick, so this test
+        # failed there with `assert 0.7840000000000487 > 0.7840000000000487` --
+        # invisible on the 3.14 the gate runs. Found by the portability matrix.
+        time.sleep(0.05)
         return probes.ProbeProcessResult(0, next(outputs), b"", 0.01)
     assert probes.probe_core_pipeline(tmp_path, timeout_seconds=1, _runner=run).status == "ready"
     assert timeouts[0] > timeouts[1] > timeouts[2] > 0
