@@ -87,23 +87,39 @@ jobs:
   # and every other Python unmeasured. That is the sample-size-of-1 trap the
   # `concurrency` group above already had to defuse once.
   #
-  # Deliberately NOT run on push: nine extra legs on every commit to main is a
+  # Deliberately NOT run on push: extra legs on every commit to main is a
   # standing cost for a question that only needs re-asking when support claims
   # or dependencies change. Dispatch it, or open a PR.
+  #
+  # SCOPE IS DELIBERATELY SMALL, and it cost real money to learn why. The first
+  # version ran 9 legs including 4x ubuntu and 2x macOS. The ubuntu legs HANG and
+  # burn the full timeout doing nothing (#45), and macOS bills at a **10x minute
+  # multiplier**. Three runs of that matrix exhausted the account's Actions
+  # allowance and took CI down for the whole repository -- gating job included.
+  #
+  # An instrument nobody can afford to run is not an instrument. Those legs are
+  # not deleted, they are BANKED: #45 and #46 hold their findings in full, so
+  # re-running them re-learns what is already written down. Restore them while
+  # working those issues, not before:
+  #
+  #     - { os: ubuntu-latest, python: "3.11" }   # ... 3.12, 3.13, 3.14  -> #45
+  #     - { os: macos-latest,  python: "3.11" }   # ... and 3.14          -> #46
+  #
+  # What remains is the cheap, currently-actionable question: does graphite work
+  # on the Python versions it CLAIMS, on the platform it already supports? Three
+  # windows legs at the 2x multiplier, ~8 minutes each.
   portability:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     continue-on-error: true
-    timeout-minutes: 45
+    # 20, not the gating job's 45. The suite takes ~8 minutes here, so a leg
+    # still running at 20 has already answered the question -- it is hung. The
+    # original 45 was copied from `test` without asking what it was for, and it
+    # is what made each hung ubuntu leg cost three quarters of an hour.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, python: "3.11" }
-          - { os: ubuntu-latest, python: "3.12" }
-          - { os: ubuntu-latest, python: "3.13" }
-          - { os: ubuntu-latest, python: "3.14" }
-          - { os: macos-latest, python: "3.11" }
-          - { os: macos-latest, python: "3.14" }
           - { os: windows-latest, python: "3.11" }
           - { os: windows-latest, python: "3.12" }
           - { os: windows-latest, python: "3.13" }
