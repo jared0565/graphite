@@ -8,8 +8,9 @@ that fails to parse is never modified.
 from __future__ import annotations
 
 import json
+import re
 import shlex
-from pathlib import Path, PurePath
+from pathlib import Path
 from typing import Any
 
 from .io import atomic_write_text
@@ -97,6 +98,22 @@ def read_settings(root: Path) -> dict[str, Any] | None:
 _CONSOLE_SCRIPT_STEMS = frozenset({"graphite"})
 _INTERPRETER_STEMS = frozenset({"python", "python3", "py", "pythonw"})
 
+#: Split on BOTH separators rather than using `PurePath`, whose `.name` follows
+#: the HOST's flavour: on POSIX, `PurePath(r"C:\Python314\python.exe").name` is
+#: the whole string, so a Windows-spelled hook command went unclassified on any
+#: non-Windows host. A hook command is data read out of a file, not a path on
+#: the machine reading it, so host semantics are the wrong tool entirely.
+#: Caught by the portability matrix on macOS; never observable on Windows.
+_PATH_SEPARATORS = re.compile(r"[\\/]")
+
+
+def _executable_stem(token: str) -> str:
+    """`C:\\Python314\\python.exe` and `/usr/bin/python3` -> `python`, `python3`.
+
+    Identical on every host by construction.
+    """
+    return _PATH_SEPARATORS.split(token.strip('"'))[-1].lower().removesuffix(".exe")
+
 
 def classify_hook_command(command: Any) -> str | None:
     """Which shadowable invocation form this hook uses, else `None`.
@@ -123,7 +140,7 @@ def classify_hook_command(command: Any) -> str | None:
         return None  # unbalanced quotes: decline to guess
     if not tokens:
         return None
-    stem = PurePath(tokens[0].strip('"')).name.lower().removesuffix(".exe")
+    stem = _executable_stem(tokens[0])
     if stem in _CONSOLE_SCRIPT_STEMS:
         return "console_script"
     if stem not in _INTERPRETER_STEMS:
