@@ -532,7 +532,7 @@ def test_daemon_health_invalid_project_count_falls_back_to_valid_projects(
 
 
 def test_daemon_health_mixed_schema_classifies_only_valid_projects_and_formats_safely(tmp_path: Path) -> None:
-    secret = "F:/Projects/DO-NOT-LEAK"
+    secret = "F:/Projects/DO-NOT-LEAK"  # noqa: S105 -- redaction sentinel, not a credential
     projects = [
         _project("F:/Projects/good", last_error="failed"),
         _project(secret, build_count="bad"),
@@ -644,6 +644,7 @@ def test_daemon_health_rejects_oversized_status_before_json_parse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     sparse: bool,
+    assert_json_omits,
 ) -> None:
     state = tmp_path / ".graphite-daemon"
     state.mkdir()
@@ -664,7 +665,17 @@ def test_daemon_health_rejects_oversized_status_before_json_parse(
     )
 
     assert [issue["code"] for issue in report["errors"]] == ["status_too_large"]
-    assert str(status_path) not in json.dumps(report)
+    # Was `assert str(status_path) not in json.dumps(report)`, which asserted the
+    # absence of a field `_finalize` writes ON PURPOSE (`status_path`, printed by
+    # `format_health_text` as "status file: ..."). Unsatisfiable in principle; it
+    # only ever passed because `json.dumps` doubles backslashes, so a Windows path
+    # cannot match its own serialised form. The portability matrix failed it on
+    # macOS the first time it ran.
+    #
+    # The property actually worth guarding here is that the oversized file's
+    # CONTENTS never reach the report -- echoing a rejected multi-megabyte blob
+    # would be the real defect, and it is true on every platform.
+    assert_json_omits("X" * 64, report)
 
 
 def test_daemon_status_stream_requests_at_most_limit_plus_one() -> None:
@@ -843,7 +854,7 @@ def test_daemon_health_exposes_only_aggregate_provider_lifecycle_codes(tmp_path:
 
 
 def test_daemon_health_rejects_provider_lifecycle_payload_that_could_leak(tmp_path: Path) -> None:
-    secret = "Bearer SECRET from C:/private/provider.exe?token=value"
+    secret = "Bearer SECRET from C:/private/provider.exe?token=value"  # noqa: S105 -- redaction sentinel, not a credential
     payload = _status("2026-06-23T12:00:30+00:00")
     payload["provider_lifecycle"] = {
         "status": "degraded",

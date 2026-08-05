@@ -49,7 +49,7 @@ def test_routing_enums_have_stable_public_values() -> None:
     assert FailureReason.GRAPH_STALE.value == "graph_stale"
 
 
-def test_contracts_are_frozen_and_serialize_in_stable_order(tmp_path: Path) -> None:
+def test_contracts_are_frozen_and_serialize_in_stable_order(tmp_path: Path, assert_json_omits) -> None:
     request = _request(tmp_path)
 
     with pytest.raises(FrozenInstanceError):
@@ -66,7 +66,7 @@ def test_contracts_are_frozen_and_serialize_in_stable_order(tmp_path: Path) -> N
         "category_hint",
     ]
     assert public["repository"] == tmp_path.name
-    assert str(tmp_path) not in json.dumps(public)
+    assert_json_omits(tmp_path, public)
 
 
 @pytest.mark.parametrize(

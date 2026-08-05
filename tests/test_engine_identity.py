@@ -23,7 +23,7 @@ def _package(tmp_path: Path) -> Path:
     return package
 
 
-def test_engine_identity_is_deterministic_and_path_free(tmp_path: Path) -> None:
+def test_engine_identity_is_deterministic_and_path_free(tmp_path: Path, assert_json_omits) -> None:
     package = _package(tmp_path)
 
     first = engine_identity("cache-v1", package_root=package, version="1.2.3")
@@ -33,7 +33,7 @@ def test_engine_identity_is_deterministic_and_path_free(tmp_path: Path) -> None:
     assert set(first) == {"version", "cache_version", "schema_version", "fingerprint"}
     assert first["version"] == "1.2.3"
     assert first["cache_version"] == "cache-v1"
-    assert str(package) not in json.dumps(first)
+    assert_json_omits(package, first)
 
 
 def test_engine_identity_changes_when_trusted_source_changes(tmp_path: Path) -> None:

@@ -1,7 +1,6 @@
 """Security invariants for the deep-probe workspace lease."""
 from __future__ import annotations
 
-import json
 import os
 import re
 import stat
@@ -364,7 +363,7 @@ def test_posix_cleanup_revalidates_after_substitution_hook(tmp_path: Path) -> No
     assert sentinel is not None and sentinel.read_text(encoding="utf-8") == "keep"
 
 
-def test_core_probe_blocks_identity_change_before_next_phase_and_preserves_replacement(tmp_path: Path) -> None:
+def test_core_probe_blocks_identity_change_before_next_phase_and_preserves_replacement(tmp_path: Path, assert_json_omits) -> None:
     if os.name == "nt":
         pytest.skip("Windows lease handles prevent this substitution; covered separately")
 
@@ -402,7 +401,7 @@ def test_core_probe_blocks_identity_change_before_next_phase_and_preserves_repla
     assert calls == 1
     assert sentinel is not None and sentinel.read_text(encoding="utf-8") == "keep"
     assert {path.name: path.read_bytes() for path in selected.iterdir()} == before
-    assert str(sentinel) not in json.dumps(check.to_dict())
+    assert_json_omits(sentinel, check.to_dict())
 
 
 def test_core_probe_uses_injected_lease_and_revalidates_all_boundaries(tmp_path: Path) -> None:

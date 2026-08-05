@@ -125,7 +125,7 @@ def test_build_writes_validation_artifact(tmp_path: Path, monkeypatch, capsys) -
     assert validation["ok"] is True
 
 
-def test_build_manifest_records_engine_identity(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_build_manifest_records_engine_identity(tmp_path: Path, monkeypatch, capsys, assert_json_omits) -> None:
     src = tmp_path / "src" / "app.py"
     src.parent.mkdir(parents=True)
     src.write_text("VALUE = 1\n", encoding="utf-8")
@@ -145,4 +145,4 @@ def test_build_manifest_records_engine_identity(tmp_path: Path, monkeypatch, cap
         "fingerprint",
     }
     assert len(manifest["engine"]["fingerprint"]) == 64
-    assert str(Path(__file__).parents[1]) not in json.dumps(manifest["engine"])
+    assert_json_omits(Path(__file__).parents[1], manifest["engine"])
