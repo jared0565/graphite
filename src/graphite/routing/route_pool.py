@@ -405,7 +405,13 @@ class ApprovedRoutePool(PublicRecord):
         object.__setattr__(self, "max_cost_microunits", cost)
 
     def to_dict(self) -> dict[str, Any]:
-        payload = super().to_dict()
+        # Explicit two-arg `super()`, NOT the zero-arg form. `slots=True` rebuilds
+        # the class, so the `__class__` cell zero-arg `super()` closes over still
+        # points at the pre-slots class and raises `TypeError: super(type, obj):
+        # obj must be an instance or subtype of type` on Python 3.11 and 3.12.
+        # The module-global name resolves at call time, which IS the rebuilt
+        # class. CPython fixed the zero-arg form in 3.13; graphite claims 3.11+.
+        payload = super(ApprovedRoutePool, self).to_dict()
         payload["candidates"] = [candidate.to_dict() for candidate in self.candidates]
         return payload
 

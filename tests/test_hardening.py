@@ -798,3 +798,56 @@ def test_analysis_rankings_ignore_external_import_nodes() -> None:
     assert "vitest" not in {item["id"] for item in report["god_nodes"]}
     assert "vitest" not in {item["id"] for item in report["orphans"]}
     assert all(item["target"] != "vitest" for item in report["surprising_connections"])
+
+
+# --- zero-arg super() inside a slots dataclass (graphite portability matrix) ---
+
+
+def test_no_slots_dataclass_uses_zero_arg_super() -> None:
+    """`@dataclass(slots=True)` REBUILDS the class, so the `__class__` cell that
+    zero-arg `super()` closes over still points at the pre-slots class. Calling
+    `super()` from such a method raises
+
+        TypeError: super(type, obj): obj must be an instance or subtype of type
+
+    on Python 3.11 and 3.12. CPython fixed it in 3.13 -- dated empirically by the
+    portability matrix, which failed 11 tests on windows-py3.11 and py3.12 and
+    passed on py3.13 and py3.14, same OS and same code.
+
+    That is why this is an AST invariant rather than a runtime test: on the 3.14
+    the gate runs, the broken form works, so a runtime test could never catch a
+    reintroduction. `ApprovedRoutePool.to_dict` carried it and nobody noticed for
+    as long as CI ran one Python version.
+
+    Fix is the explicit two-arg form: the class name resolves through the module
+    global at call time, which IS the rebuilt class.
+    """
+    import ast
+
+    offenders = []
+    for path in sorted(Path(__file__).parents[1].joinpath("src").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if not any(
+                isinstance(dec, ast.Call)
+                and any(
+                    kw.arg == "slots" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                    for kw in dec.keywords
+                )
+                for dec in node.decorator_list
+            ):
+                continue
+            for sub in ast.walk(node):
+                if (
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Name)
+                    and sub.func.id == "super"
+                    and not sub.args
+                ):
+                    offenders.append(f"{path.name}:{sub.lineno} in {node.name}")
+
+    assert offenders == [], (
+        "zero-arg super() inside a slots=True dataclass breaks on Python 3.11/3.12; "
+        f"use super(<ClassName>, self) instead: {offenders}"
+    )
