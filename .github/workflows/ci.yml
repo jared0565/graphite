@@ -105,9 +105,33 @@ jobs:
   #     - { os: ubuntu-latest, python: "3.11" }   # ... 3.12, 3.13, 3.14  -> #45
   #     - { os: macos-latest,  python: "3.11" }   # ... and 3.14          -> #46
   #
+  # When they ARE restored they will now self-diagnose: the `--timeout` below
+  # means a hang names itself instead of dying silently at `timeout-minutes`.
+  # Restoring one ubuntu leg is worth more than restoring all four -- #45 hung on
+  # every version, so one is a sufficient sample and costs a quarter as much.
+  #
   # What remains is the cheap, currently-actionable question: does graphite work
   # on the Python versions it CLAIMS, on the platform it already supports? Three
   # windows legs at the 2x multiplier, ~8 minutes each.
+  #
+  # BEFORE DISPATCHING THIS FOR A *VERSION* QUESTION, RUN IT LOCALLY -- IT IS FREE.
+  # `uv` installs any interpreter on demand, so every windows leg below reproduces
+  # on a dev machine in minutes with no billing and no queue:
+  #
+  #     uv python install 3.12
+  #     uv venv --python 3.12 --seed --clear <somewhere>   # --seed: uv omits pip
+  #     <somewhere>/Scripts/python -m pip install -e ".[dev,mcp]"
+  #     <somewhere>/Scripts/python -m pytest -q
+  #
+  # Measured: 2772 passed / 44 skipped on local Windows 3.12.13 at 8cd3a92.
+  # Safe alongside the machine-wide editable install because hatchling writes a
+  # .pth into site-packages and NOTHING into the source tree (setuptools would
+  # share `*.egg-info` and clobber it).
+  #
+  # This job is still the authority for the OS axis -- Linux (#45) and macOS (#46)
+  # cannot be reached from a Windows dev box. But routing a *version* question
+  # here is what made a 9-leg matrix look necessary, and that matrix exhausted the
+  # account's Actions allowance. Local first; dispatch for the OS axis only.
   portability:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     continue-on-error: true
@@ -136,5 +160,25 @@ jobs:
         run: python -m pip install -e ".[dev,mcp]"
       # Lint is deliberately absent: ruff findings are platform-independent, so
       # re-running them nine times measures nothing the gating job has not.
+      #
+      # `--timeout` is what makes a hung leg INFORMATIVE. #45's four ubuntu legs
+      # each ran to `timeout-minutes` and were killed by the runner, emitting no
+      # pytest summary whatsoever -- so after three full matrix runs the blocking
+      # test still has no name. A per-test cap converts that into a named test
+      # plus a traceback on the first run that reproduces it.
+      #
+      # `--timeout-method=thread` because `signal` raises in the MAIN thread and
+      # cannot describe a deadlock in one of `run_bounded_process`'s reader
+      # threads -- the subsystem most likely to be responsible. The thread method
+      # dumps EVERY thread's stack before terminating.
+      #
+      # 120s, not the 60 originally proposed: the deep-probe tests legitimately
+      # take ~31s on Windows, and naming a merely-slow test as "the hang" would
+      # send the investigation somewhere there is no bug. Measured locally at
+      # 4m55s for the whole Linux suite, so 120s per test is ample headroom.
+      #
+      # Note this is on the NON-GATING job only. The gating `test` job above is
+      # deliberately untouched: a timeout there could turn a slow machine into a
+      # red main, which is exactly where the next real failure hides.
       - name: Test
-        run: python -m pytest -q
+        run: python -m pytest -q --timeout=120 --timeout-method=thread

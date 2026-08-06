@@ -29,7 +29,12 @@ local-llm = []
 # between graphite's own MCP server and semgrep on the same interpreter.
 # The ceiling is 3 because 3.x is unexamined, not because 2.x is broken.
 mcp = ["mcp>=1.0,<3"]
-dev = ["pytest>=8.0", "ruff>=0.5"]
+# `pytest-timeout` is a DIAGNOSTIC, not a gate: nothing passes `--timeout` by
+# default, so it is inert until the portability job asks for it. It is declared
+# here because that job installs `[dev]`, and a `--timeout` flag without the
+# plugin is an unknown-argument error -- which would turn a hang into a
+# different silent failure rather than naming it. See #45.
+dev = ["pytest>=8.0", "ruff>=0.5", "pytest-timeout>=2.3"]
 
 [project.scripts]
 graphite = "graphite.cli:main"
