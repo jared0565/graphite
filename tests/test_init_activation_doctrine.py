@@ -57,7 +57,11 @@ def test_doctrine_routes_agents_to_the_channel_broker(tmp_path: Path) -> None:
 
     config = json.loads((repo / ".mcp.json").read_text(encoding="utf-8"))
     server = config["mcpServers"]["graphite"]
-    assert server["args"] == ["-m", "graphite.mcp"]
+    # `-P` leads. This launches with the consumer's repo root as cwd, so a
+    # `graphite.py` there would otherwise beat the installed package -- and MCP
+    # is how every non-Claude agent reaches graphite, so a shadowed launch means
+    # the agent talks to whatever the repo planted (round 62, codex-agent).
+    assert server["args"] == ["-P", "-m", "graphite.mcp"]
     # An absolute interpreter path would publish this machine's layout onto
     # consumer remotes AND break everywhere else. Same trap as the hook
     # trampolines, which are gitignored for exactly this reason.

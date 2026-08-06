@@ -444,3 +444,69 @@ def test_doc_version_is_14_and_template_documents_answer_contract():
     assert "caveats" in template
     assert "python -m graphite incidents list" in template
     assert "recurring incidents belong in a governed round" in template
+
+
+def test_the_mcp_launch_is_not_shadowable(tmp_path: Path) -> None:
+    """`.mcp.json` launches `python -m graphite.mcp` with the consumer's repo
+    root as cwd, so a `graphite.py` -- or a `graphite/` directory -- there wins
+    over the installed package. Same defect as the agent hooks (round 49) and
+    the git trampolines (round 52), on a surface neither fix covered; found by
+    codex-agent in operation-firewall, round 62.
+
+    This one is the worst of the three. MCP is how every non-Claude agent
+    reaches graphite, so a shadowed launch means the agent is talking to
+    whatever the repo planted, over the channel broker's own transport.
+    """
+    from graphite.init import MCP_SERVER_NAME, ensure_mcp_config
+
+    path = tmp_path / ".mcp.json"
+    ensure_mcp_config(path)
+
+    entry = json.loads(path.read_text(encoding="utf-8"))["mcpServers"][MCP_SERVER_NAME]
+    assert entry["args"][0] == "-P", entry
+    assert entry["args"] == ["-P", "-m", "graphite.mcp"], entry
+
+
+def test_the_vscode_activation_task_is_not_shadowable(tmp_path: Path) -> None:
+    """Same defect, and this one fires by itself: `runOn: folderOpen` means
+    opening the folder in VS Code, Cursor or Antigravity executes it. Nobody
+    has to invoke anything for a planted `graphite.py` to run."""
+    from graphite.init import VSCODE_ACTIVATION_LABEL, ensure_vscode_activation_task
+
+    path = tmp_path / ".vscode" / "tasks.json"
+    ensure_vscode_activation_task(path)
+
+    tasks = json.loads(path.read_text(encoding="utf-8"))["tasks"]
+    task = next(t for t in tasks if t["label"] == VSCODE_ACTIVATION_LABEL)
+    assert "-P -m graphite" in task["command"], task
+
+
+def test_rerunning_init_repairs_an_already_vulnerable_mcp_entry(tmp_path: Path) -> None:
+    """The rollout property, and the reason this is worth more than a doctor
+    report. Round 62 read `init` as unable to repair these files. It can:
+    graphite's OWN entry is replaced unconditionally on every run, and only
+    foreign entries are preserved. So every consumer is repaired by the `init`
+    they already run -- no hand-editing, no per-repo survey.
+    """
+    from graphite.init import MCP_SERVER_NAME, ensure_mcp_config
+
+    path = tmp_path / ".mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    MCP_SERVER_NAME: {"command": "python", "args": ["-m", "graphite.mcp"]},
+                    "someone-else": {"command": "node", "args": ["server.js"]},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ensure_mcp_config(path)
+
+    servers = json.loads(path.read_text(encoding="utf-8"))["mcpServers"]
+    assert servers[MCP_SERVER_NAME]["args"] == ["-P", "-m", "graphite.mcp"]
+    # A foreign server is never touched -- destroying hand-written config is the
+    # #13 mistake, and repairing our own entry must not become a licence to.
+    assert servers["someone-else"] == {"command": "node", "args": ["server.js"]}

@@ -470,7 +470,11 @@ def ensure_vscode_activation_task(path: Path) -> dict[str, Any]:
         {
             "label": VSCODE_ACTIVATION_LABEL,
             "type": "shell",
-            "command": "python -m graphite activate .",
+            # `-P` for the same reason as `.mcp.json`, and this one is worse in
+            # one respect: `runOn: folderOpen` below means it fires by itself.
+            # Nobody has to invoke anything -- opening the folder in VS Code,
+            # Cursor or Antigravity executes a planted `graphite.py`.
+            "command": "python -P -m graphite activate .",
             "presentation": {"reveal": "never", "panel": "dedicated"},
             "runOptions": {"runOn": "folderOpen"},
         }
@@ -513,9 +517,23 @@ def ensure_mcp_config(path: Path) -> dict[str, Any]:
             if not isinstance(document.get("mcpServers"), dict):
                 document["mcpServers"] = {}
 
+    # `-P` FIRST. This launches with the consumer's repo root as cwd, so
+    # `python -m graphite.mcp` puts that root at `sys.path[0]` and a
+    # `graphite.py` -- or a `graphite/` directory -- there beats the installed
+    # package. Same defect as the agent hooks and the git trampolines, on a
+    # surface neither of those fixes covered (found by codex-agent, round 62).
+    #
+    # It is the most serious of the three: MCP is how every non-Claude agent
+    # reaches graphite, so a shadowed launch means the agent is talking to
+    # whatever the repository planted, over the channel broker's own transport.
+    #
+    # `-P` rather than `-I` here, unlike the committed commit-msg hook: this
+    # command is run by graphite's own supported interpreters (>=3.11), and `-I`
+    # would additionally strip PYTHONPATH and user site-packages, which an
+    # editable or user install can legitimately need.
     document["mcpServers"][MCP_SERVER_NAME] = {
         "command": "python",
-        "args": ["-m", "graphite.mcp"],
+        "args": ["-P", "-m", "graphite.mcp"],
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
