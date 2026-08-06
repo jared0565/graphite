@@ -427,8 +427,19 @@ def test_cmd_impact_prints_epistemology_on_empty(capsys, monkeypatch):
     cli.cmd_impact(args)
     out = capsys.readouterr().out
     assert "answer health: " in out
-    assert "decision-grade" in out
+    # An empty `impact` over `calls` is advisory, not decision-grade. "Nothing
+    # depends on this" is exactly the claim an unmodelled callback
+    # registration falsifies, and it is the claim that licenses a deletion --
+    # so this surface is where the round-55 gap costs the most.
+    assert "decision-grade" not in out
+    # Not INCONCLUSIVE either: the cells are measured and healthy. What is
+    # unsupported is the absence, not the measurement.
     assert "INCONCLUSIVE" not in out
+    # The reader has to be TOLD why the absence is not proof. `cmd_impact`
+    # keeps its own empty text ("through bound edges") rather than
+    # `empty_marker`, so what carries the round-55 warning here is the
+    # conditional caveat -- which must actually reach the printed output.
+    assert "produces no call edge" in out
 
 
 def test_cmd_impact_human_advisory_line_on_nonempty_degraded(capsys, monkeypatch):

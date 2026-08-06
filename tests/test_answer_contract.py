@@ -58,6 +58,65 @@ def test_grade_inconclusive_when_degraded_and_empty():
     assert block["empty_meaning"] == "no bound callers found"
 
 
+def test_an_empty_calls_answer_is_never_a_trustworthy_absence():
+    """`decision_grade` promises "an empty result is a trustworthy absence",
+    and for `calls` the metric behind it cannot support that promise.
+
+    `resolution_health` measures how many DETECTED call sites bound to a
+    target. A function passed as a VALUE to a registrar -- `threading.Timer`,
+    `atexit.register`, `Thread(target=)` -- produces no call site at all, so
+    it never enters the denominator and cannot lower the ratio.
+
+    Measured on a purpose-built repo (aramid, round 55; reproduced here): a
+    file with two ordinary calls plus two callback registrations scored
+    `ratio 1.0, total 2, bound 2`, and `callers` on each registered function
+    returned 0 at `decision_grade`. The grade was computed from a denominator
+    that excluded exactly the failure it was being read to rule out.
+
+    A PERFECT ratio is used deliberately below -- that is the trap. No amount
+    of health can license this absence.
+    """
+    g = _graph_ratio(".py", 10, 0)
+    block = build_answer_block(g, relations=("calls",), languages=["python"], total=0)
+
+    assert block["health"]["calls"]["python"]["ratio"] == 1.0
+    assert block["health"]["calls"]["python"]["healthy"] is True
+    assert block["grade"] == GRADE_ADVISORY
+
+
+def test_a_nonempty_calls_answer_still_grades_decision():
+    """No over-correction. The callers you DID find are real; only the
+    absence claim is unsupportable, so a non-empty answer is untouched."""
+    g = _graph_ratio(".py", 10, 0)
+    block = build_answer_block(g, relations=("calls",), languages=["python"], total=4)
+
+    assert block["grade"] == GRADE_DECISION
+
+
+def test_the_callback_caveat_discriminates_where_the_blanket_one_cannot():
+    """aramid measured `python-dynamic-dispatch` as byte-identical across six
+    `callers` queries, five of them with non-zero counts, so it carries no
+    signal about any particular answer. Confirmed structurally: caveat
+    selection reads only relations x languages and never the result.
+
+    A caveat that hedges an empty answer therefore has to be ABSENT when the
+    answer is non-empty. An always-on caveat trains readers to ignore
+    caveats, which is what made this finding cost anything at all.
+    """
+    g = _graph_ratio(".py", 10, 0)
+    empty = build_answer_block(g, relations=("calls",), languages=["python"], total=0)
+    found = build_answer_block(g, relations=("calls",), languages=["python"], total=3)
+
+    codes_empty = {c["code"] for c in empty["caveats"]}
+    codes_found = {c["code"] for c in found["caveats"]}
+
+    assert "python-callback-registration" in codes_empty
+    assert "python-callback-registration" not in codes_found
+    # The blanket caveat stays on both on purpose: it is a SCOPE disclosure,
+    # not a hedge on the result, and dropping it would lose that disclosure.
+    assert "python-dynamic-dispatch" in codes_empty & codes_found
+
+
 def test_scoped_cells_ignore_other_languages():
     """The firescraper regression: healthy python must not mask degraded ts."""
     g = _merged(_graph_ratio(".py", 9, 1), _graph_ratio(".ts", 1, 9))
@@ -135,6 +194,7 @@ def test_registry_initial_entries():
     codes = {e["code"] for e in active_caveats()}
     assert codes == {
         "python-dynamic-dispatch",
+        "python-callback-registration",
         "ts-destructured-locals-unbound",
     }
 
@@ -221,13 +281,48 @@ def test_fail_open_block_stays_permissive():
     assert empty_marker(None) == "none found"
 
 
-def test_measured_healthy_answer_still_grades_decision():
-    """Guard against over-firing: real cells must still reach decision_grade."""
+def test_empty_marker_echoes_an_unverifiable_absence():
+    """A grade the printed line does not echo is a hedge the reader never sees
+    -- which is precisely how round 55's decision-grade zero got believed.
+
+    The advisory-because-undetectable listing must say so, and must NOT borrow
+    the INCONCLUSIVE wording: that means something different (degraded or
+    unmeasured cells), and collapsing the two would report a good measurement
+    as a failed one.
+    """
+    from graphite.answer_contract import INCONCLUSIVE_EMPTY, UNVERIFIED_EMPTY, empty_marker
+
+    g = _graph_ratio(".py", 10, 0)
+    healthy_empty = build_answer_block(g, relations=("calls",), languages=["python"], total=0)
+
+    assert healthy_empty["grade"] == GRADE_ADVISORY
+    assert empty_marker(healthy_empty) == UNVERIFIED_EMPTY
+    assert empty_marker(healthy_empty) != INCONCLUSIVE_EMPTY
+    assert "none found" in UNVERIFIED_EMPTY, "the listing still has to read as a listing"
+
+
+def test_measured_healthy_answer_is_not_dragged_to_inconclusive():
+    """#12's over-firing guard, preserved through the round-55 change.
+
+    This originally asserted `decision_grade` on an EMPTY calls answer. Round
+    55 showed that exact claim is unsound: the ratio measures resolution of
+    DETECTED call sites and is blind to invocations that emit no site, so a
+    perfect ratio cannot license "nothing calls this". An empty calls answer is
+    now `advisory`.
+
+    The guard this test exists for is untouched -- a block with real cells must
+    never be graded like an unmeasured one -- so it now asserts that directly,
+    plus the other half of "not over-firing": decision_grade is still reachable.
+    """
     g = _graph_ratio(".py", 9, 1)
     block = build_answer_block(g, relations=("calls",), languages=["python"], total=0)
 
     assert block["health"], "fixture must produce cells"
-    assert block["grade"] == GRADE_DECISION
+    assert block["grade"] != GRADE_INCONCLUSIVE
+    assert block["grade"] == GRADE_ADVISORY
+
+    nonempty = build_answer_block(g, relations=("calls",), languages=["python"], total=2)
+    assert nonempty["grade"] == GRADE_DECISION
 
 
 def test_unattributable_receiver_caveat_is_retired():

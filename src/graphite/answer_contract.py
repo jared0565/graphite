@@ -34,6 +34,26 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         "since": "2026-07-26",
     },
     {
+        "code": "python-callback-registration",
+        "relations": ("calls",),
+        "languages": ("python",),
+        "summary": (
+            "a function passed as a VALUE to a registrar (threading.Timer, atexit.register, "
+            "Thread(target=), signal.signal) produces no call edge, so an empty callers "
+            "result may be wrong -- confirm with grep before treating it as dead"
+        ),
+        "since": "2026-08-06",
+        # The first CONDITIONAL caveat. Every other entry is a scope
+        # disclosure -- true of the relation x language, regardless of what
+        # this particular answer found -- which means it cannot discriminate a
+        # sound answer from an unsound one. aramid measured
+        # `python-dynamic-dispatch` byte-identical across six `callers`
+        # queries, five with non-zero counts (round 55). An always-on caveat
+        # trains readers to ignore caveats, so a hedge that is meant to be
+        # ACTED on has to be absent when it does not apply.
+        "only_when_empty": True,
+    },
+    {
         "code": "ts-external-calls-unclassified",
         "relations": ("calls",),
         "languages": ("typescript", "javascript"),
@@ -62,12 +82,46 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
 )
 
 
+#: Relations where a real edge can be MISSING ENTIRELY rather than merely
+#: unresolved, so an empty answer cannot be a trustworthy absence.
+#:
+#: `resolution_health` is a RESOLUTION metric, not a COVERAGE one: it measures
+#: how many detected sites bound to a target. An invocation that produces no
+#: site at all -- a function passed as a value to `threading.Timer`,
+#: `atexit.register`, `Thread(target=)` -- never enters `total`, so it cannot
+#: lower the ratio. A perfect 1.0 is therefore compatible with an entire class
+#: of invocation being unmodelled, and grading an empty answer `decision_grade`
+#: on the strength of that ratio reads the denominator as if it excluded
+#: nothing. Measured: a file with two ordinary calls and two callback
+#: registrations scored `total 2, bound 2, ratio 1.0` while `callers` on both
+#: registered functions returned 0 at decision_grade (aramid, round 55).
+#:
+#: `imports` is deliberately NOT here. An import is a syntactic construct that
+#: extraction either sees or does not; there is no known class where a real
+#: import produces no candidate edge at all. Add a relation only with a
+#: measured non-detection case, not on suspicion.
+NON_DETECTION_RELATIONS = frozenset({"calls"})
+
+
 def active_caveats() -> list[dict[str, Any]]:
     """Registry entries that are live (no retired_by), full published shape."""
     return [dict(e) for e in CAVEAT_REGISTRY if not e.get("retired_by")]
 
 
 INCONCLUSIVE_EMPTY = "none found — INCONCLUSIVE: treat as unverified and confirm with grep"
+
+#: Empty listing under a HEALTHY answer whose absence still cannot be trusted:
+#: the cells are measured and fine, but the relation has a known non-detection
+#: class (see NON_DETECTION_RELATIONS), so "none" may simply be unmodelled.
+#:
+#: Distinct wording from INCONCLUSIVE_EMPTY on purpose -- the two say different
+#: things and collapsing them would misreport a good measurement as a failed
+#: one. Distinct from a bare "none found" for the reason round 55 exists: a
+#: grade the human line does not echo is a hedge the reader never sees.
+UNVERIFIED_EMPTY = (
+    "none found — UNVERIFIED: a callback-registered caller emits no edge, "
+    "so this absence is not proof; confirm with grep"
+)
 
 
 def is_degraded(block: dict[str, Any] | None) -> bool:
@@ -103,7 +157,14 @@ def empty_marker(block: dict[str, Any] | None) -> str:
     treatment: zero cells is zero evidence, so a bare "none found" would claim
     an absence nothing verified.
     """
-    return INCONCLUSIVE_EMPTY if (is_degraded(block) or is_unmeasured(block)) else "none found"
+    if is_degraded(block) or is_unmeasured(block):
+        return INCONCLUSIVE_EMPTY
+    # Healthy cells, but the grade says the absence is not evidence. Echo that
+    # in the human line: a machine-readable grade the printed listing
+    # contradicts is exactly the hedge a reader misses (round 55).
+    if block and block.get("grade") == GRADE_ADVISORY:
+        return UNVERIFIED_EMPTY
+    return "none found"
 
 
 def languages_for_nodes(g: nx.DiGraph, node_ids: Iterable[str]) -> list[str]:
@@ -164,21 +225,34 @@ def build_answer_block(
                 degraded = degraded or not healthy
                 cells.setdefault(relation, {})[language] = {**cell, "healthy": healthy}
         empty = total == 0
+        relation_set = set(relations)
+        language_set = set(langs)
         # No cells at all means nothing was measured for the relations x
         # languages this answer actually used. That is not evidence of health;
         # it is the absence of evidence, so it cannot grade decision_grade (#12).
         unmeasured = not cells
+        # An empty answer over a relation with a known non-detection class is
+        # NOT a trustworthy absence, however healthy the ratio -- the ratio is
+        # blind to the edges that were never emitted. See
+        # NON_DETECTION_RELATIONS. Advisory rather than inconclusive on
+        # purpose: the health genuinely IS good, so calling it inconclusive
+        # would misreport a measurement. What is unsupported is the absence,
+        # and `advisory` already means "use it, and verify".
+        undetectable_absence = empty and bool(relation_set & NON_DETECTION_RELATIONS)
         if degraded or unmeasured:
             grade = GRADE_INCONCLUSIVE if empty else GRADE_ADVISORY
+        elif undetectable_absence:
+            grade = GRADE_ADVISORY
         else:
             grade = GRADE_DECISION
-        relation_set = set(relations)
-        language_set = set(langs)
         caveats = [
             {"code": e["code"], "summary": e["summary"]}
             for e in active_caveats()
             if relation_set.intersection(e["relations"])
             and language_set.intersection(e["languages"])
+            # A conditional caveat is emitted only where it applies, so its
+            # presence carries signal a reader can act on.
+            and (empty or not e.get("only_when_empty"))
         ]
         block: dict[str, Any] = {
             "schema": ANSWER_SCHEMA,

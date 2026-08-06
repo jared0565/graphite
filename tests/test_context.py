@@ -163,7 +163,13 @@ def test_context_build_carries_answer_block():
 
     context = build_context(_trust_graph(healthy=True), ["lonely"])
     assert context["answer"]["relations"] == ["calls", "imports"]
-    assert context["answer"]["grade"] == "decision_grade"
+    assert context["answer"]["health"], "cells must still be measured"
+    # "lonely" has no neighbours, so this is an EMPTY answer over `calls`.
+    # Healthy cells no longer license a trustworthy absence there (round 55):
+    # the ratio measures resolution of DETECTED call sites and cannot see a
+    # caller that registers this function as a callback. Carrying the block at
+    # all is what this test is for, and that is unchanged.
+    assert context["answer"]["grade"] == "advisory"
 
 
 def test_context_on_non_code_file_is_not_inconclusive_despite_unhealthy_graph():
