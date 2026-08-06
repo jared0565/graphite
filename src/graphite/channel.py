@@ -213,6 +213,23 @@ COMMIT_MSG_HOOK = '''#!/bin/sh
 MSG_FILE="$1"
 ROOT="$(git rev-parse --show-toplevel)"
 
+# The registry may never be deleted. Authority is read from HEAD (see the
+# Python block below), so a commit that REMOVES `agents.json` would leave the
+# next commit with no committed registry and drop it onto the bootstrap path,
+# where any trailer is accepted. Deleting the registry is never legitimate, so
+# refusing it outright closes that escalation. `case` rather than `grep`: this
+# must work with nothing but shell builtins on PATH.
+DELETED="$(git -C "$ROOT" diff --cached --diff-filter=D --name-only 2>/dev/null)"
+case "$DELETED" in
+    *agents.json*)
+        echo "[agent-channel] REJECTED: agents.json may not be deleted." >&2
+        echo "" >&2
+        echo "The registry is the only thing that says which agents exist, so" >&2
+        echo "removing it would disarm the gate for the following commit." >&2
+        exit 1
+        ;;
+esac
+
 # `python3` FIRST, and `python` only as a fallback. Ubuntu ships no `python` at
 # all and macOS removed it in 12.3, so hardcoding it made this gate reject every
 # commit on any non-Windows machine -- an outage, not a rejection. Windows is the
@@ -236,12 +253,47 @@ else
     exit 1
 fi
 
-if "$PY" -I - "$MSG_FILE" "$ROOT/agents.json" <<'PYEOF'
-import json, re, sys
+if "$PY" -I - "$MSG_FILE" "$ROOT" <<'PYEOF'
+import json, re, subprocess, sys
+
+
+def _committed_registry(root):
+    """The registry as of HEAD -- state the commit under review cannot edit.
+
+    Authorising against the WORKING TREE was a self-signing hole: the commit
+    being checked can write `agents.json`, so adding a row and carrying the
+    matching trailer in the same commit satisfied the gate. That turns the
+    design's "identity is derived, never declared" straight back into declared.
+
+    Returns None when there is no committed registry at all. An EMPTY committed
+    registry counts the same way: a freshly seeded channel commits `{}` before
+    anyone is registered, so "the file exists" is not the same question as
+    "anyone is authorised yet". Testing the file's presence instead locked out
+    the very first registration and every commit after it.
+    """
+    result = subprocess.run(
+        ["git", "-C", root, "show", "HEAD:agents.json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return json.loads(result.stdout)
+
 
 try:
     message = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-    agents = set(json.load(open(sys.argv[2], encoding="utf-8")).values())
+    root = sys.argv[2]
+    registry = _committed_registry(root)
+    if not registry:
+        # Bootstrap only: nothing is committed, or nothing is registered yet, so
+        # there is no prior authority to check against. This is the one commit
+        # whose author is structurally unverifiable -- someone has to write the
+        # first row. Every later commit takes the strict path above.
+        with open(root + "/agents.json", encoding="utf-8") as handle:
+            registry = json.load(handle)
+    agents = set(registry.values())
 except Exception:
     sys.exit(1)
 
@@ -303,6 +355,21 @@ def ensure_channel_hook(root: Path) -> dict:
     return {"path": str(path), "changed": True}
 
 
+def _committed_agents(root: Path) -> set[str]:
+    """Agent identities as of HEAD -- the authority the gate checks against.
+
+    Read from committed state for exactly the reason the hook does: the
+    working-tree registry is about to be rewritten by this very call, so it
+    cannot be the thing that authorises the change.
+    """
+    raw = _git(root, "show", f"HEAD:{REGISTRY_FILENAME}", check=False)
+    try:
+        loaded = json.loads(raw)
+    except ValueError:
+        return set()
+    return {str(value) for value in loaded.values()} if isinstance(loaded, dict) else set()
+
+
 def register_agent(root: Path, project_root: Path, agent: str) -> dict:
     """Bind a repository to an agent identity, and commit the change.
 
@@ -343,21 +410,41 @@ def register_agent(root: Path, project_root: Path, agent: str) -> dict:
         # a lie. Refreshing it here keeps the two in step by construction.
         ensure_channel_hook(root)
 
+        # Who signs this registration is now decided by COMMITTED authority, not
+        # by the registry we just wrote. The old test was `"graphite-agent" in
+        # raw.values()` -- `raw` being the NEW registry -- which meant a second
+        # registration in a channel without graphite credited the newcomer, and
+        # the newcomer is by definition not yet authorised. That was invisible
+        # while the gate read the working tree, because the row it was checking
+        # against was the one this call had just written.
+        committed = _committed_agents(root)
+        if not committed:
+            # Bootstrap: nobody is registered, so there is no authority to
+            # borrow. Signed by whoever it registers -- the one commit that is
+            # structurally unverifiable, and unavoidable: someone writes row one.
+            author = agent
+        elif "graphite-agent" in committed:
+            # Graphite made this change, so graphite is credited. Attributing it
+            # to the agent being registered would read as "codex registered
+            # itself", which is false and is the kind of claim the trailer
+            # exists to keep honest.
+            author = "graphite-agent"
+        else:
+            # The broker mutates authority state, so it must hold authority
+            # itself. Failing loudly beats signing as someone else or writing a
+            # commit the gate will refuse for reasons the caller cannot see.
+            raise ChannelError(
+                "broker_unregistered",
+                "graphite-agent is not registered in this channel, so it cannot "
+                "author a registry change. Register it first: "
+                "`graphite channel register <graphite-repo> graphite-agent`",
+            )
+
         commit = _commit(
             root,
             [REGISTRY_FILENAME, ".githooks/commit-msg"],
             f"register {agent} for {Path(project_root).name}",
-            # Graphite made this change, so graphite is credited -- attributing
-            # it to the agent being registered would read as "codex registered
-            # itself", which is false and is exactly the kind of claim the
-            # trailer exists to keep honest.
-            #
-            # The exception is bootstrapping: in a channel where graphite-agent
-            # is not yet registered, the hook would reject a graphite trailer,
-            # so the first registration is signed by whoever it registers. That
-            # is the one commit whose author is structurally unverifiable, and
-            # it is unavoidable -- someone has to write the first row.
-            "graphite-agent" if "graphite-agent" in raw.values() else agent,
+            author,
         )
 
     result = {"ok": True, "agent": agent, "path": key, "previous": previous, "commit": commit}

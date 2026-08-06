@@ -94,6 +94,63 @@ def test_the_hook_rejects_a_commit_naming_no_agent(tmp_path: Path) -> None:
     assert "$PY" not in output, output
 
 
+def test_a_commit_cannot_register_itself_and_use_the_identity(tmp_path: Path) -> None:
+    """The trust model is "identity is derived, never declared". The gate used
+    to read `agents.json` from the WORKING TREE, which the commit under review
+    can itself write -- so adding a row and carrying the matching trailer in one
+    commit satisfied the gate, turning a derived identity straight back into a
+    declared one.
+
+    Authorisation must come from committed state the commit cannot edit.
+    """
+    root = _channel_with_hook(tmp_path)
+    channel.register_agent(root, tmp_path / "real", "aramid-agent")
+
+    registry = json.loads((root / "agents.json").read_text(encoding="utf-8"))
+    registry[str(tmp_path / "attacker")] = "ghost-agent"
+    (root / "agents.json").write_text(json.dumps(registry), encoding="utf-8")
+    (root / "rounds" / "x.md").write_text("payload\n", encoding="utf-8")
+    _git(root, "add", "-A")
+
+    result = _git(
+        root, "commit", "-m", "subject\n\nCo-Authored-By: ghost-agent <ghost@agents.local>\n"
+    )
+
+    assert result.returncode != 0, "a commit must not be able to authorise itself"
+
+
+def test_an_agent_registered_in_a_previous_commit_can_still_post(tmp_path: Path) -> None:
+    """The other half of the change: reading authorisation from committed state
+    must not lock out agents that were registered properly."""
+    root = _channel_with_hook(tmp_path)
+    channel.register_agent(root, tmp_path / "real", "aramid-agent")
+    (root / "rounds" / "x.md").write_text("payload\n", encoding="utf-8")
+    _git(root, "add", "-A")
+
+    result = _git(
+        root, "commit", "-m", "subject\n\nCo-Authored-By: aramid-agent <aramid@agents.local>\n"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_registry_cannot_be_deleted_to_escape_the_gate(tmp_path: Path) -> None:
+    """Reading from HEAD leaves one escalation: an already-registered agent
+    could delete `agents.json`, and the next commit would find no committed
+    registry and fall through the bootstrap path. Deleting the registry is
+    never legitimate, so it is refused outright."""
+    root = _channel_with_hook(tmp_path)
+    channel.register_agent(root, tmp_path / "real", "aramid-agent")
+    (root / "agents.json").unlink()
+    _git(root, "add", "-A")
+
+    result = _git(
+        root, "commit", "-m", "subject\n\nCo-Authored-By: aramid-agent <aramid@agents.local>\n"
+    )
+
+    assert result.returncode != 0, "deleting the registry must not be a way out of the gate"
+
+
 def _shim(bin_dir: Path, name: str, target: str) -> None:
     """A PATH entry that forwards to an absolute binary.
 
@@ -192,6 +249,8 @@ def test_the_hook_rejects_a_mismatched_name_and_address(tmp_path: Path) -> None:
     because it alternated the two halves independently. Deriving the pair from
     the registry closes that."""
     root = _channel_with_hook(tmp_path)
+    # Broker registered first -- see `test_registering_the_same_repo_again`.
+    channel.register_agent(root, tmp_path / "graphite", "graphite-agent")
     channel.register_agent(root, tmp_path / "a", "aramid-agent")
     channel.register_agent(root, tmp_path / "c", "codex-agent")
     (root / "rounds" / "x.md").write_text("x\n", encoding="utf-8")
@@ -232,6 +291,10 @@ def test_registering_the_same_repo_again_updates_it(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
 
+    # The broker mutates authority state, so it must hold authority itself
+    # before it can broker a second registration. A real channel registers
+    # graphite first; without this the third call raises `broker_unregistered`.
+    channel.register_agent(root, tmp_path / "graphite", "graphite-agent")
     channel.register_agent(root, repo, "codex-agent")
     result = channel.register_agent(root, repo, "aramid-agent")
 
