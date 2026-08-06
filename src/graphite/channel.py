@@ -284,6 +284,12 @@ def _registry_at(root, spec):
         ["git", "-C", root, "show", spec],
         capture_output=True,
         text=True,
+        # Explicit, for the reason `_git` documents: `text=True` alone decodes
+        # with the locale codec, and a registry key is a repository PATH, which
+        # is not required to be ASCII. Under cp1252 a non-Latin-1 path would
+        # fail to decode on subprocess's reader thread and hand this function a
+        # `None` -- wedging the gate over a repo whose only crime is its name.
+        encoding="utf-8",
         check=False,
     )
     if result.returncode != 0:
@@ -679,12 +685,28 @@ def _git(root: Path, *args: str, check: bool = True) -> str:
       hand. Observed live -- `git add` blocked 45 minutes at 0.03s CPU, having
       never reached `.git/index.lock`, with every other agent locked out behind
       it.
+
+    The encoding is EXPLICIT and must stay that way. `text=True` alone decodes
+    with the locale codec -- cp1252 on Windows -- and rounds are UTF-8 prose
+    written by agents, so any em-dash or accented character is a byte cp1252
+    does not define. The failure that causes is worse than an exception:
+    subprocess reads the pipe on a worker thread, the `UnicodeDecodeError` is
+    raised THERE, and `result.stdout` comes back `None` while git's own
+    returncode stays 0 -- so `check` below sees nothing wrong and this function
+    returns `None` against a `str` annotation. Observed live: `channel report`
+    died in `parse_round`, three frames away from the real cause.
+
+    `errors="replace"` because git also echoes paths, and a byte sequence that
+    is not valid UTF-8 must not be able to take the audit surface down. It also
+    makes the decode total, which is what keeps `result.stdout` a `str`.
     """
     try:
         result = subprocess.run(  # noqa: S603
             ["git", "-C", str(root), *args],  # noqa: S607
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             stdin=subprocess.DEVNULL,
             timeout=_GIT_TIMEOUT_SECONDS,

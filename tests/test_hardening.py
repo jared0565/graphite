@@ -851,3 +851,50 @@ def test_no_slots_dataclass_uses_zero_arg_super() -> None:
         "zero-arg super() inside a slots=True dataclass breaks on Python 3.11/3.12; "
         f"use super(<ClassName>, self) instead: {offenders}"
     )
+
+
+def test_every_textual_subprocess_call_declares_an_error_handler() -> None:
+    """`text=True` without `errors=` can raise inside subprocess's reader thread.
+
+    That is not a normal exception. The decode happens on a worker thread, so the
+    `UnicodeDecodeError` is raised THERE: the thread dies, `.stdout` comes back
+    `None`, and the child's own returncode is still 0 -- so every `check`
+    branch sees success and hands `None` to a caller whose annotation promises
+    `str`. The crash then surfaces somewhere else entirely.
+
+    Observed live, not hypothesised: `graphite channel report` died with
+    `'NoneType' object has no attribute 'startswith'` inside `parse_round`,
+    three frames from the cause, because Windows decoded git's UTF-8 round body
+    as cp1252 and choked on byte 0x8f.
+
+    Mechanical on purpose. The defect is invisible at the call site, costs one
+    keyword to avoid, and cannot be caught by reviewing the frame it blows up
+    in. `encoding=` is deliberately NOT required: `daemon_health` reads
+    `powershell.exe`, whose output follows the console codepage rather than
+    UTF-8, so forcing a codec there would be wrong. Totality is the invariant.
+    """
+    import ast
+
+    offenders = []
+    for path in sorted(Path("src").rglob("*.py")):
+        # `ast`, not a text scan: `channel.py` embeds the commit-msg hook's
+        # Python as a STRING, and a regex would count it as a call site.
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = getattr(func, "attr", None) or getattr(func, "id", None)
+            if name not in {"run", "Popen"}:
+                continue
+            if getattr(getattr(func, "value", None), "id", None) != "subprocess":
+                continue
+            kwargs = {kw.arg for kw in node.keywords}
+            textual = kwargs & {"text", "universal_newlines", "encoding"}
+            if textual and "errors" not in kwargs:
+                offenders.append(f"{path}:{node.lineno}")
+
+    assert not offenders, (
+        "textual subprocess call(s) with no `errors=`; a decode failure here "
+        f"returns None instead of raising: {offenders}"
+    )

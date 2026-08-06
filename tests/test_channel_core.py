@@ -218,6 +218,66 @@ def test_a_legacy_round_without_front_matter_still_lists(tmp_path: Path) -> None
     assert listed[0].legacy is True
 
 
+def test_git_output_is_decoded_as_utf8_regardless_of_the_locale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_git` ran `text=True` with no `encoding=`, so Python decoded git's stdout
+    with the LOCALE codec -- cp1252 on this machine.
+
+    The failure mode is nastier than an exception. subprocess reads the pipe on a
+    worker thread; the `UnicodeDecodeError` is raised THERE, the thread dies, and
+    `result.stdout` comes back `None`. git's own returncode is 0, so the
+    `check` branch sees nothing wrong and `_git` returns `None` to a caller whose
+    annotation promises `str`.
+
+    `locale.getencoding` is forced so this discriminates on a UTF-8 machine too.
+    Without it the test would pass everywhere the bug cannot occur, which is the
+    definition of a check that isn't one.
+    """
+    import locale
+
+    monkeypatch.setattr(locale, "getencoding", lambda: "cp1252")
+    root = _make_channel(tmp_path)
+    # U+00CF encodes to C3 8F, and cp1252 leaves 0x8F undefined -- the exact byte
+    # and position the live crash reported.
+    (root / "note.md").write_text("dash — and Ï\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "add note")
+
+    text = channel._git(root, "show", "HEAD:note.md")
+
+    assert text is not None, "the reader thread died and `_git` returned None"
+    assert "Ï" in text
+
+
+def test_the_report_survives_a_round_the_locale_codec_cannot_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Observed on the LIVE channel, not constructed.
+
+    `graphite channel report` died with `'NoneType' object has no attribute
+    'startswith'` -- `build_report` -> `_verify` -> `_git(root, "show", ...)`
+    on a round whose body holds a character cp1252 cannot represent, with the
+    `None` from the decode failure landing in `parse_round` three frames later.
+
+    The report is what makes the channel auditable, so this was not cosmetic:
+    the audit surface was unusable for every agent.
+    """
+    import locale
+
+    monkeypatch.setattr(locale, "getencoding", lambda: "cp1252")
+    aramid = _repo(tmp_path, "aramid")
+    root = _make_channel(tmp_path, {str(aramid): "aramid-agent"})
+    # ASCII title, non-ASCII body: the commit subject stays decodable so the
+    # POST succeeds, isolating the failure to the report's `git show` of the
+    # round -- which is where it actually happened.
+    channel.post_round(root, aramid, title="Interop", body="round trip: Ï\n")
+
+    report = channel.build_report(root)
+
+    assert report is not None
+
+
 def test_git_does_not_hand_the_brokers_stdin_to_the_child(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

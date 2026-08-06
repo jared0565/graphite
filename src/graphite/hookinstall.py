@@ -36,8 +36,16 @@ DEFAULT_TEMPLATE_DIRNAME = ".graphite-hooks-template"
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    # Explicit codec and error handler: `text=True` alone decodes with the
+    # locale codec, and git echoes repository paths and branch names that are
+    # not required to be Latin-1. A failure decodes on subprocess's reader
+    # thread, so it yields `stdout is None` rather than raising.
     return subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
 

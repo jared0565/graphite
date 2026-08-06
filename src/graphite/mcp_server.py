@@ -64,6 +64,10 @@ class GraphiteMCPServer:
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
+                # graphite forces UTF-8 on redirected output (#17), so decoding
+                # its child with the locale codec is wrong on both sides.
+                encoding="utf-8",
+                errors="replace",
                 check=False,
                 timeout=300,
             )

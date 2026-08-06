@@ -371,6 +371,12 @@ def run_graphite_build(root: Path, cfg: Config, timeout_seconds: float) -> Build
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            # graphite forces UTF-8 on redirected output (#17). Without this the
+            # daemon decodes a supervised build's log with the locale codec, and
+            # a single non-Latin-1 path in the output would return None rather
+            # than raise -- recording a build failure nobody can explain.
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=timeout_seconds,
             env=env,

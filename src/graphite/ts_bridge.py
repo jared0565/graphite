@@ -63,6 +63,14 @@ def build_typescript_index(root: Path, entries: Iterable[object], cfg: Config) -
             ["node", str(script)],
             input=payload,
             text=True,
+            # Node speaks UTF-8 in both directions, and the payload above is
+            # built with `ensure_ascii=False`, so it carries whatever non-ASCII
+            # appears in a repo's paths or identifiers. Without this the locale
+            # codec is used: on Windows that is cp1252, which cannot ENCODE the
+            # request and cannot DECODE node's reply. A decode failure there is
+            # silent -- it kills subprocess's reader thread and yields None.
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             cwd=str(Path.cwd()),
             timeout=cfg.typescript_resolver_timeout_seconds,

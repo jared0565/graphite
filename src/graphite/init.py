@@ -323,6 +323,10 @@ def _is_git_repo(root: Path) -> bool:
     result = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
         capture_output=True, text=True,
+        # See `channel._git`: `text=True` alone uses the locale codec, and a
+        # decode failure returns None instead of raising -- which here would
+        # read as "not a git repo" and silently skip hook installation.
+        encoding="utf-8", errors="replace",
     )
     return result.returncode == 0 and result.stdout.strip() == "true"
 

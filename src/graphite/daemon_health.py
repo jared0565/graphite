@@ -288,6 +288,12 @@ def check_daemon_process(base: Path) -> dict[str, Any]:
             ["powershell.exe", "-NoProfile", "-Command", ps],
             capture_output=True,
             text=True,
+            # `errors` but deliberately NO `encoding`: Windows PowerShell 5.1
+            # emits the console codepage, not UTF-8, so pinning a codec here
+            # would be wrong. What must not happen is an undecodable byte in a
+            # command line -- these are repository paths -- killing subprocess's
+            # reader thread and returning None in place of the JSON below.
+            errors="replace",
             check=False,
             timeout=10,
         )
