@@ -216,9 +216,14 @@ ROOT="$(git rev-parse --show-toplevel)"
 # The registry may never be deleted. Authority is read from HEAD (see the
 # Python block below), so a commit that REMOVES `agents.json` would leave the
 # next commit with no committed registry and drop it onto the bootstrap path,
-# where any trailer is accepted. Deleting the registry is never legitimate, so
-# refusing it outright closes that escalation. `case` rather than `grep`: this
-# must work with nothing but shell builtins on PATH.
+# where any trailer is accepted. `case` rather than `grep`: this must work with
+# nothing but shell builtins on PATH.
+#
+# This is the specific, well-named refusal, NOT the load-bearing one. Rename
+# detection is on by default, so a commit that renames `agents.json` out of the
+# way is reported `R`, not `D`, and this filter returns nothing at all --
+# measured. The registry check in the Python block is what actually closes the
+# escalation, for deletion, renaming and emptying alike.
 DELETED="$(git -C "$ROOT" diff --cached --diff-filter=D --name-only 2>/dev/null)"
 case "$DELETED" in
     *agents.json*)
@@ -253,48 +258,90 @@ else
     exit 1
 fi
 
-if "$PY" -I - "$MSG_FILE" "$ROOT" <<'PYEOF'
+"$PY" -I - "$MSG_FILE" "$ROOT" <<'PYEOF'
 import json, re, subprocess, sys
 
+# Distinguishable so the shell can name the ACTUAL reason. Sentinel objects
+# rather than strings: a registry whose contents happened to be `"absent"` would
+# otherwise be able to impersonate one.
+ABSENT = object()
+CORRUPT = object()
 
-def _committed_registry(root):
-    """The registry as of HEAD -- state the commit under review cannot edit.
 
-    Authorising against the WORKING TREE was a self-signing hole: the commit
-    being checked can write `agents.json`, so adding a row and carrying the
-    matching trailer in the same commit satisfied the gate. That turns the
-    design's "identity is derived, never declared" straight back into declared.
+def _registry_at(root, spec):
+    """Parse `agents.json` at a git revision spec.
 
-    Returns None when there is no committed registry at all. An EMPTY committed
-    registry counts the same way: a freshly seeded channel commits `{}` before
-    anyone is registered, so "the file exists" is not the same question as
-    "anyone is authorised yet". Testing the file's presence instead locked out
-    the very first registration and every commit after it.
+    HEAD is the authority the commit under review cannot edit. Authorising
+    against the WORKING TREE was a self-signing hole: the commit being checked
+    can write `agents.json`, so adding a row and carrying the matching trailer in
+    the same commit satisfied the gate. That turns the design's "identity is
+    derived, never declared" straight back into declared.
+
+    `:agents.json` reads the INDEX -- the prospective commit's own content, which
+    is what the next commit will inherit as authority.
     """
     result = subprocess.run(
-        ["git", "-C", root, "show", "HEAD:agents.json"],
+        ["git", "-C", root, "show", spec],
         capture_output=True,
         text=True,
         check=False,
     )
     if result.returncode != 0:
-        return None
-    return json.loads(result.stdout)
+        return ABSENT
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        return CORRUPT
+
+
+def _authorises_anyone(value):
+    """Whether a parsed registry actually carries authority.
+
+    Deliberately mirrors the exact condition that arms the bootstrap branch --
+    falsiness after `json.loads`, NOT "the file exists". Blocking deletion left
+    the identical escalation one keystroke away: `{}` (and `[]`, `null`, `0`,
+    `""`, which all parse happily and are all falsy) reaches bootstrap just as a
+    missing file does.
+    """
+    return isinstance(value, dict) and bool(value)
 
 
 try:
     message = open(sys.argv[1], encoding="utf-8", errors="replace").read()
     root = sys.argv[2]
-    registry = _committed_registry(root)
-    if not registry:
+    head = _registry_at(root, "HEAD:agents.json")
+
+    if _authorises_anyone(head):
+        # The registry must still authorise someone AFTER this commit. Otherwise
+        # the next commit finds no committed authority, falls to bootstrap, and
+        # reads the working tree -- which that commit writes. One registered
+        # agent could disarm the gate permanently for everyone.
+        #
+        # A "may only grow" rule would be tidier and would be WRONG:
+        # `register_agent` drops the old row when a repo is re-registered under a
+        # new name, so a superset check rejects a legitimate rename. Narrowing is
+        # denial, not impersonation, and still needs a valid trailer. Only the
+        # transition to empty hands out authority.
+        if not _authorises_anyone(_registry_at(root, ":agents.json")):
+            sys.exit(2)
+        agents = set(head.values())
+    elif head is ABSENT or head == {}:
         # Bootstrap only: nothing is committed, or nothing is registered yet, so
-        # there is no prior authority to check against. This is the one commit
-        # whose author is structurally unverifiable -- someone has to write the
-        # first row. Every later commit takes the strict path above.
+        # there is no prior authority to check against. A freshly seeded channel
+        # commits `{}` before anyone is registered, so "the file exists" is not
+        # the same question as "anyone is authorised yet" -- testing presence
+        # instead locked out the very first registration and every commit after
+        # it. This is the one commit whose author is structurally unverifiable;
+        # someone has to write the first row.
         with open(root + "/agents.json", encoding="utf-8") as handle:
-            registry = json.load(handle)
-    agents = set(registry.values())
+            agents = set(json.load(handle).values())
+    else:
+        # Parses, authorises nobody, and is not the empty object a fresh channel
+        # seeds. Nothing legitimate produces this, and the gate must not guess.
+        sys.exit(3)
 except Exception:
+    # `SystemExit` derives from BaseException, so the exits above pass through
+    # this handler untouched -- their codes survive.
     sys.exit(1)
 
 for agent in agents:
@@ -307,8 +354,48 @@ for agent in agents:
         sys.exit(0)
 sys.exit(1)
 PYEOF
-then
+STATUS=$?
+
+if [ "$STATUS" -eq 0 ]; then
     exit 0
+fi
+
+# Distinct codes rather than one generic rejection. A true rejection with a false
+# REASON sends you to fix something that was already correct -- the same failure
+# the missing-interpreter branch above exists to avoid. The banners below stay
+# QUOTED for the reason given at the generic one.
+if [ "$STATUS" -eq 2 ]; then
+    cat >&2 <<'EOF'
+[agent-channel] REJECTED: this commit leaves no usable agent registry.
+
+agents.json is the only record of which agents exist. A commit that empties it
+-- to {}, or to a list, string or number that is not an object -- or that
+removes or renames it, would leave the NEXT commit with no committed authority
+to check against, and that commit would fall back to reading the working tree,
+which any commit can write. One registered agent could disarm this gate
+permanently for everyone.
+
+This is NOT a problem with your commit message. Rows may be added, and a repo
+may be re-registered under a new name; the last one may not be removed.
+EOF
+    exit 1
+fi
+
+if [ "$STATUS" -eq 3 ]; then
+    cat >&2 <<'EOF'
+[agent-channel] BLOCKED: the committed agent registry is unusable.
+
+agents.json at HEAD parses but is not an object of rows, so the gate cannot tell
+which agents exist and refuses every commit rather than guessing. This is NOT a
+problem with your commit message, and `channel register` cannot repair it --
+that command commits, so it is refused here too.
+
+An operator must restore agents.json to {"<repo path>": "<name>-agent"} rows and
+commit it with `git commit --no-verify`. That flag is named here and nowhere
+else in this gate: a rejected trailer has a real fix, whereas this branch has no
+other recovery.
+EOF
+    exit 1
 fi
 
 # The banner heredocs stay QUOTED. An earlier revision unquoted them to

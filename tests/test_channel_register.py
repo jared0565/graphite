@@ -151,6 +151,135 @@ def test_the_registry_cannot_be_deleted_to_escape_the_gate(tmp_path: Path) -> No
     assert result.returncode != 0, "deleting the registry must not be a way out of the gate"
 
 
+@pytest.mark.parametrize("payload", ['{}', "[]", "null", "0", '""'])
+def test_emptying_the_registry_cannot_disarm_the_gate(tmp_path: Path, payload: str) -> None:
+    """Blocking DELETION left the same escalation one keystroke away.
+
+    The bootstrap branch is armed by `not registry` after `json.loads`, not by a
+    missing file. So an already-registered agent could commit `agents.json = {}`
+    -- carrying its own valid trailer, which the gate accepts -- and the NEXT
+    commit would find no committed authority, fall through to bootstrap, and read
+    the WORKING TREE, which is attacker-controlled. One registered agent could
+    permanently disarm the gate for everyone.
+
+    Parametrised over the falsy shapes because they arm bootstrap by different
+    routes: `{}` is an empty dict, the rest are type-flips that `json.loads`
+    accepts happily. A fix written as `if staged == {}` passes the first and
+    leaves the other four open.
+
+    Deliberately NOT a superset check. `register_agent` pops the old row when a
+    repo is re-registered under a new name (`channel.py:403-406`, covered by
+    `test_registering_the_same_repo_again_updates_it`), so requiring the agent
+    set to only grow would reject a legitimate rename. Narrowing the registry is
+    denial, not impersonation, and needs a valid trailer anyway; only the
+    transition to empty hands out authority.
+    """
+    root = _channel_with_hook(tmp_path)
+    channel.register_agent(root, tmp_path / "real", "aramid-agent")
+
+    (root / "agents.json").write_text(payload, encoding="utf-8")
+    _git(root, "add", "-A")
+    emptied = _git(
+        root, "commit", "-m", "subject\n\nCo-Authored-By: aramid-agent <aramid@agents.local>\n"
+    )
+
+    # The discriminating assertion. `emptied.returncode != 0` alone would go
+    # green for any unrelated rejection -- what has to disappear is the
+    # impersonation the emptied registry enables.
+    (root / "agents.json").write_text('{"/x": "ghost-agent"}', encoding="utf-8")
+    (root / "rounds" / "x.md").write_text("payload\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    impersonation = _git(
+        root, "commit", "-m", "subject\n\nCo-Authored-By: ghost-agent <ghost@agents.local>\n"
+    )
+
+    assert impersonation.returncode != 0, (
+        "an emptied registry let an unregistered agent commit as itself"
+    )
+    assert emptied.returncode != 0, "emptying the registry must be refused outright"
+
+
+def test_emptying_is_refused_by_name_not_by_blaming_the_trailer(tmp_path: Path) -> None:
+    """The gate already learned once that a true rejection with a false REASON
+    sends you to fix something that was already correct
+    (`test_a_missing_interpreter_says_so_instead_of_blaming_the_trailer`). The
+    trailer here is valid; saying "names no agent" would be a lie."""
+    root = _channel_with_hook(tmp_path)
+    channel.register_agent(root, tmp_path / "real", "aramid-agent")
+    (root / "agents.json").write_text("{}", encoding="utf-8")
+    _git(root, "add", "-A")
+
+    result = _git(
+        root, "commit", "-m", "subject\n\nCo-Authored-By: aramid-agent <aramid@agents.local>\n"
+    )
+
+    output = result.stderr + result.stdout
+    assert result.returncode != 0
+    assert "names no agent" not in output, output
+    assert "registry" in output.lower(), output
+
+
+def test_renaming_the_registry_away_is_caught_too(tmp_path: Path) -> None:
+    """The deletion guard cannot see this one, and measuring says so.
+
+    `git diff --cached --diff-filter=D --name-only` -- the guard's own command --
+    returns EMPTY for a rename, because rename detection is on by default and
+    git reports `R100 agents.json agents.json.bak`. So the well-named refusal
+    misses the route entirely; what catches it is asking whether the INDEX still
+    holds a registry that authorises anyone, which a renamed-away file does not.
+
+    Written because the two-answer test asks whether the problem is gone, not
+    whether the named route is closed.
+    """
+    root = _channel_with_hook(tmp_path)
+    channel.register_agent(root, tmp_path / "real", "aramid-agent")
+    _git(root, "mv", "agents.json", "agents.json.bak")
+
+    renamed = _git(
+        root, "commit", "-m", "subject\n\nCo-Authored-By: aramid-agent <aramid@agents.local>\n"
+    )
+
+    (root / "agents.json").write_text('{"/x": "ghost-agent"}', encoding="utf-8")
+    (root / "rounds" / "x.md").write_text("payload\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    impersonation = _git(
+        root, "commit", "-m", "subject\n\nCo-Authored-By: ghost-agent <ghost@agents.local>\n"
+    )
+
+    assert impersonation.returncode != 0, "renaming the registry away opened the gate"
+    assert renamed.returncode != 0, "the registry must not be renamed out of the way"
+    assert "names no agent" not in renamed.stderr + renamed.stdout
+
+
+def test_a_corrupt_committed_registry_wedges_instead_of_opening(tmp_path: Path) -> None:
+    """A registry at HEAD that parses but is not an object of rows must reject
+    every commit, not fall through to the working tree.
+
+    Reachable only from before the guard existed, or via `--no-verify`, which is
+    exactly why it needs a test: the incidental route was `registry.values()`
+    raising `AttributeError` into a catch-all, and incidental fail-closed is one
+    refactor away from fail-open. It also proves the hook's `$?` really carries
+    the interpreter's exit code -- if it read the heredoc instead, STATUS would
+    be 0 and this commit would be accepted.
+    """
+    root = _channel_with_hook(tmp_path)
+    channel.register_agent(root, tmp_path / "real", "aramid-agent")
+    (root / "agents.json").write_text("[]", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "--no-verify", "-m", "corrupt the registry")
+
+    (root / "rounds" / "x.md").write_text("x\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    result = _git(
+        root, "commit", "-m", "subject\n\nCo-Authored-By: ghost-agent <ghost@agents.local>\n"
+    )
+
+    output = result.stderr + result.stdout
+    assert result.returncode != 0, "a corrupt registry must not open the gate"
+    assert "names no agent" not in output, output
+    assert "unusable" in output.lower(), output
+
+
 def _shim(bin_dir: Path, name: str, target: str) -> None:
     """A PATH entry that forwards to an absolute binary.
 
