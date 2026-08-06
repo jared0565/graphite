@@ -27,6 +27,132 @@ def _credential_home(tmp_path: Path) -> Path:
     return path
 
 
+def _require_symlinks(tmp_path: Path) -> None:
+    """Skip loudly if this machine cannot make symlinks.
+
+    Windows needs SeCreateSymbolicLinkPrivilege (or Developer Mode). It is
+    available on the GitHub windows runners and on the dev machine, so this
+    should almost never fire -- and it names the reason when it does, because a
+    silent skip on the gating platform is a check that only looks like one.
+    """
+    probe = tmp_path / "_symlink_probe"
+    probe.mkdir()
+    target = probe / "target"
+    target.write_text("x", encoding="utf-8")
+    try:
+        (probe / "link").symlink_to(target)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - privilege-dependent
+        pytest.skip(f"symlinks unavailable on this machine: {exc}")
+
+
+def test_a_symlinked_interpreter_is_accepted(tmp_path: Path) -> None:
+    """On POSIX essentially every interpreter is a symlink -- `/usr/bin/python3`
+    -> `python3.12`, and a venv's `bin/python` -> the system binary. Measured on
+    Ubuntu 24.04: `sys.executable` itself is one.
+
+    The old guard rejected any symlink via `lstat`, so `build_cli_environment`
+    raised `executable_invalid` for `sys.executable`, and graphite could not
+    launch a single CLI provider on Linux or macOS. 32 tests in this file failed
+    identically on both platforms for this one reason.
+    """
+    _require_symlinks(tmp_path)
+    real_bin = tmp_path / "realbin"
+    real_bin.mkdir()
+    target = real_bin / "tool"
+    target.write_bytes(b"binary")
+    link_dir = tmp_path / "linkbin"
+    link_dir.mkdir()
+    link = link_dir / "tool-link"
+    link.symlink_to(target)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    environment = build_cli_environment(
+        provider=ProviderId.CODEX,
+        executable=link,
+        workspace=workspace,
+        credential_home=_credential_home(tmp_path),
+    )
+
+    assert environment, "a symlinked executable outside the workspace must be usable"
+
+
+def test_a_symlink_pointing_into_the_workspace_is_still_rejected(tmp_path: Path) -> None:
+    """THE test for the change above. The property the symlink ban was standing
+    in for is "never execute anything inside the agent-controlled workspace",
+    and that is enforced by resolving first and containment-checking the
+    RESOLVED path.
+
+    If this passes, the containment check is not following the link and dropping
+    the ban really did remove a protection -- so this failing is the only thing
+    that makes the relaxation safe.
+    """
+    _require_symlinks(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    planted = workspace / "evil"
+    planted.write_bytes(b"binary")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = outside / "innocent-looking"
+    link.symlink_to(planted)
+
+    with pytest.raises(CliProcessError, match="^executable_invalid$"):
+        build_cli_environment(
+            provider=ProviderId.CODEX,
+            executable=link,
+            workspace=workspace,
+            credential_home=_credential_home(tmp_path),
+        )
+
+
+def test_a_symlink_to_a_directory_is_rejected(tmp_path: Path) -> None:
+    """Dropping the `lstat` symlink ban must not cost the "is it a regular file"
+    property. Validating the RESOLVED target keeps it; validating nothing would
+    let a symlink to a directory or a fifo through."""
+    _require_symlinks(tmp_path)
+    real_dir = tmp_path / "somedir"
+    real_dir.mkdir()
+    link_dir = tmp_path / "linkbin"
+    link_dir.mkdir()
+    link = link_dir / "tool-link"
+    link.symlink_to(real_dir, target_is_directory=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with pytest.raises(CliProcessError, match="^executable_invalid$"):
+        build_cli_environment(
+            provider=ProviderId.CODEX,
+            executable=link,
+            workspace=workspace,
+            credential_home=_credential_home(tmp_path),
+        )
+
+
+def test_a_symlinked_workspace_directory_is_accepted(tmp_path: Path) -> None:
+    """`_canonical_directory` carried the identical defect. It matters most on
+    macOS, where `/tmp` -> `/private/tmp` and `/var` -> `/private/var`, so a
+    workspace under the system temp root can have a symlinked component and be
+    refused `workspace_invalid` before the executable is even looked at."""
+    _require_symlinks(tmp_path)
+    real_workspace = tmp_path / "real-workspace"
+    real_workspace.mkdir()
+    workspace = tmp_path / "workspace-link"
+    workspace.symlink_to(real_workspace, target_is_directory=True)
+    executable = tmp_path / "bin" / "tool"
+    executable.parent.mkdir()
+    executable.write_bytes(b"binary")
+
+    environment = build_cli_environment(
+        provider=ProviderId.CODEX,
+        executable=executable,
+        workspace=workspace,
+        credential_home=_credential_home(tmp_path),
+    )
+
+    assert environment, "a symlinked workspace path must be usable"
+
+
 def test_cli_transport_rejects_non_cli_provider(tmp_path: Path) -> None:
     executable = tmp_path / "bin" / "tool.exe"
     executable.parent.mkdir()

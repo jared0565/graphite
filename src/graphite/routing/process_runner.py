@@ -166,13 +166,47 @@ def _is_reparse(metadata: os.stat_result) -> bool:
     return bool(getattr(metadata, "st_file_attributes", 0) & _REPARSE_POINT)
 
 
+# Both canonicalisers RESOLVE FIRST and then judge the resolved target.
+#
+# They used to `lstat()` and reject anything that was a symlink at all. That
+# reads like defence in depth and is actually a platform assumption: on POSIX
+# essentially every interpreter is a symlink -- `/usr/bin/python3` ->
+# `python3.12`, a venv's `bin/python` -> the system binary -- so the rule
+# rejected `sys.executable` itself and graphite could not launch any CLI
+# provider on Linux or macOS. `_canonical_directory` was hit too, worst on
+# macOS, where `/tmp` -> `/private/tmp` and `/var` -> `/private/var` put a
+# symlink in the workspace path before the executable is even looked at.
+#
+# The security property here is NOT "no symlinks". It is "never execute
+# anything inside the agent-controlled workspace", enforced by the
+# `relative_to` containment check below -- which already operates on the
+# RESOLVED path, so a symlink aimed into the workspace is caught by it.
+# Dropping the ban therefore costs no containment. Pinned by
+# `test_a_symlink_pointing_into_the_workspace_is_still_rejected`, and that test
+# was mutation-checked: with the containment check removed it fails, so it is
+# testing the guard rather than the ban.
+#
+# What the ban DID carry, preserved deliberately:
+#   - "is a regular file" / "is a directory" -- now checked on
+#     `resolved.stat()`. Checking nothing would let a symlink to a directory or
+#     a fifo through.
+#   - the Windows reparse-point rule, still applied to the resolved metadata.
+#     `st_file_attributes` is Windows-only, so it is inert on POSIX and was
+#     never what failed there.
+#
+# Residual, accepted knowingly: resolving then executing leaves a TOCTOU window
+# in which a symlink can be re-pointed. The ban narrowed that window; it did not
+# close it (a plain file can be swapped too), and closing it properly needs an
+# fd-based exec, not a path check. Banning symlinks to buy a narrower race, at
+# the price of the tool not running on two of three platforms, is the wrong
+# trade.
 def _canonical_directory(path: Path, code: str) -> Path:
     try:
-        metadata = path.lstat()
         resolved = path.resolve(strict=True)
+        metadata = resolved.stat()
     except OSError as exc:
         raise CliProcessError(code) from exc
-    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata):
+    if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
         raise CliProcessError(code)
     return resolved
 
@@ -181,12 +215,15 @@ def _canonical_executable(path: Path, workspace: Path) -> Path:
     if not path.is_absolute():
         raise CliProcessError("executable_invalid")
     try:
-        metadata = path.lstat()
         resolved = path.resolve(strict=True)
+        metadata = resolved.stat()
     except OSError as exc:
         raise CliProcessError("executable_invalid") from exc
-    if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata):
+    if not stat.S_ISREG(metadata.st_mode) or _is_reparse(metadata):
         raise CliProcessError("executable_invalid")
+    # `workspace` arrives already resolved (`_canonical_directory`), so both
+    # sides of this comparison are canonical and containment cannot be
+    # sidestepped by spelling either path differently.
     try:
         resolved.relative_to(workspace)
     except ValueError:
