@@ -554,7 +554,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         root = Path(args.path).resolve()
         # Deliberately omits --detach: the child must build, not re-spawn.
         pid = spawn_detached(
-            [sys.executable, "-B", "-m", "graphite", "build", str(root)], root
+            [sys.executable, "-B", "-P", "-m", "graphite", "build", str(root)], root
         )
         print(f"[graphite] detached build started (pid {pid})")
         return 0

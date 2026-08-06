@@ -898,3 +898,50 @@ def test_every_textual_subprocess_call_declares_an_error_handler() -> None:
         "textual subprocess call(s) with no `errors=`; a decode failure here "
         f"returns None instead of raising: {offenders}"
     )
+
+
+def test_every_in_source_graphite_launch_isolates_sys_path() -> None:
+    """`python -m graphite ...` puts the CWD at `sys.path[0]`.
+
+    Every launch below runs with a CONSUMER's repo root as cwd, so a `graphite.py`
+    -- or a `graphite/` directory -- planted there beats the installed package.
+    A module-shaped shadow RUNS before it errors, so "it would crash" is not a
+    mitigation.
+
+    `-B` is NOT the fix and reading it as one is the trap this test exists for:
+    it suppresses bytecode writing and does nothing to `sys.path`. Measured with
+    a decoy on 2026-08-06 -- `python -B -m graphite --version` printed
+    `SHADOW EXECUTED`; only `-P` did not.
+
+    This closes a chain-of-custody gap, not a fresh hole. The git-hook
+    trampoline was already fixed to launch `graphite.hook_entry` under `-P`
+    (`b803493`), and `hook_entry` then re-spawned `python -B -m graphite build`
+    with the repo root as cwd -- handing back, one hop later, exactly what the
+    trampoline had just protected. It fires on every commit in every onboarded
+    repo.
+
+    Scanning list literals rather than `subprocess` calls specifically, because
+    two of these go through `spawn_detached`, which is not a subprocess call at
+    all -- scoping by call shape is how the earlier sweeps missed surfaces.
+    """
+    import ast
+
+    offenders = []
+    for path in sorted(Path("src").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.List):
+                continue
+            items = [e.value if isinstance(e, ast.Constant) else None for e in node.elts]
+            if "-m" not in items:
+                continue
+            target = items[items.index("-m") + 1] if items.index("-m") + 1 < len(items) else None
+            if not isinstance(target, str) or not target.startswith("graphite"):
+                continue
+            if "-P" not in items:
+                offenders.append(f"{path}:{node.lineno} -> {target}")
+
+    assert not offenders, (
+        "in-source graphite launch(es) without `-P`; a repo-local graphite.py "
+        f"at the cwd would win: {offenders}"
+    )

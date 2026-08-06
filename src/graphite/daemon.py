@@ -321,6 +321,7 @@ def _build_command(cfg: Config, root: Path) -> tuple[list[str], dict[str, str]]:
     cmd = [
         sys.executable,
         "-B",
+        "-P",
         "-m",
         "graphite",
         "--output-dir",

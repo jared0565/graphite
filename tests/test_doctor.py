@@ -2154,6 +2154,18 @@ def test_core_deep_probe_runs_real_pipeline_without_touching_selected_root(tmp_p
 
 
 def test_core_deep_probe_uses_exact_offline_command_contract(tmp_path: Path) -> None:
+    """Exact argv, and `-P` is part of the contract rather than incidental.
+
+    `-B` was here alone and reads like a hardening flag: it suppresses bytecode
+    writing and does nothing to `sys.path`. These launch `-m graphite` with a
+    working directory the probe controls, so a `graphite.py` reachable as
+    `sys.path[0]` would win -- measured, `python -B -m graphite` runs the shadow.
+
+    NOT `-I`, which the MCP and LLM probes nearby do use. `-I` also implies
+    `-E`, and these commands are the real graphite CLI, which reads its
+    `GRAPHITE_*` configuration from the environment. Isolating that would fix
+    the shadow by breaking the build.
+    """
     import graphite.doctor_probes as probes
 
     selected = tmp_path / "selected"
@@ -2172,9 +2184,9 @@ def test_core_deep_probe_uses_exact_offline_command_contract(tmp_path: Path) -> 
     work = calls[0][1]
     repo, out, cache, graph = work / "repo", work / "out", work / "cache", work / "out" / "graph.json"
     assert calls == [
-        (["PYTHON", "-B", "-m", "graphite", "--output-dir", str(out), "--cache-dir", str(cache), "--llm", "none", "build", str(repo)], work),
-        (["PYTHON", "-B", "-m", "graphite", "validate", "--graph-json", str(graph), "--json"], work),
-        (["PYTHON", "-B", "-m", "graphite", "query", "stats", "--graph-json", str(graph)], work),
+        (["PYTHON", "-B", "-P", "-m", "graphite", "--output-dir", str(out), "--cache-dir", str(cache), "--llm", "none", "build", str(repo)], work),
+        (["PYTHON", "-B", "-P", "-m", "graphite", "validate", "--graph-json", str(graph), "--json"], work),
+        (["PYTHON", "-B", "-P", "-m", "graphite", "query", "stats", "--graph-json", str(graph)], work),
     ]
     assert all("include-llm" not in argv for argv, _cwd in calls)
 

@@ -59,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     # `cmd_build` resolves against the process CWD, so a child launched from
     # elsewhere would write the graph into the wrong directory.
     spawn_detached(
-        [sys.executable, "-B", "-m", "graphite", "build", str(root)], root
+        [sys.executable, "-B", "-P", "-m", "graphite", "build", str(root)], root
     )
     return 0
 

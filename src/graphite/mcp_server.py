@@ -59,7 +59,7 @@ class GraphiteMCPServer:
         """Rebuild the graph and reload it."""
         try:
             result = subprocess.run(
-                [sys.executable, "-m", "graphite", "build", str(self.project_root)],
+                [sys.executable, "-P", "-m", "graphite", "build", str(self.project_root)],
                 cwd=self.project_root,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,

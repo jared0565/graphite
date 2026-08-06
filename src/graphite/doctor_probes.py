@@ -662,9 +662,9 @@ def probe_core_pipeline(
         cache = work / "cache"
         graph = out / "graph.json"
         commands = [
-            [python_executable, "-B", "-m", "graphite", "--output-dir", str(out), "--cache-dir", str(cache), "--llm", "none", "build", str(repo)],
-            [python_executable, "-B", "-m", "graphite", "validate", "--graph-json", str(graph), "--json"],
-            [python_executable, "-B", "-m", "graphite", "query", "stats", "--graph-json", str(graph)],
+            [python_executable, "-B", "-P", "-m", "graphite", "--output-dir", str(out), "--cache-dir", str(cache), "--llm", "none", "build", str(repo)],
+            [python_executable, "-B", "-P", "-m", "graphite", "validate", "--graph-json", str(graph), "--json"],
+            [python_executable, "-B", "-P", "-m", "graphite", "query", "stats", "--graph-json", str(graph)],
         ]
         outputs: list[ProbeProcessResult] = []
         validation_nodes: int | None = None
