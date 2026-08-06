@@ -81,9 +81,16 @@ def test_the_hook_rejects_a_commit_naming_no_agent(tmp_path: Path) -> None:
     assert "names no agent" in output
     # The guidance has to name an interpreter that EXISTS on the reader's
     # machine, so it interpolates the one the hook just resolved. A literal
-    # `$PY` here would mean the heredoc stopped expanding and the advice became
-    # unrunnable; the old text said `python`, which is absent off Windows.
-    assert "-P -m graphite channel register" in output, output
+    # `$PY` would mean the interpolation broke and the advice is unrunnable;
+    # the original text said `python`, which is absent off Windows.
+    #
+    # `-I`, matching the flag the hook itself uses. It previously printed `-P`,
+    # which contradicted the reason `-I` was chosen: `-P` is 3.11+, so on the
+    # older interpreters `-I` exists to support, the printed command dies with
+    # `Unknown option: -P`. The likely operator recovery is to delete the flag,
+    # which lands on exactly the CWD-shadowing form the flag was added to close.
+    assert "-I -m graphite channel register" in output, output
+    assert "-P -m graphite" not in output, output
     assert "$PY" not in output, output
 
 

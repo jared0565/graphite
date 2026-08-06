@@ -259,7 +259,14 @@ then
     exit 0
 fi
 
-cat >&2 <<EOF
+# The banner heredocs stay QUOTED. An earlier revision unquoted them to
+# interpolate `$PY`, which turned the audit gate's own output into a shell
+# expansion surface: any `$`, backtick or `$(...)` that later reaches this text
+# -- an interpolated agent name, path or commit subject -- would be executed by
+# the script that exists to gate commits. Nothing was exploitable while the body
+# stayed static, which is exactly why it would have survived review. The one
+# value actually needed is printed separately instead.
+cat >&2 <<'EOF'
 [agent-channel] REJECTED: this commit names no agent.
 
 Every commit in the channel must carry the trailer of the agent that wrote it,
@@ -269,8 +276,15 @@ so history can answer "who changed this, and why":
 
 Only your own, and only an agent registered in agents.json. Register one with:
 
-    $PY -P -m graphite channel register <repo-path> <name>-agent
-
+EOF
+# `-I`, the same flag the guard above uses -- NOT `-P`. `-P` is 3.11+, so on the
+# older interpreters `-I` exists to support, this printed command would fail with
+# `Unknown option: -P`, and the natural operator recovery is to delete the flag.
+# That lands on `python3 -m graphite ...` run from a repo root, which is the
+# CWD-shadowing path the flag was added to close. Advice that breaks into an
+# insecure form under the reader's hand is worse than no advice.
+printf '    %s -I -m graphite channel register <repo-path> <name>-agent\n\n' "$PY" >&2
+cat >&2 <<'EOF'
 The commit message must also state the reason for the change.
 See PROTOCOL.md, "Audit requirements".
 EOF
