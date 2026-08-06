@@ -9,12 +9,16 @@ so there is one record rather than two that drift.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from graphite import channel
+from graphite.hookshim import sh_interpreter_path
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -73,7 +77,94 @@ def test_the_hook_rejects_a_commit_naming_no_agent(tmp_path: Path) -> None:
     result = _git(root, "commit", "-m", "no trailer here")
 
     assert result.returncode != 0
-    assert "names no agent" in (result.stderr + result.stdout)
+    output = result.stderr + result.stdout
+    assert "names no agent" in output
+    # The guidance has to name an interpreter that EXISTS on the reader's
+    # machine, so it interpolates the one the hook just resolved. A literal
+    # `$PY` here would mean the heredoc stopped expanding and the advice became
+    # unrunnable; the old text said `python`, which is absent off Windows.
+    assert "-P -m graphite channel register" in output, output
+    assert "$PY" not in output, output
+
+
+def _shim(bin_dir: Path, name: str, target: str) -> None:
+    """A PATH entry that forwards to an absolute binary.
+
+    Shims rather than PATH surgery because the two platforms disagree about
+    where things live: on Ubuntu `git` and `python3` share `/usr/bin`, so a
+    test that wants git-without-python cannot get there by dropping
+    directories. Forwarding gives per-command control on both.
+    """
+    path = bin_dir / name
+    path.write_text(f'#!/bin/sh\nexec "{target}" "$@"\n', encoding="utf-8", newline="\n")
+    path.chmod(0o755)
+
+
+def _hook_bin(tmp_path: Path, name: str, *, with_python3: bool) -> Path:
+    bin_dir = tmp_path / name
+    bin_dir.mkdir()
+    git = shutil.which("git")
+    assert git is not None, "git is required to run the channel hook"
+    _shim(bin_dir, "git", sh_interpreter_path(Path(git)))
+    if with_python3:
+        _shim(bin_dir, "python3", sh_interpreter_path(Path(sys.executable)))
+    return bin_dir
+
+
+def _run_commit_msg_hook(root: Path, message: str, bin_dir: Path) -> subprocess.CompletedProcess[str]:
+    """Run the hook directly, with PATH containing ONLY `bin_dir`.
+
+    Direct rather than through `git commit` because the point is to control
+    which interpreters exist, and git repopulates PATH from the environment.
+    """
+    sh = shutil.which("sh")
+    if sh is None:  # pragma: no cover - Git for Windows and POSIX both ship one
+        pytest.skip("no POSIX sh available to run the hook")
+    msg_file = root / "HOOK_TEST_MSG"
+    msg_file.write_text(message, encoding="utf-8")
+    env = {**os.environ, "PATH": str(bin_dir)}
+    return subprocess.run(  # noqa: S603
+        [sh, str(root / ".githooks" / "commit-msg"), str(msg_file)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_the_hook_works_where_the_interpreter_is_called_python3(tmp_path: Path) -> None:
+    """Ubuntu ships only `python3` and macOS removed `python` in 12.3, so a hook
+    hardcoding `python` rejects EVERY commit off Windows -- the channel's audit
+    gate becomes an outage. Windows is the one platform where it works, which is
+    why the absence has to be simulated rather than waited for."""
+    root = _channel_with_hook(tmp_path)
+    channel.register_agent(root, tmp_path / "a", "codex-agent")
+    bin_dir = _hook_bin(tmp_path, "only-python3", with_python3=True)
+
+    result = _run_commit_msg_hook(
+        root, "subject\n\nCo-Authored-By: codex-agent <codex@agents.local>\n", bin_dir
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_missing_interpreter_says_so_instead_of_blaming_the_trailer(tmp_path: Path) -> None:
+    """The gate must still fail closed, but the REASON has to be true. Falling
+    through to "names no agent" sends you to fix a trailer that was already
+    correct, which is how this stayed misdiagnosed."""
+    root = _channel_with_hook(tmp_path)
+    channel.register_agent(root, tmp_path / "a", "codex-agent")
+    bin_dir = _hook_bin(tmp_path, "no-python", with_python3=False)
+
+    result = _run_commit_msg_hook(
+        root, "subject\n\nCo-Authored-By: codex-agent <codex@agents.local>\n", bin_dir
+    )
+
+    output = result.stderr + result.stdout
+    assert result.returncode != 0, "a gate that cannot verify must not pass the commit"
+    assert "names no agent" not in output, output
+    assert "python" in output.lower()
 
 
 def test_the_hook_rejects_an_agent_that_is_not_registered(tmp_path: Path) -> None:

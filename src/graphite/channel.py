@@ -213,7 +213,30 @@ COMMIT_MSG_HOOK = '''#!/bin/sh
 MSG_FILE="$1"
 ROOT="$(git rev-parse --show-toplevel)"
 
-if python - "$MSG_FILE" "$ROOT/agents.json" <<'PYEOF'
+# `python3` FIRST, and `python` only as a fallback. Ubuntu ships no `python` at
+# all and macOS removed it in 12.3, so hardcoding it made this gate reject every
+# commit on any non-Windows machine -- an outage, not a rejection. Windows is the
+# single platform where the old spelling worked.
+#
+# `-I` rather than `-P`: both drop the CWD from `sys.path`, but `-P` is 3.11+ and
+# this hook is COMMITTED, so it runs under whatever `python3` a machine happens to
+# have. `-I` has existed since 3.4 and cannot brick the gate on an older one.
+if command -v python3 >/dev/null 2>&1; then
+    PY=python3
+elif command -v python >/dev/null 2>&1; then
+    PY=python
+else
+    # `echo`, not `cat`: this branch fires when the environment is already
+    # threadbare, and a builtin needs nothing on PATH to report it.
+    echo "[agent-channel] BLOCKED: no Python interpreter found (tried python3, python)." >&2
+    echo "" >&2
+    echo "The audit gate cannot verify this commit, so it is refused rather than" >&2
+    echo "waved through. This is NOT a problem with your commit message. Install" >&2
+    echo "Python or put it on PATH, then commit again." >&2
+    exit 1
+fi
+
+if "$PY" -I - "$MSG_FILE" "$ROOT/agents.json" <<'PYEOF'
 import json, re, sys
 
 try:
@@ -236,7 +259,7 @@ then
     exit 0
 fi
 
-cat >&2 <<'EOF'
+cat >&2 <<EOF
 [agent-channel] REJECTED: this commit names no agent.
 
 Every commit in the channel must carry the trailer of the agent that wrote it,
@@ -246,7 +269,7 @@ so history can answer "who changed this, and why":
 
 Only your own, and only an agent registered in agents.json. Register one with:
 
-    python -m graphite channel register <repo-path> <name>-agent
+    $PY -P -m graphite channel register <repo-path> <name>-agent
 
 The commit message must also state the reason for the change.
 See PROTOCOL.md, "Audit requirements".
