@@ -276,6 +276,45 @@ mechanism from a secure environment with scoped credentials. Never place tokens 
 command-line arguments, shell history, repository files, or logs. This repository and
 guide do not claim that any package index is configured.
 
+## Retention and rollback
+
+Every build that was ever deployed must be retained, with its SHA256 and an
+evidence record, in a store **outside** this repository. Artifacts kept inside
+it are destroyed by `git clean -xdf` and absent from a fresh clone — precisely
+when a rollback is wanted. On this machine that store is
+`F:/Projects/.graphite-releases/`, one directory per version plus an `index.md`
+recording what is currently deployed.
+
+This is not bookkeeping. Consumers import Graphite from a single editable
+install pointed at the development tree, so a saved file is live for all of them
+with no build and no boundary. Rollback means "reinstall the last known-good
+wheel", and that is possible only for a wheel somebody kept. A build directed at
+a scratch directory satisfies the gate above and leaves the gap open.
+
+Rolling back, in an environment that already has the runtime dependencies:
+
+```text
+python -m pip install --force-reinstall --no-deps "STORE_DIR/graphite-VERSION-py3-none-any.whl"
+```
+
+Returning to live development:
+
+```text
+python -m pip install -e REPO_DIR
+```
+
+Verify each artifact's SHA256 against its evidence record before installing it,
+and confirm the switch by the resolved module path rather than by the version
+string — both states report the same version, so the version cannot distinguish
+them:
+
+```text
+python -c "import graphite; print(graphite.__file__)"
+```
+
+Prove a rollback path in a throwaway virtual environment before relying on it,
+and prove the return as well. An untested recovery step is not a recovery step.
+
 ## Verify and recover
 
 Verify the remote branch commit and annotated tag object against the release evidence.

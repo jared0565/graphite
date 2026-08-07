@@ -1749,6 +1749,11 @@ def test_release_guide_has_gates_and_version_sources() -> None:
         "## Verification gates",
         "## Build and inspect artifacts",
         "## Tag and publish",
+        # Retention is a REQUIRED section, not an optional appendix: rollback is
+        # "reinstall the last known-good wheel", which only works for a wheel
+        # somebody kept. Building into a scratch directory passes every gate in
+        # this guide and still leaves nothing to roll back to.
+        "## Retention and rollback",
         "## Verify and recover",
     )
 
