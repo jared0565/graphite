@@ -2229,9 +2229,55 @@ def _force_utf8_when_redirected() -> None:
             pass
 
 
+def _version_report() -> str:
+    """Identity of the ENGINE, not merely the packaged version string.
+
+    Every consumer here runs graphite from an editable install, so
+    `importlib.metadata.version` is frozen at whatever `pyproject.toml` said when
+    the install happened and never moves when the source does. On its own it
+    reports the same string from every repo on the machine and discriminates
+    nothing -- which is why "what version is that consumer on" had no answer from
+    inside graphite, and why a hand-maintained per-repo list went stale silently.
+
+    The fingerprint is what carries the information: a digest over the engine's
+    own source files, so two repos agreeing on it are provably running identical
+    code and a repo that differs provably is not. That is what makes this a
+    survey rather than a banner.
+
+    Never raises, deliberately. A diagnostic that dies tells you less than one
+    that names the field it could not fill -- and a survey silently missing its
+    discriminating field would read as "every repo agrees", which is the exact
+    false conclusion this exists to prevent.
+    """
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _packaged_version
+
+    try:
+        packaged = _packaged_version("graphite")
+    except PackageNotFoundError:  # pragma: no cover - installed in every supported layout
+        packaged = "unknown"
+
+    lines = [f"graphite {packaged}"]
+    try:
+        identity = engine_identity(Config().cache_version)
+    except Exception as exc:  # noqa: BLE001 - see "never raises" above
+        code = getattr(exc, "code", type(exc).__name__)
+        lines.append(f"engine-fingerprint unavailable: {code}")
+    else:
+        lines.append(f"engine-fingerprint {identity['fingerprint']}")
+        lines.append(f"cache-version      {identity['cache_version']}")
+        lines.append(f"engine-schema      {identity['schema_version']}")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     _force_utf8_when_redirected()
     parser = argparse.ArgumentParser(prog="graphite", description="Local-first code knowledge graph.")
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Print engine identity (version, fingerprint, cache version) and exit",
+    )
     parser.add_argument("--output-dir", default=None, help="Output directory (default: graph-out)")
     parser.add_argument("--cache-dir", default=None, help="Cache directory (default: .cache/graphite)")
     parser.add_argument("--workers", type=int, default=None, help="Parallel workers")
@@ -2857,6 +2903,14 @@ def main(argv: list[str] | None = None) -> int:
     p_startup_uninstall.set_defaults(func=cmd_daemon_uninstall_startup_windows)
 
     args = parser.parse_args(argv)
+    if getattr(args, "version", False):
+        # Returns BEFORE the activation call further down, on purpose. This is
+        # the one command an operator runs across every consumer repo at once;
+        # activating eight repos would enrol them all into daemon supervision
+        # and trigger eight rebuilds, so the survey would change what it
+        # measures. Read-only questions must stay read-only.
+        print(_version_report())
+        return 0
     if not args.command:
         parser.print_help()
         return 1
