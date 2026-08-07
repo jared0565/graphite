@@ -7,6 +7,22 @@ name = "graphite"
 dynamic = ["version"]
 description = "Local-first, zero-LLM knowledge graph extraction for codebases."
 readme = "README.md"
+# PEP 639: an SPDX expression plus the file, deliberately WITHOUT the old
+# `License :: OSI Approved :: MIT License` classifier, which the PEP deprecates.
+# Hatchling 1.31.0 accepts the classifier alongside this field -- measured, the
+# build exits 0 -- so omitting it avoids two declarations of one fact drifting
+# apart, and avoids a combination setuptools >= 77 rejects. It is not a live
+# build break here.
+#
+# Both lines below are needed: `license` states the terms, `license-files` is
+# what actually puts LICENSE inside the wheel and sdist. Verified in a built
+# wheel: `License-Expression: MIT`, `License-File: LICENSE`, and the file at
+# `graphite-VERSION.dist-info/licenses/LICENSE`.
+#
+# Absence was the silent case: with neither, the default is all-rights-reserved
+# and the artifact is not redistributable, and nothing anywhere warns you.
+license = "MIT"
+license-files = ["LICENSE"]
 # MEASURED, not inherited. Full suite, 2816 passed / 44 skipped on every cell,
 # all at 2e5e0a2 on Windows:
 #
@@ -112,11 +128,8 @@ include = [
     "/RELEASING.md",
     "/CONTRIBUTING.md",
     "/ARCHITECTURE.md",
+    "/LICENSE",
 ]
-# No `/LICENSE` line because there is no LICENSE file, and no `[project].license`
-# field either -- which makes this "all rights reserved" by default and not
-# redistributable. Deliberately not chosen here: picking a license is the
-# owner's call, not a packaging detail. Add the file and the field together.
 
 [tool.ruff]
 line-length = 100

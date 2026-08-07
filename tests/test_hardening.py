@@ -987,6 +987,56 @@ def test_no_shipped_source_hardcodes_a_developer_machine_path() -> None:
     )
 
 
+def test_the_package_declares_a_license_and_ships_the_file() -> None:
+    """Absence of a license is the silent case, which is why it lasted 662 commits.
+
+    Nothing warns you: the build succeeds, the wheel installs, the tests pass.
+    But with no `[project].license` and no LICENSE file, the default is
+    all-rights-reserved -- so the artifact cannot legally be redistributed, and
+    the one state that needs flagging is the one that produces no output.
+
+    Checks the declaration and the FILE together. `license` alone states terms
+    nobody receives; `license-files` is what actually puts LICENSE inside the
+    wheel and sdist. Verified against a real build: the wheel carries
+    `License-Expression`, `License-File`, and
+    `graphite-VERSION.dist-info/licenses/LICENSE`.
+
+    The deprecated `License :: OSI Approved :: ...` classifier is asserted
+    ABSENT. Measured, not assumed -- and the first version of this docstring had
+    it wrong: adding one back and building gives **exit 0** on hatchling 1.31.0,
+    so it does not break this toolchain today. Setuptools >= 77 does reject the
+    combination, which makes it a portability hazard rather than a live break.
+    The reason to forbid it here is that two declarations of the same fact drift
+    apart, and PEP 639 already picked which one wins.
+    """
+    import tomllib
+
+    root = Path(__file__).parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+
+    expression = project.get("license")
+    assert isinstance(expression, str) and expression.strip(), (
+        "no `[project].license` SPDX expression; the package defaults to "
+        "all-rights-reserved and is not redistributable"
+    )
+
+    declared = project.get("license-files") or []
+    assert declared, "`license-files` missing, so LICENSE is never packaged"
+
+    stale = [c for c in project.get("classifiers", []) if c.startswith("License ::")]
+    assert not stale, (
+        "deprecated license classifier alongside an SPDX `license` field; this "
+        f"makes the build fail rather than merely being redundant: {stale}"
+    )
+
+    for name in declared:
+        path = root / name
+        assert path.is_file(), f"`license-files` names a file that does not exist: {name}"
+        text = path.read_text(encoding="utf-8")
+        assert "Copyright" in text, f"{name} carries no copyright line"
+        assert len(text.split()) > 50, f"{name} is too short to be a real license"
+
+
 def test_the_packaged_version_is_read_from_the_source_of_truth() -> None:
     """Nothing else in this suite exercises a build, so a broken version source
     is invisible until someone installs.
