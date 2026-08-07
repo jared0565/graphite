@@ -478,8 +478,14 @@ if mcp_spec is None or mcp_spec.origin is None or pathlib.Path(mcp_spec.origin).
 """ + _MCP_CHILD_LOG_SETUP + """\
 runpy.run_module("graphite.mcp", run_name="__main__")
 """
+# Machine-independent on purpose. This shipped naming one developer's
+# `.codex_state` scratch directory, so on every other machine it pointed at a
+# file that did not exist -- and it carried that user's name into the wheel.
+# `require.resolve` asks node the same question the probe asks, needs nothing
+# installed, and works wherever the reader happens to be.
 _TYPESCRIPT_REMEDIATION = (
-    "Validate package: node C:/Users/fbmac/atlas/Codex/.codex_state/user_home/scripts/validate-packages.cjs typescript",
+    "Confirm the package resolves from the target project: "
+    "node -e \"require.resolve('typescript')\"",
     "Then add typescript with the target project's existing package manager.",
 )
 

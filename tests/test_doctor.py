@@ -3907,8 +3907,13 @@ def test_typescript_deep_probe_gives_exact_activation_guidance_when_module_is_mi
         _runner=lambda *a, **k: probes.ProbeProcessResult(0, b'{"missing_module":"typescript"}', b"", 0.01),
     )
     assert check.status == "optional"
+    # Exact-tuple guard kept deliberately -- the point of this test is that the
+    # guidance is EXACT, not merely present. Updated, not relaxed: the first
+    # step used to name one developer's `.codex_state` directory, which is a
+    # dead path on every other machine and shipped that username in the wheel.
     assert check.remediation == (
-        "Validate package: node C:/Users/fbmac/atlas/Codex/.codex_state/user_home/scripts/validate-packages.cjs typescript",
+        "Confirm the package resolves from the target project: "
+        "node -e \"require.resolve('typescript')\"",
         "Then add typescript with the target project's existing package manager.",
     )
 

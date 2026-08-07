@@ -947,6 +947,46 @@ def test_every_in_source_graphite_launch_isolates_sys_path() -> None:
     )
 
 
+def test_no_shipped_source_hardcodes_a_developer_machine_path() -> None:
+    """A path from the machine that wrote the code is wrong on every other one.
+
+    Found by actually inspecting a built artifact rather than by reading code:
+    `_TYPESCRIPT_REMEDIATION` shipped
+
+        Validate package: node C:/Users/<user>/atlas/Codex/.codex_state/...
+
+    in the wheel, as user-facing advice from `graphite doctor`. It names another
+    tool's transient state directory on one machine, so everywhere else it sends
+    the reader to a file that does not exist -- and it puts a username into a
+    distributable archive. RELEASING.md makes absolute developer paths in an
+    artifact a stop condition; nothing enforced it.
+
+    A text scan rather than an `ast` walk over string constants, deliberately: a
+    developer path in a COMMENT ships in the sdist exactly the same way, so
+    restricting this to literals would leave the archive just as dirty.
+    """
+    import re
+
+    machine_path = re.compile(
+        r"[A-Za-z]:[\\/](?:Users|Projects)[\\/][^\s\"'`)]*"  # C:\Users\..., F:/Projects/...
+        r"|/(?:home|Users)/[a-z][\w.-]*",                     # /home/..., /Users/...
+        re.IGNORECASE,
+    )
+
+    offenders = []
+    for path in sorted(Path("src").rglob("*.py")) + sorted(Path("src").rglob("*.mjs")):
+        for number, line in enumerate(
+            path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+        ):
+            for found in machine_path.finditer(line):
+                offenders.append(f"{path}:{number}: {found.group(0)}")
+
+    assert not offenders, (
+        "shipped source hardcodes a path from one developer's machine; it is "
+        f"wrong everywhere else and leaks into every built artifact: {offenders}"
+    )
+
+
 def test_the_packaged_version_is_read_from_the_source_of_truth() -> None:
     """Nothing else in this suite exercises a build, so a broken version source
     is invisible until someone installs.

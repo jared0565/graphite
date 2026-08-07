@@ -85,6 +85,39 @@ path = "src/graphite/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/graphite"]
 
+# Say what the sdist contains, rather than inheriting "everything not ignored".
+# Two things went wrong with the inherited behaviour, both found by inspecting a
+# built archive rather than by reading config:
+#
+#   * `.claude/settings.local.json` shipped. It is invisible to `git status`
+#     because it is ignored by the USER'S GLOBAL gitignore -- a machine-local
+#     exclusion that does not travel with the repository, so the packaging tool
+#     never saw it as ignored. RELEASING.md makes local configuration in an
+#     archive a stop condition.
+#   * `docs/superpowers/plans/` carries historical plan documents that quote a
+#     developer's absolute paths. Those are a record of what was decided and
+#     should not be rewritten -- so exclude them from the artifact instead.
+#
+# An allowlist, not a denylist: a new local-config directory appearing at the
+# repo root should be absent from the sdist by default, not shipped until
+# someone notices. Tests are included deliberately -- an sdist a consumer
+# cannot run the suite from is not much of a source distribution.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/pyproject.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/RELEASING.md",
+    "/CONTRIBUTING.md",
+    "/ARCHITECTURE.md",
+]
+# No `/LICENSE` line because there is no LICENSE file, and no `[project].license`
+# field either -- which makes this "all rights reserved" by default and not
+# redistributable. Deliberately not chosen here: picking a license is the
+# owner's call, not a packaging detail. Add the file and the field together.
+
 [tool.ruff]
 line-length = 100
 [tool.ruff.lint]
