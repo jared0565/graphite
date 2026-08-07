@@ -501,6 +501,95 @@ def test_search_downstream_of_a_pipe_is_filtering_not_searching(built_repo: Path
 
 
 @pytest.mark.parametrize(
+    ("command", "why"),
+    [
+        ("grep -n target_symbol alpha.py 2>/dev/null", "redirection operands are not paths"),
+        ("grep -n target_symbol alpha.py >out.txt", "redirect target is not a search path"),
+        ("grep -n target_symbol -A 5 alpha.py", "a separated flag VALUE is not a path"),
+        ("grep -n target_symbol -m 1 alpha.py", "same, for -m"),
+        ("grep -n target_symbol -A 5 alpha.py 2>/dev/null", "both at once"),
+    ],
+)
+def test_strict_allows_a_single_file_search_despite_shell_noise(
+    built_repo: Path, command: str, why: str
+) -> None:
+    """The single-file exemption has to survive ordinary shell syntax.
+
+    `_bash_search_pattern` took every non-flag token as a path argument, so
+    `2>/dev/null` contributed `2`, `>` and `/dev/null`, and `-A 5` contributed
+    `5`. `_is_single_file_scope` requires EVERY named path to be an existing
+    file, so one such token flipped it to False and a genuinely single-file
+    search was denied -- while the denial text told the reader that "literal
+    text searches scoped to a single file path are always allowed".
+
+    Measured, not theorised: `grep -E "..." file 2>/dev/null | head` parsed to
+    paths `['file', '2', '>', '/dev/null']`.
+    """
+    out = handle_pre_tool_use(_bash_payload(built_repo, command), "strict")
+
+    decision = (out or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+    assert decision != "deny", f"{why}: {command}"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -rn target_symbol . 2>/dev/null",
+        "grep -rn target_symbol src/ -A 5",
+        "grep -rn target_symbol . >out.txt 2>&1",
+    ],
+)
+def test_shell_noise_is_not_a_bypass_for_a_cross_file_search(
+    built_repo: Path, command: str
+) -> None:
+    """The falsifiability half. Ignoring redirections and flag values must not
+    become a way to launder a directory-scoped search past the gate -- if these
+    stopped denying, the fix would have removed the rule rather than repaired
+    it."""
+    out = handle_pre_tool_use(_bash_payload(built_repo, command), "strict")
+
+    assert out["hookSpecificOutput"].get("permissionDecision") == "deny", command
+
+
+def test_uppercase_regex_mode_flag_is_not_read_as_the_pattern(built_repo: Path) -> None:
+    """`-E` is extended-regex MODE and takes no value; `-e`'s value IS the
+    pattern. The lookup lowercased every token, so `-E` matched `-e` and
+    `grep -E -i PAT .` read `-i` as the pattern -- which matches no graph symbol,
+    so the search was allowed through. That direction fails open, so it cost
+    enforcement rather than causing false denials, and nothing caught it.
+    """
+    out = handle_pre_tool_use(
+        _bash_payload(built_repo, "grep -E -i target_symbol ."), "strict"
+    )
+
+    assert out["hookSpecificOutput"].get("permissionDecision") == "deny"
+    assert "target_symbol" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_strict_allows_a_search_outside_the_repository(
+    built_repo: Path, tmp_path_factory
+) -> None:
+    """The graph describes THIS repo. A search rooted somewhere else is not a
+    question the graph could answer, so denying it directs the reader to a tool
+    that has nothing to say -- and the message names symbols from a repo the
+    search never touched.
+
+    Found by the hook firing on a scratchpad file, where the *pattern* happened
+    to contain `START` (matching `daemon_start`). The matcher never considered
+    that the target was outside the repository at all.
+    """
+    outside = tmp_path_factory.mktemp("outside-the-repo")
+    (outside / "notes.txt").write_text("target_symbol appears here\n", encoding="utf-8")
+
+    out = handle_pre_tool_use(
+        _bash_payload(built_repo, f"grep -rn target_symbol {outside.as_posix()}"), "strict"
+    )
+
+    decision = (out or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+    assert decision != "deny"
+
+
+@pytest.mark.parametrize(
     "command",
     ["git status", "pytest -q", "python -m graphite build .", "ls -la", "cat alpha.py"],
 )

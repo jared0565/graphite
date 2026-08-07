@@ -197,6 +197,94 @@ _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # positional guess silently reads the wrong one -- which fails open, i.e. the
 # search is allowed through. Honouring them explicitly is what closes that.
 _PATTERN_FLAGS = frozenset({"-e", "--regexp", "-pattern", "--pattern"})
+# Matched case-SENSITIVELY for the POSIX short forms. The old lookup lowercased
+# every token, so `-E` (extended-regex mode, takes no value) collided with `-e`
+# (whose value IS the pattern) and `grep -E -i PAT file` read `-i` as the
+# pattern. That direction fails open, so it denied nothing -- but it also
+# matched nothing it should have.
+_PATTERN_FLAGS_EXACT = frozenset({"-e", "--regexp"})
+_PATTERN_FLAGS_FOLDED = frozenset({"-pattern", "--pattern"})
+
+# Redirection operators as `shlex(punctuation_chars=True)` emits them. It splits
+# `2>/dev/null` into `2`, `>` and `/dev/null`, all three of which then looked
+# like path ARGUMENTS to the search.
+_REDIRECTION_TOKENS = frozenset({">", ">>", "<", "<<", "<<<", ">&", "<&", ">|", "&>", "&>>"})
+
+# Flags whose value is a NUMBER, not a path. `grep -A 5 file` left `5` in the
+# path list. Case-sensitive on purpose: lowercasing `-A` yields `-a`, which is a
+# real grep flag that takes no value at all.
+_VALUE_FLAGS = frozenset({
+    "-A", "-B", "-C", "-m", "-d", "-j",
+    "--after-context", "--before-context", "--context",
+    "--max-count", "--max-depth", "--threads",
+})
+
+
+def _strip_redirections(argv: list[str]) -> list[str]:
+    """Drop redirection operators, their targets, and any file-descriptor digit.
+
+    Without this a single `2>/dev/null` contributed `2`, `>` and `/dev/null` to
+    the path list, and `_is_single_file_scope` requires EVERY named path to be an
+    existing file -- so one redirection turned a legitimate single-file search
+    into a denial whose own message promised that such searches are allowed.
+    """
+    kept: list[str] = []
+    skip_target = False
+    for token in argv:
+        if skip_target:
+            skip_target = False
+            continue
+        if token in _REDIRECTION_TOKENS:
+            # `2>file`: the descriptor was lexed as its own token just before.
+            if kept and kept[-1].isdigit():
+                kept.pop()
+            skip_target = True
+            continue
+        kept.append(token)
+    return kept
+
+
+def _strip_flag_values(rest: list[str]) -> list[str]:
+    """Drop the VALUE that follows a numeric-valued flag, so it is not a path."""
+    kept: list[str] = []
+    skip_value = False
+    for token in rest:
+        if skip_value:
+            skip_value = False
+            continue
+        if token in _VALUE_FLAGS:
+            skip_value = True
+            kept.append(token)
+            continue
+        kept.append(token)
+    return kept
+
+
+def _is_outside_repository(root: Path, paths: list[str]) -> bool:
+    """Every named path lies outside this repository.
+
+    The graph describes THIS repo. A search rooted anywhere else is not a
+    question it can answer, so denying it points the reader at a tool with
+    nothing to say -- and names symbols from a repository the search never
+    touched. Observed exactly that way: a scratchpad file was refused because
+    the PATTERN happened to contain `START`, matching `daemon_start` here.
+    """
+    if not paths:
+        return False
+    try:
+        root_resolved = root.resolve()
+    except OSError:  # pragma: no cover - a repo root that cannot resolve
+        return False
+    for target in paths:
+        candidate = Path(target)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            candidate.resolve().relative_to(root_resolved)
+        except (ValueError, OSError):
+            continue  # outside, keep looking
+        return False  # at least one path is inside the repo
+    return True
 
 
 def _bash_command_heads(command: str) -> list[list[str]]:
@@ -244,6 +332,7 @@ def _bash_search_pattern(command: str) -> tuple[str, list[str]] | None:
     for argv in _bash_command_heads(command):
         while argv and _ENV_ASSIGNMENT_RE.match(argv[0]):
             argv = argv[1:]
+        argv = _strip_redirections(argv)
         if not argv:
             continue
         name = PurePosixPath(argv[0].replace("\\", "/")).name.lower()
@@ -254,9 +343,11 @@ def _bash_search_pattern(command: str) -> tuple[str, list[str]] | None:
             name, rest = "grep", rest[1:]
         if name not in _SEARCH_COMMANDS:
             continue
-        lowered = [token.lower() for token in rest]
-        for index, token in enumerate(lowered):
-            if token in _PATTERN_FLAGS and index + 1 < len(rest):
+        rest = _strip_flag_values(rest)
+        for index, token in enumerate(rest):
+            if (
+                token in _PATTERN_FLAGS_EXACT or token.lower() in _PATTERN_FLAGS_FOLDED
+            ) and index + 1 < len(rest):
                 paths = [
                     value
                     for position, value in enumerate(rest)
@@ -290,6 +381,8 @@ def _denial_for(root: Path, pattern: str, paths: list[str]) -> str | None:
     if not pattern:
         return None
     if _is_single_file_scope(root, paths):
+        return None
+    if _is_outside_repository(root, paths):
         return None
     tokens = _pattern_tokens(pattern)
     if not tokens:
