@@ -1771,3 +1771,52 @@ def test_release_guide_has_gates_and_version_sources() -> None:
     assert "sys.argv[1]" in releasing
     assert "normalized forward slashes" in releasing_lower
     assert "shell metacharacters" in releasing_lower
+
+
+def test_release_guide_names_the_real_version_source() -> None:
+    """The assertions above check that words APPEAR; this one checks the
+    instruction is right.
+
+    `"pyproject.toml" in releasing` survived the guide going stale: it told the
+    operator to set `[project].version`, a field that no longer exists, and every
+    substring assertion still passed. Following it would abort the next build --
+    Hatchling refuses a field declared both statically and dynamically -- so the
+    failure would land on whoever next tried to cut a release, with the doc
+    tests green the whole way.
+
+    Pinned against the packaging config itself rather than against a literal, so
+    the two cannot drift apart: whatever `pyproject.toml` actually does is what
+    the guide has to describe.
+    """
+    import tomllib
+
+    releasing = read_document("RELEASING.md")
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert "version" in pyproject["project"].get("dynamic", []), (
+        "this test encodes a dynamic version; if that changed deliberately, "
+        "update the guide and this test together"
+    )
+
+    assert "dynamic" in releasing, "the guide must say the version is declared dynamic"
+    assert "[tool.hatch.version]" in releasing, (
+        "the guide must name where the build reads the version from"
+    )
+    assert "src/graphite/__init__.py" in releasing, (
+        "the guide must name the single authoritative version source"
+    )
+
+    # The field may be NAMED -- forbidding it is useful -- but never instructed.
+    # Checking for a prohibition in the same sentence rather than matching exact
+    # wording, so rewording the guide does not fail this for the wrong reason.
+    prohibitions = ("not", "never", "refus", "abort", "must not", "no ")
+    offenders = [
+        line.strip()
+        for line in releasing.splitlines()
+        if "[project].version" in line
+        and not any(word in line.lower() for word in prohibitions)
+    ]
+    assert not offenders, (
+        "RELEASING.md mentions `[project].version` without forbidding it; with a "
+        f"dynamic version that field makes the build abort: {offenders}"
+    )

@@ -5,10 +5,20 @@ resolve the cause, and repeat the complete affected gate.
 
 ## Current release model
 
-Graphite releases are manual. The repository has no checked-in publication workflow
-and, as of 2026-07-12, no established Git tags. This guide does not authorize
-publication. A release requires explicit maintainer authority, an approved destination,
-and credentials configured separately in a secure release environment.
+Graphite releases are manual. The repository has no checked-in publication workflow.
+The first annotated tag, `v0.2.0`, was created on 2026-08-07; it was created outside
+the sequence in "Tag and publish" below, so it carries no release evidence and must not
+be cited as a released artifact. This guide does not authorize publication. A release
+requires explicit maintainer authority, an approved destination, and credentials
+configured separately in a secure release environment.
+
+Note what a release is FOR here, because the answer is not only publication. Every
+consumer on this machine imports Graphite from one editable install pointed at the
+development tree, so a saved file reaches all of them immediately and there is no
+previous version to return to. A retained, hash-recorded artifact is what makes that
+recoverable: rollback is "reinstall the last known-good wheel", which is only possible
+if that wheel was built and kept. Building into a scratch directory and discarding it
+satisfies the gate below and leaves the gap open.
 
 Releases are model-independent. No LLM or other model access is required, and model
 output is not release evidence. Run Graphite checks with model integration disabled.
@@ -53,16 +63,29 @@ force push to make these checks pass.
 
 ## Prepare the version
 
-Set the agreed semantic version, without a leading `v`, in both authoritative sources:
+There is exactly ONE authoritative source. Set the agreed semantic version, without a
+leading `v`, in `__version__` in `src/graphite/__init__.py`.
 
-- `[project].version` in `pyproject.toml`
-- `__version__` in `src/graphite/__init__.py`
+`pyproject.toml` declares `dynamic = ["version"]` and reads that file through
+`[tool.hatch.version]`. It must NOT carry a `[project].version` field. Re-adding one is
+not a harmless duplicate: Hatchling refuses to build a field declared both statically
+and dynamically, so the next build aborts in `_get_version` rather than producing a
+mismatched artifact.
 
-Review the complete diff and confirm the values match and no unrelated changes exist:
+The single source is deliberate. Every consumer here imports from one shared editable
+install, and `importlib.metadata` reports whatever was written into the installed
+metadata at install time — so a version set only in `pyproject.toml` reaches a consumer
+only when someone reinstalls, which routine work never does. `graphite --version` reads
+`graphite.__version__` from the source tree for that reason, and reports a
+`stale-install` line when the installed metadata disagrees.
+
+Review the complete diff and confirm no unrelated changes exist, and that
+`pyproject.toml` still declares the version dynamic:
 
 ```text
 git diff -- pyproject.toml src/graphite/__init__.py
 git status --short
+python -c "import tomllib, pathlib; d = tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8')); assert 'version' not in d['project'], 'static [project].version present; the build will abort'; assert 'version' in d['project'].get('dynamic', []), 'version is not declared dynamic'; print('version source OK:', d['tool']['hatch']['version']['path'])"
 ```
 
 ## Verification gates
