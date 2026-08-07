@@ -3,7 +3,7 @@ schema_version = 1
 semgrep_block_armed = false
 bake_started = "2026-07-28"
 
-# graphite's full suite takes ~432s, well past the stock 300s pre-push budget.
+# graphite's full suite is well past the stock 300s pre-push budget.
 # Both keys are raised together on purpose: `[tests].timeout_s` is capped by the
 # gate's wall-clock budget, so raising it alone would be unreachable (see
 # aramid's data/defaults.toml -- "Raise BOTH to allow a longer run"). Kept
@@ -12,9 +12,21 @@ bake_started = "2026-07-28"
 #
 # Deliberately NOT pointed at a fast subset via `[tests].command`: this repo's
 # gate is the last thing standing between a broken graph engine and five
-# consumer repos, so the whole suite gates the push even though it costs ~7min.
+# consumer repos, so the whole suite gates the push even though it costs minutes.
+#
+# Raised 780 -> 1200 on 2026-08-07 after the gate blocked a push on
+# `pytest timeout` (ledger finding dac10e8a, re-detected after resolving clean
+# on 08-03). The suite was ~432s when 780 was chosen and is now 551-710s across
+# six measured runs that same day -- ~10% headroom, while the gate runs gitleaks
+# and semgrep alongside it. A retry would likely have squeaked through, which
+# would have proved the trigger dodged rather than the problem fixed.
+#
+# This is a symptom fix and the trend is the real issue: the suite has grown
+# ~65% and a linear budget bump does not scale. The durable answer is to make it
+# faster (parallel execution), not to keep raising this. Revisit when the
+# measured max passes ~900s rather than raising again by reflex.
 [timeouts]
-pre_push = 900
+pre_push = 1500
 
 [tests]
-timeout_s = 780
+timeout_s = 1200
