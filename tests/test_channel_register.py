@@ -304,8 +304,60 @@ def _hook_bin(tmp_path: Path, name: str, *, with_python3: bool) -> Path:
     return bin_dir
 
 
+def _hook_path(bin_dir: Path) -> str:
+    """PATH for a hook run: the shims, plus what Windows needs to spawn `git`.
+
+    The gate reads its authority from HEAD, so its Python block runs
+    `subprocess.run(["git", ...])`. POSIX `exec` honours the shim's shebang and
+    runs it happily; Windows `CreateProcess` has no such rule and cannot execute
+    an extensionless script, so on Windows a real `git.exe` has to be reachable
+    or the gate fails for a reason this test is not about.
+
+    Withholding it looked stricter and measured less. `git`'s directory carries
+    no interpreter -- which `_visible_to_the_hook` VERIFIES rather than assumes,
+    because that is the whole variable under test.
+    """
+    entries = [str(bin_dir)]
+    if os.name == "nt":
+        git = shutil.which("git")
+        assert git is not None
+        entries.append(str(Path(git).parent))
+    return os.pathsep.join(entries)
+
+
+def _visible_to_the_hook(tmp_path: Path, bin_dir: Path, *names: str) -> set[str]:
+    """Which of `names` the hook can actually resolve, measured where it runs.
+
+    Computing this in the pytest process would check the wrong environment: MSYS
+    `sh` prepends `/mingw64/bin:/usr/bin` when `MSYSTEM` is NOT inherited, so
+    under a PowerShell parent the hook silently regains Git's whole toolchain
+    while a Git Bash parent leaves PATH exactly as handed over. That difference
+    made this file pass from one shell and fail from the other on identical
+    source, so the restriction has to be observed through `sh`, not assumed.
+    """
+    sh = shutil.which("sh")
+    if sh is None:  # pragma: no cover - Git for Windows and POSIX both ship one
+        pytest.skip("no POSIX sh available to run the hook")
+    probe = tmp_path / "PROBE_PATH.sh"
+    probe.write_text(
+        "#!/bin/sh\n"
+        + "".join(f"command -v {n} >/dev/null 2>&1 && echo {n}\n" for n in names),
+        encoding="utf-8",
+        newline="\n",
+    )
+    result = subprocess.run(  # noqa: S603
+        [sh, str(probe)],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": _hook_path(bin_dir)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return set(result.stdout.split())
+
+
 def _run_commit_msg_hook(root: Path, message: str, bin_dir: Path) -> subprocess.CompletedProcess[str]:
-    """Run the hook directly, with PATH containing ONLY `bin_dir`.
+    """Run the hook directly, with PATH built by `_hook_path`.
 
     Direct rather than through `git commit` because the point is to control
     which interpreters exist, and git repopulates PATH from the environment.
@@ -315,7 +367,7 @@ def _run_commit_msg_hook(root: Path, message: str, bin_dir: Path) -> subprocess.
         pytest.skip("no POSIX sh available to run the hook")
     msg_file = root / "HOOK_TEST_MSG"
     msg_file.write_text(message, encoding="utf-8")
-    env = {**os.environ, "PATH": str(bin_dir)}
+    env = {**os.environ, "PATH": _hook_path(bin_dir)}
     return subprocess.run(  # noqa: S603
         [sh, str(root / ".githooks" / "commit-msg"), str(msg_file)],
         cwd=root,
@@ -334,6 +386,13 @@ def test_the_hook_works_where_the_interpreter_is_called_python3(tmp_path: Path) 
     root = _channel_with_hook(tmp_path)
     channel.register_agent(root, tmp_path / "a", "codex-agent")
     bin_dir = _hook_bin(tmp_path, "only-python3", with_python3=True)
+
+    # Assert the setup ACHIEVED the isolation instead of assuming it. Measured
+    # through `sh`, because that is the only place the answer is true -- see
+    # `_visible_to_the_hook`. Without this the test passed under a shell that
+    # handed back a full PATH, proving nothing about the property it names.
+    visible = _visible_to_the_hook(tmp_path, bin_dir, "python", "python3")
+    assert visible == {"python3"}, f"interpreters reachable by the hook: {visible or 'none'}"
 
     result = _run_commit_msg_hook(
         root, "subject\n\nCo-Authored-By: codex-agent <codex@agents.local>\n", bin_dir
