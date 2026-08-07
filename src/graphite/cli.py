@@ -2234,10 +2234,23 @@ def _version_report() -> str:
 
     Every consumer here runs graphite from an editable install, so
     `importlib.metadata.version` is frozen at whatever `pyproject.toml` said when
-    the install happened and never moves when the source does. On its own it
-    reports the same string from every repo on the machine and discriminates
-    nothing -- which is why "what version is that consumer on" had no answer from
-    inside graphite, and why a hand-maintained per-repo list went stale silently.
+    the install happened and never moves when the source does. Measured: the
+    dist-info directory is named `graphite-0.1.0.dist-info` and its METADATA was
+    last written 2026-07-24. Reading the version from there reports the same
+    string from every repo on the machine and discriminates nothing -- which is
+    why "what version is that consumer on" had no answer from inside graphite,
+    and why a hand-maintained per-repo list went stale silently.
+
+    So the version reported here is `graphite.__version__`, read from the source
+    tree, because under an editable install the source tree IS the deployment.
+    Bumping `pyproject.toml` alone would reach nobody until eight consumers
+    reinstall, which nothing in the workflow ever does.
+
+    That makes the version a COARSE, HAND-MAINTAINED release label. It is not
+    evidence that any particular fix is present -- the same trap as `DOC_VERSION`,
+    where the `-P` agent-hook fix shipped with no bump at all. To answer "does
+    this consumer have fix X", survey for the marker X introduced, or compare
+    fingerprints.
 
     The fingerprint is what carries the information: a digest over the engine's
     own source files, so two repos agreeing on it are provably running identical
@@ -2249,15 +2262,12 @@ def _version_report() -> str:
     discriminating field would read as "every repo agrees", which is the exact
     false conclusion this exists to prevent.
     """
-    from importlib.metadata import PackageNotFoundError
-    from importlib.metadata import version as _packaged_version
+    import graphite
+    from importlib import metadata
 
-    try:
-        packaged = _packaged_version("graphite")
-    except PackageNotFoundError:  # pragma: no cover - installed in every supported layout
-        packaged = "unknown"
+    source = graphite.__version__
 
-    lines = [f"graphite {packaged}"]
+    lines = [f"graphite {source}"]
     try:
         identity = engine_identity(Config().cache_version)
     except Exception as exc:  # noqa: BLE001 - see "never raises" above
@@ -2267,6 +2277,20 @@ def _version_report() -> str:
         lines.append(f"engine-fingerprint {identity['fingerprint']}")
         lines.append(f"cache-version      {identity['cache_version']}")
         lines.append(f"engine-schema      {identity['schema_version']}")
+
+    # The install-time string is reported only when it DISAGREES, and then as a
+    # fault rather than as an alternative version. Under an editable install a
+    # disagreement is routine (the dist-info METADATA is written once and never
+    # again), but it is also exactly what a shadowing `graphite` on `sys.path`
+    # looks like: the import resolved somewhere the installed distribution does
+    # not describe. Printing the source version and silently swallowing the
+    # mismatch would make a hijacked import indistinguishable from a healthy one.
+    try:
+        packaged: str | None = metadata.version("graphite")
+    except Exception:  # noqa: BLE001 - see "never raises" above
+        packaged = None
+    if packaged is not None and packaged != source:
+        lines.append(f"stale-install      dist-info records {packaged}; reinstall to refresh")
     return "\n".join(lines)
 
 

@@ -2,32 +2,92 @@
 
 The operator-facing problem it exists for: graphite is installed editable, so
 `importlib.metadata.version` is frozen at whatever `pyproject.toml` said when the
-install happened and does NOT move when the source does. Every consumer
-therefore reports `0.1.0` forever, and "which version is that repo on" has been
-unanswerable from inside graphite -- a standing note records that a hand-kept
-per-repo version list "went stale silently and misdirected sessions for days".
+install happened and does NOT move when the source does. Read from there, every
+consumer reports the same string forever, and "which version is that repo on"
+has been unanswerable from inside graphite -- a standing note records that a
+hand-kept per-repo version list "went stale silently and misdirected sessions
+for days".
 
-The fix is not the version string. It is the ENGINE FINGERPRINT, a digest over
-the engine's own source files, which moves the moment the code moves. Two repos
-reporting the same fingerprint are provably running identical code; a repo
-reporting a different one provably is not. That is the marker survey.
+Two independent fixes, and it matters which does which:
+
+* the version is read from `graphite.__version__` in the SOURCE tree, because
+  under an editable install the source tree is the deployment. That makes a
+  release bump reach every consumer on file save instead of on reinstall -- but
+  it is still a hand-maintained label, so it says nothing about whether a
+  given fix is present;
+* the ENGINE FINGERPRINT is the discriminating field: a digest over the
+  engine's own source files, which moves the moment the code moves. Two repos
+  reporting the same fingerprint are provably running identical code; a repo
+  reporting a different one provably is not. That is the marker survey.
 """
 from __future__ import annotations
 
+from importlib import metadata
+
+import graphite
 from graphite import activation
 from graphite.cli import main
 from graphite.config import Config
 from graphite.engine_identity import EngineIdentityError, engine_identity
 
 
-def test_version_reports_the_installed_version(capsys) -> None:
+def test_version_reports_a_version(capsys) -> None:
     assert main(["--version"]) == 0
     out = capsys.readouterr().out
     assert "graphite" in out.lower()
+    assert graphite.__version__ in out
 
-    from importlib.metadata import version
 
-    assert version("graphite") in out
+def test_version_comes_from_the_source_not_the_frozen_install(monkeypatch, capsys) -> None:
+    """The whole point, and the reason bumping `pyproject.toml` is theatre.
+
+    `importlib.metadata` reads a METADATA file written once, at install time.
+    Measured on this machine: the dist-info directory is literally named
+    `graphite-0.1.0.dist-info` and its METADATA was last written 2026-07-24,
+    while the source has moved on every day since. Reading the version from
+    there means a release bump reaches nobody until all eight consumers
+    reinstall -- which nothing in the workflow ever does.
+
+    `graphite.__version__` lives in the source tree, and the source tree IS the
+    deployment under an editable install, so it moves on file save.
+    """
+    monkeypatch.setattr(graphite, "__version__", "9.9.9-from-source")
+
+    assert main(["--version"]) == 0
+    assert "9.9.9-from-source" in capsys.readouterr().out
+
+
+def test_a_stale_install_is_named_rather_than_hidden(monkeypatch, capsys) -> None:
+    """Source and metadata disagreeing is a FACT about the install, not noise.
+
+    It is the normal state of an editable install between reinstalls, but it is
+    also what a shadowing `graphite/` on `sys.path` looks like -- the import
+    resolved somewhere the installed distribution does not describe. Printing
+    the source version and silently discarding the disagreement would make
+    those two indistinguishable from a healthy install.
+    """
+    monkeypatch.setattr(graphite, "__version__", "9.9.9-from-source")
+    monkeypatch.setattr(metadata, "version", lambda _name: "0.0.1-frozen")
+
+    assert main(["--version"]) == 0
+    out = capsys.readouterr().out
+
+    assert "9.9.9-from-source" in out, "reported version must be the source one"
+    assert "0.0.1-frozen" in out, "the stale install-time string must still be surfaced"
+    assert "stale" in out.lower(), "the disagreement must be NAMED, not left to be spotted"
+
+
+def test_an_agreeing_install_says_nothing_extra(monkeypatch, capsys) -> None:
+    """Falsifiability guard for the test above: if the staleness note printed
+    unconditionally, that test would pass while proving nothing."""
+    monkeypatch.setattr(graphite, "__version__", "7.7.7")
+    monkeypatch.setattr(metadata, "version", lambda _name: "7.7.7")
+
+    assert main(["--version"]) == 0
+    out = capsys.readouterr().out
+
+    assert "7.7.7" in out
+    assert "stale" not in out.lower()
 
 
 def test_version_carries_the_engine_fingerprint(capsys) -> None:

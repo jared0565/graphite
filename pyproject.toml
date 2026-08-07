@@ -1,6 +1,10 @@
 [project]
 name = "graphite"
-version = "0.1.0"
+# Read from `src/graphite/__init__.py`, not written here -- see the note beside
+# `__version__`. A static version here would be the one nobody reads: consumers
+# import the source tree, and `importlib.metadata` reports the install-time
+# string regardless of what this file says.
+dynamic = ["version"]
 description = "Local-first, zero-LLM knowledge graph extraction for codebases."
 readme = "README.md"
 # MEASURED, not inherited. Full suite, 2816 passed / 44 skipped on every cell,
@@ -74,6 +78,9 @@ graphite-mcp = "graphite.mcp_server:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/graphite/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/graphite"]

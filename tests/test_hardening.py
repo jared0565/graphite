@@ -945,3 +945,59 @@ def test_every_in_source_graphite_launch_isolates_sys_path() -> None:
         "in-source graphite launch(es) without `-P`; a repo-local graphite.py "
         f"at the cwd would win: {offenders}"
     )
+
+
+def test_the_packaged_version_is_read_from_the_source_of_truth() -> None:
+    """Nothing else in this suite exercises a build, so a broken version source
+    is invisible until someone installs.
+
+    `pyproject.toml` declares `dynamic = ["version"]` and points hatchling at
+    `src/graphite/__init__.py`, because the source tree IS the deployment here:
+    all eight consumers import one shared editable install, and
+    `importlib.metadata` only ever reports the string written at install time.
+
+    Three ways this breaks silently, all of them config-only and none of them
+    caught by any runtime test:
+
+    * re-adding a static `version = "..."` under `[project]` -- hatchling
+      REJECTS a field declared both statically and dynamically, so every fresh
+      install dies at build time;
+    * dropping the `[tool.hatch.version]` stanza, or pointing it at a moved
+      file, which fails the same way;
+    * editing `__version__` into a form hatchling's default regex cannot match
+      (an f-string, a computed value, a tuple join).
+
+    Verified out-of-tree rather than by reinstalling: `uv build --wheel` at
+    0.2.0 produced `graphite-0.2.0-py3-none-any.whl`. Reinstalling to check
+    would mutate the install all eight consumers share.
+    """
+    import re
+    import tomllib
+
+    import graphite
+
+    root = Path(__file__).parents[1]
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+
+    project = pyproject["project"]
+    assert "version" not in project, (
+        "static `version` under [project] conflicts with `dynamic` -- hatchling "
+        "refuses to build a field declared both ways"
+    )
+    assert "version" in project.get("dynamic", []), (
+        "`version` must be declared dynamic, or the build has no version at all"
+    )
+
+    declared = pyproject["tool"]["hatch"]["version"]["path"]
+    source = root / declared
+    assert source.is_file(), f"[tool.hatch.version].path points at nothing: {declared}"
+
+    # Hatchling's default scheme finds the version with a regex, not by importing.
+    # Match that: a value it cannot read is a build failure, not a runtime one.
+    found = re.search(
+        r"^__version__\s*=\s*(['\"])([^'\"]+)\1", source.read_text(encoding="utf-8"), re.MULTILINE
+    )
+    assert found, f"no literal `__version__ = \"...\"` for hatchling to read in {declared}"
+    assert found.group(2) == graphite.__version__, (
+        "the version hatchling would package differs from the one imported at runtime"
+    )
