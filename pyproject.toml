@@ -3,7 +3,38 @@ name = "graphite"
 version = "0.1.0"
 description = "Local-first, zero-LLM knowledge graph extraction for codebases."
 readme = "README.md"
+# MEASURED, not inherited. Full suite, 2816 passed / 44 skipped on every cell,
+# all at 2e5e0a2 on Windows:
+#
+#     3.11.15  3.12.13  3.13.13  (uv-managed CPython)
+#     3.14.5                     (system CPython)
+#
+# Pin the DISTRIBUTION when re-measuring, not just `X.Y`. `uv venv --python 3.13`
+# silently preferred the Windows Store build here -- an app-execution alias that
+# injects PYTHONUSERBASE, redirects AppData and starts slowly -- and produced
+# five failures that looked like a 3.13 incompatibility and were not. Use
+# `--managed-python` and check `pyvenv.cfg`'s `home =` before believing a cell.
+#
+# This axis needs no CI: the four cells above cost nothing locally via uv. Only
+# the OS axis (Linux #45, macOS #46) genuinely requires a runner.
 requires-python = ">=3.11"
+# Claimed only where the suite has actually been run, for the reason above.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Quality Assurance",
+]
+# Deliberately NOT "Typing :: Typed". The source is annotated throughout, but
+# that classifier ships a promise to consumers that the type information is
+# usable, and nothing in the gate type-checks it -- there is no `py.typed`
+# marker and no mypy/pyright run. Add the marker and a checker together, or
+# neither.
 dependencies = [
     "networkx>=3.3",
     "python-louvain>=0.16",
