@@ -2254,8 +2254,15 @@ def _version_report() -> str:
 
     The fingerprint is what carries the information: a digest over the engine's
     own source files, so two repos agreeing on it are provably running identical
-    code and a repo that differs provably is not. That is what makes this a
-    survey rather than a banner.
+    code. That is what makes this a survey rather than a banner.
+
+    The converse does NOT hold, and reading it as if it did is the trap. The
+    digest is over raw bytes, and line endings are bytes: `.gitattributes`
+    normalizes to LF on commit, so a working tree holding CRLF fingerprints
+    differently from a fresh checkout of the very same commit. Measured here --
+    13 of 106 engine files are CRLF in this tree, and a detached worktree at HEAD
+    fingerprints `98c7ed69...` against this tree's `d484e148...`. Equality proves
+    sameness; inequality means "look closer", not "different code".
 
     Never raises, deliberately. A diagnostic that dies tells you less than one
     that names the field it could not fill -- and a survey silently missing its

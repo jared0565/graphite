@@ -17,8 +17,11 @@ Two independent fixes, and it matters which does which:
   given fix is present;
 * the ENGINE FINGERPRINT is the discriminating field: a digest over the
   engine's own source files, which moves the moment the code moves. Two repos
-  reporting the same fingerprint are provably running identical code; a repo
-  reporting a different one provably is not. That is the marker survey.
+  reporting the same fingerprint are provably running identical code. That is
+  the marker survey.
+
+The fingerprint implication runs ONE way -- see
+`test_the_fingerprint_is_byte_exact_not_content_equivalent`.
 """
 from __future__ import annotations
 
@@ -146,6 +149,54 @@ def test_version_degrades_honestly_when_the_engine_cannot_be_identified(
     out = capsys.readouterr().out
     assert "unavailable" in out.lower()
     assert "engine_unreadable" in out
+
+
+def test_the_fingerprint_is_byte_exact_not_content_equivalent(tmp_path) -> None:
+    """Characterization test: pins what the fingerprint actually promises.
+
+    It passes against today's code by construction -- it documents behaviour
+    rather than driving it -- and it exists because the docstrings around it
+    previously claimed the converse, which is false.
+
+    A digest over raw bytes cannot tell "different code" from "same code, saved
+    differently". Line endings are the case that bites: `.gitattributes` here is
+    `* text=auto eol=lf`, so every clone gets LF while a working tree can hold
+    CRLF indefinitely. Measured on this tree, 13 of 106 engine files are CRLF,
+    and a detached worktree at HEAD fingerprints differently from the tree it
+    was made from -- same commit, same code.
+
+    So: equal fingerprint => identical bytes => identical code. Unequal
+    fingerprint => look closer. The survey answers "are these provably the
+    same", never "are these provably different".
+
+    If someone normalizes line endings inside `engine_identity`, this test
+    fails. That is a legitimate design change -- but it changes what the
+    fingerprint means, so it should fail loudly and take the docs with it.
+    """
+    same_code = "def run():\n    return 1\n"
+
+    lf_root = tmp_path / "lf" / "graphite"
+    crlf_root = tmp_path / "crlf" / "graphite"
+    for root in (lf_root, crlf_root):
+        root.mkdir(parents=True)
+    (lf_root / "mod.py").write_bytes(same_code.encode("utf-8"))
+    (crlf_root / "mod.py").write_bytes(same_code.replace("\n", "\r\n").encode("utf-8"))
+
+    lf = engine_identity("v1", package_root=lf_root, version="0.0.0")["fingerprint"]
+    crlf = engine_identity("v1", package_root=crlf_root, version="0.0.0")["fingerprint"]
+
+    assert lf != crlf, (
+        "identical code saved with different line endings must fingerprint "
+        "differently -- the digest is over bytes, and the docs must not promise "
+        "that a differing fingerprint means differing code"
+    )
+
+    twin = tmp_path / "twin" / "graphite"
+    twin.mkdir(parents=True)
+    (twin / "mod.py").write_bytes(same_code.encode("utf-8"))
+    assert engine_identity("v1", package_root=twin, version="0.0.0")["fingerprint"] == lf, (
+        "the direction that DOES hold: identical bytes fingerprint identically"
+    )
 
 
 def test_version_is_stable_across_two_calls(capsys) -> None:

@@ -62,8 +62,13 @@ derivation, create-only rounds and an append-only status log.
 `--version`.
 
 `graphite --version` reports the engine fingerprint — a digest over the engine's
-own source files — alongside the cache and schema versions. Two installs
-agreeing on the fingerprint are running identical code; one that differs is not.
+own source files — alongside the cache and schema versions. It is byte-exact, so
+the implication runs one way: two installs agreeing on the fingerprint are
+running identical code, but two that differ are not necessarily running
+different code. Line endings are bytes, and `.gitattributes` normalizes to LF on
+commit, so a working tree holding CRLF fingerprints differently from a fresh
+checkout of the same commit. Equality proves sameness; inequality does not prove
+difference.
 
 ### Changed
 
