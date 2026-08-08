@@ -1581,21 +1581,30 @@ def test_cleanup_worker_never_deletes_object_swapped_after_parent_validation(
     lease = typescript_activation._new_temporary_directory()
     leased_path = Path(lease.name)
     original = leased_path.with_name(f"{leased_path.name}-original")
-    real_rename = typescript_activation.os.rename
+    # Injected at `_rename_no_replace`, not at `os.rename`. Only the
+    # `os.name == "nt"` branch of that helper uses `os.rename`; POSIX goes
+    # through ctypes to `renameat2`/`renamex_np`, so patching `os.rename` was
+    # dead code off Windows -- the swap never happened, the identity check
+    # passed on an unswapped lease, and the worker was legitimately launched.
+    # The security property was never breached; the test simply could not state
+    # its scenario. This seam exists on both platforms.
+    real_rename_no_replace = typescript_activation._rename_no_replace
     swapped = False
 
     def swap_before_quarantine(source, destination):
         nonlocal swapped
         if not swapped and Path(source) == leased_path:
             swapped = True
-            real_rename(source, original)
+            os.rename(source, original)
             leased_path.mkdir()
             (leased_path / "replacement-marker").write_text(
                 "must survive", encoding="utf-8"
             )
-        return real_rename(source, destination)
+        return real_rename_no_replace(source, destination)
 
-    monkeypatch.setattr(typescript_activation.os, "rename", swap_before_quarantine)
+    monkeypatch.setattr(
+        typescript_activation, "_rename_no_replace", swap_before_quarantine
+    )
     monkeypatch.setattr(
         typescript_activation,
         "run_bounded_process",
