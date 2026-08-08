@@ -32,6 +32,7 @@ from .dependency_install import (
     Runner,
     StepResult,
     TRUSTED_REGISTRY,
+    TrustedFile,
     adapter_for,
     command_for,
     control_files_use_trusted_sources,
@@ -194,6 +195,33 @@ def _rename_no_replace(source: Path, destination: Path) -> bool:
     return False
 
 
+def _trusted_running_interpreter(root: Path) -> TrustedFile | None:
+    """Pin the running interpreter, preferring the name it was invoked as.
+
+    A POSIX virtual environment's ``bin/python`` is a symlink, and Python
+    locates a virtual environment from the executable it was *invoked as* -- so
+    canonicalising that name first launches the base installation under a
+    different ``sys.prefix``, which is not the runtime that decided to run this
+    worker. Validate the symlink route instead, and keep the given name.
+
+    Falling back to the canonical target preserves every case that worked before
+    launcher awareness. The route is refused when it is one the selected
+    repository controls (a virtual environment inside it, say) or when any of
+    its directories are group- or world-writable without the sticky bit; the
+    canonical target is then still resolved and validated exactly as before,
+    which is no weaker than what this did.
+    """
+    executable = Path(sys.executable)
+    reference = resolve_trusted_file(executable, root, executable=True, follow_launcher=True)
+    if reference is not None:
+        return reference
+    try:
+        canonical = executable.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    return resolve_trusted_file(canonical, root, executable=True)
+
+
 def _cleanup_isolated_home(
     lease: _TemporaryDirectoryLease,
     root: Path,
@@ -230,12 +258,8 @@ def _cleanup_isolated_home(
     except (OSError, RuntimeError, ValueError):
         return fail_after_quarantine()
     worker = Path(__file__).with_name("_cleanup_worker.py")
-    try:
-        python_executable = Path(sys.executable).resolve(strict=True)
-    except (OSError, RuntimeError):
-        return fail_after_quarantine()
     worker_reference = resolve_trusted_file(worker, root, executable=False)
-    python_reference = resolve_trusted_file(python_executable, root, executable=True)
+    python_reference = _trusted_running_interpreter(root)
     if worker_reference is None or python_reference is None:
         return fail_after_quarantine()
     if not revalidate_trusted_file(
@@ -245,7 +269,7 @@ def _cleanup_isolated_home(
     try:
         result = run_bounded_process(
             [
-                str(python_reference.path),
+                str(python_reference.command_path),
                 "-I",
                 str(worker_reference.path),
                 str(cleanup_target),

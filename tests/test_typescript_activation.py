@@ -1438,6 +1438,81 @@ def test_default_cleanup_uses_exact_bounded_process_contract(tmp_path, monkeypat
     assert "shell" not in kwargs
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX venvs symlink their interpreter; Windows copies it")
+def test_cleanup_launches_the_interpreter_name_it_was_invoked_as(tmp_path, monkeypatch):
+    """A virtual environment's `bin/python` is a symlink, and Python locates a
+    virtual environment from the executable it was *invoked as*. Resolving that
+    name first launches the base installation under a different `sys.prefix`,
+    which is a different runtime from the one that decided to run this worker.
+
+    The symlink here stands in for that layout: the assertion is that the route
+    is what gets validated and the given name is what gets launched.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    launcher = tmp_path / "python"
+    launcher.symlink_to(Path(sys.executable).resolve(strict=True))
+    monkeypatch.setattr(sys, "executable", str(launcher))
+    calls = []
+
+    def runner(argv, **_kwargs):
+        calls.append(argv)
+        raise ProbeProcessError("timeout")
+
+    monkeypatch.setattr(typescript_activation, "run_bounded_process", runner)
+    details = isolated.lstat()
+    lease = typescript_activation._TemporaryDirectoryLease(
+        str(isolated),
+        typescript_activation._temporary_directory_identity(isolated, details),
+    )
+
+    result = typescript_activation._cleanup_isolated_home(lease, root, 0.25)
+
+    # `cleanup_failed` here would mean the launcher reference did not survive
+    # revalidation, which is a different defect from launching the wrong name.
+    assert result == StepResult(False, "cleanup_timeout")
+    assert len(calls) == 1
+    assert calls[0][:2] == [str(launcher), "-I"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink route")
+def test_cleanup_refuses_an_interpreter_name_the_repository_controls(tmp_path, monkeypatch):
+    """Launcher awareness must not widen what the repository can aim us at.
+
+    A name inside the selected repository is repo-controlled, so its route is
+    refused and resolution falls back to the canonical target outside the
+    repository -- exactly what this code did before it followed launchers.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    canonical = Path(sys.executable).resolve(strict=True)
+    launcher = root / "python"
+    launcher.symlink_to(canonical)
+    monkeypatch.setattr(sys, "executable", str(launcher))
+    calls = []
+
+    def runner(argv, **_kwargs):
+        calls.append(argv)
+        raise ProbeProcessError("timeout")
+
+    monkeypatch.setattr(typescript_activation, "run_bounded_process", runner)
+    details = isolated.lstat()
+    lease = typescript_activation._TemporaryDirectoryLease(
+        str(isolated),
+        typescript_activation._temporary_directory_identity(isolated, details),
+    )
+
+    result = typescript_activation._cleanup_isolated_home(lease, root, 0.25)
+
+    assert result == StepResult(False, "cleanup_timeout")
+    assert len(calls) == 1
+    assert calls[0][0] == str(canonical) != str(launcher)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows native lease identity")
 def test_new_windows_lease_and_worker_argv_preserve_full_native_identity(
     tmp_path, monkeypatch
@@ -3164,6 +3239,25 @@ def test_resolve_trusted_external_regular_file(tmp_path):
     inside = root / "package.json"
     _file(inside)
     assert resolve_trusted_file(inside, root, executable=False) is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="`nt` has no launcher route to revalidate")
+def test_launcher_aware_resolution_stays_plain_on_windows(tmp_path):
+    """`revalidate_trusted_file` refuses a launcher reference on `nt` outright,
+    so one produced here would fail closed on its first revalidation -- every
+    caller would report failure with nothing naming the cause. The keyword is
+    accepted on both platforms and degrades to plain resolution here."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    plain = resolve_trusted_file(Path(sys.executable), root, executable=True)
+    followed = resolve_trusted_file(
+        Path(sys.executable), root, executable=True, follow_launcher=True
+    )
+
+    assert plain is not None
+    assert followed == plain
+    assert followed.launcher_path is None
+    assert dependency_install.revalidate_trusted_file(followed, root, executable=True)
 
 
 def test_provenance_rejects_non_file_and_escaping_symlink(tmp_path):

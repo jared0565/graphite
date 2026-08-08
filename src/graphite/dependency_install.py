@@ -523,8 +523,24 @@ def revalidate_trusted_file(reference: TrustedFile, root: Path, executable: bool
     return current == reference
 
 
-def resolve_trusted_file(path: Path, root: Path, *, executable: bool) -> TrustedFile | None:
-    """Resolve one caller-selected external file into an immutable identity reference."""
+def resolve_trusted_file(
+    path: Path, root: Path, *, executable: bool, follow_launcher: bool = False
+) -> TrustedFile | None:
+    """Resolve one caller-selected external file into an immutable identity reference.
+
+    ``follow_launcher`` admits a POSIX symlink route to the file: trust is still
+    anchored in the resolved target, but the supplied name is recorded as
+    ``launcher_path`` so the caller can launch what it was given rather than
+    what the name points at (see ``TrustedFile.command_path``). Plain resolution
+    cannot express that -- it rejects any path crossing a symlink outright.
+
+    The flag is deliberately ignored on Windows and for non-executables, because
+    ``revalidate_trusted_file`` refuses a launcher reference in both cases. A
+    launcher reference produced there would pass resolution and then fail closed
+    on its first revalidation, with nothing naming the cause.
+    """
+    if follow_launcher and executable and os.name != "nt":
+        return _trusted_posix_launcher(path, root)
     return _trusted_file(path, root, executable=executable)
 
 
