@@ -3071,7 +3071,32 @@ def test_mcp_deep_probe_initializes_and_lists_required_tools(tmp_path: Path) -> 
         captured.update(argv=argv, **kwargs)
         return probes.ProbeProcessResult(0, output, b"", 0.01)
 
-    check = probes.probe_mcp(tmp_path, python_executable="PYTHON", timeout_seconds=20, _runner=run)
+    def build(argv: list[str], **kwargs: object) -> object:
+        """Run the real manifest builder, but under a real interpreter.
+
+        `probe_mcp` launches two children: this builder and the server. Only
+        the server was stubbed, so the builder really executed `"PYTHON"` --
+        which resolved on Windows alone, where the filesystem is
+        case-insensitive and PATHEXT appends `.EXE`. On POSIX it is ENOENT, so
+        the probe reported `launch_failed` before the stub was ever reached.
+
+        The sentinel cannot simply become `sys.executable`: it is what proves
+        `python_executable` is forwarded verbatim, and a bug that ignored the
+        parameter would fall back to `sys.executable` and go unnoticed. So keep
+        the sentinel, assert it arrives here too, and substitute a real
+        interpreter only for the launch -- which is exactly what Windows was
+        doing by accident. The manifest below is therefore still a real one.
+        """
+        assert argv[0] == "PYTHON"
+        return probes.run_bounded_process([sys.executable, *argv[1:]], **kwargs)
+
+    check = probes.probe_mcp(
+        tmp_path,
+        python_executable="PYTHON",
+        timeout_seconds=20,
+        _runner=run,
+        _builder_runner=build,
+    )
 
     assert check.status == "ready"
     assert check.details == {"server_name": "graphite", "tool_count": 4}
@@ -3791,6 +3816,22 @@ def test_mcp_deep_probe_real_server_ignores_project_import_shadows(tmp_path: Pat
 
 
 def test_mcp_deep_probe_real_server_supports_trusted_source_inside_selected_repo() -> None:
+    """Launches a real MCP server, so it inherits a real precondition.
+
+    The manifest builder refuses any package-metadata root that lives inside
+    the selected repository and actually contains distributions -- deliberately,
+    since the selected repo is untrusted and must not be able to inject
+    distributions into the probe. `trusted_source` itself is exempt, which is
+    the property this test is named for.
+
+    A virtual environment created *inside* a clone therefore fails this test
+    through no fault of the code: its `site-packages` overlaps the selected
+    root, the builder exits 70, and `probe_mcp` flattens that to `probe_failed`
+    with no stream to read, because `run_bounded_process` raises before
+    returning. Measured, and it cost real time to chase: the same commit passes
+    from a venv outside the clone and fails from one inside it. Put the
+    environment outside the repository before suspecting this test.
+    """
     import graphite.doctor_probes as probes
 
     trusted_source = Path(probes.__file__).resolve(strict=True).parent.parent
