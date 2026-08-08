@@ -227,7 +227,24 @@ def _canonical_executable(path: Path, workspace: Path) -> Path:
     try:
         resolved.relative_to(workspace)
     except ValueError:
-        return resolved
+        # Judge the RESOLVED target, launch the path we were GIVEN.
+        #
+        # Returning `resolved` here broke every virtual environment on POSIX,
+        # where `.venv/bin/python` is a symlink to the base interpreter. Python
+        # locates a venv from the executable it was invoked as, so resolving the
+        # link launches the base interpreter with `sys.prefix` pointing at the
+        # installation rather than the venv -- measured on Linux, the resolved
+        # interpreter cannot `import graphite` at all. Windows hides this
+        # completely: venv interpreters there are copies, not symlinks, so
+        # resolved and unresolved are the same file.
+        #
+        # The containment guarantee is untouched, and this is the load-bearing
+        # sentence: the rejection below still tests `resolved`, so a symlink
+        # sitting outside the workspace that points at a repo-controlled binary
+        # is still refused. Only which spelling of the same target gets executed
+        # changes. Do not "restore" the resolved return; it buys no containment
+        # and costs venv support on two of three platforms.
+        return path
     raise CliProcessError("executable_invalid")
 
 
