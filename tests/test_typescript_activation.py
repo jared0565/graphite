@@ -1811,6 +1811,7 @@ def test_native_windows_open_uses_reparse_safe_nondelete_sharing(tmp_path):
     assert flags & 0x00200000  # FILE_FLAG_OPEN_REPARSE_POINT
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows CreateFileW rights contract")
 def test_native_windows_readonly_legacy_fallback_has_rights_and_closes_handle(
     tmp_path, monkeypatch
 ):
@@ -1913,6 +1914,7 @@ def test_native_windows_information_preserves_full_128_bit_file_id():
     assert backend.information(123) == (expected_volume, expected_id, 0x10)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows FILE_ID_INFO contract")
 def test_native_windows_information_fails_closed_without_file_id_info(
     monkeypatch,
 ):
@@ -1972,6 +1974,7 @@ def test_native_windows_directory_batch_preserves_128_bit_entry_id():
     ]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory-enumeration kernel buffer contract")
 def test_native_windows_directory_batch_returns_every_record_from_kernel_buffer(
     monkeypatch,
 ):

@@ -1813,6 +1813,7 @@ def test_windows_job_launch_failures_close_each_owned_handle_once(
         assert api.terminated_processes == []
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows CancelSynchronousIo handle contract")
 def test_cancel_synchronous_io_preserves_pointer_width_and_closes_handle(monkeypatch: pytest.MonkeyPatch) -> None:
     import ctypes
     import graphite.probe_process as transport

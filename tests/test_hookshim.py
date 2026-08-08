@@ -5,10 +5,13 @@ cheaply assertable here rather than only observable in a live repo.
 """
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from graphite.hookshim import (
     MARKER_END,
@@ -130,7 +133,15 @@ def test_no_chaining_state_is_baked_into_the_bytes() -> None:
     assert out.count("if [ -f") >= 1
 
 
+@pytest.mark.skipif(os.name != "nt", reason="drive-letter to MSYS path conversion is Windows-only")
 def test_windows_interpreter_becomes_sh_style_path() -> None:
+    # Windows-only in substance, not merely by convenience. `Path` is
+    # platform-dependent: on POSIX, `Path(r"C:\Python314\python.exe")` is one
+    # relative FILENAME -- backslashes are ordinary characters there -- so it
+    # resolves against the cwd and the drive letter never exists to convert.
+    # Trampolines carrying a drive letter are only ever written on Windows, so
+    # forcing this through `PureWindowsPath` would pin behaviour production
+    # never reaches on Linux.
     assert sh_interpreter_path(Path(r"C:\Python314\python.exe")) == "/c/Python314/python.exe"
 
 
