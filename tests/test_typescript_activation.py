@@ -2426,9 +2426,31 @@ def _file(path: Path, content: bytes = b"tool") -> TrustedFile:
 
 
 def _copied_python_node(path: Path) -> Path:
+    """A real native executable standing in for `node`.
+
+    It is a copy of this interpreter, because the fake package manager it has
+    to run is Python source behind a `#!/usr/bin/env node` shebang, and the
+    manager policy requires a genuine native binary rather than a script.
+
+    The copy needs a `pyvenv.cfg` landmark beside it or it cannot find its own
+    standard library. A relocatable CPython -- uv, or anything from
+    python-build-standalone -- is built with the literal prefix `/install`, so
+    a copy outside its own tree reports `stdlib dir = '/install/lib/python3.12'`
+    and dies before executing a line. Measured, not assumed. A distro
+    interpreter survives the same copy only because its compiled-in `/usr`
+    prefix happens to exist, which is precisely what hid this: the technique
+    was never relocatable, it just met a forgiving interpreter.
+
+    `home =` is the same landmark a virtual environment uses to make a copied
+    interpreter work, so this is the supported mechanism rather than a trick.
+    These tests are POSIX-only and CI has not run since they were written, so
+    nothing had ever exercised them.
+    """
+    real = Path(sys.executable).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(Path(sys.executable).resolve(), path)
+    shutil.copy2(real, path)
     path.chmod(0o755)
+    (path.parent / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
     return path
 
 
