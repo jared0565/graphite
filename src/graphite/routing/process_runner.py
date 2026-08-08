@@ -244,6 +244,24 @@ def _canonical_executable(path: Path, workspace: Path) -> Path:
         # is still refused. Only which spelling of the same target gets executed
         # changes. Do not "restore" the resolved return; it buys no containment
         # and costs venv support on two of three platforms.
+        #
+        # It does widen the residual TOCTOU noted above, and the widening is
+        # named here rather than left for a reviewer to find: the executed
+        # spelling is now the caller's path, so the race went from "swap the
+        # file at the canonical path" to "re-point the symlink" -- strictly
+        # easier. `str(executable)` reaches `argv[0]` directly (`_prepare`), and
+        # the second validation on the `build_cli_environment` path returns this
+        # same unpinned spelling, so neither check pins what actually execs.
+        #
+        # Left accepted, on the reasoning already given above: no path check
+        # closes this, only an fd-based exec does. The obvious cheap narrowing
+        # -- refuse a launcher whose parent directory is group- or
+        # world-writable -- was considered and rejected. Homebrew's
+        # `/usr/local/bin` is group-writable by design, so it would reject
+        # working installs on exactly the platforms this branch exists to
+        # support, while the realistic attacker here is same-UID and can write
+        # the user's own non-group-writable directories anyway. It would cost
+        # real installs and buy nothing against the actual threat.
         return path
     raise CliProcessError("executable_invalid")
 
