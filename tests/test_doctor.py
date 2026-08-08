@@ -4275,16 +4275,38 @@ def test_manifest_build_time_does_not_consume_the_server_budget(
     of the 20s budget and the probe reported `timeout` before ever starting a
     child -- graphite#39. Each phase now gets its own allowance.
     """
+    import time as _time
+
     import graphite.doctor_probes as probes
 
-    clock = {"now": 1000.0}
-    monkeypatch.setattr(probes.time, "monotonic", lambda: clock["now"])
+    # The fake clock must ADVANCE, and this is not a style preference.
+    #
+    # `probes.time` IS the stdlib `time` module, so patching an attribute on it
+    # replaces `time.monotonic` for EVERY module in the process, not just this
+    # one. A clock frozen at a constant therefore reaches
+    # `probe_process._terminate_process_tree`, whose POSIX grace loop computes
+    # `remaining = grace_deadline - time.monotonic()`. Against a frozen clock
+    # that value is permanently 0.1, the `remaining <= 0` exit can never be
+    # reached, and cleanup spins forever on a real `time.sleep`.
+    #
+    # That is graphite#45 in full: the suite hung on Linux and every ubuntu leg
+    # was killed at the 45-minute CI timeout. It cannot happen on Windows,
+    # because `_terminate_process_tree` guards that whole branch with
+    # `os.name != "nt"` -- which is exactly why it survived a Windows-only gate.
+    #
+    # Offsetting a real clock keeps the determinism this test needs (the jump is
+    # still exactly 15.0) while leaving `time.monotonic` monotonic, which is the
+    # contract every other module is entitled to rely on. Production code is NOT
+    # the right place to defend against a clock that does not advance.
+    real_monotonic = _time.monotonic
+    clock = {"offset": 0.0}
+    monkeypatch.setattr(probes.time, "monotonic", lambda: real_monotonic() + clock["offset"])
 
     original = probes._build_mcp_manifest_bounded
 
     def slow_build(*args: object, **kwargs: object) -> object:
         result = original(*args, **kwargs)
-        clock["now"] += 15.0  # the build burns 15 of the 20 seconds
+        clock["offset"] += 15.0  # the build burns 15 of the 20 seconds
         return result
 
     monkeypatch.setattr(probes, "_build_mcp_manifest_bounded", slow_build)
