@@ -38,6 +38,64 @@ from graphite.doctor import (
 )
 
 
+#: A pid no kernel can allocate, for fake processes handed to real cleanup.
+#:
+#: `_terminate_process_tree`'s POSIX branch calls `os.killpg(process.pid,
+#: SIGTERM)` and then `SIGKILL` for real -- there is no seam between the fake
+#: and the syscall. A fake pid that happens to name a live process group
+#: therefore aims both signals at an unrelated process. These fakes used
+#: `pid = 123`, which on the Linux box this was found on was root's `snapfuse`;
+#: only EPERM stopped the signals, and that EPERM is also what made four tests
+#: report `cleanup_failed`. A suite running as root -- ordinary in a container
+#: -- would have delivered them.
+#:
+#: `pid_t` is a signed 32-bit int, so INT32_MAX is representable but above every
+#: platform's maximum (Linux's `pid_max` caps at 2^22), which makes `killpg`
+#: return ESRCH rather than EINVAL. Verified in `test_the_fake_process_pid_can_
+#: name_no_real_process_group`.
+UNCLAIMABLE_PID = 2**31 - 1
+
+
+def _fake_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    error: type[OSError] | None = ProcessLookupError,
+) -> list[tuple[int, int]]:
+    """Give a fake process a fake process group, and refuse to signal any other.
+
+    Every other cleanup step is a method the fake implements -- `terminate_tree`,
+    `close_handles`, `kill`, `reap`. POSIX tree termination is the exception: it
+    reaches the `os.killpg` syscall directly, so a fake's pid is a real pgid and
+    the fake has no way to intercept it. `pytest.fail` on any other pgid makes
+    that structurally impossible rather than merely unlikely.
+
+    `error` is what the fake group's existence probe and signals raise:
+    `ProcessLookupError` for "this group is gone" (the normal case, ESRCH), or
+    `PermissionError` for "this group exists and we may not signal it" -- the
+    POSIX spelling of a tree that could not be terminated.
+
+    Patching `os.killpg` is process-global, deliberately: `probe_process` calls
+    it through the stdlib module, so a module-scoped patch would not reach it.
+    Bounded either way -- the graceful loop it feeds is capped by a real clock
+    (unlike the frozen one behind graphite#45), so no outcome here can hang.
+    """
+    signals: list[tuple[int, int]] = []
+    if os.name == "nt":  # no process groups; cleanup consults `terminate_tree`
+        return signals
+
+    def killpg(process_group_id: int, sig: int) -> None:
+        if process_group_id != UNCLAIMABLE_PID:
+            pytest.fail(
+                f"test aimed signal {sig} at a real process group: pgid={process_group_id}"
+            )
+        signals.append((process_group_id, sig))
+        if error is not None:
+            raise error(f"fake process group {process_group_id}")
+
+    monkeypatch.setattr(os, "killpg", killpg)
+    return signals
+
+
 def _cli_report(*, status: str = "ready", exit_code: int = 0) -> dict:
     return {
         "schema_version": 1,
@@ -1234,7 +1292,7 @@ def test_probe_transport_rechecks_late_writer_failure(monkeypatch: pytest.Monkey
         def read(self, size: int) -> bytes: return b""
         def close(self) -> None: pass
     class Process:
-        pid = 123
+        pid = UNCLAIMABLE_PID
         returncode = 0
         stdin = InputPipe()
         stdout = OutputPipe()
@@ -1288,7 +1346,7 @@ def test_probe_transport_reports_the_numeric_code_of_a_writer_failure(
         def close(self) -> None: pass
 
     class Process:
-        pid = 123
+        pid = UNCLAIMABLE_PID
         returncode = 0
         stdin = InputPipe()
         stdout = OutputPipe()
@@ -1306,6 +1364,24 @@ def test_probe_transport_reports_the_numeric_code_of_a_writer_failure(
     assert "os=13" in str(exc_info.value)
     # The number travels; the strerror never does.
     assert "RAW" not in str(exc_info.value)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups and killpg are POSIX")
+def test_the_fake_process_pid_can_name_no_real_process_group() -> None:
+    """The transport fakes reach `os.killpg` with no seam in between.
+
+    Two independent conditions, because either alone can pass while the pid is
+    still dangerous: the constant must exceed what the kernel can allocate --
+    an absence probe alone would pass on any machine that merely happens not to
+    be running that pid right now -- and `killpg` must actually answer ESRCH
+    rather than EINVAL, which is what makes cleanup report success instead of
+    `cleanup_failed`.
+    """
+    pid_max = Path("/proc/sys/kernel/pid_max")
+    if pid_max.exists():
+        assert UNCLAIMABLE_PID > int(pid_max.read_text().strip())
+    with pytest.raises(ProcessLookupError):
+        os.killpg(UNCLAIMABLE_PID, 0)
 
 
 def test_probe_transport_tolerates_einval_as_a_broken_pipe(
@@ -1338,7 +1414,7 @@ def test_probe_transport_tolerates_einval_as_a_broken_pipe(
         def close(self) -> None: pass
 
     class Process:
-        pid = 123
+        pid = UNCLAIMABLE_PID
         returncode = 0
         stdin = InputPipe()
         stdout = OutputPipe()
@@ -1347,6 +1423,7 @@ def test_probe_transport_tolerates_einval_as_a_broken_pipe(
         def kill(self) -> None: self.returncode = -9
 
     monkeypatch.setattr(transport, "_launch_process", lambda *a, **k: Process())
+    _fake_process_group(monkeypatch)
 
     result = transport.run_bounded_process(
         ["python"], cwd=tmp_path, stdin=b"small", timeout_seconds=5
@@ -1365,7 +1442,7 @@ def test_probe_transport_cleans_process_tree_after_success(monkeypatch: pytest.M
         def read(self, size: int) -> bytes: return b""
         def close(self) -> None: pass
     class Process:
-        pid = 123
+        pid = UNCLAIMABLE_PID
         returncode = 0
         stdin = None
         stdout = Pipe()
@@ -1380,7 +1457,7 @@ def test_probe_transport_cleans_process_tree_after_success(monkeypatch: pytest.M
     result = transport.run_bounded_process(["python"], cwd=tmp_path, timeout_seconds=1)
 
     assert result.returncode == 0
-    assert cleaned == [123]
+    assert cleaned == [UNCLAIMABLE_PID]
 
 
 @pytest.mark.parametrize("failed_start", [1, 2, 3])
@@ -1396,7 +1473,7 @@ def test_probe_transport_thread_start_failure_cleans_every_resource(
         def read(self, size: int) -> bytes: return b""
         def close(self) -> None: self.closed = True
     class Process:
-        pid = 123
+        pid = UNCLAIMABLE_PID
         returncode = None
         stdin, stdout, stderr = Pipe(), Pipe(), Pipe()
         terminated = False
@@ -1423,12 +1500,21 @@ def test_probe_transport_thread_start_failure_cleans_every_resource(
             super().start()
     monkeypatch.setattr(transport, "_launch_process", lambda *args, **kwargs: process)
     monkeypatch.setattr(transport.threading, "Thread", FailingThread)
+    signals = _fake_process_group(monkeypatch)
 
     with pytest.raises(transport.ProbeProcessError) as exc_info:
         transport.run_bounded_process(["python"], cwd=tmp_path, timeout_seconds=1)
 
     assert exc_info.value.code == "io_failed"
-    assert process.terminated and process.handles_closed
+    # "The tree was terminated" is spelled differently per platform, and only
+    # Windows reaches `terminate_tree` -- `_force_kill_process_tree` consults
+    # that method inside an `os.name == "nt"` branch. Asserting it unconditionally
+    # pinned a mechanism POSIX never uses.
+    if os.name == "nt":
+        assert process.terminated
+    else:
+        assert signal.SIGKILL in [sent for _pgid, sent in signals]
+    assert process.handles_closed
     assert all(pipe.closed for pipe in (process.stdin, process.stdout, process.stderr))
 
 
@@ -1444,7 +1530,7 @@ def test_probe_transport_cleanup_failure_never_returns_success(
         def read(self, size: int) -> bytes: return b""
         def close(self) -> None: pass
     class Process:
-        pid = 123
+        pid = UNCLAIMABLE_PID
         returncode = 0
         stdin = None
         stdout, stderr = Pipe(), Pipe()
@@ -1453,6 +1539,15 @@ def test_probe_transport_cleanup_failure_never_returns_success(
         def terminate_tree(self) -> bool: return failure != "terminate"
         def close_handles(self) -> bool: return failure != "close"
     monkeypatch.setattr(transport, "_launch_process", lambda *args, **kwargs: Process())
+    # A tree that cannot be terminated: Windows hears it from `terminate_tree`,
+    # POSIX from the errno of the group signal. EPERM is the real case -- a
+    # group we may not signal -- and it is exactly what this used to hit by
+    # accident, against an unrelated root-owned group, which is the only reason
+    # the POSIX half of `terminate` ever passed.
+    _fake_process_group(
+        monkeypatch,
+        error=PermissionError if failure == "terminate" else ProcessLookupError,
+    )
 
     with pytest.raises(transport.ProbeProcessError) as exc_info:
         transport.run_bounded_process(["python"], cwd=tmp_path, timeout_seconds=1)
