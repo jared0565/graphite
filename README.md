@@ -108,18 +108,18 @@ Canonical commands ignore ambient `GRAPHITE_LLM*` settings and never read `GRAPH
 
 `--include-llm` is an explicit network action and uses synthetic content only. It sends one bounded constant probe with no repository data, follows no redirects or retries, and reports neither response text, raw error text, nor secrets. The normal enrichment setting `GRAPHITE_LLM_MAX_OUTPUT_TOKENS` defaults to 512 and is clamped to 1–4096. The doctor probe overrides it with a fixed 16-token cap. Keep the LLM probe disabled unless network access to the configured endpoint is approved.
 
-## Global F:/Projects usage
+## Machine-wide usage
 
-This repository lives at `F:\Projects\graphite` (its own git repo) and is pip-installed editable, so `python -m graphite` works from any project in any shell. The `graphite` / `graphite-mcp` console-script shims are equivalent where they are on PATH (on this machine: PowerShell/cmd via `C:\Users\fbmac\.local\bin\graphite.cmd`, but not Git Bash — prefer `python -m graphite` in scripts and agent instructions).
+Installed editable, `python -m graphite` works from any project in any shell. The `graphite` / `graphite-mcp` console-script shims are equivalent wherever they are on PATH, but a shim directory that PowerShell and cmd see is not always on Git Bash's PATH — prefer `python -m graphite` in scripts and agent instructions.
 
 To onboard a new or existing project, run one command from anywhere:
 
 ```bash
-python -m graphite init F:/Projects/MyApp        # agent instructions + gitignore + first build + validation
-python -m graphite bootstrap F:/Projects/MyApp   # minimal variant: gitignore + AGENTS.md + build
+python -m graphite init /path/to/MyApp        # agent instructions + gitignore + first build + validation
+python -m graphite bootstrap /path/to/MyApp   # minimal variant: gitignore + AGENTS.md + build
 ```
 
-The machine-wide daemon (`graphite daemon F:\Projects`) auto-discovers any project with standard markers (`.git`, `package.json`, `pyproject.toml`, `wrangler.toml`, `go.mod`, `Cargo.toml`) and keeps its graph fresh, so `init` is about wiring agent instructions, not registration. To exclude a directory (and its whole subtree) from supervision — e.g. a third-party SDK checkout — drop a `.graphite-ignore` file in it; the daemon skips it at the next discovery cycle.
+The machine-wide daemon (`graphite daemon /path/to/projects`) auto-discovers any project with standard markers (`.git`, `package.json`, `pyproject.toml`, `wrangler.toml`, `go.mod`, `Cargo.toml`) and keeps its graph fresh, so `init` is about wiring agent instructions, not registration. To exclude a directory (and its whole subtree) from supervision — e.g. a third-party SDK checkout — drop a `.graphite-ignore` file in it; the daemon skips it at the next discovery cycle.
 
 Set `GRAPHITE_PROJECTS_ROOT` to change the default base folder used by `daemon`, `daemon-status`, `daemon-health`, the Windows startup installers, and init/bootstrap daemon-visibility checks (falls back to `F:/Projects` when it exists, else the current directory).
 

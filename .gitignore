@@ -1,4 +1,6 @@
-# Graphite artifacts (this tool graphs itself via the F:\Projects daemon)
+# Graphite artifacts (this tool graphs itself via the supervising daemon).
+# No developer-machine paths here: hatchling ships .gitignore inside the sdist,
+# so anything written in this file is published.
 graph-out/
 **/.cache/graphite/
 **/.graphite/
