@@ -33,6 +33,7 @@ from .dependency_install import (
     StepResult,
     TRUSTED_REGISTRY,
     TrustedFile,
+    _trusted_identity_launcher,
     adapter_for,
     command_for,
     control_files_use_trusted_sources,
@@ -204,15 +205,30 @@ def _trusted_running_interpreter(root: Path) -> TrustedFile | None:
     different ``sys.prefix``, which is not the runtime that decided to run this
     worker. Validate the symlink route instead, and keep the given name.
 
-    Falling back to the canonical target preserves every case that worked before
-    launcher awareness. The route is refused when it is one the selected
-    repository controls (a virtual environment inside it, say) or when any of
-    its directories are group- or world-writable without the sticky bit; the
-    canonical target is then still resolved and validated exactly as before,
-    which is no weaker than what this did.
+    Three steps, narrowing deliberately:
+
+    1. The full symlink route, path-trusted end to end. Best evidence, so first.
+    2. Failing that, the target's identity and content, keeping the name -- see
+       `_trusted_identity_launcher`. A hosted CI runner ships its whole Python
+       toolchain mode 0777, so step 1 refuses all seven components there while
+       `_trusted_file` accepts the very same binary; without this step that gap
+       silently became "launch a different interpreter".
+    3. Only then the canonical target, which drops the name. Reached when the
+       launcher is one the selected repository controls -- a virtual environment
+       inside it, say -- where refusing the name is the entire point.
+
+    A previous version of this docstring claimed the canonical fallback was "no
+    weaker than what this did". That was wrong, and measuring is what showed it:
+    `_trusted_posix_launcher` enforces path trust while `_trusted_file` enforces
+    identity and content, so falling from the first to the second is a change of
+    threat model, not a narrowing of one. Step 2 exists so that trade is made
+    once, on purpose, for the interpreter already executing this process.
     """
     executable = Path(sys.executable)
     reference = resolve_trusted_file(executable, root, executable=True, follow_launcher=True)
+    if reference is not None:
+        return reference
+    reference = _trusted_identity_launcher(executable, root)
     if reference is not None:
         return reference
     try:

@@ -1477,6 +1477,99 @@ def test_cleanup_launches_the_interpreter_name_it_was_invoked_as(tmp_path, monke
     assert calls[0][:2] == [str(launcher), "-I"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX venvs symlink their interpreter; Windows copies it")
+def test_cleanup_keeps_the_interpreter_name_when_its_route_is_world_writable(
+    tmp_path, monkeypatch
+):
+    """A world-writable route must not silently change which runtime we launch.
+
+    This reproduces a GitHub hosted runner, where the whole Python toolchain is
+    mode 0777 -- `/opt` through the interpreter binary itself. `_trusted_posix_route`
+    refuses every component of that, correctly by its own rule, and the fallback
+    then launched the RESOLVED interpreter instead: a different `sys.prefix` with
+    none of the venv's `site-packages`.
+
+    The refusal is not the bug. `sys.executable` is the interpreter already
+    executing this process -- anyone able to substitute it has already done so,
+    before graphite had a vote -- so path trust over its route defends a decision
+    already made, while the fallback it triggers causes the hazard that can still
+    happen. Trust for THIS path is anchored in the target's identity and content
+    instead, and the name we were invoked as is what gets launched.
+
+    A world-writable non-sticky directory in the route is sufficient on its own;
+    measured, with a clean control, alongside a hardlinked target and a
+    world-writable target, which each refuse for their own reason.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    wide = tmp_path / "wide"
+    wide.mkdir()
+    launcher = wide / "python"
+    launcher.symlink_to(Path(sys.executable).resolve(strict=True))
+    wide.chmod(0o777)
+    assert not wide.stat().st_mode & stat.S_ISVTX, "sticky would be exempted, voiding the setup"
+    monkeypatch.setattr(sys, "executable", str(launcher))
+    calls = []
+
+    def runner(argv, **_kwargs):
+        calls.append(argv)
+        raise ProbeProcessError("timeout")
+
+    monkeypatch.setattr(typescript_activation, "run_bounded_process", runner)
+    details = isolated.lstat()
+    lease = typescript_activation._TemporaryDirectoryLease(
+        str(isolated),
+        typescript_activation._temporary_directory_identity(isolated, details),
+    )
+
+    result = typescript_activation._cleanup_isolated_home(lease, root, 0.25)
+
+    # `cleanup_failed` would mean the reference did not survive revalidation --
+    # a different defect from launching the wrong name, so it is asserted apart.
+    assert result == StepResult(False, "cleanup_timeout")
+    assert len(calls) == 1
+    assert calls[0][:2] == [str(launcher), "-I"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink route")
+def test_identity_launcher_still_detects_a_substituted_target(tmp_path):
+    """The relaxed check must still refuse a target that changed underneath it.
+
+    `_trusted_identity_launcher` drops path trust, so identity and content are
+    the *only* things left holding the boundary. If they did not detect a swap,
+    the relaxation would have removed a guard rather than moved it -- so this
+    mutates the target and requires revalidation to say no.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    wide = tmp_path / "wide"
+    wide.mkdir()
+    target = wide / "python3.12"
+    shutil.copy2(Path(sys.executable).resolve(strict=True), target)
+    target.chmod(0o755)
+    launcher = wide / "python"
+    launcher.symlink_to(target)
+    wide.chmod(0o777)
+
+    reference = dependency_install._trusted_identity_launcher(launcher, root)
+
+    assert reference is not None, "world-writable route must still be trusted by identity"
+    assert reference.command_path == launcher
+    assert reference.launcher_identity_only is True
+    assert dependency_install.revalidate_trusted_file(reference, root, True) is True
+
+    # Swap the target for a different file at the same name -- the substitution
+    # path trust used to cover.
+    target.unlink()
+    shutil.copy2(Path(sys.executable).resolve(strict=True), target)
+    target.write_bytes(target.read_bytes() + b"\0mutated")
+    target.chmod(0o755)
+
+    assert dependency_install.revalidate_trusted_file(reference, root, True) is False
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink route")
 def test_cleanup_refuses_an_interpreter_name_the_repository_controls(tmp_path, monkeypatch):
     """Launcher awareness must not widen what the repository can aim us at.

@@ -104,11 +104,23 @@ class TrustedFile:
     sha256: str
     launcher_path: Path | None = None
     launcher_route: tuple[TrustedPathComponent, ...] = ()
+    #: The launcher name is trusted by the TARGET's identity and content rather
+    #: than by path trust over every route component, so it carries no route.
+    #: Legitimate only for the interpreter this process is already running --
+    #: see `_trusted_identity_launcher`. Anything else must earn a full route.
+    launcher_identity_only: bool = False
     prefix: bytes = b""
 
     def __post_init__(self) -> None:
+        if self.launcher_identity_only:
+            # A route would be meaningless here, and its absence is the marker
+            # revalidation reads, so an identity launcher must carry a name and
+            # no route -- not merely "one or the other".
+            paired = self.launcher_path is not None and not self.launcher_route
+        else:
+            paired = (self.launcher_path is None) == (not self.launcher_route)
         if (
-            (self.launcher_path is None) != (not self.launcher_route)
+            not paired
             or not isinstance(self.prefix, bytes)
             or len(self.prefix) > MAX_TRUSTED_EXECUTABLE_PREFIX_BYTES
         ):
@@ -435,6 +447,55 @@ def _trusted_posix_launcher(path: Path, root: Path) -> TrustedFile | None:
     )
 
 
+def _trusted_identity_launcher(path: Path, root: Path) -> TrustedFile | None:
+    """Trust a launcher by its target's identity and content, not by path trust.
+
+    `_trusted_posix_launcher` requires every component of the route to be
+    unwritable by anyone but us, which defends against a hop being swapped
+    between validation and exec. That rule is right for a file we are choosing
+    to execute. It is the wrong question for the interpreter **we are already
+    running**: whoever could substitute `sys.executable` did so before this
+    process existed, so the substitution is already decided, and refusing it
+    only pushes the caller onto a fallback that launches the *resolved* path --
+    a different `sys.prefix`, without the venv's `site-packages`. That is a
+    hazard which can still happen, traded for one which cannot.
+
+    Measured on a GitHub hosted runner: `/opt` through `bin/python3.12` are all
+    mode 0777, so all seven components are refused while `_trusted_file` accepts
+    the very same binary. This closes that gap deliberately rather than by
+    accident.
+
+    What is NOT relaxed: the target is still pinned by `_trusted_file` (identity,
+    size, times, full digest, `O_NOFOLLOW`, `nlink == 1`), and a launcher inside
+    the selected repository is still refused, so this cannot widen what a
+    repository can aim us at.
+    """
+    if os.name == "nt":
+        return None
+    try:
+        lexical = Path(os.path.abspath(path))
+        root_path = root.resolve(strict=True)
+        target = lexical.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not lexical.is_absolute() or _is_under(lexical, root_path):
+        return None
+    reference = _trusted_file(target, root_path, executable=True)
+    if reference is None or reference.path != target:
+        return None
+    return TrustedFile(
+        path=reference.path,
+        identity=reference.identity,
+        size=reference.size,
+        mtime_ns=reference.mtime_ns,
+        ctime_ns=reference.ctime_ns,
+        sha256=reference.sha256,
+        launcher_path=lexical,
+        launcher_identity_only=True,
+        prefix=reference.prefix,
+    )
+
+
 def _trusted_file(path: Path, root: Path, *, executable: bool) -> TrustedFile | None:
     if not path.is_absolute():
         return None
@@ -517,7 +578,13 @@ def revalidate_trusted_file(reference: TrustedFile, root: Path, executable: bool
     if reference.launcher_path is not None:
         if os.name == "nt" or not executable:
             return False
-        current = _trusted_posix_launcher(reference.launcher_path, root)
+        # Revalidate the way the reference was BUILT. Re-running the route check
+        # over an identity-anchored launcher would refuse it every time, turning
+        # every cleanup on a world-writable toolchain into `cleanup_failed`.
+        if reference.launcher_identity_only:
+            current = _trusted_identity_launcher(reference.launcher_path, root)
+        else:
+            current = _trusted_posix_launcher(reference.launcher_path, root)
     else:
         current = _trusted_file(reference.path, root, executable=executable)
     return current == reference
