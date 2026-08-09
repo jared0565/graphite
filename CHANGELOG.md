@@ -12,6 +12,64 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
+## [0.2.1] — 2026-08-09
+
+A portability release. `0.2.0` listed Linux and macOS as unverified; the suite
+now runs green end to end on Linux. Two of the defects hiding behind that gap
+were real, and the rest were tests that had never executed on a POSIX machine at
+all.
+
+### Added
+
+- MIT license, declared with PEP 639 (`license = "MIT"` plus `license-files`)
+  and shipped in both the wheel and the sdist. The `v0.2.0` tag predates the
+  license commit, so that tagged tree carries no LICENSE file.
+- `resolve_trusted_file(..., follow_launcher=True)`: POSIX launcher-aware
+  resolution, which keeps trust anchored in the resolved target while preserving
+  the caller's own spelling for execution.
+
+### Fixed
+
+**Virtual environments on POSIX.** Two call sites canonicalised `sys.executable`
+before launching it. `.venv/bin/python` is a symlink there, and Python locates a
+virtual environment from the executable it was *invoked as*, so the resolved path
+started the base installation instead — which cannot `import graphite` at all.
+Both now judge the resolved target and launch the path they were given.
+Containment is unchanged: the rejection still tests the resolved path, so a
+symlink outside the workspace pointing at a workspace-controlled binary is still
+refused. Windows never saw this, because its virtual-environment interpreters are
+copies rather than symlinks.
+
+**A test froze the global clock and hung every POSIX CI leg** (#45).
+`monkeypatch.setattr(probes.time, "monotonic", ...)` reads as module-scoped and
+is not — `probes.time` *is* the stdlib `time` module — so the patch reached
+`probe_process`'s POSIX grace loop, whose exit condition became unreachable and
+which then spun on a real `time.sleep`. Every POSIX leg was killed at the
+45-minute timeout. Fixed in the test by offsetting a real clock rather than
+freezing one: an advancing `time.monotonic()` is the function's contract, so a
+production guard would defend a condition that cannot occur.
+
+### Changed
+
+- The residual TOCTOU in `_canonical_executable` is now named where it lives.
+  Judging the resolved target while executing the given path moves the race from
+  "swap the file" to "re-point the symlink". It stays accepted — no path check
+  closes it, only an fd-based exec does — and the obvious narrowing, refusing
+  group- or world-writable launcher directories, would reject Homebrew's
+  `/usr/local/bin` on exactly the platforms the fix exists to support.
+
+### Known limitations
+
+As in `0.2.0`, except:
+
+- **Linux is now verified**: 2835 passed, zero failures, zero timeouts, on
+  Ubuntu under WSL2 with CPython 3.12.13. That is one machine, one distribution
+  and one interpreter build — it means "no longer failing here", not "portable".
+- **macOS remains unverified** (#46). Linux evidence is evidence about Linux.
+- **CI has not started a job since 2026-08-05.** Every push since is refused
+  with a GitHub billing/spending-limit error before the job begins, so the local
+  gate and the WSL runs are currently the only signal.
+
 ## [0.2.0] — 2026-08-07
 
 The first tagged release, covering everything since the initial import on

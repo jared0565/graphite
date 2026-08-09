@@ -9,4 +9,4 @@ from __future__ import annotations
 #: Coarse and hand-maintained by construction. It is a release label, not
 #: evidence that a given fix is present -- to answer that, survey for the marker
 #: the fix introduced, or compare `graphite --version` fingerprints.
-__version__ = "0.2.0"
+__version__ = "0.2.1"
