@@ -1,6 +1,18 @@
 name: CI
 
 on:
+  # NO `paths-ignore` HERE, and the reason is not obvious enough to rediscover.
+  # A docs-only commit looks free to skip, but `tests/test_documentation.py`
+  # reads the repository's real README/CONTRIBUTING/ARCHITECTURE/RELEASING and
+  # asserts required phrases, section ordering, credential-example safety, and
+  # that every Markdown link target EXISTS ON DISK. A markdown-only change can
+  # therefore fail the suite on its own.
+  #
+  # Worse for a static ignore list: that document set is DISCOVERED at runtime
+  # (`discover_routing_evidence_documents` globs the implementation notes), so
+  # any path list pinned in this file would drift out of sync with the test that
+  # decides what matters -- silently, and in the unsafe direction. Same hazard as
+  # a generated string that is also its own matcher.
   push:
     branches: [main]
   pull_request:
@@ -8,6 +20,21 @@ on:
   # meant pushing empty commits to main, which is why the rate was never
   # measured and every argument about "is it deterministic" stayed an argument.
   workflow_dispatch:
+    inputs:
+      # Sampling and portability are different questions, and until now every
+      # dispatch paid for both: `portability` fired on `workflow_dispatch`
+      # unconditionally, so each #29 sample also ran three windows legs at the
+      # 2x multiplier -- roughly 48 billed minutes to re-answer a version
+      # question the sample was not asking. Sampling is by design repeated N
+      # times, so that overcharge multiplied by N, and it is a plausible share
+      # of what exhausted the account.
+      #
+      # Default false: the cheap dispatch stays cheap, and the matrix is opted
+      # into when the OS/version axis is actually the question.
+      portability:
+        description: "Also run the portability matrix (3 extra windows legs, 2x billing)"
+        type: boolean
+        default: false
 
 concurrency:
   # push/PR still coalesce -- a superseded commit's run is wasted work.
@@ -20,7 +47,20 @@ concurrency:
 jobs:
   test:
     runs-on: windows-latest
-    timeout-minutes: 45
+    # 20, not 45. Measured over this workflow's successful history: push runs
+    # land at 6-7 minutes and the slowest dispatch observed was 9, so 20 leaves
+    # better than 2x headroom over the worst real run. The 45 it replaces was
+    # ~6.5x, and on a 2x-billed windows runner that made a HUNG run cost about
+    # 90 billed minutes against a normal run's ~13. Hangs are not hypothetical
+    # here -- #45 is exactly that failure, and legs burning their full timeout
+    # are what took the account's Actions allowance down.
+    #
+    # This caps a hang; it does not cap a test. Per-test `--timeout` stays off
+    # the gating job on purpose (see the portability job's note): a slow machine
+    # naming a slow test "the hang" would turn main red, which is where the next
+    # real failure hides. Raise this if a legitimate run ever approaches it --
+    # but re-measure the distribution first rather than restoring 45 on instinct.
+    timeout-minutes: 20
     steps:
       # These majors track the runner's Node runtime, so they need a periodic
       # bump: v4/v5 were built for Node 20, which the runner now force-migrates
@@ -133,7 +173,16 @@ jobs:
   # here is what made a 9-leg matrix look necessary, and that matrix exhausted the
   # account's Actions allowance. Local first; dispatch for the OS axis only.
   portability:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    # Opt-in on dispatch (see the `portability` input above), automatic on PR.
+    #
+    # The event name is tested explicitly rather than leaning on `inputs` being
+    # null-and-therefore-falsy outside workflow_dispatch. That shortcut probably
+    # works, but "probably" is doing real work in a condition that decides
+    # whether three 2x-billed legs run, and CI is currently down so it cannot be
+    # demonstrated. Written this way it is true by reading.
+    if: >-
+      github.event_name == 'pull_request'
+      || (github.event_name == 'workflow_dispatch' && inputs.portability)
     continue-on-error: true
     # 20, not the gating job's 45. The suite takes ~8 minutes here, so a leg
     # still running at 20 has already answered the question -- it is hung. The
