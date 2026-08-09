@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from typing import Any
 
 import community as community_louvain
@@ -53,13 +54,23 @@ def detect_communities(g: nx.DiGraph, seed: int = 42, weight: str = "weight") ->
     }
 
 
-def _label_cluster(g: nx.DiGraph, members: set[str]) -> list[str]:
-    """Generate zero-LLM cluster labels from shared directory and common node kinds."""
+def _label_cluster(g: nx.DiGraph, members: Iterable[str]) -> list[str]:
+    """Generate zero-LLM cluster labels from shared directory and common node kinds.
+
+    Iterates in sorted order because the caller passes a `set`, whose order
+    `PYTHONHASHSEED` randomizes per process. That reached the artifact: `max()`
+    returns the FIRST maximum, so a tie between two kinds resolved to whichever
+    the set happened to yield first. Measured -- one cluster's labels were
+    `['src/graphite']` in one build of a commit and `['src/graphite',
+    'functions']` in the next, because `unknown` and `function` tied and
+    `unknown` suppresses the label entirely.
+    """
     labels: list[str] = []
+    ordered = sorted(members)
 
     # Shared parent directory from file nodes.
     dirs: list[str] = []
-    for n in members:
+    for n in ordered:
         sf = g.nodes[n].get("source_file")
         if sf:
             dirs.append(Path(sf).parent.as_posix())
@@ -68,11 +79,12 @@ def _label_cluster(g: nx.DiGraph, members: set[str]) -> list[str]:
         if common and common != ".":
             labels.append(common)
 
-    # Most common kind.
+    # Most common kind, ties broken by name so the winner is a property of the
+    # cluster rather than of this process's hash seed.
     kinds: dict[str, int] = defaultdict(int)
-    for n in members:
+    for n in ordered:
         kinds[g.nodes[n].get("kind", "unknown")] += 1
-    top_kind = max(kinds.items(), key=lambda kv: kv[1])[0]
+    top_kind = min(kinds.items(), key=lambda kv: (-kv[1], kv[0]))[0]
     if top_kind != "unknown":
         labels.append(f"{top_kind}s")
 

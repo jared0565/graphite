@@ -19,6 +19,30 @@ def _project_nodes(g: nx.DiGraph) -> list[str]:
     return [n for n in g.nodes() if _is_project_node(g, n)]
 
 
+def _stable_cycles(g: nx.DiGraph, top_n: int) -> list[list[str]]:
+    """Cycles in a fixed order, each rotated to start at its smallest node.
+
+    `nx.simple_cycles` yields in an order that follows set iteration, which
+    `PYTHONHASHSEED` randomizes per process. That is not a cosmetic difference
+    once `[:top_n]` truncates the result: two builds of one commit reported a
+    *different set* of cycles and so disagreed about which cycles the repository
+    contains. Measured on this repository -- `nodes`, `edges` and `metadata`
+    were byte-identical between builds while `analysis.cycles` was not.
+
+    A cycle is also the same cycle under rotation, so one spelling has to be
+    chosen or `[a, b, c]` and `[b, c, a]` both appear depending on where the
+    traversal entered. Nodes within a simple cycle are distinct, so the minimum
+    is unique and rotating to it is canonical. Shortest first, then
+    lexicographic, so the truncation keeps the tightest cycles.
+    """
+    canonical: list[list[str]] = []
+    for cycle in nx.simple_cycles(g):
+        pivot = cycle.index(min(cycle))
+        canonical.append(cycle[pivot:] + cycle[:pivot])
+    canonical.sort(key=lambda cycle: (len(cycle), cycle))
+    return canonical[:top_n]
+
+
 def analyze(g: nx.DiGraph, top_n: int = 20) -> dict[str, Any]:
     """Run the full analysis suite."""
     project_subgraph = g.subgraph(_project_nodes(g)).copy()
@@ -27,7 +51,7 @@ def analyze(g: nx.DiGraph, top_n: int = 20) -> dict[str, Any]:
         "orphans": orphan_nodes(g, top_n),
         "entry_points": entry_points(g, top_n),
         "surprising_connections": surprising_connections(g, top_n),
-        "cycles": list(nx.simple_cycles(project_subgraph))[:top_n],
+        "cycles": _stable_cycles(project_subgraph, top_n),
         "top_files_by_links": top_files_by_links(g, top_n),
         "resolution_health": resolution_health(g),
     }
