@@ -46,19 +46,33 @@ _CONSOLE_SCRIPT_STEMS = frozenset({"graphite", "graphite-mcp"})
 def resolve_launcher_interpreter(explicit: str | None = None) -> Path:
     """The Python interpreter a generated launcher runs. Never a console script.
 
-    `graphite ...` is shadowable exactly like `python -m graphite`: an installed
-    entry point does not put its own directory on `sys.path[0]`, and this
-    launcher runs with a projects root as its working directory, so a
-    `graphite.py` -- or a `graphite/` directory -- dropped there beats the
-    installed package. A module-shaped shadow RUNS before it errors, and the
-    daemon starts hidden at login, so nothing would be visible.
+    The hazard is not the console script itself. Running a SCRIPT puts the
+    script's own directory on `sys.path[0]`; only `-m` puts the CWD there, and
+    that is the entire mechanism -- so a pip-generated entry point is not
+    cwd-shadowable. The hazard is the `-m` a wrapper may run internally, which
+    the generator cannot see and cannot add `-P` to.
 
-    A console script cannot express the fix: there is no `-P` to add to it, and
-    pip's generated `graphite.exe` is a binary that cannot be edited at all.
-    So the launcher runs the interpreter directly and passes `-P` itself.
+    That is not hypothetical. The resolver this replaced returned
+    `shutil.which("graphite")` or `~/.local/bin/graphite.cmd`, and on the
+    machine this was found on there is no pip console script at all -- what
+    `graphite` names there is a hand-written `.cmd` running
+    `python -B -m graphite`. This launcher starts hidden at every login with a
+    projects root as its working directory, so a `graphite.py` -- or a
+    `graphite/` directory -- dropped at that root beat the installed package,
+    and a module-shaped shadow RUNS before it errors. Measured, cwd holding a
+    hostile `graphite.py`:
+
+        python -m graphite                 -> shadow ran
+        python -P -m graphite              -> real graphite
+        .cmd -> python -B -m graphite      -> shadow ran
+        .cmd -> python -B -P -m graphite   -> real graphite
+
+    So the launcher runs the interpreter directly and passes `-P` itself: the
+    only shape it can guarantee without auditing someone else's wrapper.
 
     An explicit override stays supported and is honoured, but one naming a
-    console script is refused rather than quietly regenerating the defect.
+    console script is refused -- the argument vector built below begins
+    `-P -m graphite`, which only an interpreter can accept.
     """
     if explicit:
         path = Path(explicit).expanduser().resolve()

@@ -29,12 +29,13 @@ def test_generated_launcher_runs_the_interpreter_not_a_bare_console_script(
 ) -> None:
     """A generated launcher must not be shadowable.
 
-    `graphite ...` is hijacked exactly like `python -m graphite`: an installed
-    entry point does not put its own directory on `sys.path[0]`, and this
-    launcher runs with a projects root as its working directory, so a
-    `graphite.py` dropped there wins. A console script also cannot express the
-    fix -- there is no `-P` to add to it -- which is why the launcher has to run
-    the interpreter directly rather than the shim.
+    Only `-m` puts the CWD on `sys.path[0]`, so a console script is not itself
+    the hazard -- the `-m` inside a wrapper is. The resolver this replaced
+    returned whatever `graphite` was on PATH, which in the field was a
+    hand-written `.cmd` running `python -B -m graphite`; launched with a
+    projects root as its working directory, the shadow ran (measured). The
+    generator cannot see inside a wrapper, so it runs the interpreter and
+    passes `-P` itself.
     """
     base = tmp_path / "Projects Root"
     base.mkdir()
@@ -49,11 +50,13 @@ def test_generated_launcher_runs_the_interpreter_not_a_bare_console_script(
 def test_generated_launcher_refuses_a_console_script_it_cannot_protect(
     tmp_path: Path,
 ) -> None:
-    """Failing closed beats accepting the input that caused the defect.
+    """Failing closed beats accepting an argument vector it cannot carry.
 
-    A console script is the vulnerable shape itself, and no flag can fix it --
-    pip's generated `graphite.exe` cannot even be edited. Accepting one here
-    would quietly regenerate a shadowable launcher.
+    The command built here begins `-P -m graphite`, which only a Python
+    interpreter can accept -- handing those flags to `graphite.cmd` would be
+    broken quite apart from shadowing. A wrapper is also unauditable: the
+    generator cannot tell whether it runs `-m` internally, and cannot add `-P`
+    to one that does.
     """
     shim = tmp_path / "bin" / "graphite.cmd"
     shim.parent.mkdir()

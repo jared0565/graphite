@@ -36,9 +36,10 @@ def test_install_startup_launcher_writes_hidden_vbs_and_idempotent_script(
     assert "WScript.Shell" in launcher
     assert ", 0, False" in launcher
     # This script starts hidden at login with a projects root as its working
-    # directory -- precisely where a `graphite.py` would beat the installed
-    # package. So it must launch the interpreter with `-P` and never a bare
-    # console script, which cannot carry the flag at all.
+    # directory -- precisely where a `graphite.py` beats the installed package
+    # on a `python -m graphite` launch. The wrapper this used to name ran
+    # exactly that internally, and the generator cannot see inside a wrapper or
+    # add `-P` to one, so it must launch the interpreter itself.
     launch = next(line for line in script.splitlines() if line.startswith("Start-Process"))
     assert f"-FilePath '{Path(sys.executable)}'" in launch
     assert "@('-P', '-m', 'graphite', 'daemon'" in launch
