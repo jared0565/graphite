@@ -462,6 +462,30 @@ def test_openrouter_rejects_private_dns_and_peer_rebinding() -> None:
 
 
 def test_dns_timeout_is_bounded_and_failure_contains_no_endpoint() -> None:
+    """The probe must abandon a resolver that never returns, and name no endpoint.
+
+    This asserted `elapsed < 0.2` against a resolver that slept 0.2s, i.e. it
+    proved "did not wait for the resolver" by racing a 0.1s budget against a
+    0.2s sleep. That margin does not exist on darwin. MEASURED on
+    macos-latest 3.12.10, nothing else running, a BARE `queue.get(timeout=0.1)`
+    with no probe involved at all:
+
+        macos     min 0.1003   median 0.1596   max 0.1751
+        ubuntu    min 0.1001   median 0.1002   max 0.1002
+
+    So darwin overshoots a 0.1s timed wait by up to 75%, and `run_http_probe`
+    measured no worse than that bare control -- the probe was never the slow
+    part. Under full-suite load the same jitter reached 0.238s and failed the
+    old bound, which is the last of graphite#46's macOS failures.
+
+    A blocking resolver removes the race instead of widening it. It cannot
+    return, so `probe_timeout` reaching this frame is itself proof that the
+    probe stopped waiting -- a structural fact rather than a timing comparison.
+    The elapsed bound stays only as a hang guard, and is now loose enough that
+    no scheduler can trip it while still failing well before the resolver's own
+    cap. Do not "tighten" it back: precision here measures the platform's timer,
+    not this code.
+    """
     endpoint = HttpProbeEndpoint(
         LifecycleProviderId.OPENROUTER,
         "https",
@@ -469,15 +493,22 @@ def test_dns_timeout_is_bounded_and_failure_contains_no_endpoint() -> None:
         443,
         ProbeEndpointPurpose.OPENROUTER_MODELS,
     )
+    released = threading.Event()
 
     def resolver(*args: object, **kwargs: object) -> list[object]:
-        time.sleep(0.2)
+        released.wait(5.0)
         return []
 
     started = time.monotonic()
-    with pytest.raises(ProviderProbeError, match="^probe_timeout$") as caught:
-        run_http_probe(endpoint=endpoint, timeout_seconds=0.1, resolver=resolver)
-    assert time.monotonic() - started < 0.2
+    try:
+        with pytest.raises(ProviderProbeError, match="^probe_timeout$") as caught:
+            run_http_probe(endpoint=endpoint, timeout_seconds=0.1, resolver=resolver)
+        elapsed = time.monotonic() - started
+    finally:
+        # Let the worker finish now rather than sit out its cap holding a DNS
+        # slot, which the next test would see as `probe_dns_busy`.
+        released.set()
+    assert elapsed < 2.0
     assert "openrouter" not in str(caught.value)
 
 
