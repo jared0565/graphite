@@ -211,9 +211,27 @@ jobs:
           # measurement exactly: same cell, different environment, so the RUNNER
           # is the only variable left.
           #
-          # macOS stays banked (#46, 102 failures, unverified since):
-          #     - { os: macos-latest, python: "3.11" }   # and 3.14 -> #46
           - { os: ubuntu-latest, python: "3.12" }
+          # macOS, restored 2026-08-09 to re-measure #46. Its 102 failures were
+          # counted on 9ff1242, BEFORE the frozen-clock fix, the Windows-kernel
+          # skips, both venv-launcher fixes, the node landmark, the mcp deep-probe
+          # stub and #47 -- and 86 of the 102 sat in exactly the probe/subprocess
+          # machinery those touched. So the number on file is stale by
+          # construction; re-measuring is cheaper than reasoning about it.
+          #
+          # py3.12 to match the ubuntu leg above, which is green: same cell,
+          # different OS, so the PLATFORM is the only variable. #46 already
+          # established this is platform-not-version -- identical 102 on both
+          # 3.11 and 3.14 -- so one leg is a sufficient sample, as with ubuntu.
+          #
+          # COST, and it is the reason this was banked: macOS bills at a **10x
+          # minute multiplier** on a private repository, and three runs of the
+          # original 9-leg matrix exhausted the account's allowance and took CI
+          # down entirely. It is free here only while the repo is public and the
+          # matrix is dispatch-opt-in. If the repo goes private again, weigh this
+          # leg against that multiplier before dispatching -- and note it still
+          # fires automatically on `pull_request`.
+          - { os: macos-latest, python: "3.12" }
     runs-on: ${{ matrix.os }}
     name: portability (${{ matrix.os }}, py${{ matrix.python }})
     steps:
