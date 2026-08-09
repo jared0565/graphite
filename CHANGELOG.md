@@ -16,6 +16,31 @@ machine-checkable identity; the version is for humans.
 
 ### Fixed
 
+**Every bounded subprocess reported a failed containment on macOS.**
+`run_bounded_process` holds an exited child as an unreaped zombie on purpose, so
+its pgid cannot be recycled under the signals that follow. On darwin that makes
+the process group unsignalable and `killpg` answers **EPERM** — where Linux
+answers success for the identical state — so cleanup called every successful
+probe a failure. That is 46 of the 62 macOS test failures in #46, and in
+ordinary use it made `doctor` and every routing probe unusable on macOS.
+
+Measured on macos-latest 3.12.10 with ubuntu-latest as the control, four process
+states each. A live descendant in the same group makes darwin answer OK, which
+is what licenses reading EPERM as "nothing left to signal" rather than "not
+allowed to signal"; the transport also creates the group itself via `setsid()`
+from its own uid, so a member it may not signal is not reachable. The reading is
+gated on the leader having exited — on the timeout path the leader is alive and
+EPERM stays a failure. Linux behaviour is untouched.
+
+**A failed cleanup overwrote the diagnosis it was called to follow.** Every
+recheck after cleanup was guarded by "only if nothing failed yet"; the cleanup
+assignment itself was not, so a run that had already determined `timeout`,
+`output_limit` or `input_failed` reported `cleanup_failed` instead. Precedence
+is now explicit — a transport failure, then the child's own non-zero exit, then
+`cleanup_failed` only when there is nothing else to report — and a failed
+containment rides on `ProbeProcessError.cleanup_failed` rather than replacing
+the code. It is still raised, never returned as success.
+
 **The generated daemon launcher ran a wrapper instead of the interpreter.**
 `daemon_task_command` built its command from `resolve_graphite_executable()` —
 whatever `graphite` resolved to on PATH, or `~/.local/bin/graphite.cmd` — and

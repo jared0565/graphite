@@ -92,7 +92,11 @@ def _fake_process_group(
         if error is not None:
             raise error(f"fake process group {process_group_id}")
 
-    monkeypatch.setattr(os, "killpg", killpg)
+    # `raising=False` so a test that patches `os.name` to "posix" can reach the
+    # POSIX branch from a Windows dev box, where `os.killpg` does not exist.
+    # POSIX semantics that differ BETWEEN Unixes (darwin's EPERM, graphite#46)
+    # would otherwise be verifiable only on CI, which is where they hid.
+    monkeypatch.setattr(os, "killpg", killpg, raising=False)
     return signals
 
 
@@ -1518,6 +1522,62 @@ def test_probe_transport_thread_start_failure_cleans_every_resource(
     assert all(pipe.closed for pipe in (process.stdin, process.stdout, process.stderr))
 
 
+def _exited_leader(returncode: int | None = 0) -> SimpleNamespace:
+    """The minimum `_terminate_process_tree` reads: a pid, an exit status, a kill."""
+    return SimpleNamespace(pid=UNCLAIMABLE_PID, returncode=returncode, kill=lambda: False)
+
+
+@pytest.mark.parametrize(
+    ("platform", "returncode", "contained"),
+    [
+        # MEASURED on macos-latest 3.12.10, four process states, against
+        # ubuntu-latest as the control. darwin's `killpg` returns EPERM for a
+        # group whose only remaining member is an unreaped zombie; Linux returns
+        # SUCCESS for the identical state. A live descendant in that same group
+        # makes darwin return success too, which is what licenses reading EPERM
+        # as "nothing left to signal" rather than "not allowed to signal".
+        pytest.param("darwin", 0, True, id="darwin-zombie-only-group-is-contained"),
+        # The leader still running is a different claim entirely: nothing has
+        # exited, so EPERM cannot mean "only zombies left" and stays a failure.
+        pytest.param("darwin", None, False, id="darwin-live-leader-eperm-still-fails"),
+        # Linux never produces EPERM here, so this reading must not reach it --
+        # ubuntu is green at 2843 and is the control this change cannot perturb.
+        pytest.param("linux", 0, False, id="linux-eperm-still-fails"),
+    ],
+)
+def test_posix_tree_termination_reads_eperm_the_way_the_platform_means_it(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    returncode: int | None,
+    contained: bool,
+) -> None:
+    """EPERM means opposite things on darwin and Linux, and cleanup must not guess.
+
+    Every `run_bounded_process` call on macOS reported `cleanup_failed` for a
+    run that had in fact succeeded, because the group signal that follows a
+    clean exit lands on a group holding nothing but this module's deliberately
+    unreaped zombie leader -- and darwin spells that EPERM (graphite#46).
+
+    EPERM is genuinely ambiguous on darwin: "forbidden" and "nothing signalable"
+    share the errno. This reads it as the latter, and the justification is that
+    the transport CREATES the group itself, via `setsid()`, from its own uid and
+    a sanitized environment -- so a member it may not signal is not reachable.
+    Without that, the change is indistinguishable from swallowing an error.
+    """
+    import graphite.probe_process as transport
+
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(sys, "platform", platform)
+    # Windows has neither name, and the branch under test is POSIX-only. Faking
+    # them is what lets a Unix-vs-Unix difference be pinned from any dev box.
+    monkeypatch.setattr(signal, "SIGKILL", getattr(signal, "SIGKILL", signal.SIGTERM), raising=False)
+    _fake_process_group(monkeypatch, error=PermissionError)
+
+    result = transport._terminate_process_tree(_exited_leader(returncode), time.monotonic() + 1.0)
+
+    assert result is contained
+
+
 @pytest.mark.parametrize("failure", ["terminate", "close"])
 def test_probe_transport_cleanup_failure_never_returns_success(
     monkeypatch: pytest.MonkeyPatch,
@@ -1540,13 +1600,22 @@ def test_probe_transport_cleanup_failure_never_returns_success(
         def close_handles(self) -> bool: return failure != "close"
     monkeypatch.setattr(transport, "_launch_process", lambda *args, **kwargs: Process())
     # A tree that cannot be terminated: Windows hears it from `terminate_tree`,
-    # POSIX from the errno of the group signal. EPERM is the real case -- a
-    # group we may not signal -- and it is exactly what this used to hit by
-    # accident, against an unrelated root-owned group, which is the only reason
-    # the POSIX half of `terminate` ever passed.
+    # POSIX from the errno of the group signal.
+    #
+    # This arm used EPERM, on the reasoning that "a group we may not signal" is
+    # the real case. Measurement retired that: on darwin EPERM is ALSO how the
+    # kernel reports a group holding nothing but this module's unreaped zombie
+    # leader -- the ordinary outcome of every successful probe -- so EPERM can
+    # no longer stand for "untermintable" without asserting the opposite of
+    # `test_posix_tree_termination_reads_eperm_the_way_the_platform_means_it`.
+    #
+    # A bare OSError carries no errno and so keeps its old meaning everywhere:
+    # some other transport fault, failure on every platform. Reparameterized
+    # rather than skipped on darwin, because "cleanup failure never returns
+    # success" is most worth testing on the platform where cleanup is fragile.
     _fake_process_group(
         monkeypatch,
-        error=PermissionError if failure == "terminate" else ProcessLookupError,
+        error=OSError if failure == "terminate" else ProcessLookupError,
     )
 
     with pytest.raises(transport.ProbeProcessError) as exc_info:

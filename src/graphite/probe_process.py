@@ -689,6 +689,38 @@ def _gracefully_signal_process_tree(process: _Process) -> bool:
         return False
 
 
+def _darwin_group_holds_only_the_zombie_leader(process: _Process, error: OSError) -> bool:
+    """Say whether darwin's EPERM means "nothing left to signal" rather than "not allowed".
+
+    MEASURED on macos-latest 3.12.10 against ubuntu-latest as the control, four
+    process states, with the errno printed for each:
+
+        leader alive                      killpg -> OK        (both platforms)
+        leader exited, unreaped zombie    killpg -> EPERM     darwin
+                                          killpg -> SUCCESS   Linux
+        leader exited + live DESCENDANT   killpg -> OK        (both platforms)
+        after reap                        killpg -> ESRCH     (both platforms)
+
+    This module deliberately holds the exited leader as an unreaped zombie so
+    its pgid cannot be recycled under the signals that follow. On darwin that
+    makes the group unsignalable, so EVERY successful probe reported a failed
+    containment -- 46 of the 62 failures in graphite#46.
+
+    EPERM is genuinely ambiguous on darwin: "forbidden" and "nothing signalable"
+    share it. Reading it as the latter is licensed by the third row -- a live
+    descendant makes darwin answer OK -- and by the fact that this transport
+    CREATES the group itself via `setsid()`, from its own uid and a sanitized
+    environment, so a member it may not signal is not reachable. State that
+    reasoning wherever this is touched; without it the check is error-swallowing.
+
+    Gated on the leader having exited, which is not decoration: on the timeout
+    path `returncode` is None and the group holds a LIVE leader, where EPERM
+    cannot mean "only zombies" and stays a failure. Verified at the call site
+    rather than inferred -- 0 on the success path, None on the timeout path.
+    """
+    return sys.platform == "darwin" and isinstance(error, PermissionError) and process.returncode is not None
+
+
 def _force_kill_process_tree(process: _Process, deadline: float) -> bool:
     cleanup_ok = True
     if os.name != "nt":
@@ -696,6 +728,10 @@ def _force_kill_process_tree(process: _Process, deadline: float) -> bool:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             return True
+        except PermissionError as exc:
+            if _darwin_group_holds_only_the_zombie_leader(process, exc):
+                return True
+            cleanup_ok = False
         except (OSError, ValueError):
             cleanup_ok = False
     elif hasattr(process, "terminate_tree"):
