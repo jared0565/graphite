@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import csv
 import platform
-import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -38,19 +38,40 @@ def require_windows() -> None:
         raise RuntimeError("Windows Scheduled Task integration is only available on Windows")
 
 
-def resolve_graphite_executable(explicit: str | None = None) -> Path:
+#: Console scripts a generated launcher must never invoke. Matched on the stem,
+#: so `graphite`, `graphite.cmd` and `graphite.exe` are all refused.
+_CONSOLE_SCRIPT_STEMS = frozenset({"graphite", "graphite-mcp"})
+
+
+def resolve_launcher_interpreter(explicit: str | None = None) -> Path:
+    """The Python interpreter a generated launcher runs. Never a console script.
+
+    `graphite ...` is shadowable exactly like `python -m graphite`: an installed
+    entry point does not put its own directory on `sys.path[0]`, and this
+    launcher runs with a projects root as its working directory, so a
+    `graphite.py` -- or a `graphite/` directory -- dropped there beats the
+    installed package. A module-shaped shadow RUNS before it errors, and the
+    daemon starts hidden at login, so nothing would be visible.
+
+    A console script cannot express the fix: there is no `-P` to add to it, and
+    pip's generated `graphite.exe` is a binary that cannot be edited at all.
+    So the launcher runs the interpreter directly and passes `-P` itself.
+
+    An explicit override stays supported and is honoured, but one naming a
+    console script is refused rather than quietly regenerating the defect.
+    """
     if explicit:
         path = Path(explicit).expanduser().resolve()
         if not path.exists():
             raise FileNotFoundError(path)
+        if path.stem.lower() in _CONSOLE_SCRIPT_STEMS:
+            raise ValueError(
+                f"{path.name} is a console script and cannot carry `-P`, so a launcher "
+                "built from it would be shadowable by a `graphite.py` in its working "
+                "directory. Pass a Python interpreter instead."
+            )
         return path
-    found = shutil.which("graphite")
-    if found:
-        return Path(found).resolve()
-    local = Path.home() / ".local" / "bin" / "graphite.cmd"
-    if local.exists():
-        return local.resolve()
-    raise FileNotFoundError("graphite executable not found on PATH or at ~/.local/bin/graphite.cmd")
+    return Path(sys.executable)
 
 
 def daemon_task_command(
@@ -66,7 +87,14 @@ def daemon_task_command(
     debounce: float = 1.0,
 ) -> TaskCommand:
     base = base_path.resolve()
+    # `-P` is the whole point: it keeps the working directory off `sys.path[0]`.
+    # `-B` is deliberately NOT included -- it only suppresses bytecode and does
+    # nothing to `sys.path`, and pairing them here would re-suggest the reading
+    # that caused this defect.
     args = (
+        "-P",
+        "-m",
+        "graphite",
         "daemon",
         str(base),
         "--scan-interval",
@@ -85,7 +113,7 @@ def daemon_task_command(
         _fmt_number(debounce),
     )
     return TaskCommand(
-        executable=resolve_graphite_executable(graphite_executable),
+        executable=resolve_launcher_interpreter(graphite_executable),
         arguments=args,
         working_dir=base,
     )

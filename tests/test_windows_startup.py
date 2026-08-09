@@ -1,6 +1,7 @@
 """Tests for Windows Startup-folder Graphite daemon launcher."""
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,13 +16,10 @@ def test_install_startup_launcher_writes_hidden_vbs_and_idempotent_script(
 ) -> None:
     monkeypatch.setattr("graphite.windows_startup.platform.system", lambda: "Windows")
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
-    exe = tmp_path / "bin" / "graphite.cmd"
-    exe.parent.mkdir()
-    exe.write_text("@echo off\n", encoding="utf-8")
     base = tmp_path / "Projects"
     base.mkdir()
 
-    result = install_startup_launcher(base, graphite_executable=str(exe), name="GraphiteDaemon-Test")
+    result = install_startup_launcher(base, name="GraphiteDaemon-Test")
 
     assert result.script_path.exists()
     assert result.launcher_path.exists()
@@ -37,6 +35,19 @@ def test_install_startup_launcher_writes_hidden_vbs_and_idempotent_script(
     assert "'python.exe'" in script
     assert "WScript.Shell" in launcher
     assert ", 0, False" in launcher
+    # This script starts hidden at login with a projects root as its working
+    # directory -- precisely where a `graphite.py` would beat the installed
+    # package. So it must launch the interpreter with `-P` and never a bare
+    # console script, which cannot carry the flag at all.
+    launch = next(line for line in script.splitlines() if line.startswith("Start-Process"))
+    assert f"-FilePath '{Path(sys.executable)}'" in launch
+    assert "@('-P', '-m', 'graphite', 'daemon'" in launch
+    # Scoped to the launch line on purpose. `graphite.exe` still appears in the
+    # script's `$hosts` list, which is the already-running detector and must
+    # keep recognising a legacy console-script-hosted daemon so this does not
+    # start a second one. Only what gets LAUNCHED has to avoid the shim.
+    assert "graphite.cmd" not in launch
+    assert "graphite.exe" not in launch
 
     status = startup_status(base, name="GraphiteDaemon-Test")
     assert status["installed"] is True
