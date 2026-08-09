@@ -39,11 +39,24 @@ license-files = ["LICENSE"]
 # the OS axis (Linux #45, macOS #46) genuinely requires a runner.
 requires-python = ">=3.11"
 # Claimed only where the suite has actually been run, for the reason above.
+#
+# POSIX added 2026-08-10 under that same rule, not as an aspiration. Measured on
+# GitHub hosted runners at c30ab99, py3.12, full suite, zero failures:
+#
+#     ubuntu-latest   2850 passed / 37 skipped
+#     macos-latest    2850 passed / 37 skipped
+#
+# Both were red until #45, #46 and #47 closed, which is why the claim was absent
+# rather than merely unwritten. The OS axis genuinely needs a runner; the
+# version axis does not (see `requires-python` above), so what is claimed here
+# is: every listed Python on Windows, and 3.12 on each POSIX platform.
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -86,6 +99,16 @@ mcp = ["mcp>=1.0,<3"]
 # plugin is an unknown-argument error -- which would turn a hang into a
 # different silent failure rather than naming it. See #45.
 dev = ["pytest>=8.0", "ruff>=0.5", "pytest-timeout>=2.3"]
+
+# Without these the package advertises no way back to its own source. A
+# distribution page with no repository link is the shape a typosquat has, and it
+# is the first thing a reader checks before installing a tool that reads their
+# code and spawns subprocesses.
+[project.urls]
+Homepage = "https://github.com/jared0565/graphite"
+Repository = "https://github.com/jared0565/graphite"
+Changelog = "https://github.com/jared0565/graphite/blob/main/CHANGELOG.md"
+Issues = "https://github.com/jared0565/graphite/issues"
 
 [project.scripts]
 graphite = "graphite.cli:main"

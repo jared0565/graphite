@@ -22,10 +22,16 @@ Local-first, deterministic knowledge graph extraction for codebases. A safer, fa
 ## Installation
 
 ```bash
-pip install -e F:/Projects/graphite
+git clone https://github.com/jared0565/graphite
+cd graphite
+pip install -e .
 ```
 
-No model SDK or provider credential is required for canonical graph operation.
+Requires Python 3.11 or newer. No model SDK or provider credential is required
+for canonical graph operation.
+
+An editable install is what makes `python -m graphite` work from any repository
+on the machine, which is how every onboarded project reaches it.
 
 ## System readiness and optional integrations
 
@@ -659,11 +665,12 @@ Artifacts are written to `graph-out/`:
 
 ## Claude Code skill
 
-A skill template lives at `F:\Projects\graphite\skill\SKILL.md`. To install:
+A skill template lives at `skill/SKILL.md`. To install, from a clone of this
+repository:
 
 ```bash
 mkdir -p ~/.claude/skills/graphite
-cp /f/Projects/graphite/skill/SKILL.md ~/.claude/skills/graphite/SKILL.md
+cp skill/SKILL.md ~/.claude/skills/graphite/SKILL.md
 ```
 
 Then use `/graphite [path]` inside Claude Code. The skill defaults to zero-LLM mode.

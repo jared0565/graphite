@@ -1825,3 +1825,86 @@ def test_release_guide_names_the_real_version_source() -> None:
         "RELEASING.md mentions `[project].version` without forbidding it; with a "
         f"dynamic version that field makes the build abort: {offenders}"
     )
+
+
+def machine_local_path_offences(root: Path = ROOT, home: Path | None = None) -> tuple[str, ...]:
+    """Report shipped-doc lines that name THIS checkout or THIS user's home.
+
+    Derived from `root`/`home` rather than matched against a literal, so this is
+    not a check for one contributor's drive letter: it fails on any machine
+    whose documents name their own location, which is the property that
+    actually breaks for the next reader.
+
+    Absolute paths in general stay legal, deliberately --
+    `test_validator_snippets_require_shell_specific_absolute_paths` REQUIRES
+    them, and a placeholder like `/opt/tools/validate` names nobody's machine.
+    Only self-reference is the defect.
+    """
+    home_dir = Path.home() if home is None else home
+    needles: set[str] = set()
+    for base in (root, home_dir):
+        needles.update({str(base), base.as_posix()})
+        # MSYS/Git-Bash renders `F:/x` as `/f/x`, and a doc written in a Git Bash
+        # shell says it that way. Found by reading the very lines this check was
+        # about to fix: it caught two forms on one README and missed a third on
+        # the next line down. Derived, not listed, so it stays true per machine.
+        drive, _, tail = base.as_posix().partition("/")
+        if drive.endswith(":"):
+            needles.add(f"/{drive[:-1].lower()}/{tail}")
+    offences: list[str] = []
+    for name in DOCUMENTS:
+        path = root / name
+        if not path.exists():
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for needle in sorted(needles):
+                if needle and needle in line:
+                    offences.append(f"{name}:{lineno} embeds {needle!r}")
+                    break
+    return tuple(offences)
+
+
+def test_shipped_docs_never_name_the_checkout_they_ship_from() -> None:
+    """A document that names where this clone happens to live is broken for everyone else.
+
+    `README.md` shipped `pip install -e F:/Projects/graphite` as its ONLY
+    install instruction -- correct on exactly one computer -- and `README.md` is
+    also the packaging `readme`, so it is the front page wherever this project
+    is distributed.
+
+    Every existing check in this module read that same line and passed it. They
+    assert required phrases, section ordering, credential-example safety and
+    that each link target exists on disk, and a developer's own path violates
+    none of those. The line was not missed by the checks so much as invisible to
+    them, which is why the fix is a check and not an edit.
+    """
+    assert machine_local_path_offences() == ()
+
+
+def test_machine_local_path_check_is_not_vacuous(tmp_path: Path) -> None:
+    """The check must fire on a planted offence and stay quiet on a placeholder.
+
+    Without this, a scanner that silently examined nothing -- a renamed
+    document, an unreadable path, an empty `DOCUMENTS` -- would report a clean
+    repository forever, which is the failure mode this whole module exists to
+    prevent.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    drive, _, tail = tmp_path.as_posix().partition("/")
+    msys = f"/{drive[:-1].lower()}/{tail}" if drive.endswith(":") else tmp_path.as_posix()
+    (tmp_path / "README.md").write_text(
+        f"pip install -e {tmp_path.as_posix()}\n"
+        f"cache lives in {home}\n"
+        f"cp {msys}/skill/SKILL.md ~/skills/\n"
+        "graphite init /opt/tools/example\n",
+        encoding="utf-8",
+    )
+    offences = machine_local_path_offences(root=tmp_path, home=home)
+
+    # Line 3 is the MSYS spelling of line 1's path, and is the form that slipped
+    # past the first version of this check one line below the offence it caught.
+    assert len(offences) == 3, offences
+    for expected in ("README.md:1", "README.md:2", "README.md:3"):
+        assert any(expected in offence for offence in offences), (expected, offences)
+    assert not any("README.md:4" in offence for offence in offences)
