@@ -66,16 +66,29 @@ class ProbeProcessError(Exception):
     `_cancel_synchronous_io` aborting a worker's in-flight I/O during cleanup
     (graphite#41). Issue #29 lost several rounds to exactly this: an error
     classified down to a label that discarded the fact which discriminated.
+
+    ``cleanup_failed`` says containment did not complete -- a process may have
+    been left running. It is a SEPARATE fact from ``code``, and carrying it
+    separately is the point: it used to be written over the code, so a run that
+    had already determined why it failed reported `cleanup_failed` instead
+    (graphite#46). Both facts are true at once and only the transport knows
+    both, so it reports both.
     """
 
-    def __init__(self, code: str, os_error: int | None = None) -> None:
+    def __init__(self, code: str, os_error: int | None = None, *, cleanup_failed: bool = False) -> None:
         self.code = code if code in _SAFE_ERROR_CODES else "unexpected"
         # Coerced, never trusted: an OSError subclass can carry anything in
         # `errno`, and only an int may reach the message.
         self.os_error = os_error if isinstance(os_error, int) and not isinstance(os_error, bool) else None
+        self.cleanup_failed = bool(cleanup_failed)
         message = "probe input failed" if self.code == "input_failed" else f"probe process failed: {self.code}"
         if self.os_error is not None:
             message = f"{message} (os={self.os_error})"
+        # Only when it is not already the code, so the common case does not read
+        # "cleanup_failed (cleanup also failed)". A bare boolean is safe to
+        # surface where a message is not -- it names no path, pid or argv.
+        if self.cleanup_failed and self.code != "cleanup_failed":
+            message = f"{message} (cleanup also failed)"
         super().__init__(message)
 
 
@@ -355,6 +368,7 @@ def run_bounded_process(
     workers: list[threading.Thread] = []
     worker_pipes: list[tuple[threading.Thread, Any]] = []
     failure_code: str | None = None
+    cleanup_ok = True
 
     def read_pipe(name: str, pipe: Any) -> None:
         try:
@@ -535,8 +549,13 @@ def run_bounded_process(
             close_stdin()
         if cleanup_started is not None:
             cleanup_started.set()
-        if not _cleanup_process_transport(process, workers, worker_pipes, deadline):
-            failure_code = "cleanup_failed"
+        # Recorded, NOT assigned over `failure_code`. Every recheck below is
+        # guarded by `failure_code is None`; this one used to be the exception,
+        # so a run that already knew it had timed out came back as
+        # `cleanup_failed` (graphite#46). The precedence is now explicit and
+        # pinned by test: transport failure, then the child's own exit status,
+        # and `cleanup_failed` only when there is nothing else to report.
+        cleanup_ok = _cleanup_process_transport(process, workers, worker_pipes, deadline)
 
     # These events can be set after the direct child exits, so recheck only
     # after cleanup and every bounded join has completed.
@@ -550,10 +569,16 @@ def run_bounded_process(
         failure_code = "timeout"
     if failure_code is not None:
         raise ProbeProcessError(
-            failure_code, writer_error[0] if failure_code == "input_failed" else None
+            failure_code,
+            writer_error[0] if failure_code == "input_failed" else None,
+            cleanup_failed=not cleanup_ok,
         )
     if process.returncode is None or (check and process.returncode != 0):
-        raise ProbeProcessError("nonzero")
+        raise ProbeProcessError("nonzero", cleanup_failed=not cleanup_ok)
+    # Last, so it never speaks over a diagnosis -- but still raised rather than
+    # returned, because a run that may have leaked a process is not a success.
+    if not cleanup_ok:
+        raise ProbeProcessError("cleanup_failed", cleanup_failed=True)
     closed_at = stdin_closed_at[0]
     finished_at = exited_at[0]
     # Both stamps are required: a child with no stdin, or one reaped on a path

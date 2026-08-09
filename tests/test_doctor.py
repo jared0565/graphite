@@ -1555,6 +1555,88 @@ def test_probe_transport_cleanup_failure_never_returns_success(
     assert exc_info.value.code == "cleanup_failed"
 
 
+class _UnkillableProcess:
+    """A fake whose run fails AND whose cleanup then fails, on either platform.
+
+    Windows hears the failed containment from `terminate_tree`/`close_handles`;
+    POSIX hears it from the errno of the group signal, which
+    `_fake_process_group(error=PermissionError)` supplies.
+    """
+
+    pid = UNCLAIMABLE_PID
+    returncode: int | None = None
+    stdin = None
+
+    class _Pipe:
+        def read(self, size: int) -> bytes: return b""
+        def close(self) -> None: pass
+
+    def __init__(self) -> None:
+        self.stdout, self.stderr = self._Pipe(), self._Pipe()
+
+    def wait(self, timeout: float) -> int: raise subprocess.TimeoutExpired([], timeout)
+    def kill(self) -> bool: return False
+    def terminate_tree(self) -> bool: return False
+    def close_handles(self) -> bool: return False
+
+
+def test_probe_transport_cleanup_failure_never_replaces_the_primary_diagnosis(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A run that already knows why it failed must not be relabelled by its own cleanup.
+
+    Every recheck after cleanup is guarded by `if failure_code is None`; the
+    cleanup assignment itself was not, so a determined `timeout` came back as
+    `cleanup_failed`. That destroys the diagnosis at exactly the moment it is
+    needed, and it is not a cosmetic loss: it collapses every distinct failure
+    mode into one word, which is why #46's 62 macOS failures read as a single
+    symptom and resisted bucketing.
+
+    The leaked process is still reportable -- it moves to a flag rather than
+    overwriting the code, because "cleanup failed" and "why the run failed" are
+    two facts and the transport is the only place that knows both.
+    """
+    import graphite.probe_process as transport
+
+    monkeypatch.setattr(transport, "_launch_process", lambda *args, **kwargs: _UnkillableProcess())
+    _fake_process_group(monkeypatch, error=PermissionError)
+
+    with pytest.raises(transport.ProbeProcessError) as exc_info:
+        transport.run_bounded_process(["python"], cwd=tmp_path, timeout_seconds=0.25)
+
+    assert exc_info.value.code == "timeout"
+    assert exc_info.value.cleanup_failed is True
+
+
+def test_probe_transport_cleanup_failure_never_replaces_the_childs_own_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An exit status is a diagnosis too, and cleanup must not overwrite it either.
+
+    Ordering, stated once so it is not re-derived: a transport failure wins,
+    then the child's own non-zero exit, and `cleanup_failed` is the code only
+    when there is nothing else to report. `cleanup_failed` still never returns
+    success -- `test_probe_transport_cleanup_failure_never_returns_success` is
+    the counterweight that pins that end of the rule.
+    """
+    import graphite.probe_process as transport
+
+    class Process(_UnkillableProcess):
+        returncode = 1
+        def wait(self, timeout: float) -> int: return 1
+
+    monkeypatch.setattr(transport, "_launch_process", lambda *args, **kwargs: Process())
+    _fake_process_group(monkeypatch, error=PermissionError)
+
+    with pytest.raises(transport.ProbeProcessError) as exc_info:
+        transport.run_bounded_process(["python"], cwd=tmp_path, timeout_seconds=1)
+
+    assert exc_info.value.code == "nonzero"
+    assert exc_info.value.cleanup_failed is True
+
+
 def test_probe_transport_accepts_small_input(tmp_path: Path) -> None:
     from graphite.probe_process import run_bounded_process
 
