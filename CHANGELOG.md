@@ -12,6 +12,43 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
+## [Unreleased]
+
+### Fixed
+
+**The generated daemon launcher ran a wrapper instead of the interpreter.**
+`daemon_task_command` built its command from `resolve_graphite_executable()` —
+whatever `graphite` resolved to on PATH, or `~/.local/bin/graphite.cmd` — and
+launched it with the supervised projects root as the working directory, hidden,
+at every login. It now emits `<interpreter> -P -m graphite daemon …`, and an
+explicit `--graphite-executable` naming a console script is refused rather than
+silently accepted.
+
+⚠️ **The commit subject for that change (`ff34b4f`) states the mechanism
+incorrectly**, and a published subject cannot be amended. `3c5304f` corrects the
+source; this entry is the version a `git log --oneline` reader should trust.
+
+A console script is **not** cwd-shadowable: running a script puts the script's
+own directory on `sys.path[0]`, and only `-m` puts the CWD there. The hazard is
+an `-m` **inside a wrapper** — which a generator can neither see into nor add
+`-P` to. Measured from a directory holding a hostile `graphite.py`:
+
+| launch | result |
+|---|---|
+| `python -m graphite` | shadow ran |
+| `python -P -m graphite` | real graphite |
+| `.cmd` wrapper → `python -B -m graphite` | shadow ran |
+| `.cmd` wrapper → `python -B -P -m graphite` | real graphite |
+
+So scope a shadowing sweep by *"does anything in this chain reach `-m` with a
+repo root as its working directory"* — not by artifact kind, and not by whether
+the head of the command looks like an interpreter.
+
+**Fixing the generator does not fix the launcher it already wrote.** An existing
+install keeps the old command until `graphite daemon-install-startup-windows`
+(or `daemon-install-windows`) is re-run — the same marker-not-version rule this
+file opens with.
+
 ## [0.2.1] — 2026-08-09
 
 A portability release. `0.2.0` listed Linux and macOS as unverified; the suite
