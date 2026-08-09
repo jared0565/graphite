@@ -718,7 +718,24 @@ def _darwin_group_holds_only_the_zombie_leader(process: _Process, error: OSError
     cannot mean "only zombies" and stays a failure. Verified at the call site
     rather than inferred -- 0 on the success path, None on the timeout path.
     """
-    return sys.platform == "darwin" and isinstance(error, PermissionError) and process.returncode is not None
+    if sys.platform != "darwin" or not isinstance(error, PermissionError):
+        return False
+    if process.returncode is None:
+        # `returncode` is only set where the run HAPPENED to observe the exit.
+        # The success and timeout paths reach `process.wait` and so carry a
+        # current value, but `output_limit` and `cancelled` break out of the
+        # loop before it -- measured: a child that overflows the limit and exits
+        # immediately still reads None here. Trusting the cache would call a
+        # contained tree a leak, intermittently, depending on whether the child
+        # won the race to exit. `poll` is the same non-reaping observation the
+        # run itself uses, and a leader that really is alive still answers None.
+        poll = getattr(process, "poll", None)
+        if callable(poll):
+            try:
+                poll()
+            except (OSError, ValueError):
+                return False
+    return process.returncode is not None
 
 
 def _force_kill_process_tree(process: _Process, deadline: float) -> bool:

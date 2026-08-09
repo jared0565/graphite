@@ -1578,6 +1578,51 @@ def test_posix_tree_termination_reads_eperm_the_way_the_platform_means_it(
     assert result is contained
 
 
+@pytest.mark.parametrize(
+    ("observed", "contained"),
+    [
+        pytest.param(0, True, id="poll-reveals-the-exit"),
+        pytest.param(None, False, id="poll-says-still-running"),
+    ],
+)
+def test_posix_tree_termination_asks_the_leader_instead_of_trusting_a_stale_returncode(
+    monkeypatch: pytest.MonkeyPatch,
+    observed: int | None,
+    contained: bool,
+) -> None:
+    """`returncode` is only set where the run HAPPENED to observe the exit.
+
+    The success and timeout paths reach `process.wait` and so carry a current
+    value, but `output_limit` and `cancelled` break out of the loop before it.
+    Measured: a child that overflows the output limit and exits immediately
+    still reads `returncode = None` at the group signal. Reading the cached
+    value there would call a contained tree a leak on darwin -- an intermittent
+    one, because it depends on whether the child won the race to exit.
+
+    So ask the leader rather than trust the cache. `poll()` is the same
+    non-reaping observation the run itself uses, and a leader that really is
+    alive still answers None and still fails.
+    """
+    import graphite.probe_process as transport
+
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(signal, "SIGKILL", getattr(signal, "SIGKILL", signal.SIGTERM), raising=False)
+    _fake_process_group(monkeypatch, error=PermissionError)
+
+    class UnobservedLeader:
+        pid = UNCLAIMABLE_PID
+        returncode: int | None = None
+        def poll(self) -> int | None:
+            self.returncode = observed
+            return observed
+        def kill(self) -> bool: return False
+
+    result = transport._terminate_process_tree(UnobservedLeader(), time.monotonic() + 1.0)
+
+    assert result is contained
+
+
 @pytest.mark.parametrize("failure", ["terminate", "close"])
 def test_probe_transport_cleanup_failure_never_returns_success(
     monkeypatch: pytest.MonkeyPatch,
