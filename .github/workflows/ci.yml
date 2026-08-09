@@ -196,6 +196,24 @@ jobs:
           - { os: windows-latest, python: "3.11" }
           - { os: windows-latest, python: "3.12" }
           - { os: windows-latest, python: "3.13" }
+          # ONE ubuntu leg, restored 2026-08-09 -- the last thing #45 needs.
+          #
+          # #45's hang is fixed (`2029a41`: a test froze the GLOBAL monotonic
+          # clock, wedging `_terminate_process_tree`'s POSIX grace loop) and the
+          # suite now runs 2841 passed / 37 skipped / 0 failed in 3m46s with
+          # ZERO `Failed: Timeout >` markers. But that was measured on WSL, and
+          # the issue was filed against this runner, so the ticket stays open on
+          # an environment gap rather than a known defect. This leg closes it.
+          #
+          # ONE, not four: #45 hung on every version, so one is a sufficient
+          # sample at a quarter of the cost -- and ubuntu bills at 1x, the
+          # cheapest runner there is. 3.12 specifically, to match the local
+          # measurement exactly: same cell, different environment, so the RUNNER
+          # is the only variable left.
+          #
+          # macOS stays banked (#46, 102 failures, unverified since):
+          #     - { os: macos-latest, python: "3.11" }   # and 3.14 -> #46
+          - { os: ubuntu-latest, python: "3.12" }
     runs-on: ${{ matrix.os }}
     name: portability (${{ matrix.os }}, py${{ matrix.python }})
     steps:
