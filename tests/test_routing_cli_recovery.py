@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from argparse import Namespace
 from pathlib import Path
 from typing import NoReturn
@@ -71,7 +72,7 @@ def _attempt(root: Path, state: str) -> tuple[RepositoryStore, ExecutionReceipt]
             inventory_digest=_DIGEST, completed_at=2,
         )
     elif state == "legacy":
-        with sqlite3.connect(store.path) as connection:
+        with closing(sqlite3.connect(store.path)) as connection, connection:
             connection.execute(
                 "UPDATE execution_attempts SET status='legacy_unrecoverable', "
                 "failure_reason='legacy_attempt_digest_missing' WHERE attempt_id='attempt-1'"
@@ -230,7 +231,7 @@ def test_recoverable_cli_pages_deterministically_without_silent_truncation(
 ) -> None:
     root = tmp_path / "project"
     store, _receipt = _attempt(root, "recoverable")
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         connection.execute("PRAGMA foreign_keys = ON")
         for index in (2, 3):
             connection.execute(

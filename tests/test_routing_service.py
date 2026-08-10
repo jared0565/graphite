@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 import subprocess
 from types import SimpleNamespace
 from dataclasses import dataclass
@@ -384,7 +385,7 @@ def test_v4_attempt_and_validation_bind_provider_model_and_diff(
     service, _root, _ = _service(tmp_path, monkeypatch)
     prepared = service.prepare(_recommend(service))
     result = service.run_approved(prepared, approval_granted=True)
-    with sqlite3.connect(service.store.path) as connection:
+    with closing(sqlite3.connect(service.store.path)) as connection, connection:
         attempt = connection.execute(
             "SELECT provider,requested_model,effective_model,status,execution_id "
             "FROM cli_execution_attempts"
@@ -457,7 +458,7 @@ def test_review_uses_other_provider_read_only_separate_worktree_approval_and_att
     result = service.run_review_approved(review, approval_granted=True)
     assert result.receipt.changed_file_count == 0
     assert review_calls[0]["permission_mode"] is PermissionMode.READ_ONLY
-    with sqlite3.connect(service.store.path) as connection:
+    with closing(sqlite3.connect(service.store.path)) as connection, connection:
         link = connection.execute(
             "SELECT review_attempt_id,primary_attempt_id,primary_diff_hash FROM review_links"
         ).fetchone()

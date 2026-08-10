@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -485,7 +486,7 @@ def test_edit_smoke_audit_failure_rolls_back_promoted_snapshot_and_binding(
     store = RepositoryStore(root)
     store.initialize()
     source = _bound_read_only_snapshot(store)
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         connection.execute(
             """CREATE TRIGGER reject_edit_smoke_audit
             BEFORE INSERT ON cli_telemetry_events BEGIN
@@ -539,7 +540,7 @@ def test_snapshot_persistence_is_canonical_bounded_and_expiry_aware(tmp_path: Pa
     assert load_verified_capability_snapshots(store, now=1_700_000_001) == (snapshot,)
     assert load_verified_capability_snapshots(store, now=snapshot.expires_at) == ()
 
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         payload = json.dumps(snapshot.to_dict(), sort_keys=True, separators=(",", ":"))
         connection.execute("PRAGMA foreign_keys=OFF")
         connection.execute("DROP TRIGGER capability_snapshot_update_guard")

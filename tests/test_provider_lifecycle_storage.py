@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 
@@ -76,7 +77,7 @@ def test_lifecycle_store_creates_isolated_schema_with_safety_pragmas(tmp_path: P
         "journal_mode": "wal",
         "busy_timeout": 2_000,
     }
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone() == ("2",)
@@ -94,7 +95,7 @@ def test_schema_v1_fixture_reopens_idempotently(tmp_path: Path) -> None:
     path = root / ".graphite" / "routing" / "provider-lifecycle.sqlite3"
     path.parent.mkdir(parents=True)
     fixture = Path(__file__).parent / "fixtures" / "provider_lifecycle_schema_v1.sql"
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.executescript(fixture.read_text(encoding="utf-8"))
 
     store = LifecycleStore(root)
@@ -103,7 +104,7 @@ def test_schema_v1_fixture_reopens_idempotently(tmp_path: Path) -> None:
     store.initialize()
 
     assert store.integrity_check() == "ok"
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         assert connection.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone() == ("2",)
@@ -235,7 +236,7 @@ def test_lifecycle_events_are_database_immutable(tmp_path: Path) -> None:
     identity = _identity()
     store.record_transition("b" * 64, identity, _event(identity))
 
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         with pytest.raises(sqlite3.IntegrityError, match="lifecycle_event_immutable"):
             connection.execute("UPDATE lifecycle_events SET reason='probe_failed'")
         with pytest.raises(sqlite3.IntegrityError, match="lifecycle_event_immutable"):
@@ -309,7 +310,7 @@ def test_invalidation_evidence_is_append_only_and_idempotent(tmp_path: Path) -> 
         ("capability_snapshot", "e" * 64),
         ("approval", "approval-1"),
     }
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         with pytest.raises(sqlite3.IntegrityError, match="lifecycle_invalidation_immutable"):
             connection.execute("DELETE FROM authority_invalidations")
 
@@ -326,18 +327,18 @@ def test_verified_backup_has_external_digest_marker(tmp_path: Path) -> None:
         "backup_sha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
         "schema_version": "2",
     }
-    with sqlite3.connect(backup) as connection:
+    with closing(sqlite3.connect(backup)) as connection, connection:
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
 def test_unknown_schema_and_partial_schema_fail_closed(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         connection.execute("UPDATE schema_meta SET value='999' WHERE key='schema_version'")
     with pytest.raises(LifecycleStorageError, match="^lifecycle_schema_unsupported$"):
         LifecycleStore(tmp_path).initialize()
 
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         # Keep the DB at the current version so the migration early-returns and
         # the dropped table surfaces as lifecycle_rollback_required (not a
         # rebuild attempt against a missing table).
@@ -454,7 +455,7 @@ def test_fresh_lifecycle_store_initializes_at_v2_admitting_zai(tmp_path: Path) -
     assert LIFECYCLE_SCHEMA_VERSION == "2"
     store = _store(tmp_path)
 
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         for table in ("current_observations", "lifecycle_events"):
             ddl = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
@@ -501,7 +502,7 @@ def test_existing_v1_lifecycle_db_rebuilds_to_v2_and_admits_zai(tmp_path: Path) 
 
     openrouter_boundary = "a" * 64
     zai_boundary = "b" * 64
-    with sqlite3.connect(db) as seed:
+    with closing(sqlite3.connect(db)) as seed, seed:
         pre_ddl = seed.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='current_observations'"
         ).fetchone()[0]
@@ -513,7 +514,7 @@ def test_existing_v1_lifecycle_db_rebuilds_to_v2_and_admits_zai(tmp_path: Path) 
 
     LifecycleStore(root).initialize()  # triggers the hand-written v1->v2 rebuild
 
-    with sqlite3.connect(db) as con:
+    with closing(sqlite3.connect(db)) as con, con:
         assert con.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone() == ("2",)

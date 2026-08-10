@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -113,7 +114,7 @@ def test_status_list_and_history_are_bounded_sanitized_and_read_only(
 def test_operator_rejects_logically_inconsistent_identity_binding(tmp_path: Path) -> None:
     root, boundary, _identity_value = _observed_root(tmp_path)
     store = LifecycleStore(root)
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         connection.execute(
             "UPDATE current_observations SET identity_digest=? WHERE boundary_digest=?",
             ("f" * 64, boundary),
