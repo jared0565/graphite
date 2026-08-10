@@ -2229,6 +2229,13 @@ def _force_utf8_when_redirected() -> None:
             pass
 
 
+#: The PyPI DISTRIBUTION name, which is not the import package name. Pinned
+#: against `pyproject.toml` by test, because the only consumer of it swallows a
+#: lookup failure: a stale name here would not raise, it would silently retire
+#: the shadowed-import check below.
+_DISTRIBUTION_NAME = "graphite-code"
+
+
 def _version_report() -> str:
     """Identity of the ENGINE, not merely the packaged version string.
 
@@ -2293,7 +2300,7 @@ def _version_report() -> str:
     # not describe. Printing the source version and silently swallowing the
     # mismatch would make a hijacked import indistinguishable from a healthy one.
     try:
-        packaged: str | None = metadata.version("graphite")
+        packaged: str | None = metadata.version(_DISTRIBUTION_NAME)
     except Exception:  # noqa: BLE001 - see "never raises" above
         packaged = None
     if packaged is not None and packaged != source:

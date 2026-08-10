@@ -1,5 +1,18 @@
 [project]
-name = "graphite"
+# The PyPI distribution name. `graphite` on PyPI is a DIFFERENT project (0.71,
+# unrelated), so this name is unpublishable -- RELEASING.md already requires
+# proving a name "is not already published or reserved" before tagging, and that
+# check had never been run. Verified 2026-08-10: pypi.org/pypi/graphite -> 200.
+#
+# Only the DISTRIBUTION is renamed. The import package stays `graphite`, both
+# console scripts keep their names, and every consumer's `python -m graphite`
+# and GRAPHITE.md are untouched. What changes is `pip install graphite-code`.
+#
+# `cli.py`'s `_DISTRIBUTION_NAME` must match this, and a test pins that they
+# cannot drift -- the version check that uses it is guarded by `except
+# Exception`, so a stale name would not fail, it would silently stop detecting
+# a shadowed import.
+name = "graphite-code"
 # Read from `src/graphite/__init__.py`, not written here -- see the note beside
 # `__version__`. A static version here would be the one nobody reads: consumers
 # import the source tree, and `importlib.metadata` reports the install-time

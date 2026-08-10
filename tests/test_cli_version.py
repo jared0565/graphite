@@ -208,3 +208,31 @@ def test_version_is_stable_across_two_calls(capsys) -> None:
     second = capsys.readouterr().out
 
     assert first == second
+
+
+def test_the_distribution_name_cli_looks_up_matches_the_one_we_publish() -> None:
+    """A stale distribution name would disable the shadow check without failing.
+
+    `_version_report` asks `importlib.metadata` for the installed version and
+    reports it only when it DISAGREES with the source -- which is how a
+    shadowing `graphite` on `sys.path` announces itself. That lookup is wrapped
+    in `except Exception`, deliberately, so `--version` can never crash.
+
+    The two properties combine badly: rename the distribution and the lookup
+    raises `PackageNotFoundError`, the guard swallows it, `packaged` becomes
+    None, and the mismatch branch becomes permanently unreachable. Nothing
+    fails, no test goes red, and the check is simply gone.
+
+    So the name is pinned against `pyproject.toml` rather than trusted. The
+    rename to `graphite-code` (PyPI's `graphite` belongs to another project) is
+    exactly the change that would otherwise have done this silently.
+    """
+    import tomllib
+    from pathlib import Path
+
+    from graphite.cli import _DISTRIBUTION_NAME
+
+    root = Path(__file__).resolve().parents[1]
+    declared = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"]
+
+    assert _DISTRIBUTION_NAME == declared
