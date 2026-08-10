@@ -2338,3 +2338,71 @@ def test_repository_store_closes_every_connection_it_opens(
     assert opened, "the tracking hook never fired, so this test proves nothing"
     still_open = [c for c in opened if _connection_is_open(c)]
     assert still_open == [], f"{len(still_open)} of {len(opened)} connections left open"
+
+
+class _PragmaFailingConnection:
+    """A real connection whose WAL pragma refuses, recording whether it was closed.
+
+    Deliberately wraps a REAL handle rather than faking one: the defect is that a
+    genuine open file handle is abandoned, and a fake would leak nothing to
+    observe.
+    """
+
+    def __init__(self, real: sqlite3.Connection) -> None:
+        self._real = real
+        self.closed = False
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+    def execute(self, statement: str, *arguments: object):
+        if "journal_mode" in statement:
+            raise sqlite3.OperationalError("database is locked")
+        return self._real.execute(statement, *arguments)
+
+    def close(self) -> None:
+        self.closed = True
+        self._real.close()
+
+
+def test_a_pragma_failure_in_connect_does_not_orphan_the_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_connect` opens the handle, then configures it, and the configuration can
+    fail -- `PRAGMA journal_mode = WAL` takes a lock and is exactly what returns
+    "database is locked" when another connection holds one.
+
+    On that path the handle is already open and the caller never receives it, so
+    no caller's `try/finally` can close it. It survives until the collector runs.
+    That is the same defect the whole `with connection:` sweep was about, hiding
+    one level lower: not a transaction mistaken for a close, but an ERROR path
+    that drops the reference before anyone can own it.
+
+    It also explains why only failure-path tests leaked. This is the recovery
+    path, on the platform that will not delete a file with an open handle.
+    """
+    root = tmp_path / "repository"
+    root.mkdir()
+    store = RepositoryStore(root)
+    # The real `sqlite3.connect` has to SUCCEED for there to be a handle to
+    # orphan; without the directory it fails first and the test measures nothing.
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+
+    opened: list[_PragmaFailingConnection] = []
+    real_connect = sqlite3.connect
+
+    def tracking_connect(*arguments: object, **keywords: object):
+        wrapper = _PragmaFailingConnection(real_connect(*arguments, **keywords))
+        opened.append(wrapper)
+        return wrapper
+
+    monkeypatch.setattr("graphite.routing.storage.sqlite3.connect", tracking_connect)
+
+    with pytest.raises(StorageError):
+        store._connect()
+
+    assert opened, "the test never reached the real connect -- it proves nothing"
+    assert opened[0].closed, (
+        "the handle was orphaned on the failure path; nothing else can close it "
+        "because the caller never received it"
+    )

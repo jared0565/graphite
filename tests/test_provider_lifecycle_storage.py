@@ -540,3 +540,55 @@ def test_existing_v1_lifecycle_db_rebuilds_to_v2_and_admits_zai(tmp_path: Path) 
             for row in con.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
         ]
     assert len(triggers) >= 4
+
+
+class _PragmaFailingConnection:
+    """See the twin in `test_routing_storage.py` -- these two `_connect` methods
+    are byte-identical by intent, so they need the same guard or they drift."""
+
+    def __init__(self, real: sqlite3.Connection) -> None:
+        self._real = real
+        self.closed = False
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+    def execute(self, statement: str, *arguments: object):
+        if "journal_mode" in statement:
+            raise sqlite3.OperationalError("database is locked")
+        return self._real.execute(statement, *arguments)
+
+    def close(self) -> None:
+        self.closed = True
+        self._real.close()
+
+
+def test_a_pragma_failure_in_connect_does_not_orphan_the_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lifecycle store opens and configures in the same order as the routing
+    store, so it carried the same orphaned handle on the same error path.
+
+    Found by tracking connections at ACQUISITION rather than reading the
+    ResourceWarning, which reports wherever the collector happened to be running
+    -- for this one, `<frozen os>:709` and a `connection.execute` inside an
+    unrelated schema loop. Neither is the site.
+    """
+    store = LifecycleStore(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+
+    opened: list[_PragmaFailingConnection] = []
+    real_connect = sqlite3.connect
+
+    def tracking_connect(*arguments: object, **keywords: object):
+        wrapper = _PragmaFailingConnection(real_connect(*arguments, **keywords))
+        opened.append(wrapper)
+        return wrapper
+
+    monkeypatch.setattr("graphite.routing.lifecycle_storage.sqlite3.connect", tracking_connect)
+
+    with pytest.raises(LifecycleStorageError):
+        store._connect()
+
+    assert opened, "the test never reached the real connect -- it proves nothing"
+    assert opened[0].closed, "the handle was orphaned on the failure path"

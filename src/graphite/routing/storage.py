@@ -9,7 +9,7 @@ import re
 import secrets
 import sqlite3
 import stat
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, suppress
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -883,6 +883,18 @@ class RepositoryStore:
         return self.path.parent / "backups" / f"events-schema-v{source_version}-pre-v8.sha256.json"
 
     def _connect(self) -> sqlite3.Connection:
+        # The handle is opened first and configured second, so a failure in the
+        # configuration leaves a live handle that the caller never receives --
+        # no `try/finally` upstream can reach it, and only the collector ever
+        # frees it. `PRAGMA journal_mode = WAL` is the realistic trigger: it
+        # takes a lock, so it is what answers "database is locked" when another
+        # connection holds one.
+        #
+        # This is the `with connection:` defect one level lower. There the
+        # transaction ended and the handle stayed open; here the error path drops
+        # the reference before anyone can own it. Both leave Windows unable to
+        # unlink the database, and both do it on the RECOVERY path.
+        connection: sqlite3.Connection | None = None
         try:
             connection = sqlite3.connect(
                 self.path,
@@ -895,6 +907,11 @@ class RepositoryStore:
             connection.execute("PRAGMA journal_mode = WAL")
             return connection
         except sqlite3.Error as exc:
+            if connection is not None:
+                # Suppressed, not swallowed: a close that also fails must not
+                # replace the diagnosis the caller is about to receive.
+                with suppress(sqlite3.Error):
+                    connection.close()
             raise _translate_database_error(exc) from exc
 
     @contextmanager
