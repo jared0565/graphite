@@ -97,6 +97,116 @@ def test_arrow_caller_is_a_materialized_function_node(tmp_path: Path) -> None:
     assert nodes[arrow_src]["source_file"] == "src/consumer.ts"
 
 
+def _cjs_fixture(tmp_path: Path) -> None:
+    """Every module-boundary shape #49 covers, CommonJS and ESM side by side."""
+    _write(
+        tmp_path / "src" / "mod.js",
+        "function objLit(n) { return n; }\n"
+        "function propAssign(n) { return n; }\n"
+        "module.exports = { objLit };\n"
+        "module.exports.propAssign = propAssign;\n",
+    )
+    _write(
+        tmp_path / "src" / "esmmod.js",
+        "export function esmNamed(n) { return n; }\n",
+    )
+    _write(
+        tmp_path / "src" / "consumer.js",
+        "const m = require('./mod');\n"
+        "const { objLit } = require('./mod');\n"
+        "function nsObjLit() { return m.objLit(1); }\n"
+        "function nsPropAssign() { return m.propAssign(2); }\n"
+        "function destructured() { return objLit(3); }\n",
+    )
+    _write(
+        tmp_path / "src" / "esmconsumer.js",
+        "import * as ns from './esmmod';\n"
+        "import { esmNamed } from './esmmod';\n"
+        "export function esmNamespace() { return ns.esmNamed(4); }\n"
+        "export function esmDirect() { return esmNamed(5); }\n",
+    )
+
+
+def test_require_emits_an_import_edge(tmp_path: Path) -> None:
+    """A `require()` is a real import, and it emitted NO edge at all (#49).
+
+    Not merely unresolved -- absent. `require('./mod')` is a call expression,
+    so the import extractor never saw it, no candidate edge entered the graph,
+    and `imports.total` could not count what was never detected. That is why
+    `imported-by src/mod.js` answered nothing at decision_grade on a file
+    required twice: a resolution ratio cannot see a missing SITE.
+    """
+    _cjs_fixture(tmp_path)
+    result = _extract(tmp_path, "disabled")
+    imports = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "imports"}
+
+    assert ("src_consumer", "src_mod") in imports
+    # The ESM control: it always worked, and must keep working.
+    assert ("src_esmconsumer", "src_esmmod") in imports
+
+
+def test_unresolvable_require_is_an_external_import_like_its_esm_twin(tmp_path: Path) -> None:
+    """A bare-package require must behave exactly as `import` from the same
+    package does -- EXTERNAL_IMPORT, not a missing edge and not an in-repo one.
+    Otherwise the fix trades a blind spot for a false in-repo dependency."""
+    _write(tmp_path / "src" / "a.js", "const lodash = require('lodash');\nlodash.map([]);\n")
+    _write(tmp_path / "src" / "b.js", "import lodash from 'lodash';\n")
+    result = _extract(tmp_path, "disabled")
+    by_source = {
+        e["source"]: e for e in result.edges if e["relation"] == "imports"
+    }
+
+    assert by_source["src_a"]["confidence"] == "EXTERNAL_IMPORT"
+    assert by_source["src_a"]["confidence"] == by_source["src_b"]["confidence"]
+
+
+@pytest.mark.parametrize(
+    ("caller", "target"),
+    [
+        ("src_consumer_destructured", "src_mod_objlit"),
+        ("src_consumer_nsobjlit", "src_mod_objlit"),
+        ("src_consumer_nspropassign", "src_mod_propassign"),
+        ("src_esmconsumer_esmnamespace", "src_esmmod_esmnamed"),
+    ],
+    ids=["cjs-destructured", "cjs-namespace", "cjs-namespace-propassign", "esm-namespace"],
+)
+def test_module_boundary_calls_bind_to_their_definition(
+    tmp_path: Path, caller: str, target: str
+) -> None:
+    """Four shapes that all landed on a same-file phantom instead of the target.
+
+    Only `import { f }` bound before this. `const { f } = require()` was
+    declared as `ts-destructured-locals-unbound`; the two module-object shapes
+    and ESM `import * as ns` were undeclared until 2026-08-10. Python already
+    binds the module-object shape via its `alias_map`, so this is a mirror of
+    an in-tree design rather than a new one.
+    """
+    _cjs_fixture(tmp_path)
+    result = _extract(tmp_path, "disabled")
+    calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
+
+    assert (caller, target) in calls
+
+
+def test_a_module_object_call_is_not_classified_external(tmp_path: Path) -> None:
+    """Falsifiability control: binding must not be bought with a wrong tag.
+
+    An edge tagged EXTERNAL_CALL is excluded from the health denominator, so
+    "resolved" and "excused from the ratio" look identical on the summary line.
+    `m` resolves in-repo, so its calls are in-repo calls.
+    """
+    _cjs_fixture(tmp_path)
+    result = _extract(tmp_path, "disabled")
+    edge = next(
+        e for e in result.edges
+        if e["relation"] == "calls"
+        and e["source"] == "src_consumer_nsobjlit"
+        and e["target"] == "src_mod_objlit"
+    )
+
+    assert edge.get("confidence") != "EXTERNAL_CALL"
+
+
 def _golden_graph():
     nodes = [
         {"id": "src_app", "kind": "file", "name": "app.ts", "source_file": "src/app.ts"},
@@ -138,28 +248,16 @@ def test_query_verb_outputs_are_golden_stable() -> None:
     # has a matching health cell -> health is empty but the language-scoped
     # caveat still fires (relations/languages match on the seed's language,
     # independent of whether a health cell exists for it).
-    ts_caveat = {
-        "code": "ts-destructured-locals-unbound",
-        "summary": "calls through destructured local bindings (const { f } = require(...)) count as unbound",
-    }
-    # Declared 2026-08-10. Both apply to typescript, so the two calls answers
-    # gain one caveat and the imports answer gains its first -- `imports` had
-    # no entry in the registry at all until a `require()` was measured emitting
-    # no edge. Listed in registry order, which is the order the comprehension
-    # in `build_answer_block` walks.
-    js_module_object_caveat = {
-        "code": "js-module-object-calls-unbound",
+    # One entry after #49. The three JavaScript codes that preceded it were
+    # retired on re-measured evidence the same day; what remains is the dynamic
+    # residue, which covers BOTH relations, so it appears on the imports-only
+    # block too -- that block previously had no caveats at all.
+    js_dynamic_caveat = {
+        "code": "js-dynamic-module-load-unmodelled",
         "summary": (
-            "calls through a module object (const m = require('./x'); m.f(), or "
-            "import * as ns from './x'; ns.f()) are not bound to the target"
-        ),
-    }
-    js_require_caveat = {
-        "code": "js-require-emits-no-import-edge",
-        "summary": (
-            "a CommonJS require() is a call expression, not an import statement, so it "
-            "emits NO import edge at all -- an empty imported-by or depends-on result "
-            "may be wrong, and the imports ratio cannot see the omission"
+            "a dynamic module load -- require(expr) with a non-literal argument, or an "
+            "import() expression -- emits no import edge and binds no callable name, so "
+            "an empty imported-by or callers result may be wrong"
         ),
     }
     # These blocks all carry `health: {}` -- see the comment above for why the
@@ -177,7 +275,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "languages": ["typescript"],
         "health": {},
         "grade": "advisory",
-        "caveats": [ts_caveat, js_module_object_caveat],
+        "caveats": [js_dynamic_caveat],
     }
     answer_calls_and_imports = {
         "schema": 1,
@@ -185,7 +283,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "languages": ["typescript"],
         "health": {},
         "grade": "advisory",
-        "caveats": [ts_caveat, js_require_caveat, js_module_object_caveat],
+        "caveats": [js_dynamic_caveat],
     }
     answer_imports_only = {
         "schema": 1,
@@ -193,7 +291,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "languages": ["typescript"],
         "health": {},
         "grade": "advisory",
-        "caveats": [js_require_caveat],
+        "caveats": [js_dynamic_caveat],
     }
 
     assert query(g, "callers helper") == {

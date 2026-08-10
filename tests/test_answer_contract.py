@@ -217,13 +217,11 @@ def test_registry_initial_entries():
     assert codes == {
         "python-dynamic-dispatch",
         "python-callback-registration",
-        "ts-destructured-locals-unbound",
-        # Both measured 2026-08-10 on a two-file CommonJS fixture. The first is
-        # the reason `imports` joined NON_DETECTION_RELATIONS -- a require()
-        # emits no edge, so the imports ratio stayed 1.0 while `imported-by`
-        # answered nothing at decision_grade.
-        "js-require-emits-no-import-edge",
-        "js-module-object-calls-unbound",
+        # #49 retired all three JavaScript entries on re-measured evidence --
+        # the two declared that morning plus `ts-destructured-locals-unbound`
+        # from 2026-07-27 -- and left this narrower one behind for the dynamic
+        # forms that genuinely still emit nothing.
+        "js-dynamic-module-load-unmodelled",
     }
 
 
@@ -262,14 +260,42 @@ def test_unattributable_receiver_caveat_kept_its_published_shape_when_retired():
 def test_ts_external_calls_caveat_is_retired_with_a_successor():
     from graphite.answer_contract import CAVEAT_REGISTRY, active_caveats
 
+    """Each retirement in this chain is sound only because the RESIDUE stayed
+    declared.
+
+    `ts-external-calls-unclassified` narrowed to `ts-destructured-locals-unbound`
+    (#4). #49 then fixed the destructuring and module-object shapes outright and
+    made `require()` emit a real import edge -- but the non-detection class is
+    narrowed, not gone: a dynamic `require(expr)` or an `import()` expression
+    still emits nothing, measured the same day. That residue is
+    `js-dynamic-module-load-unmodelled`, and it is why `imports` stays in
+    NON_DETECTION_RELATIONS for these languages.
+
+    Retiring a code whose concern is MOSTLY gone, with nothing carrying the
+    remainder, is exactly the close this project's two-answer rule exists to
+    prevent.
+    """
     by_code = {e["code"]: e for e in CAVEAT_REGISTRY}
-    assert by_code["ts-external-calls-unclassified"]["retired_by"]
     active = {e["code"] for e in active_caveats()}
-    assert "ts-external-calls-unclassified" not in active
-    assert "ts-destructured-locals-unbound" in active
-    successor = by_code["ts-destructured-locals-unbound"]
-    assert successor["relations"] == ("calls",)
-    assert successor["languages"] == ("typescript", "javascript")
+
+    for retired in (
+        "ts-external-calls-unclassified",
+        "ts-destructured-locals-unbound",
+        "js-require-emits-no-import-edge",
+        "js-module-object-calls-unbound",
+    ):
+        assert by_code[retired]["retired_by"], retired
+        assert retired not in active, retired
+
+    # Published shape survives retirement -- a consumer that recorded this code
+    # keeps the meaning it was published with.
+    superseded = by_code["ts-destructured-locals-unbound"]
+    assert superseded["relations"] == ("calls",)
+    assert superseded["languages"] == ("typescript", "javascript")
+
+    residue = by_code["js-dynamic-module-load-unmodelled"]
+    assert "js-dynamic-module-load-unmodelled" in active
+    assert residue["relations"] == ("calls", "imports")
 
 
 def test_zero_cell_answer_is_not_decision_grade_when_empty():

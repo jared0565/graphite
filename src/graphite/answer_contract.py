@@ -67,6 +67,11 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         "languages": ("typescript", "javascript"),
         "summary": "calls through destructured local bindings (const { f } = require(...)) count as unbound",
         "since": "2026-07-27",
+        # Fixed by #49: a literal `require()` now binds its destructured names
+        # to the exporting file's definitions, measured in both JavaScript and
+        # TypeScript. The summary keeps its published wording -- a published
+        # code's meaning never changes.
+        "retired_by": "2026-08-10",
     },
     {
         "code": "js-require-emits-no-import-edge",
@@ -85,6 +90,12 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         # one), a 1.0 imports ratio, and an empty `imported-by` at
         # decision_grade. A missing SITE cannot lower a ratio computed over
         # sites, so the metric graded its own blind spot healthy.
+        #
+        # Fixed by #49 for a LITERAL require, which is what this code names.
+        # The non-detection class it created is narrowed, not gone -- see
+        # `js-dynamic-module-load-unmodelled`, which is why `imports` stays in
+        # NON_DETECTION_RELATIONS for these languages.
+        "retired_by": "2026-08-10",
     },
     {
         "code": "js-module-object-calls-unbound",
@@ -100,6 +111,35 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         # changes, so the member-access shape gets its own entry rather than a
         # widened summary on that one. Python already binds this shape via
         # `alias_map` (extract/ast.py); JavaScript has no equivalent.
+        #
+        # Fixed by #49, which gave JavaScript that equivalent: `_ImportBindings
+        # .namespaces` maps a whole-module local to its file, and `_resolve_call`
+        # turns `m.f()` into that file's `f`. Measured on all four shapes in
+        # both JavaScript and TypeScript; the fixture's placeholder share fell
+        # 0.143 -> 0.077 as the `m.f` phantoms stopped being invented.
+        "retired_by": "2026-08-10",
+    },
+    {
+        "code": "js-dynamic-module-load-unmodelled",
+        "relations": ("calls", "imports"),
+        "languages": ("javascript", "typescript"),
+        "summary": (
+            "a dynamic module load -- require(expr) with a non-literal argument, or an "
+            "import() expression -- emits no import edge and binds no callable name, so "
+            "an empty imported-by or callers result may be wrong"
+        ),
+        "since": "2026-08-10",
+        # The narrowed successor to `js-require-emits-no-import-edge`. #49 fixed
+        # the LITERAL form; this is the residue, and it is why `imports` stays
+        # in NON_DETECTION_RELATIONS for these languages. Measured the same day
+        # on a file containing `require(name)` and `await import('./mod')`:
+        # neither produced an import edge. Note the second still has a string
+        # literal -- what defeats it is `import()` being an expression rather
+        # than an import statement, so "literal argument" is not the test.
+        #
+        # Retiring the predecessor without this entry would have removed the
+        # honest grade from a class of absence that is still not proof: the
+        # concern was mostly gone, not gone.
     },
     {
         "code": "calls-unattributable-receiver-false-external",
@@ -152,7 +192,7 @@ NON_DETECTION_RELATIONS: dict[str, frozenset[str] | None] = {
 #: it names the construct a reader can go and grep for.
 NON_DETECTION_REASONS = {
     "calls": "a callback-registered caller emits no edge",
-    "imports": "a CommonJS `require()` emits no import edge",
+    "imports": "a dynamic `require(expr)` or `import()` emits no import edge",
 }
 
 

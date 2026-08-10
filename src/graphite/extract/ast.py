@@ -414,6 +414,36 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
                     result.edges.append(_edge(file_id, _make_id(source_lit), "imports", rel_path, _line(node), confidence="EXTERNAL_IMPORT"))
             walk_children(node, parent_id, scope)
         elif t in ("call_expression", "new_expression"):
+            # A `require('<literal>')` is a module load wearing a call's syntax.
+            # Emitted here, beside the call handling, because that is where the
+            # node actually appears -- the `import_statement` arm above can
+            # never see it. Detection is shared with the binding collector via
+            # `_require_source_literal` so the two cannot diverge.
+            require_lit = _require_source_literal(node) if t == "call_expression" else None
+            if require_lit:
+                required = _resolve_import(rel_path, require_lit, source_index)
+                if required:
+                    result.edges.append(
+                        _edge(
+                            file_id,
+                            _file_node_id(required.rel_path),
+                            "imports",
+                            rel_path,
+                            _line(node),
+                            confidence=required.confidence,
+                        )
+                    )
+                else:
+                    result.edges.append(
+                        _edge(
+                            file_id,
+                            _make_id(require_lit),
+                            "imports",
+                            rel_path,
+                            _line(node),
+                            confidence="EXTERNAL_IMPORT",
+                        )
+                    )
             func = node.child_by_field_name("function")
             if func is None and t == "new_expression":
                 # tree-sitter names this field `constructor` on a new_expression,
@@ -423,15 +453,22 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
             if func:
                 called = _call_target_name(func, source)
                 if called and called not in _LANGUAGE_BUILTIN_GLOBALS and should_keep_call_target(called):
-                    target_id = _resolve_call(file_id, called, bindings.resolved)
+                    target_id = _resolve_call(
+                        file_id, called, bindings.resolved, bindings.namespaces
+                    )
                     _materialize(scope)
                     # A member call whose receiver could not be named leaves
                     # `called` as a bare method name, which says nothing about
                     # where the call goes -- do not classify it (#14).
                     attributable = True
+                    namespace_resolved = False
                     if func.type == "member_expression":
                         obj = func.child_by_field_name("object")
-                        attributable = bool(obj is not None and _simple_object_name(obj))
+                        obj_name = _simple_object_name(obj) if obj is not None else None
+                        attributable = bool(obj_name)
+                        namespace_resolved = bool(
+                            obj_name and obj_name in bindings.namespaces
+                        )
                     edge = _edge(
                         scope.id, target_id, "calls", rel_path, _line(node),
                         confidence=_call_confidence(
@@ -444,7 +481,17 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
                     # can re-point this edge to the real class method definition
                     # (see _resolve_method_dispatch). `new x.Foo()` is construction,
                     # not dispatch, so restrict to call_expression.
-                    if t == "call_expression" and func.type == "member_expression":
+                    # Skipped when the receiver was a whole-module binding: the
+                    # post-pass exists for edges whose target is "only a
+                    # file-scoped phantom", and re-points on method NAME alone.
+                    # A namespace-resolved edge already points at the real
+                    # definition, so leaving `_member` set would let any
+                    # same-named class method elsewhere steal it back.
+                    if (
+                        t == "call_expression"
+                        and func.type == "member_expression"
+                        and not namespace_resolved
+                    ):
                         prop = func.child_by_field_name("property")
                         method = prop.text.decode("utf-8", errors="ignore") if prop is not None and prop.text else None
                         if method:
@@ -513,6 +560,13 @@ class _ImportBindings:
     resolved: dict[str, str]
     external: frozenset[str]
     in_repo: frozenset[str] = frozenset()
+    #: Local name -> the FILE node id it stands for, for a whole-module binding:
+    #: `import * as ns from './x'` and `const m = require('./x')`. A call
+    #: `ns.f()` resolves to `<that file>_f`, which is exactly what Python's
+    #: `alias_map` has always done for `import x` + `x.attr()`. Separate from
+    #: `resolved` because that maps a name to a DEFINITION, and these names
+    #: stand for a whole file rather than any one export.
+    namespaces: dict[str, str] = field(default_factory=dict)
 
 
 def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceIndex | None) -> _ImportBindings:
@@ -531,11 +585,11 @@ def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceInd
     symbols: dict[str, str] = {}
     external: set[str] = set()
     in_repo: set[str] = set()
+    namespaces: dict[str, str] = {}
     if source_index is None:
-        return _ImportBindings(symbols, frozenset(), frozenset())
-    for node in root.children:
-        if node.type != "import_statement":
-            continue
+        return _ImportBindings(symbols, frozenset(), frozenset(), {})
+
+    def _handle_import_statement(node: Any) -> None:
         source_lit = None
         clause = None
         for child in node.children:
@@ -544,19 +598,75 @@ def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceInd
             elif child.type == "import_clause":
                 clause = child
         if not source_lit or clause is None:
-            continue
+            return
         resolved = _resolve_import(rel_path, source_lit, source_index)
         if resolved is None:
             # Unresolved module: every name it binds leaves the repo.
             external.update(_iter_bound_local_names(clause))
-            continue
+            return
         # Resolved module: every name it binds is proven in-repo, regardless
         # of binding form -- must win over an _EXTERNAL_GLOBALS collision.
         in_repo.update(_iter_bound_local_names(clause))
         target_file_id = _file_node_id(resolved.rel_path)
         for local, original in _iter_named_imports(clause):
             symbols[local] = _make_id(target_file_id, original)
-    return _ImportBindings(symbols, frozenset(external), frozenset(in_repo))
+        for child in clause.children:
+            if child.type != "namespace_import":  # import * as ns from './x'
+                continue
+            for sub in child.children:
+                if sub.type.endswith("identifier") and sub.text:
+                    namespaces[sub.text.decode("utf-8", errors="ignore")] = target_file_id
+
+    def _handle_require_declarator(node: Any) -> None:
+        """`const m = require('./x')` and `const { f } = require('./x')`.
+
+        A require is a call expression, so none of this is reachable from the
+        `import_statement` walk above -- which is why CommonJS bound nothing at
+        all before #49.
+        """
+        value = node.child_by_field_name("value")
+        name_node = node.child_by_field_name("name")
+        if value is None or name_node is None:
+            return
+        source_lit = _require_source_literal(value)
+        if not source_lit:
+            return
+        if name_node.type.endswith("identifier"):
+            if not name_node.text:
+                return
+            local = name_node.text.decode("utf-8", errors="ignore")
+            bound, pairs = [local], []
+        elif name_node.type == "object_pattern":
+            pairs = list(_iter_object_pattern_names(name_node))
+            bound = [local for local, _original in pairs]
+        else:
+            return
+        if not bound:
+            return
+        resolved = _resolve_import(rel_path, source_lit, source_index)
+        if resolved is None:
+            external.update(bound)
+            return
+        in_repo.update(bound)
+        target_file_id = _file_node_id(resolved.rel_path)
+        if pairs:
+            for local, original in pairs:
+                symbols[local] = _make_id(target_file_id, original)
+        else:
+            namespaces[bound[0]] = target_file_id
+
+    def visit(node: Any) -> None:
+        # Recursive, unlike the old top-level-only scan: a `require` inside a
+        # function body binds a name the same way one at module scope does.
+        if node.type == "import_statement":
+            _handle_import_statement(node)
+        elif node.type == "variable_declarator":
+            _handle_require_declarator(node)
+        for child in node.children:
+            visit(child)
+
+    visit(root)
+    return _ImportBindings(symbols, frozenset(external), frozenset(in_repo), namespaces)
 
 
 def _iter_named_imports(clause: Any):
@@ -605,6 +715,56 @@ def _iter_bound_local_names(clause: Any):
                 chosen = alias_node if alias_node is not None else name_node
                 if chosen is not None and chosen.text:
                     yield chosen.text.decode("utf-8", errors="ignore")
+
+
+def _require_source_literal(node: Any) -> str | None:
+    """The module string of `require('<literal>')`, else None.
+
+    ONE definition, called from both the binding collector and the walk that
+    emits the import edge. Two independent detections of the same syntax drift
+    the moment one of them learns about `require.resolve` or a template literal
+    and the other does not.
+
+    Literal-only on purpose: `require(someExpr)` is a genuine dynamic import
+    with no statically knowable target, and stays unmodelled -- and declared.
+    """
+    if node.type != "call_expression":
+        return None
+    func = node.child_by_field_name("function")
+    if func is None or not func.type.endswith("identifier") or not func.text:
+        return None
+    if func.text.decode("utf-8", errors="ignore") != "require":
+        return None
+    arguments = node.child_by_field_name("arguments")
+    if arguments is None:
+        return None
+    literals = [child for child in arguments.children if child.type == "string"]
+    # Exactly one string argument. `require(a, b)` is not a module load, and a
+    # template literal parses as `template_string`, so it never lands here.
+    if len(literals) != 1 or not literals[0].text:
+        return None
+    return literals[0].text.decode("utf-8", errors="ignore").strip("'\"") or None
+
+
+def _iter_object_pattern_names(pattern: Any):
+    """Yield (local_name, original_export_name) for `const { a, b: c } = ...`."""
+    for child in pattern.children:
+        if child.type == "shorthand_property_identifier_pattern":
+            if child.text:
+                name = child.text.decode("utf-8", errors="ignore")
+                yield name, name
+        elif child.type == "pair_pattern":
+            key = child.child_by_field_name("key")
+            value = child.child_by_field_name("value")
+            if key is None or value is None or not key.text or not value.text:
+                continue
+            if not value.type.endswith("identifier"):
+                # Nested destructuring binds no single callable name.
+                continue
+            yield (
+                value.text.decode("utf-8", errors="ignore"),
+                key.text.decode("utf-8", errors="ignore"),
+            )
 
 
 def _declarator_binding_name(node: Any) -> str | None:
@@ -1460,17 +1620,30 @@ def _resolve_import(rel_path: str, source_lit: str, source_index: SourceIndex | 
     return None
 
 
-def _resolve_call(file_id: str, called: str, import_symbols: dict[str, str] | None = None) -> str:
+def _resolve_call(
+    file_id: str,
+    called: str,
+    import_symbols: dict[str, str] | None = None,
+    namespaces: dict[str, str] | None = None,
+) -> str:
     """Convert a call target string into a node id.
 
     A plain identifier that was imported into this file resolves to the
-    definition node in the file that exports it (cross-file). Otherwise the call
-    is attached to the current file's namespace (same-file resolution).
+    definition node in the file that exports it (cross-file). A single-segment
+    member call whose receiver is a whole-module binding -- `import * as ns` or
+    `const m = require('./x')` -- resolves to that export in the module's file.
+    Otherwise the call is attached to the current file's namespace (same-file
+    resolution).
     """
     if import_symbols and called and "." not in called:
         mapped = import_symbols.get(called)
         if mapped:
             return mapped
+    if namespaces and called and called.count(".") == 1:
+        receiver, member = called.split(".")
+        module_file_id = namespaces.get(receiver)
+        if module_file_id:
+            return _make_id(module_file_id, member)
     # Local call: if called starts with lowercase or is relative, attach to file namespace.
     if called and not called.startswith(".") and not called.startswith("node_modules"):
         # Try namespaced under file first; fallback to bare id.

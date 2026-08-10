@@ -16,6 +16,52 @@ machine-checkable identity; the version is for humans.
 
 ### Fixed
 
+### Added
+
+**CommonJS is modelled (#49).** `require('<literal>')` now emits a real
+`imports` edge — resolved in-repo, or `EXTERNAL_IMPORT` for a bare package,
+exactly as the ESM equivalent does. Four call shapes that previously landed on
+a same-file phantom now bind to their definition:
+
+| shape | before | after |
+|---|---|---|
+| `const { f } = require('./x')` → `f()` | phantom | binds |
+| `const m = require('./x')` → `m.f()` | phantom | binds |
+| `module.exports.f = f` → `m.f()` | phantom | binds |
+| `import * as ns from './x'` → `ns.f()` | phantom | binds |
+
+`_ImportBindings` gained `namespaces`, mapping a whole-module local name to the
+file it stands for, and `_resolve_call` turns `m.f()` into that file's `f`.
+This is a mirror of what Python's `alias_map` has always done for `import x` +
+`x.attr()`, not a new design. Detection of the `require()` shape lives in one
+predicate used by both the binding collector and the edge-emitting walk, so the
+two cannot drift.
+
+Measured on a four-file fixture, JavaScript and TypeScript both: calls
+**1/2 → 5/5**, imports **1/1 → 2/2**, placeholder share **0.143 → 0.077** as the
+`m.f` phantoms stopped being invented, and the graph moved unhealthy → healthy.
+Note the calls denominator *grew* while the ratio rose — newly bound sites are
+sites that were previously never counted. `imported-by src/mod.js` now answers
+`consumer.js` at `decision_grade` instead of answering nothing at that grade.
+
+One interaction worth recording: `_resolve_method_dispatch` re-points any call
+edge carrying `_member` by method NAME alone, so a namespace-resolved `m.f()`
+would have been stolen back by any same-named class method elsewhere. The walk
+now omits `_member` when the namespace map resolved the target — the post-pass
+exists for edges that are "only a file-scoped phantom", which these no longer
+are.
+
+Three caveats retired on re-measured evidence — `ts-destructured-locals-unbound`
+(declared 2026-07-27), `js-require-emits-no-import-edge` and
+`js-module-object-calls-unbound` (both declared that morning). One added:
+`js-dynamic-module-load-unmodelled`, because `require(expr)` and `import()`
+expressions still emit nothing, measured the same day. **The non-detection class
+is narrowed, not gone**, so `imports` stays in `NON_DETECTION_RELATIONS` for
+JavaScript and TypeScript. Retiring the predecessor without that successor would
+have removed the honest grade from a class of absence that is still not proof.
+
+### Fixed
+
 **`imported-by` reported a confident false absence for CommonJS.** A
 `require('./mod')` is a call expression, not an import statement, so the import
 extractor never sees it and no candidate edge is emitted. A missing *site*
