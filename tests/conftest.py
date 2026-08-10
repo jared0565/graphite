@@ -10,12 +10,103 @@ activation rather than relying on every test file to remember.
 from __future__ import annotations
 
 import json
+import sqlite3
+import traceback
 from pathlib import Path
 from typing import Callable
 
 import pytest
 
 from graphite import activation
+
+
+# --- every sqlite connection this repo opens must be explicitly closed -------
+#
+# Written because the suite could not see the defect it was supposed to. The
+# `_connect` orphan -- a handle opened, abandoned when a PRAGMA failed, and
+# reachable by nobody -- passed 2854 tests, ruff, semgrep, a fail-closed push
+# gate and six CI legs. Nothing was broken; no test asserted the invariant, and
+# a gate only enforces the assertions that exist.
+#
+# Two properties this has to have, both learned the hard way:
+#
+# * it must NOT depend on coverage. The `ResourceWarning` those leaks produced
+#   only appears under `--cov`, because the tracer holds frames alive and defeats
+#   refcounting. An invariant that fires only under an optional flag is not
+#   default-on. So this records close() calls directly rather than watching for
+#   warnings.
+# * it must hold NO strong reference to a connection. Pinning every handle for
+#   the length of a session would itself keep databases open, and on Windows an
+#   open handle blocks unlink -- the check would cause the class of failure it
+#   exists to detect. Only the allocation site is kept, as a string.
+#
+# `with connection:` does not call `close()`, and neither does the C-level
+# deallocator, so both the transaction-mistaken-for-a-close and the
+# reclaimed-by-the-collector cases are caught. That second one is the point:
+# "it gets closed eventually, by GC" is precisely the property that made the
+# recovery path timing-dependent.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_CONFTEST = str(Path(__file__).resolve())
+_open_connections: dict[int, str] = {}
+_real_sqlite_connect = sqlite3.connect
+
+
+class _TrackedConnection(sqlite3.Connection):
+    def close(self) -> None:
+        _open_connections.pop(id(self), None)
+        super().close()
+
+
+def _owning_site() -> str | None:
+    """Deepest frame belonging to this repository, or None for a foreign caller.
+
+    Foreign callers are ignored on purpose. `coverage` keeps its data in SQLite,
+    so under `--cov` it opens connections this suite neither owns nor can close;
+    holding it to graphite's invariant would fail the run for someone else's
+    handle.
+    """
+    for frame in reversed(traceback.extract_stack(limit=30)):
+        if frame.filename == _CONFTEST or "site-packages" in frame.filename:
+            continue
+        try:
+            relative = Path(frame.filename).resolve().relative_to(_REPO_ROOT)
+        except (ValueError, OSError):
+            continue
+        return f"{relative.as_posix()}:{frame.lineno} in {frame.name}"
+    return None
+
+
+def _tracking_connect(*arguments: object, **keywords: object) -> sqlite3.Connection:
+    if "factory" not in keywords:
+        keywords["factory"] = _TrackedConnection
+    connection = _real_sqlite_connect(*arguments, **keywords)
+    if isinstance(connection, _TrackedConnection):
+        site = _owning_site()
+        if site is not None:
+            _open_connections[id(connection)] = site
+    return connection
+
+
+sqlite3.connect = _tracking_connect
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    if not _open_connections:
+        return
+    sites: dict[str, int] = {}
+    for site in _open_connections.values():
+        sites[site] = sites.get(site, 0) + 1
+    report = "\n".join(f"    {count:>4} x {site}" for site, count in sorted(sites.items()))
+    print(
+        f"\n\nLEAKED SQLITE CONNECTIONS: {len(_open_connections)} never had close() called\n"
+        f"{report}\n"
+        "Each site opened a handle that only the garbage collector can release.\n"
+        "Use `with closing(...)` or an explicit `try/finally: connection.close()`.\n",
+        flush=True,
+    )
+    if exitstatus == 0:
+        # Do not overwrite a real test failure -- that diagnosis comes first.
+        session.exitstatus = 1
 
 
 @pytest.fixture(autouse=True)
