@@ -91,6 +91,51 @@ def test_an_agreeing_install_says_nothing_extra(monkeypatch, capsys) -> None:
 
     assert "7.7.7" in out
     assert "stale" not in out.lower()
+    assert "unverified" not in out.lower(), (
+        "an install that resolves and agrees must not claim the check was skipped"
+    )
+
+
+def test_an_unresolvable_distribution_is_named_rather_than_read_as_healthy(
+    monkeypatch, capsys
+) -> None:
+    """The failure mode that a passing test suite cannot see.
+
+    `_version_report` swallows the metadata lookup so `--version` can never
+    crash, then reports only a DISAGREEMENT. Those two combine badly: if the
+    lookup raises, `packaged` is None, the mismatch branch is unreachable, and
+    the report prints a clean-looking four-line block. Not "less information" --
+    actively MORE reassuring than the truth, because the `stale-install` line
+    that had been firing for weeks disappears.
+
+    Measured on this machine after the `graphite-code` rename shipped:
+    `metadata.version("graphite-code")` raised `PackageNotFoundError` (the
+    dist-info still said `graphite` 0.1.0), and `--version` went from printing a
+    staleness warning to printing none. Nothing failed. The shadowed-import
+    check -- the thing that tells a hijacked `sys.path` from a healthy install --
+    was simply gone, and the output said everything was fine.
+
+    So an unresolvable distribution has to be its own reported state, distinct
+    from both "agrees" and "disagrees". This is the rule the docstring above
+    already states and this branch alone did not follow: name the field you
+    could not fill.
+    """
+    monkeypatch.setattr(graphite, "__version__", "7.7.7")
+
+    def not_installed(_name: str) -> str:
+        raise metadata.PackageNotFoundError(_name)
+
+    monkeypatch.setattr(metadata, "version", not_installed)
+
+    assert main(["--version"]) == 0
+    out = capsys.readouterr().out
+
+    assert "7.7.7" in out, "the source version is still the reported one"
+    assert "unverified" in out.lower(), (
+        "a lookup that could not resolve must be NAMED; printing a clean report "
+        "makes a dead check indistinguishable from a healthy install"
+    )
+    assert "graphite-code" in out, "say which distribution name failed to resolve"
 
 
 def test_version_carries_the_engine_fingerprint(capsys) -> None:

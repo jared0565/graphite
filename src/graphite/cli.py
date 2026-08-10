@@ -2299,11 +2299,26 @@ def _version_report() -> str:
     # looks like: the import resolved somewhere the installed distribution does
     # not describe. Printing the source version and silently swallowing the
     # mismatch would make a hijacked import indistinguishable from a healthy one.
+    #
+    # A lookup that FAILS is its own state, reported as such. Swallowing it and
+    # reporting nothing is worse than reporting less: the mismatch branch goes
+    # unreachable, and the report gets shorter and cleaner at the exact moment
+    # it stops checking anything. Measured when `graphite-code` shipped -- the
+    # dist-info still said `graphite`, so the lookup raised
+    # `PackageNotFoundError`, and `--version` went from printing a staleness
+    # warning to printing none at all. Nothing failed, and the output read
+    # healthier than before. Naming the unresolvable case is what keeps a dead
+    # check distinguishable from a healthy install.
     try:
         packaged: str | None = metadata.version(_DISTRIBUTION_NAME)
     except Exception:  # noqa: BLE001 - see "never raises" above
         packaged = None
-    if packaged is not None and packaged != source:
+    if packaged is None:
+        lines.append(
+            f"install-unverified no dist-info for {_DISTRIBUTION_NAME!r}; "
+            "the shadowed-import check did not run (reinstall to re-enable)"
+        )
+    elif packaged != source:
         lines.append(f"stale-install      dist-info records {packaged}; reinstall to refresh")
     return "\n".join(lines)
 
