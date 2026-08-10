@@ -16,6 +16,42 @@ machine-checkable identity; the version is for humans.
 
 ### Fixed
 
+**A package manager that printed anything was reported as not installed.**
+`run_manager_version` gave `<manager> --version` a 64-byte output budget, and
+`run_bounded_process` applies its budget **per stream** — so whatever the child
+wrote to stderr competed with a limit sized for the version string on stdout.
+Overflow raises `output_limit`, which the probe reported as
+`manager_unavailable`: the same answer it gives when the manager is absent, so
+TypeScript activation declined to proceed and named the wrong cause.
+`_minimal_node_environment` forwards only locale variables and a PATH, so
+nothing silences npm notices or Node deprecation warnings, and either clears 64
+bytes on its own. The budget is now `MANAGER_VERSION_OUTPUT_LIMIT` (8 KiB) —
+still a hard flood bound, three orders of magnitude under the install budget,
+and the only pathological one: a sweep of every `max_output_bytes` call site
+found the next smallest at 4 KiB.
+
+Found from the other side, as #48: Python 3.14 added a `site.py` check that
+warns when `sys.prefix` disagrees with the `pyvenv.cfg` layout, and the POSIX
+activation fixture wrote that landmark beside the copied interpreter rather
+than one level above its directory. 287 bytes on stderr, two red legs on ubuntu
+and macOS, reported as a missing package manager. Reproduced locally under WSL
+on CPython 3.14.7 — a different distribution from the runner's — and attributed
+with a 2×2: **either fix alone clears it**, the budget because the probe stops
+caring what the child says, the fixture because the child stops saying it. Both
+shipped; the fixture was wrong on its own terms, and the budget defect was
+never about 3.14.
+
+**A version probe would not say what it had refused.** `run_manager_version`
+flattened the provenance revalidation result into `manager_unavailable`, while
+`run_install` had always returned it as-is — one test asserted both, side by
+side, on a single command. "Your toolchain changed under us and graphite
+refused to launch it" and "there is no package manager here" are opposite
+operator situations, and they arrived as one string from a check whose whole
+job is to be believed. The reason is now returned unflattened
+(`executable_changed` / `command_changed`). The user-visible activation reason
+is unchanged: the mapping in `typescript_activation` already defaults unknown
+reasons to `manager_version_unavailable`.
+
 **Every bounded subprocess reported a failed containment on macOS.**
 `run_bounded_process` holds an exited child as an unreaped zombie on purpose, so
 its pgid cannot be recycled under the signals that follow. On darwin that makes

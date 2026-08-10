@@ -24,6 +24,14 @@ from .probe_process import ProbeProcessError, ProbeProcessResult, run_bounded_pr
 
 TRUSTED_REGISTRY = "https://registry.npmjs.org/"
 INSTALL_OUTPUT_LIMIT = 64 * 1024
+#: Budget for `<manager> --version`. Sized for the NOISE, not for the answer:
+#: `run_bounded_process` applies its limit per stream, so whatever the child
+#: writes to stderr competes with the same number, and overflow is reported as
+#: an unavailable manager. A version string needs tens of bytes; npm notices,
+#: Node deprecation warnings and interpreter warnings need hundreds to a few
+#: thousand, and `_minimal_node_environment` silences none of them. Still a
+#: hard flood bound -- three orders of magnitude under the install budget.
+MANAGER_VERSION_OUTPUT_LIMIT = 8 * 1024
 MAX_CONTROL_FILE_BYTES = 8 * 1024 * 1024
 MAX_TRUSTED_FILE_BYTES = 256 * 1024 * 1024
 MAX_TRUSTED_LAUNCHER_LINKS = 8
@@ -1462,15 +1470,20 @@ def run_manager_version(
 ) -> VersionResult:
     if not math.isfinite(timeout) or timeout <= 0:
         return VersionResult(False, "manager_unavailable")
-    if _command_revalidation_reason(command, root) is not None:
-        return VersionResult(False, "manager_unavailable")
+    # Returned as-is, the way `run_install` already does. Flattened into
+    # `manager_unavailable`, a command refused for changing under us read
+    # exactly like one that was never installed -- two opposite operator
+    # actions behind one string, on a security check.
+    provenance_reason = _command_revalidation_reason(command, root)
+    if provenance_reason is not None:
+        return VersionResult(False, provenance_reason)
     try:
         result = runner(
             [*command.argv, "--version"],
             cwd=root,
             stdin=None,
             timeout_seconds=timeout,
-            max_output_bytes=64,
+            max_output_bytes=MANAGER_VERSION_OUTPUT_LIMIT,
             check=False,
             environment=_minimal_node_environment(),
         )

@@ -25,6 +25,7 @@ from graphite.config import Config
 from graphite.dependency_install import (
     ACTIVATION_MAX_FILES,
     INSTALL_OUTPUT_LIMIT,
+    MANAGER_VERSION_OUTPUT_LIMIT,
     MAX_CONTROL_FILE_BYTES,
     MAX_TRUSTED_FILE_BYTES,
     TRUSTED_REGISTRY,
@@ -2525,8 +2526,8 @@ def _copied_python_node(path: Path) -> Path:
     to run is Python source behind a `#!/usr/bin/env node` shebang, and the
     manager policy requires a genuine native binary rather than a script.
 
-    The copy needs a `pyvenv.cfg` landmark beside it or it cannot find its own
-    standard library. A relocatable CPython -- uv, or anything from
+    The copy needs a `pyvenv.cfg` landmark or it cannot find its own standard
+    library. A relocatable CPython -- uv, or anything from
     python-build-standalone -- is built with the literal prefix `/install`, so
     a copy outside its own tree reports `stdlib dir = '/install/lib/python3.12'`
     and dies before executing a line. Measured, not assumed. A distro
@@ -2535,15 +2536,37 @@ def _copied_python_node(path: Path) -> Path:
     was never relocatable, it just met a forgiving interpreter.
 
     `home =` is the same landmark a virtual environment uses to make a copied
-    interpreter work, so this is the supported mechanism rather than a trick.
-    These tests are POSIX-only and CI has not run since they were written, so
-    nothing had ever exercised them.
+    interpreter work, so this is the supported mechanism rather than a trick --
+    but only in a virtual environment's SHAPE. CPython accepts `pyvenv.cfg`
+    beside the executable as well as one level up, and takes whichever
+    directory holds it as `sys.prefix`. Placed beside the binary that makes
+    `sys.prefix` the `bin` directory itself, and Python 3.14 added a `site.py`
+    check that warns about exactly that:
+
+        <frozen site>:101: RuntimeWarning: Unexpected value in sys.prefix,
+        expected .../runtime, got .../runtime/bin
+
+    The interpreter still runs -- but 287 bytes land on stderr, and the caller
+    budgets the child's output. That was graphite#48: two POSIX 3.14 legs red
+    with `manager_unavailable`, i.e. reported as a missing package manager.
+    Measured on 3.14: this layout emits 0 bytes, the flat one 287.
+
+    So the landmark goes one level ABOVE the directory holding the binary --
+    the shape `python -m venv` produces -- which leaves the executable exactly
+    where the caller asked for it and keeps the helper idempotent for the
+    provenance tests that re-copy in place.
+
+    `sys._base_executable` rather than `sys.executable`, so a test run from
+    inside a virtual environment points `home` at the base interpreter instead
+    of chaining one `pyvenv.cfg` into another.
     """
-    real = Path(sys.executable).resolve()
+    real = Path(getattr(sys, "_base_executable", None) or sys.executable).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(real, path)
     path.chmod(0o755)
-    (path.parent / "pyvenv.cfg").write_text(f"home = {real.parent}\n", encoding="utf-8")
+    (path.parent.parent / "pyvenv.cfg").write_text(
+        f"home = {real.parent}\n", encoding="utf-8"
+    )
     return path
 
 
@@ -2962,6 +2985,95 @@ def test_posix_node_script_manager_uses_exact_trusted_node_without_node_on_child
     assert all(str(node.path.parent) not in record["path"].split(os.pathsep) for record in records)
 
 
+def _chatty_manager_command(tmp_path: Path, root: Path, body: str) -> TrustedCommand:
+    """A runnable two-part command: this interpreter plus a script it executes.
+
+    Deliberately *not* `_copied_python_node`. Nothing here is copied, so the
+    command runs on every platform and cannot fail for reasons belonging to a
+    relocated interpreter -- which is what makes it able to isolate the output
+    budget from everything else.
+
+    `resolve()` first: inside a virtual environment `sys.executable` is a
+    symlink on POSIX, and path trust refuses any route crossing one, so the
+    unresolved path yields no reference at all.
+
+    Asserted rather than skipped. If some environment cannot trust its own
+    interpreter this has to be visible -- a skip here would read as coverage
+    while proving nothing, which is the failure this pair exists to correct.
+    """
+    script = tmp_path / "manager.py"
+    script.write_text(body, encoding="utf-8")
+    interpreter = resolve_trusted_file(
+        Path(sys.executable).resolve(), root, executable=True
+    )
+    reference = resolve_trusted_file(script, root, executable=False)
+    assert interpreter is not None, f"interpreter not trustable: {sys.executable}"
+    assert reference is not None
+    return TrustedCommand(
+        (str(interpreter.path), str(script)), (interpreter, reference)
+    )
+
+
+def test_a_manager_that_writes_a_notice_to_stderr_still_reports_its_version(tmp_path):
+    """A chatty manager is a working manager, not a missing one.
+
+    `run_manager_version` budgeted 64 bytes, and `run_bounded_process` applies
+    that budget PER STREAM -- so anything a manager writes to stderr competes
+    with a limit sized for the version string on stdout. Overflow raises
+    `output_limit`, which this function reports as `manager_unavailable`: the
+    same answer it gives when the manager is not installed at all.
+
+    Reachable with a stock toolchain. `_minimal_node_environment()` forwards
+    only locale variables and a PATH, so nothing silences npm's notices or
+    Node's deprecation warnings, and either one clears 64 bytes on its own.
+    graphite#48 hit it from the other side: Python 3.14 added a `site.py`
+    RuntimeWarning that put 287 bytes on the child's stderr.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    command = _chatty_manager_command(
+        tmp_path,
+        root,
+        "import sys\n"
+        "sys.stderr.write('npm notice ' + 'x' * 300 + '\\n')\n"
+        "print('10.9.0')\n",
+    )
+
+    result = run_manager_version(command, root, 10)
+
+    assert result.ok, f"a manager that printed a notice reported {result.reason!r}"
+    assert result.version == Version(10, 9, 0)
+
+
+def test_the_version_probe_still_refuses_a_manager_that_floods_a_stream(tmp_path):
+    """Falsifiability control for the test above: the bound must still bind.
+
+    "Let the manager talk" has an obvious over-fix -- drop the explicit budget
+    and inherit whatever `run_bounded_process` defaults to. Mutation-proven
+    against exactly that: deleting the `max_output_bytes` argument fails this
+    test and leaves the one above passing.
+
+    What it does NOT prove: the magnitude. The flood is derived from the
+    constant, so this test rescales with any value and cannot object to a
+    limit widened to `INSTALL_OUTPUT_LIMIT`. That is deliberate -- it pins
+    enforcement at whatever budget is configured, and the size itself is a
+    judgement call rather than a correctness property.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    command = _chatty_manager_command(
+        tmp_path,
+        root,
+        "import sys\n"
+        f"sys.stdout.write('x' * {MANAGER_VERSION_OUTPUT_LIMIT * 2})\n",
+    )
+
+    result = run_manager_version(command, root, 10)
+
+    assert not result.ok
+    assert result.reason == "manager_unavailable"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX interpreter binding")
 @pytest.mark.parametrize("phase", ("version", "install"))
 @pytest.mark.parametrize("mutation", ("replace", "repoint"))
@@ -3011,6 +3123,13 @@ def test_posix_node_script_manager_rejects_node_provenance_change_before_phase(
         )
     )
     assert not result.ok
+    # Pinned, not merely falsy. Revalidation runs BEFORE any launch, so this
+    # test survived graphite#48's broken fixture on its own merits -- measured,
+    # 4 passed while its two siblings went red. What `not result.ok` cannot
+    # distinguish is a refusal from any other way the phase might fail, which
+    # is precisely what would go unnoticed if the check ever moved after the
+    # launch. The reason names which one happened.
+    assert result.reason == "executable_changed"
     assert not (tmp_path / "unexpected.jsonl").exists()
 
 
@@ -3318,7 +3437,7 @@ def test_posix_launcher_chain_mutation_fails_before_launch(tmp_path, mutation):
         called = True
         return ProbeProcessResult(0, b"11.0.0", b"", 0)
 
-    assert run_manager_version(command, root, 1, runner).reason == "manager_unavailable"
+    assert run_manager_version(command, root, 1, runner).reason == "command_changed"
     assert run_install(
         root,
         command,
@@ -3623,7 +3742,11 @@ def test_manager_version_and_install_use_fixed_argv(tmp_path):
     version = run_manager_version(command, root, 1, version_runner)
     assert version.ok and version.version == Version(11, 2, 0) and version.reason == "manager_versioned"
     assert calls[0][0] == [*command.argv, "--version"]
-    assert calls[0][1]["max_output_bytes"] == 64
+    # The constant, matching how the validator's budget is pinned above. This
+    # asserts the probe passes a budget, not that the budget is well chosen --
+    # it moves with the value. The magnitude is guarded behaviourally instead,
+    # by the chatty-manager pair, which runs a real child.
+    assert calls[0][1]["max_output_bytes"] == MANAGER_VERSION_OUTPUT_LIMIT
     assert calls[0][1]["check"] is False
 
     install = run_install(root, command, adapter_for(Manager.NPM), "https://registry.npmjs.org/", tmp_path / "home", 2, version_runner)
@@ -3865,6 +3988,51 @@ def test_manager_nonzero_is_unavailable_not_a_version_parse_failure(tmp_path):
         lambda *a, **k: ProbeProcessResult(1, b"RAW invalid", b"RAW secret", 0),
     )
     assert result.reason == "manager_unavailable"
+
+
+def test_a_version_probe_names_a_provenance_change_the_way_install_does(tmp_path):
+    """The two phases must agree on what they refused, and they did not.
+
+    `run_install` returns the revalidation reason as-is (`executable_changed` /
+    `command_changed`); `run_manager_version` flattened the identical check into
+    `manager_unavailable` -- the same string it returns for a manager that is
+    simply not installed. `test_posix_launcher_chain_mutation_fails_before_launch`
+    asserts both, side by side, on one command.
+
+    Two opposite operator situations -- "your toolchain changed under us, and
+    graphite refused to launch it" and "there is no package manager here" --
+    arrived as one string, from a check whose entire job is to be believed.
+
+    Platform-neutral by construction -- the POSIX pair needs symlink chains, so
+    it cannot demonstrate this on the machine the code is usually written on.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    command = _command(tmp_path / "bin" / ("npm.exe" if os.name == "nt" else "npm"))
+    executable = command.references[0].path
+    executable.write_bytes(b"mutated")
+    executable.chmod(0o755)
+    called = False
+
+    def runner(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return ProbeProcessResult(0, b"11.0.0", b"", 0)
+
+    version = run_manager_version(command, root, 1, runner)
+    install = run_install(
+        root,
+        command,
+        adapter_for(Manager.NPM),
+        TRUSTED_REGISTRY,
+        tmp_path / "isolated",
+        1,
+        runner,
+    )
+
+    assert version.reason == "executable_changed"
+    assert install.reason == "executable_changed"
+    assert not called, "neither phase may launch a command it has already refused"
 
 
 def test_nonpositive_timeouts_fail_before_runner_invocation(tmp_path):
