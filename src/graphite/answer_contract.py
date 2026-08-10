@@ -69,6 +69,39 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         "since": "2026-07-27",
     },
     {
+        "code": "js-require-emits-no-import-edge",
+        "relations": ("imports",),
+        "languages": ("javascript", "typescript"),
+        "summary": (
+            "a CommonJS require() is a call expression, not an import statement, so it "
+            "emits NO import edge at all -- an empty imported-by or depends-on result "
+            "may be wrong, and the imports ratio cannot see the omission"
+        ),
+        "since": "2026-08-10",
+        # Declared the day it was measured, decoupled from the fix. This is the
+        # first entry whose relation is `imports`, and it is why `imports`
+        # joined NON_DETECTION_RELATIONS: a two-file fixture requiring one
+        # module TWICE produced exactly one import edge (the unrelated ESM
+        # one), a 1.0 imports ratio, and an empty `imported-by` at
+        # decision_grade. A missing SITE cannot lower a ratio computed over
+        # sites, so the metric graded its own blind spot healthy.
+    },
+    {
+        "code": "js-module-object-calls-unbound",
+        "relations": ("calls",),
+        "languages": ("javascript", "typescript"),
+        "summary": (
+            "calls through a module object (const m = require('./x'); m.f(), or "
+            "import * as ns from './x'; ns.f()) are not bound to the target"
+        ),
+        "since": "2026-08-10",
+        # Distinct from `ts-destructured-locals-unbound`, which covers only
+        # `const { f } = require(...)`. A published code's meaning never
+        # changes, so the member-access shape gets its own entry rather than a
+        # widened summary on that one. Python already binds this shape via
+        # `alias_map` (extract/ast.py); JavaScript has no equivalent.
+    },
+    {
         "code": "calls-unattributable-receiver-false-external",
         "relations": ("calls",),
         "languages": ("typescript", "javascript", "python"),
@@ -96,11 +129,47 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
 #: registrations scored `total 2, bound 2, ratio 1.0` while `callers` on both
 #: registered functions returned 0 at decision_grade (aramid, round 55).
 #:
-#: `imports` is deliberately NOT here. An import is a syntactic construct that
-#: extraction either sees or does not; there is no known class where a real
-#: import produces no candidate edge at all. Add a relation only with a
-#: measured non-detection case, not on suspicion.
-NON_DETECTION_RELATIONS = frozenset({"calls"})
+#: `imports` USED to be excluded here, on the reasoning that "an import is a
+#: syntactic construct that extraction either sees or does not". CommonJS
+#: falsifies that: `require('./mod')` is a call expression, so the import
+#: extractor never sees it and no candidate edge is emitted. Measured on a
+#: two-file fixture where `consumer.js` requires `./mod` TWICE -- the graph held
+#: exactly one import edge (the unrelated ESM one), the imports cell read
+#: `total 1, bound 1, ratio 1.0`, and `imported-by src/mod.js` answered nothing
+#: at decision_grade. The rule that governed this entry was "add a relation only
+#: with a measured non-detection case, not on suspicion", and that is now met.
+#:
+#: Scoped BY LANGUAGE rather than added outright. `None` means every language;
+#: a frozenset restricts it. Rust `use` and Go imports have no dynamic form
+#: graphite models, so their absences are still evidence and must not be
+#: downgraded to buy a fix for JavaScript.
+NON_DETECTION_RELATIONS: dict[str, frozenset[str] | None] = {
+    "calls": None,
+    "imports": frozenset({"javascript", "typescript"}),
+}
+
+#: Why an absence in this relation is not proof. Reaches the human listing, so
+#: it names the construct a reader can go and grep for.
+NON_DETECTION_REASONS = {
+    "calls": "a callback-registered caller emits no edge",
+    "imports": "a CommonJS `require()` emits no import edge",
+}
+
+
+def non_detecting_relations(
+    relations: Iterable[str], languages: Iterable[str]
+) -> list[str]:
+    """Relations whose absence cannot be trusted for these languages."""
+    language_set = set(languages)
+    return sorted(
+        relation
+        for relation in set(relations)
+        if relation in NON_DETECTION_RELATIONS
+        and (
+            NON_DETECTION_RELATIONS[relation] is None
+            or language_set & NON_DETECTION_RELATIONS[relation]
+        )
+    )
 
 
 def active_caveats() -> list[dict[str, Any]]:
@@ -118,10 +187,17 @@ INCONCLUSIVE_EMPTY = "none found — INCONCLUSIVE: treat as unverified and confi
 #: things and collapsing them would misreport a good measurement as a failed
 #: one. Distinct from a bare "none found" for the reason round 55 exists: a
 #: grade the human line does not echo is a hedge the reader never sees.
-UNVERIFIED_EMPTY = (
-    "none found — UNVERIFIED: a callback-registered caller emits no edge, "
-    "so this absence is not proof; confirm with grep"
-)
+def unverified_empty(reason: str) -> str:
+    """The UNVERIFIED listing line for one non-detection reason."""
+    return (
+        f"none found — UNVERIFIED: {reason}, "
+        "so this absence is not proof; confirm with grep"
+    )
+
+
+#: The `calls` wording, kept as a module constant because it is the published
+#: shape round 55 introduced and is asserted verbatim.
+UNVERIFIED_EMPTY = unverified_empty(NON_DETECTION_REASONS["calls"])
 
 
 def is_degraded(block: dict[str, Any] | None) -> bool:
@@ -163,6 +239,16 @@ def empty_marker(block: dict[str, Any] | None) -> str:
     # in the human line: a machine-readable grade the printed listing
     # contradicts is exactly the hedge a reader misses (round 55).
     if block and block.get("grade") == GRADE_ADVISORY:
+        # Name the construct that went undetected, not just "unverified" -- the
+        # reader's next action is a grep, and which one depends on whether the
+        # missing edge is a callback registration or a `require()`.
+        triggered = non_detecting_relations(
+            block.get("relations", ()), block.get("languages", ())
+        )
+        if triggered:
+            return unverified_empty(
+                " and ".join(NON_DETECTION_REASONS[r] for r in triggered)
+            )
         return UNVERIFIED_EMPTY
     return "none found"
 
@@ -238,7 +324,9 @@ def build_answer_block(
         # purpose: the health genuinely IS good, so calling it inconclusive
         # would misreport a measurement. What is unsupported is the absence,
         # and `advisory` already means "use it, and verify".
-        undetectable_absence = empty and bool(relation_set & NON_DETECTION_RELATIONS)
+        undetectable_absence = empty and bool(
+            non_detecting_relations(relation_set, language_set)
+        )
         if degraded or unmeasured:
             grade = GRADE_INCONCLUSIVE if empty else GRADE_ADVISORY
         elif undetectable_absence:

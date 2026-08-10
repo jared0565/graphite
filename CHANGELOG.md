@@ -16,6 +16,38 @@ machine-checkable identity; the version is for humans.
 
 ### Fixed
 
+**`imported-by` reported a confident false absence for CommonJS.** A
+`require('./mod')` is a call expression, not an import statement, so the import
+extractor never sees it and no candidate edge is emitted. A missing *site*
+cannot lower a ratio computed over sites, so the metric graded its own blind
+spot healthy. Measured on a two-file fixture where `consumer.js` requires
+`./mod` **twice**: the graph held exactly one import edge (the unrelated ESM
+one), the imports cell read `total 1, bound 1, ratio 1.0`, and `imported-by
+src/mod.js` answered nothing at **`decision_grade`** — the grade whose contract
+is "an empty result is a trustworthy absence".
+
+This is round 55's defect in the relation that had been excused from it. That
+round added `NON_DETECTION_RELATIONS` for `calls`, because a callback-registered
+caller emits no edge, and recorded `imports` as exempt: "an import is a
+syntactic construct that extraction either sees or does not… add a relation only
+with a measured non-detection case, not on suspicion." CommonJS is that measured
+case. **A resolution metric cannot underwrite a coverage claim**, in any
+relation.
+
+`imports` now joins the non-detection set, **scoped by language** — Rust `use`
+and Go imports have no dynamic form graphite models, so their absences are still
+evidence and are not downgraded to buy a fix for JavaScript. The empty-listing
+line also names the construct that went undetected, since the reader's next
+action is a grep and which one depends on whether the missing edge is a callback
+registration or a `require()`.
+
+Two blind spots declared the day they were measured, per the caveat process:
+`js-require-emits-no-import-edge` (imports) and `js-module-object-calls-unbound`
+(calls — `const m = require('./x'); m.f()` and `import * as ns; ns.f()`, neither
+covered by the existing destructuring entry). Python already binds this shape
+via `alias_map`; JavaScript has no equivalent. Extraction is unchanged — these
+are declarations, not fixes.
+
 **A failed Git version probe told the operator to upgrade a working Git.**
 `GitUnsupportedVersionError` carries three unrelated conditions, and the one it
 is named for is the rarest: the other two are a `--version` probe that timed out

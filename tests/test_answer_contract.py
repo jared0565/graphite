@@ -29,6 +29,22 @@ def _graph_ratio(lang_ext, bound_n, unbound_n):
     return g
 
 
+def _graph_imports(lang_ext, bound_n, unbound_n):
+    """`_graph_ratio`'s shape for the imports relation."""
+    g = nx.DiGraph()
+    src = f"importer{lang_ext.replace('.', '_')}"
+    g.add_node(src, kind="file", source_file=f"a{lang_ext}")
+    for i in range(bound_n):
+        t = f"imported{i}{lang_ext.replace('.', '_')}"
+        g.add_node(t, kind="file", source_file=f"b{i}{lang_ext}")
+        g.add_edge(src, t, relation="imports", source_file=f"a{lang_ext}")
+    for i in range(unbound_n):
+        t = f"phantomimport{i}{lang_ext.replace('.', '_')}"
+        g.add_node(t, kind="unknown")
+        g.add_edge(src, t, relation="imports", source_file=f"a{lang_ext}")
+    return g
+
+
 def _merged(g1, g2):
     return nx.compose(g1, g2)
 
@@ -191,11 +207,23 @@ def test_retired_caveats_never_emitted(monkeypatch):
 
 
 def test_registry_initial_entries():
+    """Exact-set on purpose: declaring a blind spot must be a deliberate act.
+
+    A superset assertion would let an entry be added silently, and the whole
+    contract rests on the registry being the complete list of what graphite
+    admits it cannot see.
+    """
     codes = {e["code"] for e in active_caveats()}
     assert codes == {
         "python-dynamic-dispatch",
         "python-callback-registration",
         "ts-destructured-locals-unbound",
+        # Both measured 2026-08-10 on a two-file CommonJS fixture. The first is
+        # the reason `imports` joined NON_DETECTION_RELATIONS -- a require()
+        # emits no edge, so the imports ratio stayed 1.0 while `imported-by`
+        # answered nothing at decision_grade.
+        "js-require-emits-no-import-edge",
+        "js-module-object-calls-unbound",
     }
 
 
@@ -299,6 +327,50 @@ def test_empty_marker_echoes_an_unverifiable_absence():
     assert empty_marker(healthy_empty) == UNVERIFIED_EMPTY
     assert empty_marker(healthy_empty) != INCONCLUSIVE_EMPTY
     assert "none found" in UNVERIFIED_EMPTY, "the listing still has to read as a listing"
+
+
+def test_an_empty_javascript_import_answer_is_not_a_trustworthy_absence():
+    """`require()` is a real import that emits no candidate edge. MEASURED.
+
+    The registry's own admission rule for `NON_DETECTION_RELATIONS` was "add a
+    relation only with a measured non-detection case, not on suspicion", and it
+    recorded `imports` as exempt because "an import is a syntactic construct
+    that extraction either sees or does not". CommonJS breaks that premise:
+    `require('./mod')` is a call expression, so the import extractor never sees
+    it, no candidate edge is emitted, and the site never reaches `total`.
+
+    Measured on a two-file fixture -- `consumer.js` requires `./mod` TWICE and
+    the graph contains exactly one import edge, the unrelated ESM one. The
+    imports cell read `total 1, bound 1, ratio 1.0`, i.e. perfectly healthy,
+    while `imported-by src/mod.js` returned nothing at decision_grade. That is
+    the round-55 defect exactly, in the relation that was excused from it: a
+    RESOLUTION metric cannot underwrite a COVERAGE claim.
+    """
+    g = _graph_imports(".js", 10, 0)
+
+    block = build_answer_block(g, relations=("imports",), languages=["javascript"], total=0)
+
+    assert block["health"]["imports"]["javascript"]["healthy"] is True, (
+        "the fixture must be genuinely healthy, or this proves nothing about "
+        "an absence that a GOOD ratio was underwriting"
+    )
+    assert block["grade"] == GRADE_ADVISORY
+
+
+def test_an_empty_rust_import_answer_stays_a_trustworthy_absence():
+    """Falsifiability control: the fix must be SCOPED, not a blanket downgrade.
+
+    Adding `imports` to the non-detection set unconditionally would satisfy the
+    test above while making every "nothing imports this file" answer unverified
+    in languages that have no such construct. Rust `use` is syntactic and has
+    no dynamic form graphite models, so its absence is still evidence.
+    """
+    g = _graph_imports(".rs", 10, 0)
+
+    block = build_answer_block(g, relations=("imports",), languages=["rust"], total=0)
+
+    assert block["health"]["imports"]["rust"]["healthy"] is True
+    assert block["grade"] == GRADE_DECISION
 
 
 def test_measured_healthy_answer_is_not_dragged_to_inconclusive():

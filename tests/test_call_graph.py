@@ -142,6 +142,26 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "code": "ts-destructured-locals-unbound",
         "summary": "calls through destructured local bindings (const { f } = require(...)) count as unbound",
     }
+    # Declared 2026-08-10. Both apply to typescript, so the two calls answers
+    # gain one caveat and the imports answer gains its first -- `imports` had
+    # no entry in the registry at all until a `require()` was measured emitting
+    # no edge. Listed in registry order, which is the order the comprehension
+    # in `build_answer_block` walks.
+    js_module_object_caveat = {
+        "code": "js-module-object-calls-unbound",
+        "summary": (
+            "calls through a module object (const m = require('./x'); m.f(), or "
+            "import * as ns from './x'; ns.f()) are not bound to the target"
+        ),
+    }
+    js_require_caveat = {
+        "code": "js-require-emits-no-import-edge",
+        "summary": (
+            "a CommonJS require() is a call expression, not an import statement, so it "
+            "emits NO import edge at all -- an empty imported-by or depends-on result "
+            "may be wrong, and the imports ratio cannot see the omission"
+        ),
+    }
     # These blocks all carry `health: {}` -- see the comment above for why the
     # fixture produces no cell for "typescript". Until #12 they also graded
     # `decision_grade`, i.e. this golden pinned the very defect #12 described:
@@ -157,7 +177,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "languages": ["typescript"],
         "health": {},
         "grade": "advisory",
-        "caveats": [ts_caveat],
+        "caveats": [ts_caveat, js_module_object_caveat],
     }
     answer_calls_and_imports = {
         "schema": 1,
@@ -165,7 +185,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "languages": ["typescript"],
         "health": {},
         "grade": "advisory",
-        "caveats": [ts_caveat],
+        "caveats": [ts_caveat, js_require_caveat, js_module_object_caveat],
     }
     answer_imports_only = {
         "schema": 1,
@@ -173,7 +193,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "languages": ["typescript"],
         "health": {},
         "grade": "advisory",
-        "caveats": [],
+        "caveats": [js_require_caveat],
     }
 
     assert query(g, "callers helper") == {
