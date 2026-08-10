@@ -16,6 +16,7 @@ from .git import (
     GitTimeoutError,
     GitUnavailableError,
     GitUnsupportedVersionError,
+    git_version_failure_message,
 )
 from .validation import validate_graph_bundle
 
@@ -115,8 +116,13 @@ def _run_review_git(
 ):
     try:
         return runner.run(arguments, timeout_seconds=timeout_seconds)
-    except GitUnsupportedVersionError:
-        raise ReviewError("Git 2.38 or newer is required") from None
+    except GitUnsupportedVersionError as exc:
+        # Looked up from `reason`, never taken from `str(exc)`: the message on
+        # the exception could carry Git's own output, and keeping that off a
+        # user's terminal is what the hardcoded literal was protecting. The
+        # literal also asserted a version requirement for two causes where no
+        # version was ever read -- sanitized and wrong at the same time.
+        raise ReviewError(git_version_failure_message(exc.reason)) from None
     except GitUnavailableError as exc:
         raise ReviewError("Git executable was not found") from exc
     except GitTimeoutError as exc:

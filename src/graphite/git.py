@@ -17,6 +17,34 @@ _GIT_VERSION_STDOUT_MAX_BYTES = 256
 _READ_CHUNK_BYTES = 64 * 1024
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 0.1
 
+#: Sanitized operator-facing message per version-check failure `reason`.
+#:
+#: Every value is a module constant and none is derived from Git's output, so
+#: looking a message up here can never leak a checkout path -- which is what
+#: lets `review` surface an accurate cause without abandoning the sanitising
+#: boundary it deliberately keeps between Git's text and a user's terminal.
+#:
+#: The table exists because there was only ever ONE message for three unrelated
+#: conditions, and it asserted a version requirement in the two cases where no
+#: version had been read. An operator acting on "Git 2.38 or newer is required"
+#: after a probe timeout goes and upgrades a working Git.
+_GIT_VERSION_FAILURE_MESSAGES = {
+    "too_old": "Git 2.38 or newer is required",
+    "unreadable": "Git version output could not be read",
+    "probe_GitTimeoutError": "Git version check timed out",
+    "probe_GitLaunchError": "Git version check could not be launched",
+    "probe_GitOutputLimitError": "Git version check output limit exceeded",
+}
+#: For a reason this table does not know. Deliberately admits ignorance rather
+#: than falling back to the version sentence, which is the failure being fixed:
+#: a new probe failure must not silently inherit "upgrade your Git".
+_GIT_VERSION_FAILURE_FALLBACK = "Git version could not be verified"
+
+
+def git_version_failure_message(reason: str | None) -> str:
+    """Map a version-check `reason` to its sanitized operator-facing message."""
+    return _GIT_VERSION_FAILURE_MESSAGES.get(reason, _GIT_VERSION_FAILURE_FALLBACK)
+
 
 @dataclass(frozen=True)
 class GitResult:
@@ -171,9 +199,10 @@ class GitRunner:
                 # `os_error` rides along when the inner failure had one; the
                 # class name alone cannot separate "spawn took longer than two
                 # seconds" from "spawn was refused".
+                probe_reason = f"probe_{type(exc).__name__}"
                 raise GitUnsupportedVersionError(
-                    "Git 2.38 or newer is required",
-                    reason=f"probe_{type(exc).__name__}",
+                    git_version_failure_message(probe_reason),
+                    reason=probe_reason,
                     os_error=getattr(exc, "os_error", None),
                 ) from exc
             version = _parse_git_version(result.stdout) if result.returncode == 0 else None
@@ -181,11 +210,11 @@ class GitRunner:
                 # Ran, and said something this parser does not recognise. Not the
                 # same finding as a version that parsed and was too low.
                 raise GitUnsupportedVersionError(
-                    "Git 2.38 or newer is required", reason="unreadable"
+                    git_version_failure_message("unreadable"), reason="unreadable"
                 )
             if version < _MINIMUM_GIT_VERSION:
                 raise GitUnsupportedVersionError(
-                    "Git 2.38 or newer is required", reason="too_old"
+                    git_version_failure_message("too_old"), reason="too_old"
                 )
             self._version = version
 

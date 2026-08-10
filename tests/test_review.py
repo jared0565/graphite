@@ -401,8 +401,48 @@ def test_discover_git_changes_maps_unsupported_git_version(
     with pytest.raises(ReviewError) as error:
         discover_git_changes(tmp_path)
 
-    assert str(error.value) == "Git 2.38 or newer is required"
+    # An exception carrying no `reason` gets the fallback, NOT the version
+    # sentence. That is the point: an unrecognised cause must admit it is
+    # unrecognised rather than inherit a specific remedy that may be wrong.
+    assert str(error.value) == "Git version could not be verified"
+    assert "private" not in str(error.value)
     assert error.value.__cause__ is None
+
+
+def test_review_reports_the_probe_failure_rather_than_a_version_requirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lie survived one layer further than `git.py`.
+
+    `_run_review_git` caught every `GitUnsupportedVersionError` -- including the
+    two that mean the probe never ran -- and re-raised one hardcoded literal,
+    `from None`, so the third hop discarded the identity all over again. That is
+    the line a user sees on their terminal, and it told them to upgrade a Git
+    that is installed and current.
+
+    The literal cannot simply become `str(exc)`: `review` keeps a deliberate
+    sanitising boundary between Git's text and a terminal, pinned by
+    `test_review_maps_unsupported_git_version` below. So the message is looked
+    up from `reason` -- a vocabulary graphite itself produces -- which is
+    accurate and constant at the same time.
+    """
+    class TimedOutProbeRunner:
+        def run(self, arguments: list[str], *, timeout_seconds: float) -> None:
+            raise git_module.GitUnsupportedVersionError(
+                "private raw version output", reason="probe_GitTimeoutError"
+            )
+
+    monkeypatch.setattr(
+        review_module, "_review_git_runner", lambda _root: TimedOutProbeRunner()
+    )
+
+    with pytest.raises(ReviewError) as error:
+        discover_git_changes(tmp_path)
+
+    message = str(error.value)
+    assert message == "Git version check timed out"
+    assert "2.38" not in message
+    assert "private" not in message
 
 
 def test_review_changes_cli_maps_unsupported_git_version(
@@ -422,7 +462,7 @@ def test_review_changes_cli_maps_unsupported_git_version(
 
     output = capsys.readouterr()
     assert output.out == ""
-    assert output.err == "[graphite] error: Git 2.38 or newer is required\n"
+    assert output.err == "[graphite] error: Git version could not be verified\n"
     assert "private" not in output.err
 
 

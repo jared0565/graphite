@@ -217,22 +217,33 @@ def test_git_runner_accepts_supported_version_formats(
 
 
 @pytest.mark.parametrize(
-    "version_process",
+    ("version_process", "expected_reason"),
     [
-        pytest.param(_FakeProcess(b"private malformed output\n"), id="malformed"),
         pytest.param(
-            _FakeProcess(b"prefix git version 2.39.5\n"), id="malformed-prefix"
+            _FakeProcess(b"private malformed output\n"), "unreadable", id="malformed"
+        ),
+        pytest.param(
+            _FakeProcess(b"prefix git version 2.39.5\n"),
+            "unreadable",
+            id="malformed-prefix",
         ),
         pytest.param(
             _FakeProcess(b"git version 2.39.5\nprivate"),
+            "unreadable",
             id="trailing-control-text",
         ),
         pytest.param(
-            _FakeProcess(b"private nonzero output\n", returncode=1), id="nonzero"
+            _FakeProcess(b"private nonzero output\n", returncode=1),
+            "unreadable",
+            id="nonzero",
         ),
-        pytest.param(_FakeProcess(b"private" * 1024), id="overflow"),
         pytest.param(
-            _FakeProcess(b"", timeout_until_killed=True), id="timeout"
+            _FakeProcess(b"private" * 1024), "probe_GitOutputLimitError", id="overflow"
+        ),
+        pytest.param(
+            _FakeProcess(b"", timeout_until_killed=True),
+            "probe_GitTimeoutError",
+            id="timeout",
         ),
     ],
 )
@@ -240,7 +251,16 @@ def test_git_runner_sanitizes_version_probe_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     version_process: _FakeProcess,
+    expected_reason: str,
 ) -> None:
+    """Sanitized AND correctly attributed.
+
+    These six inputs used to assert one shared message, which meant the test
+    could not tell an unreadable version string from a probe that never ran --
+    it only proved Git's own text stayed out of the message. `expected_reason`
+    adds the half that was missing: a case silently reclassified now fails here
+    rather than passing under a message that fits everything.
+    """
     runner, calls = _runner_with_fake_process(
         tmp_path,
         monkeypatch,
@@ -250,8 +270,12 @@ def test_git_runner_sanitizes_version_probe_failures(
     with pytest.raises(git_module.GitUnsupportedVersionError) as error:
         runner.run(["status"], timeout_seconds=2)
 
-    assert str(error.value) == "Git 2.38 or newer is required"
-    assert "private" not in str(error.value)
+    message = str(error.value)
+    assert error.value.reason == expected_reason
+    # Drawn from the constant table, never from Git's output -- the property
+    # this test exists for, and the reason `review` can surface it verbatim.
+    assert message == git_module.git_version_failure_message(expected_reason)
+    assert "private" not in message
     assert len(calls) == 1
 
 
@@ -804,7 +828,71 @@ def test_a_version_probe_that_timed_out_does_not_read_as_an_old_git(
         "a probe that ran out of time must say so; reporting the bucket alone is "
         "what left #37 undiagnosable"
     )
-    assert str(error.value) == "Git 2.38 or newer is required", "message must stay sanitized"
+    # Sanitized, but no longer the version sentence: the message is now looked
+    # up per cause, and no version was read here. See
+    # `test_a_probe_failure_does_not_tell_the_operator_to_upgrade_git`.
+    assert str(error.value) == git_module.git_version_failure_message(
+        "probe_GitTimeoutError"
+    ), "message must stay sanitized"
+
+
+def test_a_probe_failure_does_not_tell_the_operator_to_upgrade_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The message was a false statement, not merely a vague one.
+
+    `diagnostic()` carries the inner cause for a reader of CI logs, but the
+    MESSAGE -- the sentence an operator actually acts on -- still said "Git 2.38
+    or newer is required" when no version had been read at all. Two of the three
+    conditions reaching this class are transient probe failures on a Git that is
+    installed, current, and working. The advice is not merely unhelpful there:
+    it names a specific remedy, and that remedy is wrong.
+
+    Same shape as the channel audit gate printing "this commit names no agent"
+    when the interpreter was missing -- an error that sends you to fix the one
+    thing that is not broken costs more than one that admits it does not know.
+    """
+    repository = _trusted_repository(tmp_path, monkeypatch)
+
+    def slow_version_popen(command: list[str], **kwargs: object) -> _FakeProcess:
+        if command[1:] == ["--version"]:
+            return _FakeProcess(b"", timeout_until_killed=True)
+        return _FakeProcess(b"")
+
+    monkeypatch.setattr(git_module.subprocess, "Popen", slow_version_popen)
+
+    with pytest.raises(git_module.GitUnsupportedVersionError) as error:
+        git_module.GitRunner(repository).run(["status"], timeout_seconds=1)
+
+    message = str(error.value)
+    assert "2.38" not in message, (
+        "no version was read, so the message must not assert a version requirement"
+    )
+    assert "timed out" in message
+    # Still sanitized: every message is a module constant, never Git's output.
+    assert message == git_module.git_version_failure_message("probe_GitTimeoutError")
+
+
+def test_a_genuinely_old_git_still_says_which_version_it_needs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Falsifiability control: the useful message must survive the fix.
+
+    Deleting the version requirement from every message would satisfy the test
+    above while removing the one case where "upgrade Git" is exactly right.
+    """
+    runner, _calls = _runner_with_fake_process(
+        tmp_path,
+        monkeypatch,
+        _FakeProcess(b"tracked.py\0"),
+        version_process=_FakeProcess(b"git version 2.20.1\n"),
+    )
+
+    with pytest.raises(git_module.GitUnsupportedVersionError) as error:
+        runner.run(["status"], timeout_seconds=2)
+
+    assert str(error.value) == "Git 2.38 or newer is required"
+    assert error.value.reason == "too_old"
 
 
 def test_a_genuinely_old_git_stays_distinguishable_from_a_slow_one(

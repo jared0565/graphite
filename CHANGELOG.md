@@ -16,6 +16,30 @@ machine-checkable identity; the version is for humans.
 
 ### Fixed
 
+**A failed Git version probe told the operator to upgrade a working Git.**
+`GitUnsupportedVersionError` carries three unrelated conditions, and the one it
+is named for is the rarest: the other two are a `--version` probe that timed out
+or could not be launched. All three raised the literal "Git 2.38 or newer is
+required" — a sanitized message, and a false statement in the two cases where no
+version was ever read. It does not merely fail to help; it names a specific
+remedy, and that remedy is wrong. `review` repeated the same literal one layer
+up, `from None`, so the line a user actually sees on their terminal carried it
+too.
+
+Messages now come from a per-`reason` table of module constants
+(`git_version_failure_message`). "Git 2.38 or newer is required" survives for
+`too_old`, where it is exactly right; a timeout says it timed out; an
+unrecognised reason says the version could not be verified rather than
+inheriting a remedy. `review` looks up the same table instead of hardcoding a
+literal — and deliberately does not pass `str(exc)` through, because that
+message can carry Git's own output and keeping it off a terminal is what the
+hardcoded literal was protecting. Mutation-proven: passing the exception's text
+through fails three tests.
+
+This is diagnosis, not a fix for #37 — the flake it makes readable has not
+recurred in 40 CI runs since `b3ae61a`, and absence of a sighting is not
+evidence of a fix.
+
 **A package manager that printed anything was reported as not installed.**
 `run_manager_version` gave `<manager> --version` a 64-byte output budget, and
 `run_bounded_process` applies its budget **per stream** — so whatever the child
