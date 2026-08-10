@@ -194,18 +194,18 @@ graphite impact src/lib/db.ts
 graphite context src/lib/db.ts
 
 # Initialize shared Graphite instructions for AI coding platforms
-graphite init F:/Projects/MyApp
+graphite init C:/Projects/MyApp
 graphite init . --platform codex --platform claude
 graphite init . --all
 
 # Make a project Graphite-ready
-graphite bootstrap F:/Projects/MyApp
+graphite bootstrap C:/Projects/MyApp
 
 # Check daemon health
-graphite daemon-health F:/Projects
+graphite daemon-health C:/Projects
 
 # Audit whether Graphite can replace Graphify for a project
-graphite audit-replacement F:/Projects/MyApp
+graphite audit-replacement C:/Projects/MyApp
 ```
 
 ## Graphify replacement audit
@@ -213,7 +213,7 @@ graphite audit-replacement F:/Projects/MyApp
 Use the replacement audit before removing legacy Graphify files or ignore entries:
 
 ```bash
-graphite audit-replacement F:/Projects/MyApp
+graphite audit-replacement C:/Projects/MyApp
 graphite audit-replacement . --json
 graphite audit-replacement . --fail-on-blocker
 ```
@@ -225,9 +225,9 @@ The audit checks Graphite bootstrap state, graph freshness and validity, daemon 
 Use daemon health for operational checks and automation:
 
 ```bash
-graphite daemon-health F:/Projects
-graphite daemon-health F:/Projects --json
-graphite daemon-health F:/Projects --fail-on-error
+graphite daemon-health C:/Projects
+graphite daemon-health C:/Projects --json
+graphite daemon-health C:/Projects --fail-on-error
 ```
 
 Health checks include status age, daemon process presence, startup launcher installation, failing projects, pending initial builds, and projects that have not built successfully within the configured age window.
@@ -254,7 +254,7 @@ When no platform is supplied in an interactive terminal, Graphite presents the c
 Use bootstrap for new or existing projects that should join the Graphite workflow:
 
 ```bash
-graphite bootstrap F:/Projects/MyApp
+graphite bootstrap C:/Projects/MyApp
 graphite bootstrap . --no-build
 graphite bootstrap . --json
 ```
@@ -412,17 +412,17 @@ graphite watch . --no-initial-build
 
 ## Multi-project daemon
 
-Use the daemon when you want Graphite to keep every discovered project under `F:\Projects` fresh without manually starting a watcher in each repo:
+Use the daemon when you want Graphite to keep every discovered project under `C:\Projects` fresh without manually starting a watcher in each repo:
 
 ```bash
 # One-shot health/build pass
-graphite daemon F:\Projects --once
+graphite daemon C:\Projects --once
 
 # Persistent local supervisor
-graphite daemon F:\Projects
+graphite daemon C:\Projects
 
 # Read latest health/status
-graphite daemon-status F:\Projects
+graphite daemon-status C:\Projects
 ```
 
 Daemon behavior:
@@ -436,16 +436,16 @@ Daemon behavior:
 Useful controls:
 
 ```bash
-graphite daemon F:\Projects --scan-interval 10 --discover-interval 60
-graphite daemon F:\Projects --max-builds-per-cycle 1 --build-timeout 180
-graphite daemon F:\Projects --no-initial-build
+graphite daemon C:\Projects --scan-interval 10 --discover-interval 60
+graphite daemon C:\Projects --max-builds-per-cycle 1 --build-timeout 180
+graphite daemon C:\Projects --no-initial-build
 ```
 
 Windows startup integration:
 
 ```bash
 # Install as a current-user logon task and start immediately
-graphite daemon-install-windows F:\Projects --start-now
+graphite daemon-install-windows C:\Projects --start-now
 
 # Inspect the scheduled task
 graphite daemon-task-status
@@ -459,12 +459,12 @@ The installed task is named `GraphiteDaemon-FProjects` by default and uses the s
 If Task Scheduler creation is blocked by Windows policy, install the non-admin Startup-folder fallback:
 
 ```bash
-graphite daemon-install-startup-windows F:\Projects
-graphite daemon-startup-status F:\Projects
-graphite daemon-uninstall-startup-windows F:\Projects
+graphite daemon-install-startup-windows C:\Projects
+graphite daemon-startup-status C:\Projects
+graphite daemon-uninstall-startup-windows C:\Projects
 ```
 
-The fallback writes a hidden VBS launcher in the current user's Startup folder and an idempotent PowerShell launcher in `F:\Projects\.graphite-daemon`.
+The fallback writes a hidden VBS launcher in the current user's Startup folder and an idempotent PowerShell launcher in `C:\Projects\.graphite-daemon`.
 
 ## Canonical graph and enrichment isolation
 
@@ -687,7 +687,7 @@ Then configure Claude Code (Desktop) to use the local server. Add this to your `
     "graphite": {
       "command": "python",
       "args": ["-m", "graphite.mcp"],
-      "cwd": "F:/Projects/YourProject"
+      "cwd": "C:/Projects/YourProject"
     }
   }
 }
