@@ -8,18 +8,29 @@ from typing import Any
 
 
 def default_projects_root() -> Path:
-    """Base folder for daemon/init defaults.
+    r"""Base folder for daemon/init defaults: the environment, else the cwd.
 
-    `GRAPHITE_PROJECTS_ROOT` overrides everything so the tool is not welded to
-    this machine's layout; `F:/Projects` remains the legacy fallback when it
-    exists, and the current directory is the portable last resort.
+    This used to probe one hardcoded absolute path and return it when that
+    directory existed, welding a single machine's drive layout into a
+    published tool. The literal is deliberately not repeated here: it would
+    ship inside the wheel, which is exactly the defect being removed. Three
+    consequences, in rising order of seriousness:
+
+    * the path reached `--help` text and every README example -- and README is
+      the packaging `readme`, so it rendered on PyPI as if it were the default;
+    * any user who happens to have that directory would silently get a folder
+      that is not theirs, with nothing said about it;
+    * `channel_root()` derives from this, so which directory the agent channel
+      lived in was decided by whether one drive letter existed.
+
+    `GRAPHITE_PROJECTS_ROOT` is now the only way to move it, which is what the
+    variable was always for. Machines that relied on the old fallback set it
+    explicitly -- an operator action, and a visible one, rather than a constant
+    in shipped source.
     """
     env = os.environ.get("GRAPHITE_PROJECTS_ROOT")
     if env:
         return Path(env)
-    legacy = Path("F:/Projects")
-    if legacy.exists():
-        return legacy
     return Path(".")
 
 

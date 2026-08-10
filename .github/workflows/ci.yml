@@ -111,6 +111,74 @@ jobs:
       - name: Test
         run: python -m pytest -q
 
+  # The ARTIFACT, which nothing else here tests.
+  #
+  # Every other job installs `-e .` and imports `src/graphite` directly, so the
+  # thing a user actually receives is executed by nothing. The only check that
+  # ever opened a real distribution was a manual step in RELEASING.md, run once
+  # per release -- which makes drift between releases invisible by construction.
+  # Two defects were already sitting there when it was first run by hand: the
+  # wheel METADATA shipped an absolute developer path (README is the packaging
+  # `readme`, so it renders on PyPI), and the release runbook named artifacts the
+  # build no longer produces, which would have HALTED the next release on its own
+  # mismatch check.
+  #
+  # ubuntu, and on push rather than dispatch: this bills at 1x, takes a few
+  # minutes, and the failure it catches is one nobody sees until release day --
+  # exactly the trade the portability matrix makes in the opposite direction.
+  #
+  # GATING, unlike `portability`. A wheel that ships a credential or drops
+  # package data is not evidence to weigh, it is a defect.
+  artifact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build the distribution
+        run: |
+          python -m pip install --upgrade build
+          python -m build --sdist --wheel --outdir dist
+      - name: Inspect what was packaged
+        run: python scripts/verify_artifact.py dist
+      # Installed into a venv the checkout cannot reach, then exercised from a
+      # directory OUTSIDE it. Running from the repo root would let `src/` satisfy
+      # the import and the test would pass without the wheel working at all --
+      # the whole question is whether the package stands on its own.
+      - name: Install the wheel into a clean environment
+        run: |
+          python -m venv "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/smoke/bin/python" -m pip install dist/*.whl
+      - name: Smoke test from outside the checkout
+        run: |
+          set -euo pipefail
+          SMOKE="$RUNNER_TEMP/smoke"
+          PROBE="$RUNNER_TEMP/probe"
+          mkdir -p "$PROBE/src"
+          cd "$PROBE"
+          git init -q
+          git config user.email "ci@example.invalid"
+          git config user.name "Graphite CI"
+          printf 'def greet(name):\n    return f"hi {name}"\n\n\ndef main():\n    return greet("world")\n' > src/app.py
+          git add -A
+          git commit -qm baseline
+          # The import must resolve inside the venv, never back to a checkout.
+          "$SMOKE/bin/python" - <<'PY'
+          import graphite
+          origin = graphite.__file__
+          assert "/smoke/" in origin, f"import resolved outside the venv: {origin}"
+          print("import origin:", origin)
+          PY
+          "$SMOKE/bin/graphite" --version
+          "$SMOKE/bin/graphite" --llm none build .
+          "$SMOKE/bin/graphite" validate --graph-json graph-out/graph.json --json > /dev/null
+          "$SMOKE/bin/graphite" query "callers greet" --json > /dev/null
+          "$SMOKE/bin/graphite" debt --as-of 2026-01-01 > /dev/null
+          echo "installed wheel builds and queries a graph from a clean environment"
+
   # Portability MEASUREMENT, not a gate. `pyproject.toml` claims
   # `requires-python = ">=3.11"` and the gating job above proves exactly one
   # cell of that claim: windows-latest on 3.14. Linux, macOS, and 3.11-3.13 are

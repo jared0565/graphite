@@ -1842,7 +1842,13 @@ def machine_local_path_offences(root: Path = ROOT, home: Path | None = None) -> 
     """
     home_dir = Path.home() if home is None else home
     needles: set[str] = set()
-    for base in (root, home_dir):
+    # `root.parent` is not decoration -- it is the form that actually shipped.
+    # This check derived from `root` alone, so it caught `<parent>/graphite` and
+    # was blind to `<parent>`, which is exactly what the README used as its
+    # example path in 22 places and what the wheel METADATA therefore published.
+    # It passed the entire time. A check scoped one directory too narrow reads
+    # as coverage and is not.
+    for base in (root, root.parent, home_dir):
         needles.update({str(base), base.as_posix()})
         # MSYS/Git-Bash renders `F:/x` as `/f/x`, and a doc written in a Git Bash
         # shell says it that way. Found by reading the very lines this check was
@@ -1897,6 +1903,7 @@ def test_machine_local_path_check_is_not_vacuous(tmp_path: Path) -> None:
         f"pip install -e {tmp_path.as_posix()}\n"
         f"cache lives in {home}\n"
         f"cp {msys}/skill/SKILL.md ~/skills/\n"
+        f"graphite daemon {tmp_path.parent.as_posix()}\n"
         "graphite init /opt/tools/example\n",
         encoding="utf-8",
     )
@@ -1904,10 +1911,21 @@ def test_machine_local_path_check_is_not_vacuous(tmp_path: Path) -> None:
 
     # Line 3 is the MSYS spelling of line 1's path, and is the form that slipped
     # past the first version of this check one line below the offence it caught.
-    assert len(offences) == 3, offences
-    for expected in ("README.md:1", "README.md:2", "README.md:3"):
+    #
+    # Line 4 names the PARENT and not the checkout, which is the form that
+    # actually shipped: 22 README examples and the wheel METADATA carried it
+    # while this check derived from `root` alone and passed. Planting it here is
+    # what stops the widened needle being decoration -- the check was never
+    # broken, it was scoped one directory too narrow, and nothing said so.
+    assert len(offences) == 4, offences
+    for expected in ("README.md:1", "README.md:2", "README.md:3", "README.md:4"):
         assert any(expected in offence for offence in offences), (expected, offences)
-    assert not any("README.md:4" in offence for offence in offences)
+    # Line 5 is the placeholder `/opt/tools/example`, which names nobody's
+    # machine and must stay legal -- absolute paths are REQUIRED elsewhere in
+    # this module. Its line number moved when the parent-form offence was
+    # inserted above; a positional assertion that silently follows the wrong
+    # line is the same false-pass this whole test exists to prevent.
+    assert not any("README.md:5" in offence for offence in offences)
 
 
 def test_the_release_procedure_names_the_artifacts_the_build_actually_produces() -> None:

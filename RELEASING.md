@@ -283,9 +283,11 @@ guide do not claim that any package index is configured.
 Every build that was ever deployed must be retained, with its SHA256 and an
 evidence record, in a store **outside** this repository. Artifacts kept inside
 it are destroyed by `git clean -xdf` and absent from a fresh clone — precisely
-when a rollback is wanted. On this machine that store is
-`F:/Projects/.graphite-releases/`, one directory per version plus an `index.md`
-recording what is currently deployed.
+when a rollback is wanted. The store lives at
+`$GRAPHITE_PROJECTS_ROOT/.graphite-releases/`, one directory per version plus an
+`index.md` recording what is currently deployed. Named through the variable
+rather than as a literal: this file ships inside the sdist, so an absolute path
+here is the maintainer's layout published as if it were policy.
 
 This is not bookkeeping. Consumers import Graphite from a single editable
 install pointed at the development tree, so a saved file is live for all of them

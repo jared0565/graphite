@@ -127,7 +127,7 @@ python -m graphite bootstrap /path/to/MyApp   # minimal variant: gitignore + AGE
 
 The machine-wide daemon (`graphite daemon /path/to/projects`) auto-discovers any project with standard markers (`.git`, `package.json`, `pyproject.toml`, `wrangler.toml`, `go.mod`, `Cargo.toml`) and keeps its graph fresh, so `init` is about wiring agent instructions, not registration. To exclude a directory (and its whole subtree) from supervision — e.g. a third-party SDK checkout — drop a `.graphite-ignore` file in it; the daemon skips it at the next discovery cycle.
 
-Set `GRAPHITE_PROJECTS_ROOT` to change the default base folder used by `daemon`, `daemon-status`, `daemon-health`, the Windows startup installers, and init/bootstrap daemon-visibility checks (falls back to `F:/Projects` when it exists, else the current directory).
+Set `GRAPHITE_PROJECTS_ROOT` to change the default base folder used by `daemon`, `daemon-status`, `daemon-health`, the Windows startup installers, and init/bootstrap daemon-visibility checks (defaults to the current directory when unset).
 
 After upgrading graphite itself, restart the daemon: a long-running daemon keeps executing the code it loaded at start, and daemon state is in-memory only, so a restart both loads the new code and rebuilds every supervised graph — clearing `engine_changed` staleness across all managed projects in one pass.
 

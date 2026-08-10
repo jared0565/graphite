@@ -2709,7 +2709,7 @@ def main(argv: list[str] | None = None) -> int:
     p_init.add_argument("--platform", action="append", default=[], help="Platform to configure: codex, claude, antigravity, visual-studio, cursor, windsurf, or all. Can be repeated or comma-separated.")
     p_init.add_argument("--all", action="store_true", help="Configure every supported platform")
     p_init.add_argument("--yes", action="store_true", help="Use default platforms and suppress optional dependency prompts")
-    p_init.add_argument("--daemon-base", default=None, help="Daemon base folder for visibility check, default auto-detects F:/Projects")
+    p_init.add_argument("--daemon-base", default=None, help="Daemon base folder for visibility check; defaults to $GRAPHITE_PROJECTS_ROOT, else the current directory")
     p_init.add_argument("--no-build", action="store_true", help="Only update instruction files; do not build graph")
     p_init.add_argument("--no-validate", action="store_true", help="Skip graph validation after init")
     p_init.add_argument("--list-platforms", action="store_true", help="Print supported platform keys and exit")
@@ -2739,7 +2739,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_bootstrap = sub.add_parser("bootstrap", help="Make a project Graphite-ready and optionally build its graph")
     p_bootstrap.add_argument("path", help="Project path")
-    p_bootstrap.add_argument("--daemon-base", default=None, help="Daemon base folder for visibility check, default auto-detects F:/Projects")
+    p_bootstrap.add_argument("--daemon-base", default=None, help="Daemon base folder for visibility check; defaults to $GRAPHITE_PROJECTS_ROOT, else the current directory")
     p_bootstrap.add_argument("--no-build", action="store_true", help="Only update project workflow files; do not build graph")
     p_bootstrap.add_argument("--no-validate", action="store_true", help="Skip graph validation after bootstrap")
     p_bootstrap.add_argument("--json", action="store_true", help="Emit machine-readable JSON")

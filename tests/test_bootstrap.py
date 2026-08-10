@@ -201,3 +201,48 @@ def test_bootstrap_ci_masks_terminal_capability(tmp_path, capsys, monkeypatch) -
     capsys.readouterr()
     assert calls[0].stdin_is_tty is False
     assert calls[0].stdout_is_tty is False
+
+
+def test_no_machine_specific_path_is_consulted_when_the_env_is_unset(monkeypatch) -> None:
+    r"""`default_projects_root()` welded one machine's drive layout into the tool.
+
+    The old body probed a hardcoded `F:/Projects` and returned it when it
+    existed. Three consequences, in rising order of seriousness:
+
+    * `--help` advertised that path, and README used it as the example
+      throughout -- and README is the packaging `readme`, so the maintainer's
+      layout rendered on PyPI;
+    * any Windows user who happens to have `F:\Projects` would silently get a
+      directory that is not theirs, with no message saying so;
+    * `channel_root()` derives from this, so the agent channel's location was
+      decided by whether one specific drive letter existed.
+
+    The check is deliberately NOT "does F:/Projects exist on this host" -- that
+    passes vacuously on CI, where it never exists, and would only bite on the
+    one machine it was written for. Instead every `exists()` is forced True: the
+    old body then returns the hardcoded path and this fails, on any host.
+    """
+    from pathlib import Path as _Path
+
+    from graphite.config import default_projects_root
+
+    monkeypatch.delenv("GRAPHITE_PROJECTS_ROOT", raising=False)
+    monkeypatch.setattr(_Path, "exists", lambda self: True)
+
+    assert default_projects_root() == _Path("."), (
+        "with no environment override the root must be the current directory; "
+        "a hardcoded absolute path makes the tool behave differently on the "
+        "machine it was written on than anywhere else"
+    )
+
+
+def test_the_env_override_still_wins_over_the_cwd_default(tmp_path: Path, monkeypatch) -> None:
+    """Falsifiability control for the test above: a `default_projects_root` that
+    returned `Path(".")` unconditionally would satisfy it while breaking every
+    consumer that sets the variable -- including this machine's agent channel."""
+    from graphite.config import default_projects_root
+
+    root = tmp_path / "Workspace"
+    monkeypatch.setenv("GRAPHITE_PROJECTS_ROOT", str(root))
+
+    assert default_projects_root() == root
