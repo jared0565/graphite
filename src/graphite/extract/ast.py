@@ -586,6 +586,9 @@ def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceInd
     external: set[str] = set()
     in_repo: set[str] = set()
     namespaces: dict[str, str] = {}
+    #: Local names bound by a `require()` declarator, so the shadowing guard
+    #: below applies to exactly what CommonJS support introduced.
+    cjs_locals: set[str] = set()
     if source_index is None:
         return _ImportBindings(symbols, frozenset(), frozenset(), {})
 
@@ -643,6 +646,7 @@ def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceInd
             return
         if not bound:
             return
+        cjs_locals.update(bound)
         resolved = _resolve_import(rel_path, source_lit, source_index)
         if resolved is None:
             external.update(bound)
@@ -666,6 +670,14 @@ def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceInd
             visit(child)
 
     visit(root)
+    # Applied only to what CommonJS introduced. ESM binding forms are
+    # statement-level and were never re-derived from a declarator, so filtering
+    # them here would change long-standing behaviour for a hazard this change
+    # did not create.
+    rebound = _rebound_local_names(root) & cjs_locals
+    for name in rebound:
+        namespaces.pop(name, None)
+        symbols.pop(name, None)
     return _ImportBindings(symbols, frozenset(external), frozenset(in_repo), namespaces)
 
 
@@ -744,6 +756,53 @@ def _require_source_literal(node: Any) -> str | None:
     if len(literals) != 1 or not literals[0].text:
         return None
     return literals[0].text.decode("utf-8", errors="ignore").strip("'\"") or None
+
+
+def _rebound_local_names(root: Any) -> frozenset[str]:
+    """Names this file binds more than once, anywhere, at any depth.
+
+    The CommonJS binding maps are FILE-level while calls are walked per scope,
+    so an inner `const m = ...`, a parameter named `m`, or a second destructure
+    of the same name is indistinguishable from the module binding at resolution
+    time -- and would make `m.real()` claim the module's definition, putting a
+    caller in `callers real` that does not exist.
+
+    Deliberately blunt: count every binding occurrence and distrust any name
+    that appears twice, rather than modelling JavaScript scope. That FAILS
+    CLOSED, giving up an edge instead of inventing one, which is the right
+    direction for a graph whose empty answers are graded honestly. Real
+    scope tracking would bind more, and is a larger change than #49.
+    """
+    counts: dict[str, int] = {}
+
+    def _count(name_node: Any) -> None:
+        if name_node is None:
+            return
+        if name_node.type.endswith("identifier"):
+            if name_node.text:
+                name = name_node.text.decode("utf-8", errors="ignore")
+                counts[name] = counts.get(name, 0) + 1
+        elif name_node.type in ("object_pattern", "array_pattern"):
+            for _node, name in _pattern_identifiers(name_node):
+                counts[name] = counts.get(name, 0) + 1
+
+    def visit(node: Any) -> None:
+        if node.type == "variable_declarator":
+            _count(node.child_by_field_name("name"))
+        elif node.type in ("formal_parameters", "arrow_function"):
+            for child in node.children:
+                if child.type in ("required_parameter", "optional_parameter"):
+                    _count(child.child_by_field_name("pattern"))
+                elif child.type.endswith("identifier") or child.type in (
+                    "object_pattern",
+                    "array_pattern",
+                ):
+                    _count(child)
+        for child in node.children:
+            visit(child)
+
+    visit(root)
+    return frozenset(name for name, count in counts.items() if count > 1)
 
 
 def _iter_object_pattern_names(pattern: Any):

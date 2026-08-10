@@ -188,6 +188,64 @@ def test_module_boundary_calls_bind_to_their_definition(
     assert (caller, target) in calls
 
 
+@pytest.mark.parametrize(
+    "shadow",
+    [
+        "function f() { const m = { real: () => 9 }; return m.real(1); }",
+        "function f(m) { return m.real(1); }",
+        "function f() { const { real } = { real: () => 9 }; return real(1); }",
+    ],
+    ids=["inner-const", "parameter", "inner-destructure"],
+)
+def test_a_shadowed_module_local_does_not_bind_to_the_module(
+    tmp_path: Path, shadow: str
+) -> None:
+    """A wrong edge is worse than a missing one, and this fix could create them.
+
+    The binding maps are FILE-level while calls are walked per scope, so an
+    inner `const m = ...`, a parameter named `m`, or an inner destructure of the
+    same name all look identical to the module binding at resolution time. The
+    guard is deliberately blunt: a name bound more than once anywhere in the
+    file is not trusted as a module binding at all. That fails CLOSED -- it
+    gives up an edge rather than inventing one -- which is the right direction
+    for a graph whose empty answers are already graded honestly.
+    """
+    _write(tmp_path / "src" / "mod.js", "function real(n) { return n; }\nmodule.exports = { real };\n")
+    _write(
+        tmp_path / "src" / "consumer.js",
+        "const m = require('./mod');\n"
+        "const { real } = require('./mod');\n"
+        f"{shadow}\n"
+        "module.exports = { f };\n",
+    )
+    result = _extract(tmp_path, "disabled")
+    calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
+
+    assert ("src_consumer_f", "src_mod_real") not in calls, (
+        "the local binding shadows the module one; claiming the module's "
+        "definition here would put a caller in `callers real` that does not exist"
+    )
+
+
+def test_an_unshadowed_module_local_still_binds(tmp_path: Path) -> None:
+    """Falsifiability control: the guard must not simply disable the feature.
+
+    Dropping every module binding would satisfy the test above and undo #49
+    entirely.
+    """
+    _write(tmp_path / "src" / "mod.js", "function real(n) { return n; }\nmodule.exports = { real };\n")
+    _write(
+        tmp_path / "src" / "consumer.js",
+        "const m = require('./mod');\n"
+        "function f() { return m.real(1); }\n"
+        "module.exports = { f };\n",
+    )
+    result = _extract(tmp_path, "disabled")
+    calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
+
+    assert ("src_consumer_f", "src_mod_real") in calls
+
+
 def test_a_module_object_call_is_not_classified_external(tmp_path: Path) -> None:
     """Falsifiability control: binding must not be bought with a wrong tag.
 
@@ -260,6 +318,17 @@ def test_query_verb_outputs_are_golden_stable() -> None:
             "an empty imported-by or callers result may be wrong"
         ),
     }
+    # The other residue of #49: a require-bound name that is rebound elsewhere
+    # in the file is distrusted rather than risk a wrong caller. `calls` only,
+    # so it is absent from the imports-only block below.
+    js_shadowed_caveat = {
+        "code": "js-shadowed-module-local-unbound",
+        "summary": (
+            "when a name bound by require() is also bound elsewhere in the same file "
+            "(an inner declaration, a parameter), calls through it are left unbound "
+            "rather than risk claiming the module's definition"
+        ),
+    }
     # These blocks all carry `health: {}` -- see the comment above for why the
     # fixture produces no cell for "typescript". Until #12 they also graded
     # `decision_grade`, i.e. this golden pinned the very defect #12 described:
@@ -275,7 +344,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "languages": ["typescript"],
         "health": {},
         "grade": "advisory",
-        "caveats": [js_dynamic_caveat],
+        "caveats": [js_shadowed_caveat, js_dynamic_caveat],
     }
     answer_calls_and_imports = {
         "schema": 1,
@@ -283,7 +352,7 @@ def test_query_verb_outputs_are_golden_stable() -> None:
         "languages": ["typescript"],
         "health": {},
         "grade": "advisory",
-        "caveats": [js_dynamic_caveat],
+        "caveats": [js_shadowed_caveat, js_dynamic_caveat],
     }
     answer_imports_only = {
         "schema": 1,

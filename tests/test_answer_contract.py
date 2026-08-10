@@ -219,9 +219,11 @@ def test_registry_initial_entries():
         "python-callback-registration",
         # #49 retired all three JavaScript entries on re-measured evidence --
         # the two declared that morning plus `ts-destructured-locals-unbound`
-        # from 2026-07-27 -- and left this narrower one behind for the dynamic
-        # forms that genuinely still emit nothing.
+        # from 2026-07-27 -- and left two narrower ones behind: the dynamic
+        # forms that genuinely still emit nothing, and the shadowing case the
+        # fix deliberately fails closed on.
         "js-dynamic-module-load-unmodelled",
+        "js-shadowed-module-local-unbound",
     }
 
 
@@ -296,6 +298,14 @@ def test_ts_external_calls_caveat_is_retired_with_a_successor():
     residue = by_code["js-dynamic-module-load-unmodelled"]
     assert "js-dynamic-module-load-unmodelled" in active
     assert residue["relations"] == ("calls", "imports")
+
+    # `js-module-object-calls-unbound` did not retire cleanly either: a name
+    # rebound in the same file is still unbound, on purpose. Retiring it with
+    # nothing carrying that subset would be the same tidy-registry mistake one
+    # entry over.
+    shadowed = by_code["js-shadowed-module-local-unbound"]
+    assert "js-shadowed-module-local-unbound" in active
+    assert shadowed["relations"] == ("calls",)
 
 
 def test_zero_cell_answer_is_not_decision_grade_when_empty():

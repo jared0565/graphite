@@ -120,6 +120,29 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         "retired_by": "2026-08-10",
     },
     {
+        "code": "js-shadowed-module-local-unbound",
+        "relations": ("calls",),
+        "languages": ("javascript", "typescript"),
+        "summary": (
+            "when a name bound by require() is also bound elsewhere in the same file "
+            "(an inner declaration, a parameter), calls through it are left unbound "
+            "rather than risk claiming the module's definition"
+        ),
+        "since": "2026-08-10",
+        # The residue of `js-module-object-calls-unbound`, and the reason that
+        # retirement is honest rather than tidy. #49's binding maps are
+        # FILE-level while calls are walked per scope, so a rebound name cannot
+        # be told from the module binding at resolution time. The guard
+        # (`_rebound_local_names`) distrusts any name bound twice, which fails
+        # CLOSED -- it gives up an edge instead of inventing one, because a
+        # wrong caller in `callers f` is worse than a missing one.
+        #
+        # Measured: a file with `const m = require('./mod')` and an inner
+        # `const m = {...}` loses binding for every `m.x()` in it, which is
+        # exactly the pre-#49 behaviour for that file and no worse. Retires
+        # when scope-aware resolution replaces the blunt count.
+    },
+    {
         "code": "js-dynamic-module-load-unmodelled",
         "relations": ("calls", "imports"),
         "languages": ("javascript", "typescript"),

@@ -51,14 +51,37 @@ now omits `_member` when the namespace map resolved the target — the post-pass
 exists for edges that are "only a file-scoped phantom", which these no longer
 are.
 
+Guarded against a false positive the fix itself introduced. The binding maps are
+file-level while calls are walked per scope, so an inner `const m = ...`, a
+parameter named `m`, or a second destructure of the same name is
+indistinguishable from the module binding at resolution time — and `m.real()`
+would have claimed the module's definition, putting a caller in `callers real`
+that does not exist. A wrong edge is worse than a missing one.
+`_rebound_local_names` distrusts any require-bound name that is bound more than
+once anywhere in the file: deliberately blunt rather than modelling JavaScript
+scope, because it **fails closed**, giving up an edge instead of inventing one.
+Measured cost — in a file that rebinds the name, every `m.x()` in it loses
+binding, which is exactly the pre-#49 behaviour for that file and no worse.
+Applied only to names CommonJS introduced; ESM binding forms are
+statement-level and were never re-derived from a declarator.
+
+Also measured and correct without change: a module-object call to a member the
+module does not export (`m.notExported()`) produces an unbound placeholder and
+LOWERS the ratio rather than fabricating a binding.
+
 Three caveats retired on re-measured evidence — `ts-destructured-locals-unbound`
 (declared 2026-07-27), `js-require-emits-no-import-edge` and
 `js-module-object-calls-unbound` (both declared that morning). One added:
 `js-dynamic-module-load-unmodelled`, because `require(expr)` and `import()`
-expressions still emit nothing, measured the same day. **The non-detection class
-is narrowed, not gone**, so `imports` stays in `NON_DETECTION_RELATIONS` for
-JavaScript and TypeScript. Retiring the predecessor without that successor would
-have removed the honest grade from a class of absence that is still not proof.
+expressions still emit nothing, measured the same day — note the second has a
+string literal, so "non-literal argument" is not the test; `import()` is an
+expression rather than an import statement. And one more,
+`js-shadowed-module-local-unbound`, for the shadowing subset above. **Both
+non-detection classes are narrowed, not gone**, so `imports` stays in
+`NON_DETECTION_RELATIONS` for JavaScript and TypeScript. Retiring either
+predecessor without its successor would have removed the honest grade from a
+class of absence that is still not proof — the tidy-registry mistake, made once
+and caught, then nearly made again one entry over.
 
 ### Fixed
 
