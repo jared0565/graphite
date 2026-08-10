@@ -154,6 +154,11 @@ _ACTIVATION_EXEMPT_COMMANDS = frozenset({
     "daemon-startup-status",
     "daemon-uninstall-startup-windows",
     "agent-hook",
+    # `debt` reads the engine's own caveat registry and touches no repository at
+    # all. Marking the cwd active would enrol whatever directory the operator
+    # happened to ask the question from -- the same survey-changes-what-it-
+    # measures problem `--version` has.
+    "debt",
     # `channel` answers a question about machine layout, not about the repo you
     # happen to be standing in -- registering activation would make an unrelated
     # repo look "open" to the daemon.
@@ -615,6 +620,26 @@ def cmd_check(args: argparse.Namespace) -> int:
     else:
         print("[graphite] graph is fresh")
     return 1 if status["stale"] else 0
+
+
+def cmd_debt(args: argparse.Namespace) -> int:
+    """Declared blind spots and how long they have been declared.
+
+    Reads the engine's own caveat registry, not a repository, so it needs no
+    graph, no project layout and no network -- the point is a number that is
+    comparable across runs and across machines.
+    """
+    from datetime import date
+
+    from .debt import debt_report, render_debt
+
+    as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
+    report = debt_report(as_of=as_of)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(render_debt(report))
+    return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -2616,6 +2641,25 @@ def main(argv: list[str] | None = None) -> int:
         help="Report source drift only; treat graphite engine updates as fresh",
     )
     p_check.set_defaults(func=cmd_check)
+
+    p_debt = sub.add_parser(
+        "debt",
+        help="Declared blind spots and how long they have been open",
+        description=(
+            "Report declared blind spots with their age, and retired ones with "
+            "their declaration-to-fix latency. Counts are not the target: a "
+            "DECLARED unfixed blind spot is the contract working, an undeclared "
+            "one is the failure this measures."
+        ),
+    )
+    p_debt.add_argument("--json", action="store_true", help="Machine-readable report")
+    p_debt.add_argument(
+        "--as-of",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Compute ages against this date instead of today (keeps output reproducible)",
+    )
+    p_debt.set_defaults(func=cmd_debt)
 
     p_doctor = sub.add_parser(
         "doctor",
