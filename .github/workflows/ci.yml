@@ -175,7 +175,21 @@ jobs:
           "$SMOKE/bin/graphite" --version
           "$SMOKE/bin/graphite" --llm none build .
           "$SMOKE/bin/graphite" validate --graph-json graph-out/graph.json --json > /dev/null
-          "$SMOKE/bin/graphite" query "callers greet" --json > /dev/null
+          # `query` emits JSON by DEFAULT and has no --json flag, unlike
+          # `validate` one line up. Passing one fails at the TOP-LEVEL parser,
+          # which prints the root usage and makes it look like the wrong command
+          # broke. Assert on the payload rather than the exit code: a smoke test
+          # that only checks statuses would pass against a query returning
+          # nothing at all.
+          "$SMOKE/bin/graphite" query "callers greet" > result.json
+          "$SMOKE/bin/python" - <<'PY'
+          import json
+          payload = json.load(open("result.json", encoding="utf-8"))
+          assert payload.get("schema_version"), payload
+          names = {c["name"] for c in payload.get("callers", [])}
+          assert "main" in names, f"expected main to call greet, got {names}"
+          print("query resolved a cross-function caller:", names)
+          PY
           "$SMOKE/bin/graphite" debt --as-of 2026-01-01 > /dev/null
           echo "installed wheel builds and queries a graph from a clean environment"
 
