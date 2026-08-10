@@ -1,0 +1,154 @@
+# Reasoned suppressions for BLOCK-tier findings. A local `aramid override` is
+# deliberately refused at this tier: a BLOCK must be adjudicated in a file that
+# is committed, diffed and reviewed, not waved through on one machine.
+#
+# Everything below is ruff S608 ("possible SQL injection through string-based
+# query construction") in the two SQLite stores. Each was read before being
+# listed here, and they share one root cause: **SQLite cannot bind an
+# identifier.** `?` binds values only, so a table or column name can only ever
+# reach a statement by interpolation. The question is therefore never "is this
+# an f-string" but "where does the name come from", and in every case below it
+# comes from a module-level constant, a literal at the call site, or a dict
+# lookup that raises before the statement is built.
+#
+# These are entries, not a rule-wide exemption: S608 stays armed in these files,
+# so a NEW interpolation -- one where the name could come from a caller -- still
+# blocks. That is the whole point of listing 19 ids instead of ignoring a rule.
+#
+# Adjudicated 2026-08-10, surfaced when a connection-lifetime fix touched both
+# files. They pre-date that change; the gate scans changed files, so they had
+# simply never been in front of anyone.
+
+[[suppress]]
+id = "af409bd09c1c2a39e8d1ce21ce478aea056cbda059e8fb3d9517d21f9e6fb7ca"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/lifecycle_storage.py"
+reason = "The interpolated name is a migration table key read from a module-level schema dict, never caller input. SQLite cannot bind an identifier, so an f-string is the only mechanism available; every VALUE is bound with ?."
+
+[[suppress]]
+id = "17a9d79522c375ab04720971f1695c25c14fbaa41482e75aea120916eaa1c674"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/lifecycle_storage.py"
+reason = "The interpolated name is a migration table key read from a module-level schema dict, never caller input. SQLite cannot bind an identifier, so an f-string is the only mechanism available; every VALUE is bound with ?."
+
+[[suppress]]
+id = "9904af1ed9c5edf1e72d3dde619b1d661e86540585ebde24d711c7b4332ed0e7"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/lifecycle_storage.py"
+reason = "The interpolated name is a migration table key read from a module-level schema dict, never caller input. SQLite cannot bind an identifier, so an f-string is the only mechanism available; every VALUE is bound with ?."
+
+[[suppress]]
+id = "2208eb33f88b49f98c025f590a1907204d9907f87388e78af596b35d60f65c97"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/storage.py"
+reason = "The interpolated name is a migration table key read from a module-level schema dict, never caller input. SQLite cannot bind an identifier, so an f-string is the only mechanism available; every VALUE is bound with ?."
+
+[[suppress]]
+id = "7ce04371849b320a5372cb3d53a4d256fbf9b32832809faa4899904181ea8882"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/storage.py"
+reason = "The interpolated name is a migration table key read from a module-level schema dict, never caller input. SQLite cannot bind an identifier, so an f-string is the only mechanism available; every VALUE is bound with ?."
+
+[[suppress]]
+id = "ffab5abb15eec47daf0461c61f71edcbf9f83f55829bbfe582d55dd445a2ba4e"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/storage.py"
+reason = "The interpolated name is a migration table key read from a module-level schema dict, never caller input. SQLite cannot bind an identifier, so an f-string is the only mechanism available; every VALUE is bound with ?."
+
+[[suppress]]
+id = "d6c770936c365d4df6047cb04874eb075674026d9ae5701db8119605261cdf6f"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/storage.py"
+reason = "The interpolated name is a migration table key read from a module-level schema dict, never caller input. SQLite cannot bind an identifier, so an f-string is the only mechanism available; every VALUE is bound with ?."
+
+[[suppress]]
+id = "d639e3097a0a35b60560794e3ebaa7c991b6be6ec95e1475d30a187a8ea53ee5"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/storage.py"
+reason = "The interpolated name is a migration table key read from a module-level schema dict, never caller input. SQLite cannot bind an identifier, so an f-string is the only mechanism available; every VALUE is bound with ?."
+
+[[suppress]]
+id = "4d9e0147099bfec7c75e3ee84a5618d338306457f267d44678427b8fe1921858"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/storage.py"
+reason = "The interpolated name is a migration table key read from a module-level schema dict, never caller input. SQLite cannot bind an identifier, so an f-string is the only mechanism available; every VALUE is bound with ?."
+
+[[suppress]]
+id = "dcde2cafc4b8adff7e4ea13db534f5f9796de1001a6cfa3b8d4657aaf47566a5"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/storage.py"
+reason = "The interpolated name is a migration table key read from a module-level schema dict, never caller input. SQLite cannot bind an identifier, so an f-string is the only mechanism available; every VALUE is bound with ?."
+
+[[suppress]]
+id = "2afe859e3efd05e949cf885f584bc211b89d727d8b860342d7308a4d253964c3"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/storage.py"
+reason = "The interpolated name is a migration table key read from a module-level schema dict, never caller input. SQLite cannot bind an identifier, so an f-string is the only mechanism available; every VALUE is bound with ?."
+
+[[suppress]]
+id = "93fce77ad53578c8daf753c4dc5be3efad23b4ac07a3b377c143a2f724671ff2"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/storage.py"
+reason = "The table name is checked against the module's _TABLES allowlist and a non-member raises ValueError before this line is reached. SQLite cannot bind an identifier; values are bound with ?."
+
+[[suppress]]
+id = "003bc65fe15758acc1aa8face90a74328c516b7938973bda58a1c05cd89fa843"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/storage.py"
+reason = "table and key_column arrive as string literals from every call site -- verified through the code graph (decision_grade, 4 callers) -- and the public entry point maps authority_kind through a literal dict that raises ValueError on a miss, so the interpolated pair can only ever be one of three literals. The key VALUE is bound with ?."
+
+[[suppress]]
+id = "6efb7335c8ef7a18f77e3ac8086a41078fe1213f7c7936bb844b72f7e96ca060"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/storage.py"
+reason = "table and key_column arrive as string literals from every call site -- verified through the code graph (decision_grade, 4 callers) -- and the public entry point maps authority_kind through a literal dict that raises ValueError on a miss, so the interpolated pair can only ever be one of three literals. The key VALUE is bound with ?."
+
+[[suppress]]
+id = "405bdb77e8aa3673aef31c264c7c9a172e1817699bc621e81082bf1ed9b6b10e"
+tool = "ruff"
+rule = "S608"
+path = "src/graphite/routing/storage.py"
+reason = "The correct parameterized-IN idiom: the interpolation is a generated run of '?' placeholders and every value is bound."
+
+[[suppress]]
+id = "ff9a7fbb6f1e2903c75899bc7f61331a2a7817a69033d09a7a56f4cc4d33981e"
+tool = "ruff"
+rule = "S608"
+path = "tests/test_routing_storage.py"
+reason = "A test iterating a fixed, in-test list of table names to compare snapshots. No external input reaches the statement."
+
+[[suppress]]
+id = "d4e7050efa097e34ae3ea2f94f94330e335b7080afb7bfc35b75b16d8e34850e"
+tool = "ruff"
+rule = "S608"
+path = "tests/test_routing_storage.py"
+reason = "A test iterating a fixed, in-test list of table names to compare snapshots. No external input reaches the statement."
+
+[[suppress]]
+id = "63ef049e0f2b27162978e413a4f852e6dd0e55b7615754069d6717d6a6c8e55e"
+tool = "ruff"
+rule = "S608"
+path = "tests/test_routing_storage.py"
+reason = "A test iterating a fixed, in-test list of table names to compare snapshots. No external input reaches the statement."
+
+[[suppress]]
+id = "4950d00c3941c052cb3401752b12f564e797d29d36446b39717a52041316ffab"
+tool = "ruff"
+rule = "S608"
+path = "tests/test_routing_storage.py"
+reason = "A test iterating a fixed, in-test list of table names to compare snapshots. No external input reaches the statement."
+

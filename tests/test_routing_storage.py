@@ -2283,3 +2283,57 @@ def test_v6_origin_store_drops_superseded_guard_and_accepts_carried_approval(
         snapshot.digest,
         new,
     )
+
+
+def _connection_is_open(connection: sqlite3.Connection) -> bool:
+    """A closed sqlite3 connection raises rather than answering."""
+    try:
+        connection.execute("SELECT 1")
+    except sqlite3.ProgrammingError:
+        return False
+    return True
+
+
+def test_repository_store_closes_every_connection_it_opens(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Releasing the database file must not depend on when the collector runs.
+
+    `with sqlite3.connect(...) as c` ends the TRANSACTION and leaves the handle
+    open -- a long-standing trap in that API -- and `_connect` hands back a raw
+    connection, so nothing here ever closed one. Measured: 934
+    `ResourceWarning: unclosed database` in a single suite run, one per
+    connection opened.
+
+    Refcounting usually hides it, which is why the suite is green: the local
+    dies when the method returns and CPython finalizes immediately. It stops
+    hiding it the moment anything else holds a frame alive -- a traceback, a
+    debugger, a coverage tracer. Under `pytest --cov` the v3->v4 and v4->v5
+    rollback drills both failed with `PermissionError: [WinError 32]`, because
+    Windows will not unlink a file with an open handle and rollback REPLACES the
+    live database. The recovery path was depending on garbage-collection timing.
+
+    Holding the connections in a list is what makes this deterministic rather
+    than a race: it reproduces exactly the condition -- an outside reference --
+    that the tracer created by accident.
+    """
+    opened: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+
+    def tracking_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        connection = real_connect(*args, **kwargs)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", tracking_connect)
+
+    root = tmp_path / "project"
+    root.mkdir()
+    store = RepositoryStore(root)
+    store.initialize()
+    store.record_task("task-close", "documentation", "low", "a" * 64, 1)
+
+    assert opened, "the tracking hook never fired, so this test proves nothing"
+    still_open = [c for c in opened if _connection_is_open(c)]
+    assert still_open == [], f"{len(still_open)} of {len(opened)} connections left open"

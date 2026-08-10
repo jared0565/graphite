@@ -7,7 +7,8 @@ import os
 import secrets
 import sqlite3
 import stat
-from contextlib import closing
+from contextlib import closing, contextmanager
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -260,6 +261,35 @@ class LifecycleStore:
         except sqlite3.Error as exc:
             raise _translate_database_error(exc) from exc
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        """End the transaction like `with connection:` does, then actually CLOSE it.
+
+        `sqlite3.Connection.__exit__` commits or rolls back and leaves the handle
+        OPEN -- a long-standing trap in that API. `with self._connection() as c:`
+        therefore released nothing, and 51 sites across this package used it.
+        Measured: 934 `ResourceWarning: unclosed database` in one suite run.
+
+        Refcounting hides it: the local dies when the method returns and CPython
+        finalizes immediately, which is why the suite was green. It stops hiding
+        the moment anything else holds a frame alive -- a traceback, a debugger,
+        a coverage tracer. Under `pytest --cov` the v3->v4 and v4->v5 rollback
+        drills failed with `PermissionError: [WinError 32]`: Windows will not
+        unlink a file with an open handle, and rollback REPLACES the live
+        database. The recovery path was depending on collector timing.
+
+        The methods that manage their own transaction keep using `_connect` with
+        an explicit `try/finally: connection.close()` -- they were already
+        correct, and wrapping them here would add a second commit they did not
+        ask for.
+        """
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def _connect_readonly(self) -> sqlite3.Connection:
         """Open existing lifecycle authority without creating or mutating repository state."""
         current = self.root
@@ -470,7 +500,7 @@ class LifecycleStore:
 
     def integrity_check(self) -> str:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 self._validate_integrity(connection)
         except LifecycleStorageError:
             raise
@@ -480,7 +510,7 @@ class LifecycleStore:
 
     def pragma_state(self) -> dict[str, int | str]:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 return {
                     "foreign_keys": int(connection.execute("PRAGMA foreign_keys").fetchone()[0]),
                     "journal_mode": str(connection.execute("PRAGMA journal_mode").fetchone()[0]).casefold(),
@@ -618,7 +648,7 @@ class LifecycleStore:
     ) -> CurrentLifecycleObservation | None:
         boundary = _digest(boundary_digest, "lifecycle_boundary_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 row = connection.execute(
                     """SELECT boundary_digest,provider,runtime_kind,identity_digest,
                     identity_json,state,policy_version,observed_at,updated_at
@@ -732,7 +762,7 @@ class LifecycleStore:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_EVENT_PAGE_SIZE:
             raise ValueError("events_limit_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(
                     """SELECT payload_json FROM lifecycle_events
                     WHERE boundary_digest=? ORDER BY occurred_at DESC,event_id DESC LIMIT ?""",
@@ -824,7 +854,7 @@ class LifecycleStore:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_EVENT_PAGE_SIZE:
             raise ValueError("invalidations_limit_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(
                     """SELECT * FROM authority_invalidations WHERE boundary_digest=?
                     ORDER BY invalidated_at,invalidation_id LIMIT ?""",

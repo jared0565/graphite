@@ -9,7 +9,8 @@ import re
 import secrets
 import sqlite3
 import stat
-from contextlib import closing
+from contextlib import closing, contextmanager
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -896,6 +897,35 @@ class RepositoryStore:
         except sqlite3.Error as exc:
             raise _translate_database_error(exc) from exc
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        """End the transaction like `with connection:` does, then actually CLOSE it.
+
+        `sqlite3.Connection.__exit__` commits or rolls back and leaves the handle
+        OPEN -- a long-standing trap in that API. `with self._connection() as c:`
+        therefore released nothing, and 51 sites across this package used it.
+        Measured: 934 `ResourceWarning: unclosed database` in one suite run.
+
+        Refcounting hides it: the local dies when the method returns and CPython
+        finalizes immediately, which is why the suite was green. It stops hiding
+        the moment anything else holds a frame alive -- a traceback, a debugger,
+        a coverage tracer. Under `pytest --cov` the v3->v4 and v4->v5 rollback
+        drills failed with `PermissionError: [WinError 32]`: Windows will not
+        unlink a file with an open handle, and rollback REPLACES the live
+        database. The recovery path was depending on collector timing.
+
+        The methods that manage their own transaction keep using `_connect` with
+        an explicit `try/finally: connection.close()` -- they were already
+        correct, and wrapping them here would add a second commit they did not
+        ask for.
+        """
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def initialize(self) -> None:
         _secure_repository_directory(self.root, self.path.parent)
         _validate_database_file(self.path)
@@ -1467,7 +1497,7 @@ class RepositoryStore:
 
     def integrity_check(self) -> str:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 row = connection.execute("PRAGMA integrity_check").fetchone()
         except sqlite3.Error as exc:
             raise _translate_database_error(exc) from exc
@@ -1476,7 +1506,7 @@ class RepositoryStore:
         return "ok"
 
     def pragma_state(self) -> dict[str, int | str]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
             journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).casefold()
             busy_timeout = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
@@ -1501,7 +1531,7 @@ class RepositoryStore:
             raise ValueError("objective_hash_invalid")
         created_at = _nonnegative_integer(created_at, "created_at_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 cursor = connection.execute(
                     "INSERT OR IGNORE INTO tasks(task_id, category, risk, objective_hash, created_at) "
                     "VALUES (?, ?, ?, ?, ?)",
@@ -1531,7 +1561,7 @@ class RepositoryStore:
             _nonnegative_integer(created_at, "created_at_invalid"),
         )
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 cursor = connection.execute(
                     """INSERT OR IGNORE INTO decisions(
                         decision_id, task_id, model_id, effort, policy_version,
@@ -1614,7 +1644,7 @@ class RepositoryStore:
             raise ValueError("outcome_invalid")
         recorded_at = _nonnegative_integer(recorded_at, "recorded_at_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 cursor = connection.execute(
                     "INSERT OR IGNORE INTO outcomes(outcome_id, execution_id, provenance, success, severe_failure, recorded_at) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
@@ -1640,7 +1670,7 @@ class RepositoryStore:
         if not _HEX_64.fullmatch(graph_fingerprint):
             raise ValueError("graph_fingerprint_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 cursor = connection.execute(
                     """INSERT OR IGNORE INTO execution_evidence(
                         execution_id, task_id, decision_id, graph_fingerprint
@@ -1653,7 +1683,7 @@ class RepositoryStore:
 
     def execution_evidence(self, execution_id: str) -> dict[str, str] | None:
         execution_id = _identifier(execution_id, "execution_id_invalid")
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """SELECT ee.task_id, ee.decision_id, ee.graph_fingerprint
                 FROM execution_evidence ee
@@ -1783,7 +1813,7 @@ class RepositoryStore:
         updated_at = _nonnegative_integer(updated_at, "updated_at_invalid")
         status = "persistence_failed" if persistence_failed else "failed"
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 cursor = connection.execute(
                     """UPDATE execution_attempts
                     SET status = ?, failure_reason = ?, updated_at = ?
@@ -2101,7 +2131,7 @@ class RepositoryStore:
         query += " ORDER BY a.attempt_id LIMIT ?"
         parameters.append(limit + 1)
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(query, parameters).fetchall()
         except sqlite3.Error as exc:
             raise _translate_database_error(exc) from exc
@@ -2178,7 +2208,7 @@ class RepositoryStore:
 
     def execution_attempt(self, attempt_id: str) -> dict[str, Any] | None:
         attempt_id = _identifier(attempt_id, "attempt_id_invalid")
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM execution_attempts WHERE attempt_id = ?",
                 (attempt_id,),
@@ -2186,7 +2216,7 @@ class RepositoryStore:
         return None if row is None else dict(row)
 
     def outcome_evidence_rows(self) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 """SELECT o.outcome_id, o.execution_id, o.provenance, o.success,
                     o.severe_failure, o.recorded_at, e.model_id, e.effort,
@@ -2202,7 +2232,7 @@ class RepositoryStore:
         execution_id = _identifier(execution_id, "execution_id_invalid")
         reviewed_at = _nonnegative_integer(reviewed_at, "reviewed_at_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 cursor = connection.execute(
                     "INSERT OR IGNORE INTO incident_reviews(execution_id, reviewed_at) VALUES (?, ?)",
                     (execution_id, reviewed_at),
@@ -2212,7 +2242,7 @@ class RepositoryStore:
             raise _translate_database_error(exc) from exc
 
     def latest_incident_review(self) -> int | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute("SELECT MAX(reviewed_at) FROM incident_reviews").fetchone()
         return None if row is None or row[0] is None else int(row[0])
 
@@ -2278,7 +2308,7 @@ class RepositoryStore:
             raise ValueError("comparison_invalid")
         created_at = _nonnegative_integer(created_at, "created_at_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute(
                     """INSERT INTO blind_comparisons(
                         comparison_id, primary_execution_id, shadow_execution_id,
@@ -2295,7 +2325,7 @@ class RepositoryStore:
         if verdict not in {"a", "b", "tie", "reject_both"}:
             raise ValueError("pairwise_verdict_invalid")
         recorded_at = _nonnegative_integer(recorded_at, "recorded_at_invalid")
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 """UPDATE blind_comparisons SET verdict = ?, recorded_at = ?
                 WHERE comparison_id = ? AND verdict IS NULL""",
@@ -2305,7 +2335,7 @@ class RepositoryStore:
 
     def blind_comparison(self, comparison_id: str) -> dict[str, Any] | None:
         comparison_id = _identifier(comparison_id, "comparison_id_invalid")
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM blind_comparisons WHERE comparison_id = ?",
                 (comparison_id,),
@@ -2347,7 +2377,7 @@ class RepositoryStore:
                 connection.close()
 
     def confidence_rows(self) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 """SELECT model_id, effort, category, risk, sample_count,
                     success_count, severe_failure_count
@@ -2377,7 +2407,7 @@ class RepositoryStore:
         if not _HEX_64.fullmatch(canonical_root_hash):
             raise ValueError("canonical_root_hash_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 existing = connection.execute(
                     "SELECT worktree_id,task_id,baseline_commit,canonical_root_hash,created_at "
                     "FROM task_worktrees WHERE worktree_id=?",
@@ -2409,7 +2439,7 @@ class RepositoryStore:
             raise ValueError("worktree_status_invalid")
         updated_at = _nonnegative_integer(updated_at, "updated_at_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 cursor = connection.execute(
                     "UPDATE task_worktrees SET status=?,updated_at=? "
                     "WHERE worktree_id=? AND status=?",
@@ -2432,7 +2462,7 @@ class RepositoryStore:
 
     def task_worktree_record(self, worktree_id: str) -> dict[str, Any] | None:
         worktree_id = _identifier(worktree_id, "worktree_id_invalid")
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM task_worktrees WHERE worktree_id=?", (worktree_id,)
             ).fetchone()
@@ -2440,7 +2470,7 @@ class RepositoryStore:
 
     def latest_task_worktree_record(self, task_id: str) -> dict[str, Any] | None:
         task_id = _identifier(task_id, "task_id_invalid")
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM task_worktrees WHERE task_id=? "
                 "ORDER BY created_at DESC,worktree_id DESC LIMIT 1",
@@ -2450,7 +2480,7 @@ class RepositoryStore:
 
     def worktree_validation_record(self, worktree_id: str) -> dict[str, Any] | None:
         worktree_id = _identifier(worktree_id, "worktree_id_invalid")
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """SELECT v.*,a.attempt_id,a.execution_id,a.status AS attempt_status,
                     a.provider,a.task_id,a.decision_id,a.worktree_id,t.risk,t.category
@@ -2482,7 +2512,7 @@ class RepositoryStore:
         if not _HEX_64.fullmatch(primary_diff_hash):
             raise ValueError("primary_diff_hash_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 cursor = connection.execute(
                     "INSERT OR IGNORE INTO review_links VALUES (?,?,?,?)", values
                 )
@@ -2548,7 +2578,7 @@ class RepositoryStore:
             if not _HEX_64.fullmatch(value):
                 raise ValueError(code)
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 cursor = connection.execute(
                     """INSERT OR IGNORE INTO cli_execution_attempts(
                         attempt_id,approval_id,task_id,decision_id,worktree_id,provider,
@@ -2583,7 +2613,7 @@ class RepositoryStore:
         if execution_id is not None:
             execution_id = _identifier(execution_id, "execution_id_invalid")
         updated_at = _nonnegative_integer(updated_at, "updated_at_invalid")
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 "UPDATE cli_execution_attempts SET status=?,failure_reason=?,execution_id=?,"
                 "updated_at=? WHERE attempt_id=? AND status IN ('pending','persistence_failed')",
@@ -2625,7 +2655,7 @@ class RepositoryStore:
         if outcome not in {"passed", "failed", "blocked", "not_run"}:
             raise ValueError("validation_outcome_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 cursor = connection.execute(
                     "INSERT OR IGNORE INTO validation_results VALUES (?,?,?,?,?,?)", values
                 )
@@ -2846,7 +2876,7 @@ class RepositoryStore:
         """Persist one immutable, allowlisted telemetry event."""
         event_hash, canonical, observed_at = self._cli_telemetry_values(payload)
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 cursor = connection.execute(
                     "INSERT OR IGNORE INTO cli_telemetry_events VALUES (?,?,?)",
                     (event_hash, canonical, observed_at),
@@ -3017,7 +3047,7 @@ class RepositoryStore:
     def cli_telemetry_records(self, *, limit: int = 1000) -> tuple[dict[str, Any], ...]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
             raise ValueError("cli_telemetry_limit_invalid")
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT payload_json FROM cli_telemetry_events "
                 "ORDER BY observed_at DESC,event_hash DESC LIMIT ?", (limit,),
@@ -3121,7 +3151,7 @@ class RepositoryStore:
             signature, evidence_hash, created_at,
         )
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 cursor = connection.execute(
                     "INSERT OR IGNORE INTO cli_policy_versions VALUES (?,?,?,?,?,?,?)", values
@@ -3172,7 +3202,7 @@ class RepositoryStore:
             raise ValueError("human_authority_required")
         created_at = _nonnegative_integer(created_at, "created_at_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 exists = connection.execute(
                     "SELECT 1 FROM cli_policy_versions WHERE policy_version=?",
@@ -3204,11 +3234,11 @@ class RepositoryStore:
             raise _translate_database_error(exc) from exc
 
     def active_cli_policy_version(self) -> str | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             return self._active_cli_policy(connection)
 
     def cli_policy_event_records(self) -> tuple[dict[str, Any], ...]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT policy_version,action,prior_version,actor,created_at "
                 "FROM cli_policy_events ORDER BY event_id"
@@ -3218,7 +3248,7 @@ class RepositoryStore:
     def row_count(self, table: str) -> int:
         if table not in _TABLES:
             raise ValueError("table_invalid")
-        with self._connect() as connection:
+        with self._connection() as connection:
             return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
 
     def save_capability_snapshot_record(self, snapshot: CapabilitySnapshot) -> bool:
@@ -3246,7 +3276,7 @@ class RepositoryStore:
             snapshot.expires_at,
         )
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 existing = connection.execute(
                     "SELECT capability_snapshot_digest,provider,requested_model,"
                     "effective_model,effort,executable_sha256,cli_version,"
@@ -3276,7 +3306,7 @@ class RepositoryStore:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 64:
             raise ValueError("capability_snapshot_limit_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(
                     "SELECT capability_snapshot_digest,payload_json FROM capability_snapshots "
                     "ORDER BY capability_snapshot_digest LIMIT ?",
@@ -3344,7 +3374,7 @@ class RepositoryStore:
             raise ValueError("lifecycle_identity_digest_invalid")
         bound_at = _nonnegative_integer(bound_at, "bound_at_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 return self._save_lifecycle_binding(
                     connection,
                     table="lifecycle_snapshot_bindings",
@@ -3373,7 +3403,7 @@ class RepositoryStore:
             raise ValueError("lifecycle_identity_digest_invalid")
         bound_at = _nonnegative_integer(bound_at, "bound_at_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 return self._save_lifecycle_binding(
                     connection,
                     table="lifecycle_approval_bindings",
@@ -3400,7 +3430,7 @@ class RepositoryStore:
             raise ValueError("lifecycle_identity_digest_invalid")
         bound_at = _nonnegative_integer(bound_at, "bound_at_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 return self._save_lifecycle_binding(
                     connection,
                     table="lifecycle_attempt_bindings",
@@ -3434,7 +3464,7 @@ class RepositoryStore:
         else:
             authority_id = _identifier(authority_id, "authority_id_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 if authority_kind == "capability_snapshot":
                     row = connection.execute(
                         """SELECT COALESCE(
@@ -3505,7 +3535,7 @@ class RepositoryStore:
             raise ValueError("registry_snapshot_too_large")
         payload_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute(
                     """INSERT INTO registry_snapshots(
                         snapshot_id, payload_json, payload_hash, refreshed_at, expires_at
@@ -3522,7 +3552,7 @@ class RepositoryStore:
 
     def load_registry_snapshot(self) -> dict[str, Any] | None:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 row = connection.execute(
                     "SELECT payload_json, payload_hash FROM registry_snapshots WHERE snapshot_id = 1"
                 ).fetchone()
@@ -3562,7 +3592,7 @@ class RepositoryStore:
         expires_at = _nonnegative_integer(expires_at, "expires_at_invalid")
         reserved_tokens = _nonnegative_integer(reserved_tokens, "reserved_tokens_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 existing = connection.execute(
                     "SELECT nonce_hash, manifest_hash, expires_at, reserved_tokens FROM approvals WHERE approval_id = ?",
                     (approval_id,),
@@ -3658,7 +3688,7 @@ class RepositoryStore:
 
     def approval_status(self, approval_id: str) -> str | None:
         approval_id = _identifier(approval_id, "approval_id_invalid")
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT status FROM approvals WHERE approval_id = ?",
                 (approval_id,),
@@ -3731,7 +3761,7 @@ class RepositoryStore:
         if not _HEX_64.fullmatch(lifecycle_identity_digest):
             raise ValueError("lifecycle_identity_digest_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 snapshots = tuple(
                     str(row[0])
                     for row in connection.execute(
@@ -3770,7 +3800,7 @@ class RepositoryStore:
     ) -> tuple[str, str] | None:
         approval_id = _identifier(approval_id, "approval_id_invalid")
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 row = connection.execute(
                     "SELECT capability_snapshot_digest,lifecycle_identity_digest "
                     "FROM lifecycle_approval_bindings WHERE approval_id=?",
@@ -3817,7 +3847,7 @@ class RepositoryStore:
                 connection.close()
 
     def reserved_token_total(self) -> int:
-        with self._connect() as connection:
+        with self._connection() as connection:
             return int(
                 connection.execute(
                     "SELECT COALESCE(SUM(token_amount), 0) FROM budget_ledger WHERE entry_type = 'reservation'"
