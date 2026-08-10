@@ -359,8 +359,13 @@ def _run_git(
         # (started, protected config unreadable). Different causes, different
         # fixes, and `from None` then discards the one fact that separates them
         # -- graphite#37's single CI sighting could not be taken any further
-        # than the string. The class name carries no path, argv or environment.
-        raise DiffPolicyError("git_unavailable", type(exc).__name__) from None
+        # than the string.
+        #
+        # `diagnostic()` rather than `type(exc).__name__`: the class name alone
+        # still leaves seven `GitLaunchError` sites indistinguishable, and says
+        # nothing about what the OS refused. It stays path-free -- a fixed step
+        # token and an integer errno, never `filename`, argv or Git's own text.
+        raise DiffPolicyError("git_unavailable", exc.diagnostic()) from None
     if result.returncode != 0:
         raise DiffPolicyError("git_failed")
     return result.stdout

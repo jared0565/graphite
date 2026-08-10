@@ -215,3 +215,32 @@ def test_inspect_diff_rejects_case_collisions_and_limits(tmp_path: Path) -> None
 def test_index_gitlink_is_rejected_as_a_submodule() -> None:
     with pytest.raises(WorktreeError, match="^source_special_file$"):
         _validate_index(b"160000 " + b"1" * 40 + b" 0\tmodule\0")
+
+
+def test_the_os_error_number_survives_the_hop_into_the_policy_error() -> None:
+    """#37's sighting reached a CI log as the bare word `git_unavailable`.
+
+    Every detail here is `from None`-sanitised across two hops, so anything not
+    handed across explicitly is gone by the time a human reads it. That is the
+    whole failure mode: the errno exists at the raise site and nowhere useful.
+    """
+    launch = GitLaunchError("unable to run Git command", reason="popen", os_error=22)
+
+    with pytest.raises(DiffPolicyError) as excinfo:
+        _run_git(_RaisingRunner(launch), ["status"], maximum=64)
+
+    assert excinfo.value.code == "git_unavailable", "the stable taxonomy must not widen"
+    assert "os=22" in str(excinfo.value)
+    assert "popen" in str(excinfo.value)
+
+
+def test_a_git_error_with_nothing_to_add_reads_exactly_as_before() -> None:
+    """Falsifiability guard. If `diagnostic()` appended a placeholder for the
+    absent fields, the test above would pass on a format that reports `os=None`
+    for the four launch sites that never hold an `OSError` at all."""
+    with pytest.raises(DiffPolicyError) as excinfo:
+        _run_git(_RaisingRunner(GitUnavailableError("nope")), ["status"], maximum=64)
+
+    assert "GitUnavailableError" in str(excinfo.value)
+    assert "os=" not in str(excinfo.value)
+    assert "None" not in str(excinfo.value)

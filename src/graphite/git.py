@@ -27,7 +27,44 @@ class GitResult:
 
 
 class GitError(RuntimeError):
-    """Base class for sanitized Git execution failures."""
+    """Base class for sanitized Git execution failures.
+
+    The MESSAGE is a path-free constant, deliberately: Git's own text routinely
+    embeds a checkout path, which is why every raise site here is re-raised
+    `from None` upstream. That sanitising works, and it also left `git_unavailable`
+    carrying one bit of information -- the class name -- for faults with entirely
+    different fixes.
+
+    `diagnostic()` is the seam. It carries the step that failed and the OS error
+    number beside the message rather than inside it, so `str(exc)` stays exactly
+    the constant its tests assert. The vocabulary is fixed tokens and integers;
+    an `OSError`'s `.filename` is a path and must never reach it.
+    """
+
+    reason: str | None = None
+    os_error: int | None = None
+
+    def diagnostic(self) -> str:
+        """Path-free identity: which class, which step, which errno."""
+        parts = [type(self).__name__]
+        if self.reason:
+            parts.append(self.reason)
+        if self.os_error is not None:
+            parts.append(f"os={self.os_error}")
+        return ":".join(parts)
+
+
+class _StepGitError(GitError):
+    """A `GitError` that knows which step raised it and what the OS said."""
+
+    def __init__(
+        self, message: str, *, reason: str | None = None, os_error: int | None = None
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        # `None` stays `None`. Four launch sites hold no `OSError` at all, and an
+        # `os=None` would read as an errno that simply is not one.
+        self.os_error = os_error
 
 
 class GitUnavailableError(GitError):
@@ -38,16 +75,39 @@ class GitTimeoutError(GitError):
     """Raised when a Git command exceeds its deadline."""
 
 
-class GitLaunchError(GitError):
-    """Raised when the trusted Git process cannot be launched."""
+class GitLaunchError(_StepGitError):
+    """Raised when the trusted Git process cannot be launched.
+
+    Seven distinct sites raise this inside `_run_bounded` alone -- root
+    resolution, spawn, wait, a missing stdout pipe, a reader thread that would
+    not join, a read that failed, and a close that failed. They are the reason
+    graphite#37's single sighting could not be taken past the bucket name, so
+    each one passes its own `reason`.
+    """
 
 
 class GitOutputLimitError(GitError):
     """Raised when Git stdout exceeds the configured bound."""
 
 
-class GitUnsupportedVersionError(GitError):
-    """Raised when Git's protected command configuration is unavailable."""
+class GitUnsupportedVersionError(_StepGitError):
+    """Raised when Git's protected command configuration is unavailable.
+
+    Three unrelated conditions land here, and the failure this class is NAMED
+    for is the rarest of them. Git really being older than 2.38 is a permanent,
+    obvious, one-machine fact. The other two are transient: the `--version`
+    probe timed out inside `_GIT_VERSION_TIMEOUT_SECONDS`, or it could not be
+    launched at all. Both then widen into `git_unavailable` upstream, which is
+    how graphite#37 got a CI log saying an installed, working Git was
+    unavailable.
+
+    The probe's budget is two seconds for one process spawn, and `_version` is
+    cached per RUNNER -- `collect_diff_evidence`, `create_task_worktree` and
+    `accept` each build their own -- so a single routing operation pays that
+    race several times over. On a loaded Windows runner that is a plausible
+    intermittent failure, and `reason` is what lets the next sighting say so
+    instead of blaming the Git version.
+    """
 
 
 class GitRunner:
@@ -57,7 +117,9 @@ class GitRunner:
         try:
             self.root = project_root.resolve()
         except OSError as exc:
-            raise GitLaunchError("unable to run Git command") from exc
+            raise GitLaunchError(
+                "unable to run Git command", reason="resolve", os_error=exc.errno
+            ) from exc
         self.executable = _resolve_git_executable(
             self.root, platform_name=platform_name
         )
@@ -104,12 +166,27 @@ class GitRunner:
                     max_stdout_bytes=_GIT_VERSION_STDOUT_MAX_BYTES,
                 )
             except (GitTimeoutError, GitLaunchError, GitOutputLimitError) as exc:
+                # The probe never returned a version, so nothing here is
+                # evidence about Git's version -- carry what actually happened.
+                # `os_error` rides along when the inner failure had one; the
+                # class name alone cannot separate "spawn took longer than two
+                # seconds" from "spawn was refused".
                 raise GitUnsupportedVersionError(
-                    "Git 2.38 or newer is required"
+                    "Git 2.38 or newer is required",
+                    reason=f"probe_{type(exc).__name__}",
+                    os_error=getattr(exc, "os_error", None),
                 ) from exc
             version = _parse_git_version(result.stdout) if result.returncode == 0 else None
-            if version is None or version < _MINIMUM_GIT_VERSION:
-                raise GitUnsupportedVersionError("Git 2.38 or newer is required")
+            if version is None:
+                # Ran, and said something this parser does not recognise. Not the
+                # same finding as a version that parsed and was too low.
+                raise GitUnsupportedVersionError(
+                    "Git 2.38 or newer is required", reason="unreadable"
+                )
+            if version < _MINIMUM_GIT_VERSION:
+                raise GitUnsupportedVersionError(
+                    "Git 2.38 or newer is required", reason="too_old"
+                )
             self._version = version
 
     def _run_bounded(
@@ -134,15 +211,23 @@ class GitRunner:
         except subprocess.TimeoutExpired as exc:
             raise GitTimeoutError("Git command timeout") from exc
         except OSError as exc:
-            raise GitLaunchError("unable to run Git command") from exc
+            raise GitLaunchError(
+                "unable to run Git command", reason="popen", os_error=exc.errno
+            ) from exc
 
         if process.stdout is None:
             _bounded_cleanup(process)
-            raise GitLaunchError("unable to run Git command")
+            raise GitLaunchError("unable to run Git command", reason="no_stdout")
 
         stdout = bytearray()
         overflow = threading.Event()
         read_failed = threading.Event()
+        # The reader runs on its own thread, so its exception cannot propagate --
+        # it can only leave a trace here. An `Event` alone records THAT the read
+        # failed and never why, which is how a bounded read fault and a pipe torn
+        # down by the peer became the same log line. One slot, written once,
+        # before the flag any waiter keys on.
+        read_error: list[int | None] = []
 
         def read_stdout() -> None:
             try:
@@ -160,7 +245,8 @@ class GitRunner:
                             pass
                         return
                     stdout.extend(chunk)
-            except OSError:
+            except OSError as exc:
+                read_error.append(exc.errno)
                 read_failed.set()
 
         reader = threading.Thread(target=read_stdout, daemon=True)
@@ -172,20 +258,26 @@ class GitRunner:
             raise GitTimeoutError("Git command timeout") from exc
         except OSError as exc:
             _bounded_cleanup(process, reader)
-            raise GitLaunchError("unable to run Git command") from exc
+            raise GitLaunchError(
+                "unable to run Git command", reason="wait", os_error=exc.errno
+            ) from exc
 
         reader.join(timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS)
         if reader.is_alive():
             _bounded_cleanup(process, reader)
-            raise GitLaunchError("unable to run Git command")
+            raise GitLaunchError("unable to run Git command", reason="reader_hang")
         if overflow.is_set():
             _bounded_cleanup(process, reader)
             raise GitOutputLimitError("Git command output limit exceeded")
         if read_failed.is_set():
             _close_stdout(process)
-            raise GitLaunchError("unable to run Git command")
+            raise GitLaunchError(
+                "unable to run Git command",
+                reason="read",
+                os_error=read_error[0] if read_error else None,
+            )
         if not _close_stdout(process):
-            raise GitLaunchError("unable to run Git command")
+            raise GitLaunchError("unable to run Git command", reason="close")
         return GitResult(returncode=returncode, stdout=bytes(stdout))
 
 

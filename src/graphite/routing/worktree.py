@@ -96,7 +96,7 @@ def _run(runner: GitRunner, arguments: list[str], *, maximum: int = MAX_GIT_META
         raise WorktreeError("git_output_limit") from None
     except GitError as exc:
         # See the matching branch in `diff_policy._run_git` (graphite#37).
-        raise WorktreeError("git_unavailable", type(exc).__name__) from None
+        raise WorktreeError("git_unavailable", exc.diagnostic()) from None
 
 
 def _decode_line(output: bytes, code: str) -> str:

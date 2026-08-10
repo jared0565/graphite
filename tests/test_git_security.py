@@ -612,3 +612,219 @@ def test_git_runner_sanitizes_process_errors(
 
     assert str(error.value) == message
     assert "private" not in str(error.value)
+
+
+# --- #37: which launch failure was it, and what did the OS say? -------------
+#
+# `git_unavailable` is the one sighting recorded on graphite#37, and it is a
+# bucket, not a cause. `_run_git` widens `GitError` into it, so three unrelated
+# faults arrive wearing the same string: no executable found, found but would
+# not start, started but its protected config was unreadable. `b3ae61a` split
+# those by class name -- which is one bit of information for SEVEN distinct
+# `GitLaunchError` raise sites inside `_run_bounded` alone.
+#
+# The errno is the discriminator, and today every site throws it away: three
+# sites hold a live `OSError` and raise a bare message from it, and the reader
+# thread catches `OSError` into a boolean `Event` where even the exception is
+# gone. A boolean says WHICH step failed and never WHY -- the same lesson the
+# macOS cleanup round paid for.
+#
+# The invariant these must not break: the sanitized MESSAGE stays exactly what
+# it is (a path-free constant, asserted verbatim above), because Git's own text
+# routinely embeds a path. So the detail goes in a separate `diagnostic()`, and
+# it carries a fixed-vocabulary step token and an integer errno -- never a
+# message, never `filename`, never argv.
+
+
+def test_a_launch_failure_carries_the_os_error_number() -> None:
+    """Without this, `git_unavailable` on a CI runner is unactionable.
+
+    A Windows spawn failure that is `ENOMEM`-shaped (the runner is out of paging
+    file) needs a completely different answer from one that is `EACCES`-shaped
+    (antivirus holding the executable). Both currently print the same string.
+    """
+    error = git_module.GitLaunchError(
+        "unable to run Git command", reason="popen", os_error=22
+    )
+
+    assert "os=22" in error.diagnostic()
+    assert "popen" in error.diagnostic()
+    assert "GitLaunchError" in error.diagnostic()
+
+
+def test_the_sanitized_message_is_unchanged_by_the_diagnostic() -> None:
+    """The detail must ride beside the message, never inside it.
+
+    `test_git_runner_sanitizes_process_errors` asserts `str(error.value)` is
+    equal to a constant, and that assertion is load-bearing: it is what proves
+    Git's path-bearing text never escapes. Appending the diagnostic to `__str__`
+    would defeat it while looking like an improvement.
+    """
+    error = git_module.GitLaunchError(
+        "unable to run Git command", reason="popen", os_error=22
+    )
+
+    assert str(error) == "unable to run Git command"
+
+
+def test_a_launch_failure_with_no_os_error_claims_none() -> None:
+    """Vacuity guard. Four of the seven sites have no `OSError` in hand at all
+    (no stdout pipe, reader still alive, close failed). If the format emitted a
+    placeholder those would read as `os=None` -- an errno-shaped field that is
+    not an errno, which is worse than an absent one."""
+    error = git_module.GitLaunchError("unable to run Git command", reason="no_stdout")
+
+    assert "os=" not in error.diagnostic()
+    assert "None" not in error.diagnostic()
+    assert "no_stdout" in error.diagnostic()
+
+
+def test_the_os_error_filename_never_reaches_the_diagnostic() -> None:
+    """`OSError` carries `.filename`, and it is a PATH.
+
+    This is the one way the errno work could reintroduce exactly the leak the
+    `from None` sanitising exists to prevent -- stringify the exception instead
+    of reading `.errno` and the checkout path ships to the CI log.
+    """
+    private = r"C:\Users\someone\private\checkout\git.exe"
+    source = OSError(13, "Permission denied", private)
+    assert source.filename == private, "fixture must actually carry a path"
+
+    error = git_module.GitLaunchError(
+        "unable to run Git command", reason="popen", os_error=source.errno
+    )
+
+    assert "os=13" in error.diagnostic()
+    assert private not in error.diagnostic()
+    assert "someone" not in error.diagnostic()
+    assert "Permission denied" not in error.diagnostic()
+
+
+def test_distinct_launch_steps_are_distinguishable() -> None:
+    """One string for seven raise sites is what made #37 a dead end."""
+    steps = [
+        git_module.GitLaunchError("unable to run Git command", reason=reason).diagnostic()
+        for reason in ("resolve", "popen", "wait", "no_stdout", "reader_hang", "read", "close")
+    ]
+
+    assert len(set(steps)) == len(steps), f"launch steps collapse together: {steps}"
+
+
+def test_a_plain_git_error_still_reports_just_its_class() -> None:
+    """Errors that never had a step or an errno must not grow noise."""
+    assert git_module.GitUnavailableError("nope").diagnostic() == "GitUnavailableError"
+
+
+def test_a_real_spawn_failure_wires_its_own_errno_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tests above construct the error by hand, so they pin the FORMAT and
+    say nothing about whether any raise site fills it in. That gap is the whole
+    defect restated: a field that exists and is never populated reports exactly
+    as much as no field at all.
+
+    So drive a real `Popen` failure through `GitRunner` and read what comes out.
+    The `OSError` here carries a filename, because that is the realistic shape --
+    a spawn refusal names the executable it refused.
+    """
+    import errno as errno_module
+
+    repository = tmp_path / "repository"
+    trusted_bin = tmp_path / "trusted"
+    repository.mkdir()
+    trusted_bin.mkdir()
+    executable = trusted_bin / ("git.exe" if os.name == "nt" else "git")
+    _write(executable, "trusted")
+    if os.name != "nt":
+        executable.chmod(0o700)
+    monkeypatch.setenv("PATH", str(trusted_bin))
+
+    private = str(tmp_path / "private" / "git.exe")
+    refusal = OSError(errno_module.EACCES, "Permission denied", private)
+
+    def refusing_popen(command: list[str], **kwargs: object) -> _FakeProcess:
+        if command[1:] == ["--version"]:
+            return _FakeProcess(b"git version 2.38.0\n")
+        raise refusal
+
+    monkeypatch.setattr(git_module.subprocess, "Popen", refusing_popen)
+
+    with pytest.raises(git_module.GitLaunchError) as error:
+        git_module.GitRunner(repository).run(["status"], timeout_seconds=1)
+
+    assert error.value.os_error == errno_module.EACCES, "the errno was dropped at the raise site"
+    assert error.value.reason == "popen", "the step was not recorded"
+    assert f"os={errno_module.EACCES}" in error.value.diagnostic()
+    assert private not in error.value.diagnostic(), "the OSError filename leaked"
+    assert str(error.value) == "unable to run Git command", "the sanitized message moved"
+
+
+def _trusted_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    repository = tmp_path / "repository"
+    trusted_bin = tmp_path / "trusted"
+    repository.mkdir()
+    trusted_bin.mkdir()
+    executable = trusted_bin / ("git.exe" if os.name == "nt" else "git")
+    _write(executable, "trusted")
+    if os.name != "nt":
+        executable.chmod(0o700)
+    monkeypatch.setenv("PATH", str(trusted_bin))
+    return repository
+
+
+def test_a_version_probe_that_timed_out_does_not_read_as_an_old_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The likeliest reading of graphite#37, and today it is unfalsifiable.
+
+    `_ensure_supported_version` spends at most `_GIT_VERSION_TIMEOUT_SECONDS`
+    (2.0) on `git --version`, and folds GitTimeoutError, GitLaunchError and
+    GitOutputLimitError into `GitUnsupportedVersionError` -- which `_run_git`
+    then buckets into `git_unavailable`. So "this runner was too slow to spawn a
+    process for two seconds" and "this machine has Git 2.20" arrive as the same
+    string, and the first is exactly what a loaded Windows CI runner produces
+    intermittently while every earlier Git call in the same test succeeded.
+
+    Naming the inner cause is what makes the next sighting decide between them
+    instead of restating the bucket.
+    """
+    repository = _trusted_repository(tmp_path, monkeypatch)
+
+    def slow_version_popen(command: list[str], **kwargs: object) -> _FakeProcess:
+        if command[1:] == ["--version"]:
+            return _FakeProcess(b"", timeout_until_killed=True)
+        return _FakeProcess(b"")
+
+    monkeypatch.setattr(git_module.subprocess, "Popen", slow_version_popen)
+
+    with pytest.raises(git_module.GitUnsupportedVersionError) as error:
+        git_module.GitRunner(repository).run(["status"], timeout_seconds=1)
+
+    assert "GitTimeoutError" in error.value.diagnostic(), (
+        "a probe that ran out of time must say so; reporting the bucket alone is "
+        "what left #37 undiagnosable"
+    )
+    assert str(error.value) == "Git 2.38 or newer is required", "message must stay sanitized"
+
+
+def test_a_genuinely_old_git_stays_distinguishable_from_a_slow_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Falsifiability guard for the test above.
+
+    If every `GitUnsupportedVersionError` grew the same suffix, that test would
+    pass while still collapsing the two causes it exists to separate.
+    """
+    repository = _trusted_repository(tmp_path, monkeypatch)
+
+    def old_git_popen(command: list[str], **kwargs: object) -> _FakeProcess:
+        return _FakeProcess(b"git version 2.20.0\n")
+
+    monkeypatch.setattr(git_module.subprocess, "Popen", old_git_popen)
+
+    with pytest.raises(git_module.GitUnsupportedVersionError) as error:
+        git_module.GitRunner(repository).run(["status"], timeout_seconds=1)
+
+    diagnostic = error.value.diagnostic()
+    assert "GitTimeoutError" not in diagnostic, "an old Git must not report a timeout"
+    assert "too_old" in diagnostic
