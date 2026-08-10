@@ -98,7 +98,7 @@ mcp = ["mcp>=1.0,<3"]
 # here because that job installs `[dev]`, and a `--timeout` flag without the
 # plugin is an unknown-argument error -- which would turn a hang into a
 # different silent failure rather than naming it. See #45.
-dev = ["pytest>=8.0", "ruff>=0.5", "pytest-timeout>=2.3"]
+dev = ["pytest>=8.0", "ruff>=0.5", "pytest-timeout>=2.3", "pytest-cov>=5.0"]
 
 # Without these the package advertises no way back to its own source. A
 # distribution page with no repository link is the shape a typosquat has, and it
@@ -152,6 +152,28 @@ include = [
     "/CONTRIBUTING.md",
     "/ARCHITECTURE.md",
     "/LICENSE",
+]
+
+# Coverage is MEASURED on demand, not on every run: `--cov` is not in `addopts`,
+# so the gate keeps its current runtime and nothing here is inert-but-costly.
+#
+# READ THE NUMBER WITH THIS CAVEAT. graphite spawns subprocesses as its normal
+# mode of operation -- probes, the daemon, hook shims, the MCP server -- and a
+# child process is not measured unless coverage is started inside it. So the
+# figure here UNDERSTATES how much of `src/graphite` actually executes, and the
+# understatement is largest in exactly the modules that matter most. It is a
+# floor and a regression signal, not a description of what the suite exercises.
+[tool.coverage.run]
+source = ["src/graphite"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
 ]
 
 [tool.ruff]
