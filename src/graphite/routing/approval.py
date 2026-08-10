@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import sqlite3
+from contextlib import closing
 import stat
 import time
 from dataclasses import dataclass
@@ -157,7 +158,7 @@ class _MachineQuotaStore:
         self.path = path
         _secure_parent(path.parent)
         try:
-            with sqlite3.connect(path, timeout=2.0) as connection:
+            with closing(sqlite3.connect(path, timeout=2.0)) as connection, connection:
                 connection.execute("PRAGMA busy_timeout = 2000")
                 connection.execute(
                     """CREATE TABLE IF NOT EXISTS reservations (
@@ -210,7 +211,7 @@ class _MachineQuotaStore:
 
     def release(self, nonce_hash: str) -> None:
         try:
-            with sqlite3.connect(self.path, timeout=2.0) as connection:
+            with closing(sqlite3.connect(self.path, timeout=2.0)) as connection, connection:
                 connection.execute(
                     "UPDATE reservations SET status = 'released' WHERE nonce_hash = ? AND status = 'reserved'",
                     (nonce_hash,),
@@ -220,7 +221,7 @@ class _MachineQuotaStore:
 
     def reserved_total(self) -> int:
         try:
-            with sqlite3.connect(self.path, timeout=2.0) as connection:
+            with closing(sqlite3.connect(self.path, timeout=2.0)) as connection, connection:
                 return int(
                     connection.execute(
                         "SELECT COALESCE(SUM(token_amount), 0) FROM reservations WHERE status = 'reserved'"

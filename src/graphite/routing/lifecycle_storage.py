@@ -702,7 +702,7 @@ class LifecycleStore:
     ) -> CurrentLifecycleObservation | None:
         boundary = _digest(boundary_digest, "lifecycle_boundary_invalid")
         try:
-            with self._connect_readonly() as connection:
+            with closing(self._connect_readonly()) as connection:
                 row = connection.execute(
                     """SELECT boundary_digest,provider,runtime_kind,identity_digest,
                     identity_json,state,policy_version,observed_at,updated_at
@@ -722,7 +722,7 @@ class LifecycleStore:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_EVENT_PAGE_SIZE:
             raise ValueError("observations_limit_invalid")
         try:
-            with self._connect_readonly() as connection:
+            with closing(self._connect_readonly()) as connection:
                 rows = connection.execute(
                     """SELECT boundary_digest,provider,runtime_kind,identity_digest,
                     identity_json,state,policy_version,observed_at,updated_at
@@ -743,7 +743,7 @@ class LifecycleStore:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_EVENT_PAGE_SIZE:
             raise ValueError("events_limit_invalid")
         try:
-            with self._connect_readonly() as connection:
+            with closing(self._connect_readonly()) as connection:
                 rows = connection.execute(
                     """SELECT payload_json FROM lifecycle_events
                     WHERE boundary_digest=? ORDER BY occurred_at DESC,event_id DESC LIMIT ?""",

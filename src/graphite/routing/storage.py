@@ -3930,7 +3930,7 @@ class AggregateStore:
     def _initialize(self) -> None:
         _secure_directory(self.path.parent)
         try:
-            with sqlite3.connect(self.path, timeout=2.0) as connection:
+            with closing(sqlite3.connect(self.path, timeout=2.0)) as connection, connection:
                 connection.execute("PRAGMA journal_mode = WAL")
                 connection.execute("PRAGMA busy_timeout = 2000")
                 connection.execute(
@@ -3960,7 +3960,7 @@ class AggregateStore:
         self._initialize()
         values = record.to_dict()
         try:
-            with sqlite3.connect(self.path, timeout=2.0) as connection:
+            with closing(sqlite3.connect(self.path, timeout=2.0)) as connection, connection:
                 connection.execute("PRAGMA busy_timeout = 2000")
                 connection.execute(
                     """INSERT INTO aggregate_events(
@@ -3978,7 +3978,7 @@ class AggregateStore:
         if not self.opt_in or not self.path.exists():
             return 0
         try:
-            with sqlite3.connect(self.path, timeout=2.0) as connection:
+            with closing(sqlite3.connect(self.path, timeout=2.0)) as connection, connection:
                 return int(connection.execute("SELECT COUNT(*) FROM aggregate_events").fetchone()[0])
         except sqlite3.Error as exc:
             raise _translate_database_error(exc) from exc
