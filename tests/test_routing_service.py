@@ -192,7 +192,11 @@ def _service(
     def execute(**kwargs: object) -> FakeResult:
         captured.update(kwargs)
         service = service_ref["service"]
-        with service.store._connect() as connection:
+        # `with connection:` ends the TRANSACTION and leaves the handle OPEN --
+        # this executor runs inside every routing test that reaches execution, so
+        # one missing `closing` leaks a handle per test. `closing` outermost so
+        # the handle is released last.
+        with closing(service.store._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT approval_id FROM approvals WHERE status='consumed'"
             ).fetchone()
