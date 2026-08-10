@@ -1908,3 +1908,41 @@ def test_machine_local_path_check_is_not_vacuous(tmp_path: Path) -> None:
     for expected in ("README.md:1", "README.md:2", "README.md:3"):
         assert any(expected in offence for offence in offences), (expected, offences)
     assert not any("README.md:4" in offence for offence in offences)
+
+
+def test_the_release_procedure_names_the_artifacts_the_build_actually_produces() -> None:
+    """A release runbook that names the wrong file is a STOP condition, not a typo.
+
+    `RELEASING.md` instructs the maintainer to "Stop for extra, missing, or
+    mismatched artifacts". So when the distribution was renamed to
+    `graphite-code`, the runbook kept naming `graphite-VERSION-py3-none-any.whl`
+    and the next release would have halted at that step -- on a doc line, with
+    the build itself perfectly correct.
+
+    Nothing caught it because nothing was looking: the rename touched
+    `pyproject.toml`, `cli.py` and a test pinning the constant, and the runbook
+    is prose. Measured against a real build, the artifacts are
+    `graphite_code-0.2.1-py3-none-any.whl` and `graphite_code-0.2.1.tar.gz` --
+    the DISTRIBUTION name, normalised to underscores, which is neither the
+    import package name nor the string in `pyproject.toml` verbatim.
+    """
+    import tomllib
+
+    root = Path(__file__).resolve().parents[1]
+    distribution = tomllib.loads(
+        (root / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["name"]
+    # PEP 427: every run of non-alphanumerics becomes a single underscore.
+    expected = re.sub(r"[-_.]+", "_", distribution)
+
+    releasing = (root / "RELEASING.md").read_text(encoding="utf-8")
+
+    assert f"{expected}-VERSION-py3-none-any.whl" in releasing, (
+        f"RELEASING.md does not name the wheel this project builds "
+        f"({expected}-VERSION-py3-none-any.whl); a release would stop on the "
+        "mismatched-artifact check"
+    )
+    assert f"{expected}-VERSION.tar.gz" in releasing, (
+        f"RELEASING.md does not name the sdist this project builds "
+        f"({expected}-VERSION.tar.gz)"
+    )

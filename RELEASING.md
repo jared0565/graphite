@@ -148,8 +148,10 @@ python -m build --no-isolation --sdist --wheel --outdir "ARTIFACT_DIR"
 ```
 
 The build must produce exactly one wheel and one source distribution matching the
-approved version, normally `graphite-VERSION-py3-none-any.whl` and
-`graphite-VERSION.tar.gz`. Stop for extra, missing, or mismatched artifacts. Resolve the
+approved version, normally `graphite_code-VERSION-py3-none-any.whl` and
+`graphite_code-VERSION.tar.gz` -- note the DISTRIBUTION name (`graphite-code`, because
+PyPI's `graphite` belongs to another project) normalised to underscores, not the
+import package name. Stop for extra, missing, or mismatched artifacts. Resolve the
 actual files as the policy-compliant `WHEEL_PATH` and `SDIST_PATH`, then list both:
 
 ```text
@@ -294,7 +296,7 @@ a scratch directory satisfies the gate above and leaves the gap open.
 Rolling back, in an environment that already has the runtime dependencies:
 
 ```text
-python -m pip install --force-reinstall --no-deps "STORE_DIR/graphite-VERSION-py3-none-any.whl"
+python -m pip install --force-reinstall --no-deps "STORE_DIR/graphite_code-VERSION-py3-none-any.whl"
 ```
 
 Returning to live development:
