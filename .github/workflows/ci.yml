@@ -212,6 +212,28 @@ jobs:
           # is the only variable left.
           #
           - { os: ubuntu-latest, python: "3.12" }
+          # ENDPOINTS on the non-Windows OSes, added 2026-08-10 to close the gap
+          # between what `pyproject.toml` claims and what CI proves.
+          #
+          # The claim is `requires-python = ">=3.11"` across three operating
+          # systems, i.e. 12 cells. Windows was already complete -- 3.11/3.12/3.13
+          # here plus 3.14 in the `test` job -- while ubuntu and macOS were 3.12
+          # only. Six cells were published and untested, on the two platforms
+          # where #45, #46 and #47 each found real defects Windows never showed.
+          #
+          # Endpoints rather than all four: version breakage clusters at the ends
+          # of the range. The oldest supported version is where newer syntax and
+          # stdlib additions break, and the newest is where deprecations land and
+          # where an interpreter's own behaviour shifts -- 3.14 is the one this
+          # machine develops on. The middles (3.13 here) are interpolation
+          # between two tested points and are the cheapest cells to omit.
+          #
+          # 10 of 12 tested. The two omitted are ubuntu/macOS 3.13, and that is a
+          # deliberate, recorded gap rather than an oversight -- if a defect ever
+          # lands specifically there, this comment is wrong and the cell should
+          # be added.
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.14" }
           # macOS, restored 2026-08-09 to re-measure #46. Its 102 failures were
           # counted on 9ff1242, BEFORE the frozen-clock fix, the Windows-kernel
           # skips, both venv-launcher fixes, the node landmark, the mcp deep-probe
@@ -232,6 +254,15 @@ jobs:
           # leg against that multiplier before dispatching -- and note it still
           # fires automatically on `pull_request`.
           - { os: macos-latest, python: "3.12" }
+          # macOS endpoints -- see the ubuntu block above for the reasoning.
+          #
+          # These two carry the cost warning with them: at the 10x multiplier a
+          # private repo pays for macOS, going from one leg to three triples the
+          # most expensive line on the bill. Free while public; re-weigh if that
+          # changes, and prefer dropping these two before the 3.12 leg, which is
+          # the one #46 is measured against.
+          - { os: macos-latest, python: "3.11" }
+          - { os: macos-latest, python: "3.14" }
     runs-on: ${{ matrix.os }}
     name: portability (${{ matrix.os }}, py${{ matrix.python }})
     steps:
