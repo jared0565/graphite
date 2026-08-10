@@ -334,3 +334,46 @@ def test_unattributable_receiver_caveat_is_retired():
     assert entry["retired_by"], "must be retired, not deleted or reworded"
     assert "bare method name" in entry["summary"], "a published summary never changes"
     assert "calls-unattributable-receiver-false-external" not in {e["code"] for e in active_caveats()}
+
+
+# --- the grade has to REACH the caller ---------------------------------------
+#
+# Everything above tests `build_answer_block` directly. That proves the grading
+# is right and says nothing about whether a consumer ever sees it -- and a
+# correct producer whose output never reaches the reader is the defect shape this
+# repo keeps finding: `getattr(exc, "cause")` on a field nothing sets,
+# `metadata.version` on a name nothing installed. Both looked fine and reported
+# nothing.
+#
+# `query()` is what every agent and every MCP call actually goes through, so the
+# wiring is what the contract rests on.
+
+
+def test_a_degraded_graph_reaches_the_caller_as_a_degraded_grade():
+    from graphite.query import query
+
+    # 1 bound target against 9 unbound: a calls ratio of 0.1, far under the 0.8
+    # line, so any answer scoped to python/calls is degraded by construction.
+    degraded = _graph_ratio(".py", bound_n=1, unbound_n=9)
+
+    result = query(degraded, "callers bound0")
+
+    assert result["callers"], "fixture must produce a NON-empty answer to grade"
+    assert result["answer"]["grade"] == GRADE_ADVISORY, (
+        "a degraded graph graded decision_grade through the real query path -- "
+        "the contract is only worth as much as its delivery"
+    )
+
+
+def test_a_healthy_graph_reaches_the_caller_as_decision_grade():
+    """Firing control. Without it the test above passes against a `query` that
+    hardcodes `advisory`, or one that degrades every answer indiscriminately --
+    both of which deliver a grade that discriminates nothing."""
+    from graphite.query import query
+
+    healthy = _graph_ratio(".py", bound_n=10, unbound_n=0)
+
+    result = query(healthy, "callers bound0")
+
+    assert result["callers"]
+    assert result["answer"]["grade"] == GRADE_DECISION
