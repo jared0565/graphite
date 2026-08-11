@@ -964,6 +964,58 @@ def test_deep_bounded_runner_times_out_without_leaking_process_output(tmp_path: 
     assert "RAW" not in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    ("emits", "expect_output"),
+    [("sys.stdout.write('RAW partial');sys.stdout.flush();", True), ("", False)],
+)
+def test_a_bounded_timeout_carries_what_it_observed_before_giving_up(
+    tmp_path: Path, emits: str, expect_output: bool
+) -> None:
+    """A timeout must report how long it waited and whether the child spoke.
+
+    graphite#51. `_record_probe_diagnostics` reads every field off a `result`,
+    and a transport failure never produces one -- the deep-probe call site
+    passes no result at all -- so the diagnostic printed `<none>` for every
+    field on exactly the failure it exists to explain.
+
+    The discriminating pair is elapsed-against-budget:
+
+    * elapsed <= budget => the deadline fired on time and the child did not
+      answer within it;
+    * elapsed >  budget => OUR OWN deadline was late, i.e. the parent process
+      was starved. That is the load hypothesis, and it is currently
+      indistinguishable from a slow server in the log.
+
+    ⚠️ A normal timeout lands *below* budget, not at it: `run_bounded_process`
+    reserves up to 40% of the budget for cleanup
+    (`cleanup_reserve = min(_CLEANUP_SECONDS, max(0.05, timeout_seconds*0.4))`)
+    and enforces the earlier `execution_deadline`. A 0.3s budget gives back
+    ~0.19s, which is why the bound below is `budget * 0.6` rather than `budget`
+    -- derived from that formula, not measured here. Load can only push elapsed
+    UP, away from this bound, so it cannot go flaky.
+
+    `stdout_bytes` separates the first case further: zero means the child never
+    produced a byte, non-zero means it was alive and progressing. Asserted as
+    presence/absence rather than an exact count, because an exact count would
+    race the deadline -- the same mistake this file just finished removing.
+    """
+    from graphite.probe_process import ProbeProcessError, run_bounded_process
+
+    child = f"import sys,time;{emits}time.sleep({_UNREACHABLE_CHILD_SECONDS})"
+    with pytest.raises(ProbeProcessError) as exc_info:
+        run_bounded_process([sys.executable, "-c", child], cwd=tmp_path, timeout_seconds=0.3)
+    error = exc_info.value
+
+    assert error.code == "timeout"
+    assert error.budget_seconds == 0.3
+    assert error.elapsed_seconds is not None
+    assert error.elapsed_seconds >= 0.3 * 0.6
+    assert (error.stdout_bytes > 0) is expect_output
+    # Counts are carried as NUMBERS precisely so they can travel where content
+    # cannot. The child's bytes must still not reach the message.
+    assert "RAW" not in str(error)
+
+
 def test_deep_bounded_runner_handles_nonzero_and_held_descendant_pipe(tmp_path: Path) -> None:
     from graphite.probe_process import ProbeProcessError, run_bounded_process
 
@@ -3872,6 +3924,54 @@ def test_mcp_deep_probe_maps_transport_failures_to_degraded(tmp_path: Path, fail
     assert time.monotonic() - started < _HANG_GUARD_SECONDS
     assert check.status == "degraded"
     assert check.details == {"code": failure_code}
+
+
+def test_a_transport_timeout_diagnostic_reports_what_was_observed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The deep-probe timeout diagnostic must not be all `<none>` (graphite#51).
+
+    `_record_probe_diagnostics` reads every field off a `result`, and this path
+    has none: `run_bounded_process` raises instead of returning. So the one
+    failure the diagnostic exists to explain printed `<none>` for every field,
+    which is exactly what made a real CI sighting uninterpretable:
+
+        [graphite-probe] deep_mcp timeout: returncode=<none> | input_bytes=<none>
+        | input_complete=<none> | outlived_close_s=<none> | stdout='' | stderr=''
+
+    The values chosen here are the starvation signature the field exists to make
+    visible -- elapsed well ABOVE budget, meaning our own deadline was late
+    rather than the child being slow. A normal timeout reports elapsed at or
+    below budget.
+    """
+    import graphite.doctor_probes as probes
+    from graphite.probe_process import ProbeProcessError
+
+    def fail(*args: object, **kwargs: object) -> object:
+        raise ProbeProcessError(
+            "timeout",
+            elapsed_seconds=9.5,
+            budget_seconds=4.0,
+            stdout_bytes=17,
+            stderr_bytes=3,
+        )
+
+    builder_runner = _bounded_manifest_builder_runner(tmp_path)
+    check = probes.probe_mcp(
+        tmp_path,
+        timeout_seconds=0.2,
+        _runner=fail,
+        _builder_script="pass",
+        _builder_runner=builder_runner,
+    )
+    assert check.details == {"code": "timeout"}
+
+    diagnostic = capsys.readouterr().err
+    assert "deep_mcp timeout" in diagnostic
+    assert "elapsed_s=9.5" in diagnostic
+    assert "budget_s=4.0" in diagnostic
+    assert "stdout_bytes=17" in diagnostic
+    assert "stderr_bytes=3" in diagnostic
 
 
 @pytest.mark.parametrize(

@@ -16,6 +16,32 @@ machine-checkable identity; the version is for humans.
 
 ### Fixed
 
+**A transport failure now says what it observed (#51).** The deep MCP probe's
+diagnostic read every field off a `ProbeProcessResult`, and a transport failure
+never produces one — `run_bounded_process` raises instead of returning. So on a
+timeout, the one failure the diagnostic exists to explain, it printed `<none>`
+for every field. A real CI sighting was consequently uninterpretable.
+
+`ProbeProcessError` now carries `elapsed_seconds`, `budget_seconds`,
+`stdout_bytes` and `stderr_bytes`. Counts and timings only: the error type is
+contractually free of process data, and tests pin that a child's output cannot
+reach `str(exc)`. Numbers are safe to carry there for the same reason
+`os_error` already was.
+
+Read `elapsed_s` against `budget_s`. At or below budget, the deadline fired on
+time and the child did not answer within it — note a normal timeout lands
+*below* budget, because the runner reserves up to 40% of it for cleanup and
+enforces the earlier execution deadline. **Above** budget means our own deadline
+was late, i.e. the process was starved of CPU — the load hypothesis, which
+nothing in the log could previously express. `stdout_bytes` splits the first
+case: zero means the child never produced a byte, non-zero means it was alive
+and progressing.
+
+Live output, same probe, two failures:
+
+    deep_mcp output_limit: elapsed_s=0.170 | budget_s=0.35 | stdout_bytes=1048577
+    deep_mcp timeout:      elapsed_s=0.325 | budget_s=0.35 | stdout_bytes=0
+
 ### Added
 
 **CommonJS is modelled (#49).** `require('<literal>')` now emits a real

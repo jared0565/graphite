@@ -53,6 +53,21 @@ _ESSENTIAL_ENV = (
 )
 
 
+def _observed_number(value: object) -> float | None:
+    """Coerce an observation to a finite, non-negative number, else ``None``.
+
+    Same discipline as ``os_error``'s coercion, and for the same reason: these
+    values are only ever read by diagnostics, so a malformed one must degrade to
+    "not observed" rather than propagate. ``bool`` is rejected explicitly -- it
+    is an ``int`` subclass, and ``True`` would otherwise be reported as ``1``.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
 class ProbeProcessError(Exception):
     """A classified transport failure containing no process or environment data.
 
@@ -75,12 +90,46 @@ class ProbeProcessError(Exception):
     both, so it reports both.
     """
 
-    def __init__(self, code: str, os_error: int | None = None, *, cleanup_failed: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        os_error: int | None = None,
+        *,
+        cleanup_failed: bool = False,
+        elapsed_seconds: float | None = None,
+        budget_seconds: float | None = None,
+        stdout_bytes: int | None = None,
+        stderr_bytes: int | None = None,
+    ) -> None:
         self.code = code if code in _SAFE_ERROR_CODES else "unexpected"
         # Coerced, never trusted: an OSError subclass can carry anything in
         # `errno`, and only an int may reach the message.
         self.os_error = os_error if isinstance(os_error, int) and not isinstance(os_error, bool) else None
         self.cleanup_failed = bool(cleanup_failed)
+        # What the run had observed when it gave up (graphite#51).
+        #
+        # Numbers, for exactly the reason `os_error` is a number: a COUNT is
+        # safe to carry where the bytes it counts are not. None means the
+        # failure happened before there was anything to observe -- an invalid
+        # timeout, a launch that never happened -- and must stay
+        # distinguishable from a measured zero.
+        #
+        # `elapsed_seconds` against `budget_seconds` is the discriminating pair,
+        # and the whole point of the field:
+        #
+        #   elapsed ~= budget  -> the deadline fired on time and the child did
+        #                         not answer within it;
+        #   elapsed >> budget  -> OUR OWN deadline was late, i.e. this process
+        #                         was starved of CPU.
+        #
+        # That second case is the load hypothesis, and until now it was
+        # indistinguishable in the log from a merely slow child. `stdout_bytes`
+        # splits the first case further: zero means the child never produced a
+        # byte, non-zero means it was alive and progressing.
+        self.elapsed_seconds = _observed_number(elapsed_seconds)
+        self.budget_seconds = _observed_number(budget_seconds)
+        self.stdout_bytes = _observed_number(stdout_bytes)
+        self.stderr_bytes = _observed_number(stderr_bytes)
         message = "probe input failed" if self.code == "input_failed" else f"probe process failed: {self.code}"
         if self.os_error is not None:
             message = f"{message} (os={self.os_error})"
@@ -567,18 +616,45 @@ def run_bounded_process(
         failure_code = "io_failed"
     elif failure_code is None and any(thread.is_alive() for thread in workers):
         failure_code = "timeout"
+    # Observations every failure below carries. A raise from here on has run the
+    # child, so there is always something to report -- and reporting nothing is
+    # exactly the defect being fixed (graphite#51): the deep-probe diagnostic
+    # read its fields off a result that a transport failure never produces, and
+    # printed `<none>` for all of them on the one failure it existed to explain.
+    # Any new raise added below MUST pass these four.
+    elapsed = time.monotonic() - started
+    stdout_seen = len(outputs["stdout"])
+    stderr_seen = len(outputs["stderr"])
     if failure_code is not None:
         raise ProbeProcessError(
             failure_code,
             writer_error[0] if failure_code == "input_failed" else None,
             cleanup_failed=not cleanup_ok,
+            elapsed_seconds=elapsed,
+            budget_seconds=timeout_seconds,
+            stdout_bytes=stdout_seen,
+            stderr_bytes=stderr_seen,
         )
     if process.returncode is None or (check and process.returncode != 0):
-        raise ProbeProcessError("nonzero", cleanup_failed=not cleanup_ok)
+        raise ProbeProcessError(
+            "nonzero",
+            cleanup_failed=not cleanup_ok,
+            elapsed_seconds=elapsed,
+            budget_seconds=timeout_seconds,
+            stdout_bytes=stdout_seen,
+            stderr_bytes=stderr_seen,
+        )
     # Last, so it never speaks over a diagnosis -- but still raised rather than
     # returned, because a run that may have leaked a process is not a success.
     if not cleanup_ok:
-        raise ProbeProcessError("cleanup_failed", cleanup_failed=True)
+        raise ProbeProcessError(
+            "cleanup_failed",
+            cleanup_failed=True,
+            elapsed_seconds=elapsed,
+            budget_seconds=timeout_seconds,
+            stdout_bytes=stdout_seen,
+            stderr_bytes=stderr_seen,
+        )
     closed_at = stdin_closed_at[0]
     finished_at = exited_at[0]
     # Both stamps are required: a child with no stdin, or one reaped on a path

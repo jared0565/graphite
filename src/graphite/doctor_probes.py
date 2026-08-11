@@ -795,6 +795,31 @@ def _record_probe_diagnostics(root: Path, failure: str, result: object = None) -
         detail = " | ".join(
             (
                 f"returncode={getattr(result, 'returncode', '<none>')}",
+                # Transport-side evidence, and the only evidence there IS when
+                # the transport raised rather than returned (graphite#51).
+                # `run_bounded_process` never produces a result on that path, so
+                # every field below used to read `<none>` on precisely the
+                # failure this diagnostic exists to explain.
+                #
+                # Read `elapsed_s` against `budget_s`:
+                #
+                #   elapsed <= budget -> the deadline fired on time; the child
+                #                        did not answer inside it. NOTE a normal
+                #                        timeout lands BELOW budget, because the
+                #                        runner reserves up to 40% of it for
+                #                        cleanup and enforces the earlier
+                #                        execution deadline.
+                #   elapsed >  budget -> our own deadline was late, i.e. THIS
+                #                        process was starved of CPU. That is the
+                #                        load hypothesis, and nothing in the log
+                #                        could express it before.
+                #
+                # `stdout_bytes` splits the first case: 0 means the child never
+                # produced a byte, non-zero means it was alive and progressing.
+                f"elapsed_s={getattr(result, 'elapsed_seconds', '<none>')}",
+                f"budget_s={getattr(result, 'budget_seconds', '<none>')}",
+                f"stdout_bytes={getattr(result, 'stdout_bytes', '<none>')}",
+                f"stderr_bytes={getattr(result, 'stderr_bytes', '<none>')}",
                 # Input-side evidence, and the point of recording it: a short
                 # response transcript is ambiguous on its own. `input_complete`
                 # False means the child stopped reading and therefore saw an
@@ -1802,13 +1827,17 @@ def probe_mcp(
             stdin_close_when=_mcp_transcript_complete,
         )
     except ProbeProcessError as exc:
-        # No `result` on this path -- run_bounded_process raises before
-        # returning, so its stdout/stderr are lost inside it. The code alone
-        # still discriminates a great deal (timeout vs nonzero vs
-        # launch_failed), which is more than the bare "degraded" this used to
-        # give. Threading the streams out of ProbeProcessError would be
-        # strictly better and is deliberately left as a separate change.
-        _record_probe_diagnostics(root, exc.code)
+        # The exception IS the result on this path (graphite#51). No
+        # `ProbeProcessResult` exists -- run_bounded_process raises instead of
+        # returning -- so passing nothing made every field render `<none>` on
+        # the one failure the diagnostic exists to explain.
+        #
+        # The streams themselves deliberately stay inside the transport: the
+        # error type is contractually free of process data, pinned by tests that
+        # assert a child's output cannot reach `str(exc)`. What crosses is
+        # COUNTS and TIMINGS -- numbers, safe for the same reason `os_error` is
+        # carried as a number.
+        _record_probe_diagnostics(root, exc.code, exc)
         return _degraded_probe("deep_mcp", "MCP", exc.code)
     except Exception:
         _record_probe_diagnostics(root, "probe_failed")
