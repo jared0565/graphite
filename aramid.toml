@@ -30,3 +30,26 @@ pre_push = 1500
 
 [tests]
 timeout_s = 1200
+
+# [mutation].baseline_timeout_s is deliberately NOT set. Measured 2026-08-11.
+#
+# The stock budget is mutant_timeout_s * 4 = 480s. graphite's suite has never fit
+# it: 36 runs burned 14211s (~3.9h) establishing nothing between 08-08 and 08-11,
+# reported as "baseline failing" until aramid split timeout from failure.
+#
+# Raising it does NOT fix mutation here, and makes the failure quieter. At
+# baseline_timeout_s = 1800 the baseline succeeded at baseline_s = 685.8s, and
+# then:
+#
+#   generated: 18, tested: 0, truncated: true, state: "ok"
+#   "0 confirmed survivor(s) of 0 mutant(s) tested (budget/cap hit)"
+#
+# 690s per drain, zero mutants tested, and `aramid status` shows neither a
+# degraded streak nor a stood-down line -- it looks healthy. At the default it
+# instead stands down loudly after 3 attempts and stops spending. A loud stop
+# beats a silent no-op, so the default stays until the real fix lands.
+#
+# The real fix is a narrower [mutation].test_command: the baseline is the whole
+# 2900-test suite, so a per-mutant budget can never fit it. That is a scoping
+# decision about which suite is allowed to certify a mutant, not a number to
+# raise, and it is deliberately left open rather than guessed at here.
