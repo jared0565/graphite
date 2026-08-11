@@ -1131,6 +1131,17 @@ def test_activate_cleanup_deadline_overrides_every_provisional_result(tmp_path, 
     assert [event[0] for event in events].count("install") == expected_installs
 
 
+#: Hang guard, not a performance bound (graphite#50).
+#:
+#: `cleanup` below returns immediately, so nothing here races anything: the real
+#: property is proved structurally by `reason == "operation_timeout"`,
+#: `cleanup_calls == 1`, and above all the thread-set equality, which is what
+#: "without worker retention" actually means. The old `< 0.75` was measured on an
+#: idle laptop and observed failing at 0.896 under full-suite load. Do not
+#: tighten it back; precision here measures the machine, not this code.
+_HANG_GUARD_SECONDS = 15
+
+
 def test_activate_maps_terminated_cleanup_timeout_without_worker_retention(tmp_path):
     root = _activation_root(tmp_path)
     events = []
@@ -1151,7 +1162,7 @@ def test_activate_maps_terminated_cleanup_timeout_without_worker_retention(tmp_p
     )
     elapsed = time.monotonic() - started
 
-    assert elapsed < 0.75
+    assert elapsed < _HANG_GUARD_SECONDS
     assert result.outcome is ActivationOutcome.INSTALLATION_FAILED
     assert result.reason == "operation_timeout"
     assert cleanup_calls == 1

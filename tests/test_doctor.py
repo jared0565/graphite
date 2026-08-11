@@ -38,6 +38,62 @@ from graphite.doctor import (
 )
 
 
+#: Hang guard, not a performance bound (graphite#50).
+#:
+#: Every timing assertion in this file sits beside a structural one that proves
+#: the actual property -- an error code, a status, a terminate-before-kill
+#: ordering. The elapsed check exists only so a genuine wedge fails the run
+#: instead of hanging it, so it must be loose enough that no scheduler can trip
+#: it. These were tuned on a quiet laptop (`< 0.3`, `< 1`) and failed under
+#: full-suite load; one of them, at 1.576s against a `< 1` bound, is in #50's
+#: measured failure set.
+#:
+#: Where the process cannot finish on its own -- a `_QueuedProbeProcess` whose
+#: `wait()` blocks on an Event only `kill()` sets, a runner monkeypatched to
+#: raise, a validation path that never launches -- *any* finite guard
+#: discriminates, so this is used directly.
+_HANG_GUARD_SECONDS = 15
+
+#: Lifetime for a real child that must outlive its probe's timeout by a margin.
+#:
+#: Where a child *does* finish on its own, the guard is only meaningful while it
+#: sits below that lifetime. The fix is to raise the lifetime clear of the guard
+#: rather than shave the guard down to race it -- removing the race instead of
+#: narrowing it, per the doctrine in `test_provider_probe_runner.py`'s DNS
+#: timeout test (graphite#46). Costs nothing when the code is correct: the child
+#: is killed at the probe's timeout and never sleeps this out.
+#:
+#: Do not "tighten" either constant back. Precision here measures the machine's
+#: scheduler, not this code.
+_UNREACHABLE_CHILD_SECONDS = 60
+
+#: How long to let a would-be orphan reveal itself before concluding it was killed.
+#:
+#: This is the OPPOSITE hazard from the guards above and the worse one: too
+#: short a window is a false *pass*, a test reporting that a leaked process tree
+#: was cleaned up when it simply had not written its sentinel yet.
+#:
+#: Both orphan tests raced it. The builder probe slept 0.3s before writing and
+#: was checked after 0.35s; the llm probe's grandchild wrote at ~1.0s and was
+#: checked at ~1.5s. Worse, the builder's single 0.3s served two opposing
+#: constraints at once -- the elapsed guard had to sit below it and the orphan
+#: check above it -- leaving 0.05s of margin for each. Widening the guard on its
+#: own would have bought that margin straight out of this one.
+_ORPHAN_REVEAL_SECONDS = 4
+
+
+def _assert_no_orphan(sentinel: Path) -> None:
+    """Give a surviving orphan every chance to appear, then require it did not.
+
+    Polls rather than sleeping a fixed span, so the failing case still reports
+    as soon as the sentinel lands while the passing case pays the full window.
+    """
+    deadline = time.monotonic() + _ORPHAN_REVEAL_SECONDS
+    while not sentinel.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not sentinel.exists()
+
+
 #: A pid no kernel can allocate, for fake processes handed to real cleanup.
 #:
 #: `_terminate_process_tree`'s POSIX branch calls `os.killpg(process.pid,
@@ -647,7 +703,7 @@ def test_bounded_process_cleanup_finishes(monkeypatch: pytest.MonkeyPatch, tmp_p
     _, output, actual_timeout = doctor_module._run_bounded_process(
         [str(tmp_path / "node")], cwd=tmp_path, env={}, timeout_seconds=0.01, max_stdout_bytes=500
     )
-    assert time.monotonic() - started < 1.0
+    assert time.monotonic() - started < _HANG_GUARD_SECONDS
     assert output == b""
     assert actual_timeout is timed_out
 
@@ -899,10 +955,11 @@ def test_bounded_process_rejects_invalid_exact_environment(
 def test_deep_bounded_runner_times_out_without_leaking_process_output(tmp_path: Path) -> None:
     from graphite.probe_process import ProbeProcessError, run_bounded_process
 
+    child = f"import time;print('RAW C:/secret', flush=True);time.sleep({_UNREACHABLE_CHILD_SECONDS})"
     started = time.monotonic()
     with pytest.raises(ProbeProcessError) as exc_info:
-        run_bounded_process([sys.executable, "-c", "import time;print('RAW C:/secret', flush=True);time.sleep(5)"], cwd=tmp_path, timeout_seconds=0.1)
-    assert time.monotonic() - started < 2
+        run_bounded_process([sys.executable, "-c", child], cwd=tmp_path, timeout_seconds=0.1)
+    assert time.monotonic() - started < _HANG_GUARD_SECONDS
     assert exc_info.value.code == "timeout"
     assert "RAW" not in str(exc_info.value)
 
@@ -914,12 +971,20 @@ def test_deep_bounded_runner_handles_nonzero_and_held_descendant_pipe(tmp_path: 
         run_bounded_process([sys.executable, "-c", "raise SystemExit(7)"], cwd=tmp_path, timeout_seconds=5)
     assert exc_info.value.code == "nonzero"
 
-    held_pipe = "import subprocess,sys; subprocess.Popen([sys.executable,'-c','import time;time.sleep(5)'])"
+    # Deliberately NOT _UNREACHABLE_CHILD_SECONDS. This one is a *detached*
+    # grandchild whose whole job is to still be holding the pipe when its parent
+    # exits, and the transport is not guaranteed to reap it -- that is the very
+    # condition under test. Raising its lifetime would leave a survivor loading
+    # the machine for a minute, penalising every test that runs after it in this
+    # file. A child's lifetime is only safe to raise when the child is reliably
+    # killed; here 5s already outlives the ~0.1s return by 50x.
+    grandchild = "import time;time.sleep(5)"
+    held_pipe = f"import subprocess,sys; subprocess.Popen([sys.executable,'-c',{grandchild!r}])"
     threads_before = {thread.ident for thread in threading.enumerate()}
     started = time.monotonic()
     result = run_bounded_process([sys.executable, "-c", held_pipe], cwd=tmp_path, timeout_seconds=2)
     assert result.returncode == 0
-    assert time.monotonic() - started < 2
+    assert time.monotonic() - started < _HANG_GUARD_SECONDS
     assert [thread for thread in threading.enumerate() if thread.ident not in threads_before] == []
 
 
@@ -931,7 +996,7 @@ def test_deep_bounded_runner_rejects_nonfinite_or_nonpositive_timeout(tmp_path: 
     with pytest.raises(ProbeProcessError) as exc_info:
         run_bounded_process([sys.executable, "-c", "raise AssertionError('must not launch')"], cwd=tmp_path, timeout_seconds=timeout)
     assert exc_info.value.code == "invalid_timeout"
-    assert time.monotonic() - started < 0.5
+    assert time.monotonic() - started < _HANG_GUARD_SECONDS
 
 
 def test_deep_bounded_runner_limits_stdin_and_times_out_nonreader(tmp_path: Path) -> None:
@@ -944,13 +1009,13 @@ def test_deep_bounded_runner_limits_stdin_and_times_out_nonreader(tmp_path: Path
     started = time.monotonic()
     with pytest.raises(ProbeProcessError) as exc_info:
         run_bounded_process(
-            [sys.executable, "-c", "import time;time.sleep(5)"],
+            [sys.executable, "-c", f"import time;time.sleep({_UNREACHABLE_CHILD_SECONDS})"],
             cwd=tmp_path,
             stdin=b"x" * (1024 * 1024),
             timeout_seconds=0.25,
         )
     assert exc_info.value.code == "timeout"
-    assert time.monotonic() - started < 1.5
+    assert time.monotonic() - started < _HANG_GUARD_SECONDS
 
 
 def test_deep_bounded_runner_tolerates_child_exiting_before_reading_stdin(tmp_path: Path) -> None:
@@ -2731,7 +2796,7 @@ def test_core_probe_blocking_cleanup_is_bounded_and_never_ready(tmp_path: Path) 
     release.set()
     assert check.status == "blocked"
     assert check.details == {"error_type": "cleanup", "code": "cleanup_timeout"}
-    assert elapsed < 2
+    assert elapsed < _HANG_GUARD_SECONDS
     deadline = time.monotonic() + 1
     while created[0].exists() and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -3034,7 +3099,7 @@ def test_llm_parent_timeout_is_wall_clock_bounded_and_leaves_no_orphan(tmp_path:
     child = (
         "import subprocess,sys,time;"
         f"subprocess.Popen([sys.executable,'-c',{grandchild!r},sys.argv[1]]);"
-        "time.sleep(5)"
+        f"time.sleep({_UNREACHABLE_CHILD_SECONDS})"
     )
 
     def contained_runner(*args: object, **kwargs: object) -> probes.ProbeProcessResult:
@@ -3052,10 +3117,9 @@ def test_llm_parent_timeout_is_wall_clock_bounded_and_leaves_no_orphan(tmp_path:
         _runner=contained_runner,
     )
 
-    assert time.monotonic() - started < 1.5
+    assert time.monotonic() - started < _HANG_GUARD_SECONDS
     assert check.details == {"category": "timeout"}
-    time.sleep(1.1)
-    assert not sentinel.exists()
+    _assert_no_orphan(sentinel)
 
 
 def test_llm_real_isolated_worker_rejects_unsupported_provider_without_network() -> None:
@@ -3536,12 +3600,11 @@ def test_mcp_manifest_builder_is_hard_bounded_and_leaves_no_orphan(
 
     check = probes.probe_mcp(tmp_path, timeout_seconds=0.05, _builder_script=script)
 
-    assert time.monotonic() - started < 0.3
+    assert time.monotonic() - started < _HANG_GUARD_SECONDS
     assert check.status == "degraded"
     assert check.details == {"code": "timeout"}
     assert parent_bindings == []
-    time.sleep(0.35)
-    assert not sentinel.exists()
+    _assert_no_orphan(sentinel)
 
 
 def test_cached_path_binding_rejects_symlink_retarget(tmp_path: Path) -> None:
@@ -3806,7 +3869,7 @@ def test_mcp_deep_probe_maps_transport_failures_to_degraded(tmp_path: Path, fail
         _builder_script="pass",
         _builder_runner=builder_runner,
     )
-    assert time.monotonic() - started < 1
+    assert time.monotonic() - started < _HANG_GUARD_SECONDS
     assert check.status == "degraded"
     assert check.details == {"code": failure_code}
 
@@ -4154,7 +4217,7 @@ def test_mcp_deep_probe_real_transport_bounds_failures_and_escalates_cleanup(
         _builder_runner=builder_runner,
     )
 
-    assert time.monotonic() - started < 1
+    assert time.monotonic() - started < _HANG_GUARD_SECONDS
     assert check.status == "degraded"
     assert check.details == {"code": expected_code}
     assert events.index("terminate") < events.index("kill")
@@ -4178,7 +4241,7 @@ def test_mcp_deep_probe_real_transport_handles_nonzero_without_hanging(
         _builder_script="pass",
         _builder_runner=builder_runner,
     )
-    assert time.monotonic() - started < 1
+    assert time.monotonic() - started < _HANG_GUARD_SECONDS
     assert check.status == "degraded"
     assert check.details == {"code": "nonzero"}
 
@@ -4201,7 +4264,7 @@ def test_mcp_deep_probe_real_transport_handles_closed_stdout_without_hanging(
         _builder_script="pass",
         _builder_runner=builder_runner,
     )
-    assert time.monotonic() - started < 1
+    assert time.monotonic() - started < _HANG_GUARD_SECONDS
     assert check.status == "degraded"
     assert check.details == {"code": "invalid_response"}
 
