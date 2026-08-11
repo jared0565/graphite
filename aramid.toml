@@ -1,6 +1,6 @@
 # aramid repo config -- detected stack: python; package manager: none
 schema_version = 1
-semgrep_block_armed = false
+semgrep_block_armed = true
 bake_started = "2026-07-28"
 
 # graphite's full suite is well past the stock 300s pre-push budget.
