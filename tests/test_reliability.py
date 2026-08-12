@@ -142,7 +142,12 @@ def test_build_manifest_records_engine_identity(tmp_path: Path, monkeypatch, cap
         "version",
         "cache_version",
         "schema_version",
+        "parsers",
         "fingerprint",
     }
     assert len(manifest["engine"]["fingerprint"]) == 64
+    # The manifest is what the daemon's engine-change check and the cache
+    # partition actually read, so the grammars have to reach it here -- not only
+    # into engine_identity's return value (#52).
+    assert "tree-sitter-python=" in manifest["engine"]["parsers"]
     assert_json_omits(Path(__file__).parents[1], manifest["engine"])

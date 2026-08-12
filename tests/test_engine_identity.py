@@ -30,7 +30,7 @@ def test_engine_identity_is_deterministic_and_path_free(tmp_path: Path, assert_j
     second = engine_identity("cache-v1", package_root=package, version="1.2.3")
 
     assert first == second
-    assert set(first) == {"version", "cache_version", "schema_version", "fingerprint"}
+    assert set(first) == {"version", "cache_version", "schema_version", "parsers", "fingerprint"}
     assert first["version"] == "1.2.3"
     assert first["cache_version"] == "cache-v1"
     assert_json_omits(package, first)
@@ -128,6 +128,69 @@ def test_engine_identity_rejects_unreadable_source(tmp_path: Path, monkeypatch) 
 
     assert raised.value.code == "engine_file_unreadable"
     assert "sensitive absolute path" not in str(raised.value)
+
+
+def test_engine_identity_changes_when_a_parser_version_changes(tmp_path: Path) -> None:
+    """The grammars produce the AST, so they are part of the engine that produced it.
+
+    Without this, upgrading tree-sitter-python changes every extracted graph while
+    the fingerprint stays byte-identical -- which defeats the cache partition
+    (#21), the daemon's engine-change rebuild (#18), and the documented meaning of
+    `metadata.engine.fingerprint`. See #52.
+    """
+    package = _package(tmp_path)
+
+    before = engine_identity(
+        "cache-v1", package_root=package, version="1.2.3", parsers="tree-sitter-python=0.23.0"
+    )
+    after = engine_identity(
+        "cache-v1", package_root=package, version="1.2.3", parsers="tree-sitter-python=0.25.0"
+    )
+
+    assert before["fingerprint"] != after["fingerprint"]
+
+
+def test_engine_identity_reports_which_parsers_produced_it(tmp_path: Path) -> None:
+    """A changed fingerprint says something moved; this says WHAT."""
+    package = _package(tmp_path)
+
+    identity = engine_identity("cache-v1", package_root=package, version="1.2.3")
+
+    assert "tree-sitter-python=" in identity["parsers"]
+    assert "tree-sitter-typescript=" in identity["parsers"]
+    assert identity["parsers"] == engine_identity(
+        "cache-v1", package_root=package, version="1.2.3"
+    )["parsers"]
+
+
+def test_an_absent_parser_is_recorded_rather_than_fatal(tmp_path: Path, monkeypatch) -> None:
+    """A missing grammar degrades that language; it must not break identity itself.
+
+    Recorded rather than skipped, because "go was absent" and "go was present"
+    are different engines and must not share a fingerprint.
+    """
+    package = _package(tmp_path)
+    real = engine_identity_module.metadata.version
+
+    def absent_go(name: str) -> str:
+        if name == "tree-sitter-go":
+            raise engine_identity_module.metadata.PackageNotFoundError(name)
+        return real(name)
+
+    monkeypatch.setattr(engine_identity_module.metadata, "version", absent_go)
+
+    identity = engine_identity("cache-v1", package_root=package, version="1.2.3")
+
+    assert "tree-sitter-go=absent" in identity["parsers"]
+
+
+def test_engine_identity_rejects_an_empty_parser_record(tmp_path: Path) -> None:
+    package = _package(tmp_path)
+
+    with pytest.raises(EngineIdentityError) as raised:
+        engine_identity("cache-v1", package_root=package, version="1.2.3", parsers="")
+
+    assert raised.value.code == "engine_parsers_invalid"
 
 
 def test_freshness_treats_legacy_manifest_as_engine_changed(tmp_path: Path) -> None:

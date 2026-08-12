@@ -5,10 +5,26 @@ import hashlib
 import json
 import os
 import stat
+from importlib import metadata
 from pathlib import Path
 from typing import Final
 
-ENGINE_SCHEMA_VERSION: Final = "1"
+# Bumped to 2 when the grammars joined the identity (#52): a fingerprint computed
+# under schema 1 covered graphite's own files only, so the two are not comparable.
+ENGINE_SCHEMA_VERSION: Final = "2"
+
+# The tree-sitter distributions that actually produce the ASTs. Kept sorted so the
+# record is order-independent, and hyphenated because these are DISTRIBUTION names
+# (what importlib.metadata resolves), not the underscored import names used in
+# `extract.ast`.
+PARSER_DISTRIBUTIONS: Final = (
+    "tree-sitter",
+    "tree-sitter-go",
+    "tree-sitter-javascript",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-typescript",
+)
 MAX_ENGINE_FILES: Final = 512
 MAX_ENGINE_FILE_BYTES: Final = 8 * 1024 * 1024
 MAX_ENGINE_TOTAL_BYTES: Final = 64 * 1024 * 1024
@@ -138,10 +154,29 @@ def _read_stable_file(path: Path, root: Path, limit: int) -> bytes:
     return data
 
 
+def parser_inventory() -> str:
+    """Record the grammar versions that will do the parsing, deterministically.
+
+    An absent grammar is recorded as `absent` rather than omitted: "go was
+    installed" and "go was not" are different engines and must not share a
+    fingerprint. Missing a grammar degrades that one language, so it must not
+    make computing an identity fail.
+    """
+    return ",".join(_parser_record(name) for name in PARSER_DISTRIBUTIONS)
+
+
+def _parser_record(name: str) -> str:
+    try:
+        return f"{name}={metadata.version(name)}"
+    except metadata.PackageNotFoundError:
+        return f"{name}=absent"
+
+
 def engine_identity(
     cache_version: str,
     *,
     package_root: Path | None = None,
+    parsers: str | None = None,
     version: str | None = None,
     max_files: int = MAX_ENGINE_FILES,
     max_file_bytes: int = MAX_ENGINE_FILE_BYTES,
@@ -162,6 +197,11 @@ def engine_identity(
     if not isinstance(version, str) or not version:
         raise EngineIdentityError("engine_version_invalid")
 
+    if parsers is None:
+        parsers = parser_inventory()
+    if not isinstance(parsers, str) or not parsers:
+        raise EngineIdentityError("engine_parsers_invalid")
+
     candidate_root = package_root if package_root is not None else Path(__file__).parent
     try:
         root = candidate_root.resolve(strict=True)
@@ -171,6 +211,7 @@ def engine_identity(
 
     header = {
         "cache_version": cache_version,
+        "parsers": parsers,
         "schema_version": ENGINE_SCHEMA_VERSION,
         "version": version,
     }

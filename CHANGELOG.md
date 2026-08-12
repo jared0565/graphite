@@ -16,6 +16,42 @@ machine-checkable identity; the version is for humans.
 
 ### Fixed
 
+**The engine fingerprint could not see the parsers (#52).** `engine_identity`
+digested `cache_version`, `schema_version`, `graphite.__version__` and the files
+under `src/graphite/` — everything except the tree-sitter grammars that actually
+produce the ASTs. Upgrading `tree-sitter-python` therefore changed every
+extracted graph while the fingerprint stayed byte-identical.
+
+Three mechanisms this repo deliberately built were defeated by that. The
+extraction cache partitions on `{cache_version}-{engine[:16]}` (#21), so a
+grammar upgrade served parses produced by the OLD parser — precisely the
+staleness partitioning was introduced to prevent. The daemon queues a rebuild
+when a project's recorded engine identity differs from the current one (#18), and
+a grammar upgrade produced no difference, so supervised repos kept graphs that
+disagreed with their source. And `metadata.engine.fingerprint` is documented as
+the engine that produced the content, which across a parser change it was not.
+
+Not hypothetical: every runtime dependency is lower-bound only, and the installed
+`tree-sitter` was already 0.25.2 against a declared floor of `>=0.23`.
+
+`engine_identity` now folds a `parsers` record into the digest, and
+`metadata.engine` reports it, so a reader can see *which* grammars produced a
+graph rather than only that something moved:
+
+```
+"parsers": "tree-sitter=0.25.2,tree-sitter-go=0.25.0,..."
+```
+
+An absent grammar is recorded as `absent` rather than omitted — "go was
+installed" and "go was not" are different engines and must not share a
+fingerprint — and a missing grammar degrades that one language without making
+identity itself fail. `ENGINE_SCHEMA_VERSION` is now `2`: a fingerprint computed
+under schema 1 covered graphite's own files only, so the two are not comparable.
+
+**Expect a one-time rebuild everywhere.** Every fingerprint changes, so the first
+run after upgrading re-extracts and re-partitions its cache. That is the correct
+signal, not a side effect.
+
 **A transport failure now says what it observed (#51).** The deep MCP probe's
 diagnostic read every field off a `ProbeProcessResult`, and a transport failure
 never produces one — `run_bounded_process` raises instead of returning. So on a
@@ -43,6 +79,20 @@ Live output, same probe, two failures:
     deep_mcp timeout:      elapsed_s=0.325 | budget_s=0.35 | stdout_bytes=0
 
 ### Added
+
+**`graphite debt` reports declared blind spots and their age.** A blind spot that
+is DECLARED is working as designed; an undeclared one is the failure. The command
+prints open and retired entries with time-to-retire, so the count is auditable
+rather than a claim. Retirement is recorded against the fix that earned it.
+
+**The public API surface is declared.** `docs/` now states what consumers may
+depend on and what they may not. Six repos import this package from one install,
+so "it happened to work" was the only contract they had; anything not listed is
+explicitly not a promise.
+
+**Release verification targets the BUILT DISTRIBUTION, not the source tree.**
+Checks that passed against the working tree could not see what the wheel actually
+contained — the two differ precisely where packaging bugs live.
 
 **CommonJS is modelled (#49).** `require('<literal>')` now emits a real
 `imports` edge — resolved in-repo, or `EXTERNAL_IMPORT` for a bare package,
@@ -260,6 +310,44 @@ the head of the command looks like an interpreter.
 install keeps the old command until `graphite daemon-install-startup-windows`
 (or `daemon-install-windows`) is re-run — the same marker-not-version rule this
 file opens with.
+
+**The distribution is now named `graphite-code`, and the name it is looked up by
+is pinned.** PyPI's `graphite` belongs to another project. The import package is
+still `graphite`; only the distribution name changed. A test pins the lookup name
+because `importlib.metadata` fails silently on a mismatch — which is exactly how
+the CLI came to report no version at all.
+
+**The CLI reported nothing instead of an unresolvable distribution.** A failed
+metadata lookup fell through to silence, so a broken install and a working one
+were indistinguishable at the one command a consumer would use to tell them
+apart. It now says which distribution it could not resolve.
+
+**One machine's drive layout was welded into a published tool.** Default paths
+and documentation carried this checkout's own absolute paths, which would have
+shipped to every user of a release — and to PyPI's rendered README. Fixed in the
+config defaults and the docs, with a check that keeps them gone.
+
+**Six sqlite connections were left to the garbage collector.** `_connect`
+orphaned its handle when configuration failed; the routing and lifecycle stores
+left connections unclosed on several paths; and the test fixtures leaked the same
+handle the source did, which hid the defect from the suite that should have
+caught it. On Windows an unclosed handle blocks the file, so recovery depended on
+GC timing. `conftest` now fails the suite when a handle is never closed — the
+instrument that found the rest.
+
+**A running interpreter is trusted by identity, not by its path.** Path-based
+comparison misidentified the active interpreter when the same binary was reachable
+by more than one path, which is normal under virtualenvs and symlinks.
+
+**A test could pass while the thing it checked never happened (#50).** Sixteen
+wall-clock assertions were demoted to named hang guards: a stopwatch bound beside
+a structural assertion adds flake surface and no correctness. Two orphan checks
+were worse than flaky — their reveal window was too short, so a surviving orphan
+could go unseen and the test would pass. Each fix is mutation-proven.
+
+**A failed Git step did not say which step failed (refs #37).** Git errors are now
+attributed to the operation and carry the OS error text, so a CI sighting is
+interpretable without a local repro.
 
 ## [0.2.1] — 2026-08-09
 
