@@ -1091,3 +1091,37 @@ def test_the_packaged_version_is_read_from_the_source_of_truth() -> None:
     assert found.group(2) == graphite.__version__, (
         "the version hatchling would package differs from the one imported at runtime"
     )
+
+
+def test_no_absolute_developer_path_ships_in_the_packaged_sources() -> None:
+    """RELEASING.md: a release archive must exclude absolute developer paths.
+
+    `_default_daemon_base` compared each parent against one hardcoded absolute
+    path from the initial commit until 0.3.0, so daemon discovery worked on
+    exactly one machine and every wheel through 0.2.1 shipped that path. Both
+    prior releases recorded a clean disclosure scan anyway, because they searched
+    the COMPRESSED archive bytes -- where a plaintext pattern cannot match, so a
+    real leak and a clean tree were indistinguishable.
+
+    Scans the packaged sources, which is what the wheel actually contains.
+    Docstrings count: they ship too, and the first draft of this very fix
+    reintroduced the path by quoting it in prose.
+    """
+    import re
+
+    root = Path(__file__).parents[1] / "src" / "graphite"
+    pattern = re.compile(r"[A-Za-z]:[\\/]{1,2}(?:Users|Projects)", re.IGNORECASE)
+
+    offenders = []
+    for path in sorted(root.rglob("*")):
+        if path.suffix.lower() not in {".py", ".mjs"} or not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for match in pattern.finditer(text):
+            line = text[: match.start()].count("\n") + 1
+            offenders.append(f"{path.relative_to(root).as_posix()}:{line}: {match.group()}")
+
+    assert not offenders, (
+        "absolute developer path(s) in packaged sources -- these reach every "
+        "consumer inside the wheel:\n  " + "\n  ".join(offenders)
+    )

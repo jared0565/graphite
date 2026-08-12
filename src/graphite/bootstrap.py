@@ -150,9 +150,15 @@ def ensure_agents(path: Path, project_name: str) -> dict[str, Any]:
     }
 
 
+#: The directory the daemon writes its state into. Named once because
+#: `_default_daemon_base` now FINDS the base by looking for it, so a drifted
+#: literal there would silently stop discovering the very thing it points at.
+DAEMON_STATE_DIRNAME = ".graphite-daemon"
+
+
 def daemon_visibility(project_root: Path, *, daemon_base: Path | None = None) -> dict[str, Any]:
     base = (daemon_base or _default_daemon_base(project_root)).resolve()
-    status_path = base / ".graphite-daemon" / "status.json"
+    status_path = base / DAEMON_STATE_DIRNAME / "status.json"
     payload: dict[str, Any] = {
         "base": str(base),
         "status_path": str(status_path),
@@ -184,11 +190,21 @@ def daemon_visibility(project_root: Path, *, daemon_base: Path | None = None) ->
 
 
 def _default_daemon_base(project_root: Path) -> Path:
+    """Find the directory the daemon writes its state into.
+
+    Discovered by the marker rather than by name. From the first commit onward
+    this compared each parent against one hardcoded absolute path -- the
+    maintainer's own layout compiled into shipped code -- so discovery worked on
+    exactly one machine, and the wheel carried an absolute developer path, which
+    RELEASING.md forbids in a release archive. The value is only ever used to
+    reach `base/DAEMON_STATE_DIRNAME/status.json`, so look for that. Do not name
+    a concrete path here: this docstring ships inside the wheel.
+    """
     env = os.environ.get("GRAPHITE_PROJECTS_ROOT")
     if env:
         return Path(env)
     resolved = project_root.resolve()
     for parent in (resolved, *resolved.parents):
-        if parent.as_posix().lower().rstrip("/") == "f:/projects":
+        if (parent / DAEMON_STATE_DIRNAME).is_dir():
             return parent
     return resolved

@@ -63,6 +63,62 @@ def test_projects_root_env_overrides_defaults(tmp_path: Path, monkeypatch) -> No
     assert _default_daemon_base(tmp_path / "some" / "app") == root
 
 
+def test_default_daemon_base_finds_the_directory_holding_the_daemon_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The base is discovered by the marker it exists to find, not by its name.
+
+    It was matched against the literal `f:/projects` -- the maintainer's own
+    layout compiled into shipped code, so the daemon was discoverable on exactly
+    one machine and the wheel carried an absolute developer path (RELEASING.md
+    forbids one in the archives). The value is only ever used to reach
+    `base/.graphite-daemon/status.json`, so search for that instead.
+
+    The fixture is named `Workspace` on purpose: named `Projects` under a drive
+    letter it could pass against the literal match and prove nothing.
+    """
+    monkeypatch.delenv("GRAPHITE_PROJECTS_ROOT", raising=False)
+    base = tmp_path / "Workspace"
+    project = base / "repo"
+    project.mkdir(parents=True)
+    (base / ".graphite-daemon").mkdir()
+    (base / ".graphite-daemon" / "status.json").write_text("{}", encoding="utf-8")
+
+    from graphite.bootstrap import _default_daemon_base
+
+    assert _default_daemon_base(project) == base.resolve()
+
+
+def test_daemon_base_env_still_wins_over_a_discovered_marker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Precedence is load-bearing: the explicit override outranks discovery."""
+    base = tmp_path / "Workspace"
+    project = base / "repo"
+    project.mkdir(parents=True)
+    (base / ".graphite-daemon").mkdir()
+    (base / ".graphite-daemon" / "status.json").write_text("{}", encoding="utf-8")
+    override = tmp_path / "Elsewhere"
+    monkeypatch.setenv("GRAPHITE_PROJECTS_ROOT", str(override))
+
+    from graphite.bootstrap import _default_daemon_base
+
+    assert _default_daemon_base(project) == override
+
+
+def test_default_daemon_base_falls_back_to_the_project_when_no_marker_exists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No daemon anywhere above: report the project itself, not a guess."""
+    monkeypatch.delenv("GRAPHITE_PROJECTS_ROOT", raising=False)
+    project = tmp_path / "Workspace" / "repo"
+    project.mkdir(parents=True)
+
+    from graphite.bootstrap import _default_daemon_base
+
+    assert _default_daemon_base(project) == project.resolve()
+
+
 def test_bootstrap_reports_daemon_visibility(tmp_path: Path) -> None:
     base = tmp_path / "Projects"
     project = base / "app"
