@@ -12,9 +12,40 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
-## [Unreleased]
+## [0.3.0] — 2026-08-12
+
+**The first release consumers install as a built wheel.** Through 0.2.1 every
+consumer on the development machine imported graphite from one shared editable
+install pointed at the source tree, so a saved file was live everywhere with no
+build, no review and no version boundary. That is why `__version__` could not
+distinguish two states of the tree, and why "which fix does this install have"
+was answerable only by surveying for markers. A wheel install writes source and
+metadata together, so from 0.3.0 the version means something again.
 
 ### Fixed
+
+**Daemon discovery only worked on one machine, and the wheel shipped that path.**
+`_default_daemon_base` compared each parent directory against a single hardcoded
+absolute path — the maintainer's own layout, present since the initial commit.
+Two separate defects in one line. Functionally, discovery succeeded on exactly
+one machine and silently fell back to the project root everywhere else, so
+`daemon-health` and `bootstrap` reported no daemon for every other user.
+Distribution-wise, the wheel carried an absolute developer path, which
+`RELEASING.md` forbids in a release archive.
+
+The value is only ever used to reach `base/.graphite-daemon/status.json`, so it
+now searches upward for that marker instead of matching a name. Behaviour is
+unchanged where the old literal applied, and correct everywhere else.
+`GRAPHITE_PROJECTS_ROOT` still takes precedence, and the directory name is now a
+single named constant shared with the reader of that file.
+
+Worth recording *why this survived two releases*: 0.2.0 and 0.2.1 both ran a
+disclosure scan and both recorded zero developer-path hits, because both searched
+the **compressed** archive bytes, where a plaintext pattern cannot match. A clean
+tree and a leaking one were indistinguishable — the scan could not fail. The
+0.2.1 wheel in fact shipped this path in three modules and twelve times in
+`METADATA`. `tests/test_hardening.py` now scans the packaged sources directly,
+docstrings included, and is mutation-proven against the original line.
 
 **The engine fingerprint could not see the parsers (#52).** `engine_identity`
 digested `cache_version`, `schema_version`, `graphite.__version__` and the files

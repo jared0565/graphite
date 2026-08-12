@@ -26,11 +26,16 @@ from __future__ import annotations
 __all__ = ["__version__"]
 
 #: THE version. `pyproject.toml` reads this file rather than the other way
-#: round (`[tool.hatch.version]`), because every consumer on this machine runs
-#: graphite from one shared editable install: the source tree is the deployment,
-#: and `importlib.metadata` only ever reports what was true at install time.
+#: round (`[tool.hatch.version]`), so there is exactly one place to set it.
+#:
+#: Through 0.2.1 this was doubly load-bearing: every consumer on this machine
+#: ran graphite from one shared editable install, so the source tree WAS the
+#: deployment and a saved file was live everywhere with no build and no
+#: boundary. 0.3.0 is the first version consumers install as a built wheel, so
+#: this string and the installed metadata are now set together by a release
+#: rather than drifting apart between them.
 #:
 #: Coarse and hand-maintained by construction. It is a release label, not
 #: evidence that a given fix is present -- to answer that, survey for the marker
 #: the fix introduced, or compare `graphite --version` fingerprints.
-__version__ = "0.2.1"
+__version__ = "0.3.0"
