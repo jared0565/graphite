@@ -30,6 +30,36 @@ pre_push = 1500
 
 [tests]
 timeout_s = 1200
+# Points at the dev venv, and this is load-bearing as of v0.3.0.
+#
+# Consumers now install graphite as a WHEEL rather than importing this tree
+# through a shared editable install. The machine interpreter therefore resolves
+# `import graphite` to site-packages -- so a gate run with the machine `pytest`
+# would exercise the RELEASED artifact and report green on changes it never
+# loaded. This venv holds the editable install, so it is what tests the tree.
+#
+# THE VENV MUST LIVE OUTSIDE THE CLONE, and that is not tidiness. A venv inside
+# the repository fails
+# `test_mcp_deep_probe_real_server_supports_trusted_source_inside_selected_repo`:
+# the probe treats the in-repo environment as an import shadow of the repo it
+# was asked to trust. That test's own docstring says so -- "the same commit
+# passes from a venv outside the clone and fails from one inside it" -- and it
+# cost a blocked push here to rediscover. Measured both ways: inside, 5/5 fail;
+# outside, passes.
+#
+# Relative, not absolute: an absolute path would bake a developer path (and a
+# username) into a committed file, which is the defect 0.3.0 fixed in
+# `bootstrap.py`. Resolved against the repo root, which is the gate's cwd.
+#
+# Argv form, not a string: aramid splits a string command POSIX-style, which
+# eats backslashes on Windows. Forward slashes work in either form.
+#
+# Recreate with:
+#   python -m venv ../.venvs/graphite-dev
+#   ../.venvs/graphite-dev/Scripts/python.exe -m pip install -e ".[dev,mcp]"
+#
+# Still the whole suite, deliberately -- see the note above `[timeouts]`.
+command = ["../.venvs/graphite-dev/Scripts/python.exe", "-m", "pytest"]
 
 # [mutation].baseline_timeout_s is deliberately NOT set. Measured 2026-08-11,
 # re-measured 2026-08-12.
