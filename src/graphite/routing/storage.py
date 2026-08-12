@@ -902,7 +902,11 @@ class RepositoryStore:
                 isolation_level=None,
             )
             connection.row_factory = sqlite3.Row
-            connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+            # PRAGMA accepts no bind parameters, so this cannot be parameterized.
+            # busy_timeout_ms is an int validated to 100..30_000 at construction.
+            # Bare marker, not `nosemgrep: <id>`: semgrep namespaces rule ids by
+            # CONFIG PATH, so the real id embeds this machine's install location.
+            connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")  # nosemgrep
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA journal_mode = WAL")
             return connection
@@ -1245,21 +1249,26 @@ class RepositoryStore:
             )
             connection.execute("PRAGMA foreign_keys=OFF")
             connection.execute("BEGIN IMMEDIATE")
+            # The `# nosemgrep` markers below cover table IDENTIFIER interpolation.
+            # SQL binds values, never identifiers, so a migration that copies and
+            # rebuilds tables cannot use parameters. `table` is not caller input:
+            # `_PRE_V6_WIDENED_TABLES` is a module-level `Final` mapping of two
+            # literal table names.
             for table, (ddl, columns) in _PRE_V6_WIDENED_TABLES.items():
-                before = connection.execute(
+                before = connection.execute(  # nosemgrep
                     f"SELECT COUNT(*) FROM {table}"
                 ).fetchone()[0]
-                connection.execute(
+                connection.execute(  # nosemgrep
                     f"CREATE TABLE {table}_pre_v6_copy AS SELECT * FROM {table}"
                 )
-                connection.execute(f"DROP TABLE {table}")
+                connection.execute(f"DROP TABLE {table}")  # nosemgrep
                 connection.execute(ddl)
                 connection.execute(
                     f"INSERT INTO {table} ({columns}) "
                     f"SELECT {columns} FROM {table}_pre_v6_copy"
                 )
-                connection.execute(f"DROP TABLE {table}_pre_v6_copy")
-                after = connection.execute(
+                connection.execute(f"DROP TABLE {table}_pre_v6_copy")  # nosemgrep
+                after = connection.execute(  # nosemgrep
                     f"SELECT COUNT(*) FROM {table}"
                 ).fetchone()[0]
                 if before != after:
@@ -1318,21 +1327,26 @@ class RepositoryStore:
             )
             connection.execute("PRAGMA foreign_keys=OFF")
             connection.execute("BEGIN IMMEDIATE")
+            # The `# nosemgrep` markers below cover table IDENTIFIER interpolation.
+            # SQL binds values, never identifiers, so a migration that copies and
+            # rebuilds tables cannot use parameters. `table` is not caller input:
+            # `_PRE_V6_WIDENED_TABLES` is a module-level `Final` mapping of two
+            # literal table names.
             for table, (ddl, columns) in _PRE_V6_WIDENED_TABLES.items():
-                before = connection.execute(
+                before = connection.execute(  # nosemgrep
                     f"SELECT COUNT(*) FROM {table}"
                 ).fetchone()[0]
-                connection.execute(
+                connection.execute(  # nosemgrep
                     f"CREATE TABLE {table}_pre_v7_copy AS SELECT * FROM {table}"
                 )
-                connection.execute(f"DROP TABLE {table}")
+                connection.execute(f"DROP TABLE {table}")  # nosemgrep
                 connection.execute(ddl)
                 connection.execute(
                     f"INSERT INTO {table} ({columns}) "
                     f"SELECT {columns} FROM {table}_pre_v7_copy"
                 )
-                connection.execute(f"DROP TABLE {table}_pre_v7_copy")
-                after = connection.execute(
+                connection.execute(f"DROP TABLE {table}_pre_v7_copy")  # nosemgrep
+                after = connection.execute(  # nosemgrep
                     f"SELECT COUNT(*) FROM {table}"
                 ).fetchone()[0]
                 if before != after:
@@ -3263,10 +3277,14 @@ class RepositoryStore:
         return tuple(dict(row) for row in rows)
 
     def row_count(self, table: str) -> int:
+        # The one site here that DOES take a caller-supplied name, which is why the
+        # allowlist below is load-bearing rather than decorative: `table` is
+        # rejected unless it is one of the known table names, and only then reaches
+        # the query. A table identifier cannot be passed as a bind parameter.
         if table not in _TABLES:
             raise ValueError("table_invalid")
         with self._connection() as connection:
-            return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])  # nosemgrep
 
     def save_capability_snapshot_record(self, snapshot: CapabilitySnapshot) -> bool:
         if not isinstance(snapshot, CapabilitySnapshot):

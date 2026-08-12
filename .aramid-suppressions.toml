@@ -18,6 +18,25 @@
 # Adjudicated 2026-08-10, surfaced when a connection-lifetime fix touched both
 # files. They pre-date that change; the gate scans changed files, so they had
 # simply never been in front of anyone.
+#
+# 2026-08-12, v0.3.0: two ids re-affirmed after their fingerprints moved. The
+# same two findings, same code, same reasoning -- adding explanatory comments
+# above those statements shifted their line numbers, and an id here is bound to
+# the finding's position. Nothing was newly adjudicated; `a376b978` replaces
+# `17a9d795` and `0bec96f6` replaces `93fce77a`.
+#
+# Note the fragility, since it will recur: a purely cosmetic edit above a
+# suppressed line silently invalidates its entry, and the finding then returns
+# as NEW and blocks. That is fail-closed, which is the right direction, but it
+# means these ids are re-verified on every reflow rather than being durable.
+#
+# The same v0.3.0 gate also surfaced the SEMGREP view of these identical
+# statements (rule `owasp-top-ten.a03-injection.python-sqli-string-concat`),
+# which is handled at the source with bare `# nosemgrep` markers instead of
+# entries here. Not a style preference: semgrep namespaces its rule ids by
+# config path, so the id it actually emits embeds the absolute location of the
+# vendored ruleset -- including a username -- and is therefore unusable both in
+# a committed file and in shipped source.
 
 [[suppress]]
 id = "af409bd09c1c2a39e8d1ce21ce478aea056cbda059e8fb3d9517d21f9e6fb7ca"
@@ -27,7 +46,7 @@ path = "src/graphite/routing/lifecycle_storage.py"
 reason = "The interpolated name is a migration table key read from a module-level schema dict, never caller input. SQLite cannot bind an identifier, so an f-string is the only mechanism available; every VALUE is bound with ?."
 
 [[suppress]]
-id = "17a9d79522c375ab04720971f1695c25c14fbaa41482e75aea120916eaa1c674"
+id = "a376b978d811111408282f5a43a978bb2d0927ea83ac220db6ca564bcd66f5ef"
 tool = "ruff"
 rule = "S608"
 path = "src/graphite/routing/lifecycle_storage.py"
@@ -97,7 +116,7 @@ path = "src/graphite/routing/storage.py"
 reason = "The interpolated name is a migration table key read from a module-level schema dict, never caller input. SQLite cannot bind an identifier, so an f-string is the only mechanism available; every VALUE is bound with ?."
 
 [[suppress]]
-id = "93fce77ad53578c8daf753c4dc5be3efad23b4ac07a3b377c143a2f724671ff2"
+id = "0bec96f6f08e1f429a9f9150d4d3fbf6670d297690a40d0efd777218487d895c"
 tool = "ruff"
 rule = "S608"
 path = "src/graphite/routing/storage.py"

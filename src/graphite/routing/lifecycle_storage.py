@@ -266,7 +266,11 @@ class LifecycleStore:
                 isolation_level=None,
             )
             connection.row_factory = sqlite3.Row
-            connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+            # PRAGMA accepts no bind parameters, so this cannot be parameterized.
+            # busy_timeout_ms is an int validated to 100..30_000 at construction.
+            # Bare marker, not `nosemgrep: <id>`: semgrep namespaces rule ids by
+            # CONFIG PATH, so the real id embeds this machine's install location.
+            connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")  # nosemgrep
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA journal_mode = WAL")
             return connection
@@ -342,7 +346,11 @@ class LifecycleStore:
                 isolation_level=None,
             )
             connection.row_factory = sqlite3.Row
-            connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+            # PRAGMA accepts no bind parameters, so this cannot be parameterized.
+            # busy_timeout_ms is an int validated to 100..30_000 at construction.
+            # Bare marker, not `nosemgrep: <id>`: semgrep namespaces rule ids by
+            # CONFIG PATH, so the real id embeds this machine's install location.
+            connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")  # nosemgrep
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA query_only = ON")
             version = connection.execute(
@@ -440,6 +448,10 @@ class LifecycleStore:
             ),
         )
         try:
+            # The `# nosemgrep` markers below cover table IDENTIFIER interpolation.
+            # SQL binds values, never identifiers, so a migration that renames and
+            # rebuilds tables cannot use parameters. `table` is not caller input:
+            # `rebuilds` is the literal tuple defined immediately above.
             for table, create_sql, columns in rebuilds:
                 rebuilt = create_sql.replace(
                     f"CREATE TABLE IF NOT EXISTS {table} ",
@@ -449,17 +461,17 @@ class LifecycleStore:
                 if rebuilt == create_sql:
                     raise LifecycleStorageError("lifecycle_migration_failed")
                 connection.execute(rebuilt)
-                connection.execute(
+                connection.execute(  # nosemgrep
                     f"INSERT INTO {table}__v2 ({columns}) SELECT {columns} FROM {table}"
                 )
-                before = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                after = connection.execute(
+                before = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # nosemgrep
+                after = connection.execute(  # nosemgrep
                     f"SELECT COUNT(*) FROM {table}__v2"
                 ).fetchone()[0]
                 if before != after:
                     raise LifecycleStorageError("lifecycle_migration_quarantined")
-                connection.execute(f"DROP TABLE {table}")
-                connection.execute(f"ALTER TABLE {table}__v2 RENAME TO {table}")
+                connection.execute(f"DROP TABLE {table}")  # nosemgrep
+                connection.execute(f"ALTER TABLE {table}__v2 RENAME TO {table}")  # nosemgrep
             if connection.execute("PRAGMA foreign_key_check").fetchall():
                 raise LifecycleStorageError("lifecycle_migration_quarantined")
             integrity = connection.execute("PRAGMA integrity_check").fetchone()
@@ -501,9 +513,11 @@ class LifecycleStore:
         }
         if not set(expected) <= actual:
             raise LifecycleStorageError("lifecycle_rollback_required")
+        # Identifier interpolation again, and `table` comes from the `expected`
+        # literal above -- never from a caller. PRAGMA takes no bind parameters.
         for table, required_columns in expected.items():
             columns = {
-                str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")
+                str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")  # nosemgrep
             }
             if not required_columns <= columns:
                 raise LifecycleStorageError("lifecycle_rollback_required")
