@@ -193,6 +193,103 @@ jobs:
           "$SMOKE/bin/graphite" debt --as-of 2026-01-01 > /dev/null
           echo "installed wheel builds and queries a graph from a clean environment"
 
+      # `init` is the most invasive thing this package does -- it writes git
+      # hooks, an MCP server registration, VS Code tasks and agent hooks INTO
+      # the user's repository -- and until now it was the one command this
+      # smoke test never called.
+      #
+      # The unit tests cover these surfaces well (including an AST sweep in
+      # test_hardening.py requiring `-P` on every in-source launch), but they all
+      # run against the SOURCE TREE. They cannot see a template that failed to be
+      # packaged. That is not hypothetical: v0.3.0 fixed a path defect present
+      # since the first commit which shipped in every prior wheel and which every
+      # unit test passed over, because the tests never asked what the ARTIFACT
+      # contains.
+      - name: Onboard a repo using the installed wheel
+        run: |
+          set -euo pipefail
+          SMOKE="$RUNNER_TEMP/smoke"
+          ONBOARD="$RUNNER_TEMP/onboard"
+          mkdir -p "$ONBOARD/src"
+          cd "$ONBOARD"
+          git init -q
+          git config user.email "ci@example.invalid"
+          git config user.name "Graphite CI"
+          printf 'def greet(name):\n    return f"hi {name}"\n' > src/app.py
+          git add -A
+          git commit -qm baseline
+          "$SMOKE/bin/graphite" init .
+          "$SMOKE/bin/python" - <<'PY'
+          import json, pathlib, sys
+
+          root = pathlib.Path(".")
+
+          # Every launch site `init` wrote, collected by WALKING WHAT EXISTS
+          # rather than by checking a list of expected filenames. Scoping a
+          # shadowing sweep by artifact kind is how this project missed surfaces
+          # four separate times; the question is only ever "does this chain reach
+          # -m", so JSON argv arrays are joined before matching and shell files
+          # are read line by line.
+          launches = []
+
+          def scan_json(path):
+              if not path.is_file():
+                  return
+              data = json.loads(path.read_text(encoding="utf-8"))
+              stack = [data]
+              while stack:
+                  node = stack.pop()
+                  if isinstance(node, dict):
+                      argv = node.get("args")
+                      cmd = node.get("command")
+                      if isinstance(cmd, str) and isinstance(argv, list):
+                          launches.append((path, " ".join([cmd, *map(str, argv)])))
+                      elif isinstance(cmd, str):
+                          launches.append((path, cmd))
+                      stack.extend(node.values())
+                  elif isinstance(node, list):
+                      stack.extend(node)
+
+          for name in (".mcp.json", ".vscode/tasks.json", ".claude/settings.json"):
+              scan_json(root / name)
+
+          for hook in sorted((root / ".githooks").glob("*")):
+              if hook.is_file():
+                  for line in hook.read_text(encoding="utf-8").splitlines():
+                      if "-m graphite" in line:
+                          launches.append((hook, line.strip()))
+
+          reaching = [(p, c) for p, c in launches if "-m graphite" in c]
+          unhardened = [(p, c) for p, c in reaching if "-P" not in c.split()]
+
+          for path, cmd in reaching:
+              print(f"  {'OK ' if '-P' in cmd.split() else 'BAD'}  {path}: {cmd[:100]}")
+
+          # A sweep that examined nothing reports zero violations and looks
+          # identical to a clean one. This is the control, and it is the reason
+          # the number is asserted rather than printed: a rename that moved a
+          # surface out of reach would otherwise pass silently.
+          print(f"\nlaunch sites reaching `-m graphite`: {len(reaching)}")
+          assert len(reaching) >= 8, (
+              f"expected init to write at least 8 launch sites, found {len(reaching)}. "
+              "Either the sweep stopped seeing a surface, or init stopped writing "
+              "one. Both are failures -- find out which before lowering this."
+          )
+          assert not unhardened, (
+              "init wrote graphite launches without `-P`:\n  "
+              + "\n  ".join(f"{p}: {c}" for p, c in unhardened)
+              + "\n`python -m X` puts the CWD on sys.path[0], so a repo-local "
+              "graphite.py wins; a module-shaped shadow RUNS before it errors."
+          )
+
+          for required in ("GRAPHITE.md", "AGENTS.md", "CLAUDE.md", ".gitignore"):
+              assert (root / required).is_file(), f"init did not write {required}"
+
+          print("init from the installed wheel wrote every surface, all hardened")
+          PY
+          test -f graph-out/graph.json
+          echo "onboarding works from a packaged wheel, not just from the source tree"
+
   # Portability MEASUREMENT, not a gate. `pyproject.toml` claims
   # `requires-python = ">=3.11"` and the gating job above proves exactly one
   # cell of that claim: windows-latest on 3.14. Linux, macOS, and 3.11-3.13 are
