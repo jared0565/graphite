@@ -30,11 +30,16 @@ What it CANNOT see -- published so the oracle does not grade its own blind spot
   migrations use exactly this shape.
 
 Consequently this oracle UNDER-counts real sites. A site it misses is not
-evidence the rule over-fires. It is a lower bound on ground truth, which is the
-right direction for grading precision and the wrong one for claiming recall --
-so recall figures derived from it are stated as "of the sites this oracle can
-see", never as absolute. Measured size of that gap, on the shapes above:
-**it claims 2 of 7** (agent-channel round 86).
+evidence another tool over-fires. It is a lower bound on ground truth, which is
+the right direction for grading precision and the wrong one for claiming recall
+-- so recall figures derived from it are stated as "of the sites this oracle can
+see", never as absolute.
+
+For the size of that gap, run `tests/test_sqloracle.py` rather than reading a
+number here. A figure written into prose has no verifier and rots in silence;
+the same figure asserted in a test goes red. This paragraph carried "it claims
+2 of 7" for about four hours before an improvement to this file made it three,
+which is the whole argument.
 
 What the `kind` field means -- and why it is four values, not two
 ----------------------------------------------------------------
@@ -59,10 +64,10 @@ How it was validated -- read this before trusting a number it produced
 Known-answer tests live in `tests/test_sqloracle.py` and run in this repo's
 suite; the fixtures are `tests/data/sqloracle/*.py.txt`, carrying that extension
 so that code which contains SQL injection BY CONSTRUCTION is not scanned by this
-repo's own security gate. They pin the two figures published on the channel --
-7 sites for the round-69 fixture, 2 claims for the round-86 blind-spot fixture
--- so that if either moves, a round needs correcting rather than a number
-quietly changing under a published claim.
+repo's own security gate. They pin both answer sets published on the channel, by
+SCOPE NAME rather than by count -- a count drifts quietly, a named set cannot --
+so that if either moves, the suite goes red and a round needs correcting instead
+of a number changing underneath a published claim.
 
 Three defects this validation caught, none of which a plausible-looking run
 would have shown:
@@ -80,9 +85,19 @@ Defect 2 is the cautionary one: the fixture agreed with the oracle because both
 shared the same blind spot. A fixture written by the same person as the tool
 grades the tool against its author's assumptions -- which is precisely why an
 independent oracle is worth having, and why this one should not be the last
-word either. Round 86 measured the cost of that directly: of seven hazards,
-four are invisible to this oracle AND to the rule it grades, so on that class
-the two agree perfectly and neither sees anything.
+word either.
+
+What this file will NOT tell you: how any other tool scores on the same input.
+That comparison is real and it is recorded in the agent-channel rounds, dated
+and attributed, where both sides can see it. It does not belong here.
+
+An earlier version of this docstring stated how many of those shapes were
+invisible to this oracle AND to the semgrep rule it grades. That sentence
+described behaviour in a repository this one may not read and cannot run, so it
+was inherited by construction and unverifiable from this side -- and it went
+false within two hours, when improving this file moved one shape out of the set.
+Nothing here could have noticed. Repository isolation is not only a boundary on
+where this repo may act; it is a boundary on what it is entitled to assert.
 """
 
 from __future__ import annotations

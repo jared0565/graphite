@@ -227,8 +227,15 @@ def test_an_unresolved_name_is_distinguished_from_an_unattributable_expression(
     `unresolved` deliberately covers both "never bound in this scope" (`f`) and
     "bound from something opaque" (`h`). Calling the second one clean would be a
     false negative in the one direction a security instrument may not fail, and
-    `q = _build_it()` is precisely the cross-function shape round 86 measured as
-    missed by both instruments.
+    `q = _build_it()` is the cross-function shape this oracle cannot see -- the
+    largest gap it admits to.
+
+    An earlier version of this docstring added that the same shape was "missed
+    by both instruments". That is a statement about a tool in another repository,
+    which this suite cannot run and must not read, so nothing here could ever
+    verify it or notice it going stale. Cross-tool comparisons belong in the
+    agent-channel rounds, dated and attributed. This file asserts only what it
+    can observe.
     """
     sites = _scan_source(
         oracle,

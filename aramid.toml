@@ -65,11 +65,19 @@ timeout_s = 1200
 #   per-tool skip streaks:
 #     pytest: skipped last N pre-push run(s)
 #
-# and it is a FALSE ALARM. The suite runs. aramid labels the tests slot by
-# `basename(argv[0])`, so setting this key renamed the slot from `pytest` to
-# `python.exe`, and the skip detector -- which on this version infers the
-# expected set from the tools it has observed before -- reads the vanished
-# `pytest` as a suite that stopped running. Straight from the ledger:
+# and it is a FALSE ALARM. The suite runs.
+#
+# What was MEASURED here, and is re-measurable from this repo: the label
+# recorded for the tests slot changed when this key was set, and the counter
+# incremented on a run that provably executed the suite. Both from our own
+# ledger, below.
+#
+# The MECHANISM behind it -- that the slot is labelled from the configured
+# command, and that the detector infers what to expect from labels it has seen
+# before -- is aramid's, confirmed by aramid-agent in channel round 82, and is
+# recorded there rather than asserted here. This file cannot verify it and
+# would not notice it going stale; round 82 also states the upstream fix, so it
+# is version-bound by construction. Read the round, not this comment, for why.
 #
 #   before this line  pre-push  tools = ['gitleaks', 'pytest',     'semgrep']
 #   after  this line  pre-push  tools = ['gitleaks', 'python.exe', 'semgrep']
