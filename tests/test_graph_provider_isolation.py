@@ -121,15 +121,23 @@ def test_explicit_llm_none_remains_a_compatible_canonical_noop(tmp_path: Path) -
 def test_daemon_child_build_has_no_provider_argv_or_environment(
     tmp_path: Path, monkeypatch
 ) -> None:
-    secret = "provider-secret-must-not-propagate"
+    # Named for what it is. This is a canary, not a credential: the value exists
+    # to be searched for in the child's argv and environment, and the assertions
+    # below fail if it survives the hop. Calling it `secret` made ruff read the
+    # line as a hardcoded password (S105) -- a BLOCK-tier finding standing open
+    # over a string whose whole purpose is to be greppable. The repo's other
+    # four instances of this were settled the same way, by renaming rather than
+    # by a suppression entry; a suppression here would have bought silence on a
+    # rule that should stay loud in test files that DO handle real keys.
+    canary = "provider-secret-must-not-propagate"
     environment = _CredentialTrap(
         {
             "PATH": "safe-bin",
             "GRAPHITE_LLM": "cloud",
-            "GRAPHITE_LLM_API_KEY": secret,
-            "OPENAI_API_KEY": secret,
-            "OPENROUTER_API_KEY": secret,
-            "ANTHROPIC_API_KEY": secret,
+            "GRAPHITE_LLM_API_KEY": canary,
+            "OPENAI_API_KEY": canary,
+            "OPENROUTER_API_KEY": canary,
+            "ANTHROPIC_API_KEY": canary,
             "OLLAMA_HOST": "http://provider.invalid",
         }
     )
@@ -139,7 +147,7 @@ def test_daemon_child_build_has_no_provider_argv_or_environment(
         llm_provider="openrouter",
         llm_model="vendor/model",
         llm_base_url="https://provider.invalid/v1",
-        llm_api_key=secret,
+        llm_api_key=canary,
     )
 
     argv, environment = _build_command(cfg, tmp_path)
@@ -147,7 +155,7 @@ def test_daemon_child_build_has_no_provider_argv_or_environment(
 
     assert argv[-3:] == ["none", "build", str(tmp_path)]
     assert argv[argv.index("--llm") + 1] == "none"
-    for forbidden in ("--llm-provider", "--llm-model", "--llm-base-url", secret):
+    for forbidden in ("--llm-provider", "--llm-model", "--llm-base-url", canary):
         assert forbidden not in serialized
     for name in (
         "GRAPHITE_LLM",
