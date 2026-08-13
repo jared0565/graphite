@@ -209,9 +209,34 @@ jobs:
   # and every other Python unmeasured. That is the sample-size-of-1 trap the
   # `concurrency` group above already had to defuse once.
   #
-  # Deliberately NOT run on push: extra legs on every commit to main is a
-  # standing cost for a question that only needs re-asking when support claims
-  # or dependencies change. Dispatch it, or open a PR.
+  # ~~Deliberately NOT run on push~~ -- REVERSED 2026-08-13, and the reversal is
+  # measured. It now runs on push to main; see the `if:` on the job below.
+  #
+  # The reasoning this replaces was sound and its premise expired. "Extra legs
+  # on every commit is a standing cost" is only true where legs cost something.
+  # This repository is PUBLIC and GitHub does not meter standard runners on
+  # public repositories. Timing API for run 31748503731, which is the first run
+  # that actually contained macOS legs:
+  #
+  #     UBUNTU  total_ms 0 (4 jobs)
+  #     WINDOWS total_ms 0 (4 jobs)
+  #     MACOS   total_ms 0 (3 jobs)     <- the 10x multiplier below, measured
+  #     run_duration_ms 660000
+  #
+  # An 11-minute run that billed nothing, with run_duration as the control that
+  # the endpoint reports anything at all. The 10x macOS multiplier is real and
+  # applies to METERED usage; it does not apply here.
+  #
+  # ⚠️ The first version of this reversal was justified on a run where
+  # portability was SKIPPED, so it had no macOS job -- ubuntu and windows were
+  # measured and macOS was generalised, which is precisely the cell this comment
+  # warned about. Do not repeat that: if the cost question is reopened, measure
+  # the timing endpoint on a run that CONTAINS the runner in question.
+  #
+  # What would make the old reasoning true again: this repository going private,
+  # or a move to larger/self-hosted runners. Either re-arms the cost argument
+  # entirely. Re-measure before restoring the restriction -- do not restore it
+  # from prose, including this prose.
   #
   # SCOPE IS DELIBERATELY SMALL, and it cost real money to learn why. The first
   # version ran 9 legs including 4x ubuntu and 2x macOS. The ubuntu legs HANG and
