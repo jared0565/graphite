@@ -1,0 +1,79 @@
+"""Known-answer fixture for sqloracle.py. Expected: 7 sites, none in safe_*.
+
+Sent to aramid to grade the ORACLE, not the rule. Two warnings about it:
+
+* It was written by the oracle's author, so it shares the author's blind spots.
+  It is the reason defect 2 in the oracle survived a 6/6 score: neither the tool
+  nor the fixture had a loop, so build-then-execute-inside-a-for-loop was
+  invisible to both. `positive_in_loop` exists only because real code in
+  graphite's migrations exposed it. Assume more of these remain.
+* The two `gap_*` cases are NOT oracle bugs. They are cases the oracle catches
+  and aramid's rule (as of 73e2d1f) does not -- kept here so the two can be
+  compared on the same input.
+
+Cases most worth adding, which I did not write because I could not think past my
+own model: a query assembled across two functions; one built into `self.q`; one
+built into a dict or list then iterated; one built with `+=` in a loop; one
+rebound on only one branch of an if/else.
+"""
+
+import sqlite3
+
+cur = sqlite3.connect(":memory:").cursor()
+x = "untrusted"
+parts = ["SELECT * FROM t WHERE x = '", x, "'"]
+
+
+def positive_concat() -> None:
+    q = "SELECT * FROM t WHERE x = '" + x + "'"
+    cur.execute(q)
+
+
+def positive_fstring() -> None:
+    q = f"SELECT * FROM t WHERE x = '{x}'"
+    cur.execute(q)
+
+
+def positive_percent() -> None:
+    q = "SELECT * FROM t WHERE x = '%s'" % x
+    cur.execute(q)
+
+
+def positive_format() -> None:
+    q = "SELECT * FROM t WHERE x = '{}'".format(x)
+    cur.execute(q)
+
+
+def positive_in_loop() -> None:
+    # The shape graphite actually uses (storage.py migrations): build inside a
+    # loop body, execute in the same body. Pinned because an earlier oracle
+    # revision missed exactly this and reported zero sites of the class.
+    for table in ("alpha", "beta"):
+        ddl = f"ALTER TABLE {table} ADD COLUMN c TEXT"
+        cur.execute(ddl)
+
+
+def safe_parameterized() -> None:
+    cur.execute("SELECT * FROM t WHERE x = ?", (x,))
+
+
+def safe_never_executed() -> None:
+    message = f"built but never run: {x}"
+    print(message)
+
+
+def safe_fstring_as_parameter() -> None:
+    cur.execute("SELECT * FROM t WHERE x = ?", (f"{x}",))
+
+
+def gap_join() -> None:
+    # aramid states this is still missed by the rule. Confirmed 2026-08-11.
+    q = "".join(parts)
+    cur.execute(q)
+
+
+def gap_multi_hop() -> None:
+    # aramid states chains through >1 intermediate are still missed. Confirmed.
+    first = f"SELECT * FROM t WHERE x = '{x}'"
+    second = first
+    cur.execute(second)

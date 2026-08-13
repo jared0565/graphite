@@ -1,0 +1,206 @@
+"""Blind-spot fixture for sqloracle.py -- the shapes its own docstring says it
+cannot see, plus a safe twin for each so the fixture grades PRECISION and not
+only recall.
+
+Why twins. A rule that flags every `self.q = f"..."` scores 100% recall on the
+positives here and is worthless. Every hazardous shape below is paired with a
+form that LOOKS the same and is not vulnerable, so a matcher keying on syntax
+rather than on flow is caught producing a false positive rather than rewarded
+for over-firing.
+
+Ground truth. "VULNERABLE" means an untrusted value (`UNTRUSTED`, or anything
+derived from it) reaches an executor by string interpolation rather than by
+parameter binding. "SAFE" means it does not -- either the interpolated parts are
+constants, or the untrusted value travels as a bound parameter. These labels are
+mine and are the thing this fixture asks you to trust; each is stated next to
+the code so a disagreement is about one function rather than about a score.
+
+What this fixture still cannot do. It shares its author's blind spots, the same
+way the round-69 fixture did -- that one scored 6/6 while both it and the oracle
+were blind to build-then-execute-inside-a-loop, because neither had a loop. The
+shapes here came from the oracle's PUBLISHED blind-spot list, which means they
+are the gaps I know about. The ones that matter are the gaps I do not, and no
+fixture I write can contain them.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+
+cur = sqlite3.connect(":memory:").cursor()
+
+UNTRUSTED = "'; DROP TABLE t; --"
+UNTRUSTED_VALUES = [UNTRUSTED, "b"]
+UNTRUSTED_TABLES = [UNTRUSTED, "beta"]
+
+# The real shape from graphite's own migrations: a module-level table of DDL,
+# unpacked by a for-loop. Every string here is a constant.
+MIGRATIONS = {"alpha": ("ALTER TABLE alpha ADD COLUMN c TEXT", ["c"])}
+
+
+# --- 1. cross-function assembly -------------------------------------------
+# Oracle blind spot: "a query built in one function and executed in another,
+# including via a return value or a helper that assembles SQL".
+
+
+def _assemble(value: str) -> str:
+    return "SELECT * FROM t WHERE x = '" + value + "'"
+
+
+def bs_cross_function() -> None:
+    """VULNERABLE. The build is one frame away from the execute."""
+    cur.execute(_assemble(UNTRUSTED))
+
+
+def _assemble_parameterized() -> str:
+    return "SELECT * FROM t WHERE x = ?"
+
+
+def bs_cross_function_safe() -> None:
+    """SAFE. Same call-a-helper-then-execute shape, constant SQL, bound value."""
+    cur.execute(_assemble_parameterized(), (UNTRUSTED,))
+
+
+# --- 2. attribute targets --------------------------------------------------
+# Oracle blind spot: "attributes and subscripts: `self.q = f'...'`".
+
+
+class Repo:
+    def build(self) -> None:
+        self.q = f"SELECT * FROM t WHERE x = '{UNTRUSTED}'"
+
+    def run(self) -> None:
+        """VULNERABLE. Built into an attribute in one method, executed in another."""
+        cur.execute(self.q)
+
+
+class SafeRepo:
+    def build(self) -> None:
+        self.q = "SELECT * FROM t WHERE x = ?"
+
+    def run(self) -> None:
+        """SAFE. Identical attribute-then-execute shape, constant SQL."""
+        cur.execute(self.q, (UNTRUSTED,))
+
+
+def bs_subscript_target() -> None:
+    """VULNERABLE. Same idea through a dict rather than an attribute."""
+    d = {}
+    d["q"] = f"SELECT * FROM t WHERE x = '{UNTRUSTED}'"
+    cur.execute(d["q"])
+
+
+# --- 3. container built, then iterated -------------------------------------
+# Oracle blind spot: "a list/dict of queries built then iterated".
+
+
+def bs_container_iterated() -> None:
+    """VULNERABLE. Nothing tainted is ever the direct argument to execute."""
+    statements = []
+    for table in UNTRUSTED_TABLES:
+        statements.append(f"DROP TABLE {table}")
+    for statement in statements:
+        cur.execute(statement)
+
+
+def bs_container_iterated_safe() -> None:
+    """SAFE. Same build-a-list-then-iterate shape, every element a constant."""
+    statements = ["SELECT 1", "SELECT 2"]
+    for statement in statements:
+        cur.execute(statement)
+
+
+# --- 4. augmented assignment in a loop -------------------------------------
+# Oracle blind spot: "augmented assignment (`q += ...`)".
+
+
+def bs_augmented_in_loop() -> None:
+    """VULNERABLE. The hazard accumulates; no single statement builds the query."""
+    query = "SELECT * FROM t WHERE 1=0"
+    for value in UNTRUSTED_VALUES:
+        query += f" OR x = '{value}'"
+    cur.execute(query)
+
+
+def bs_augmented_in_loop_safe() -> None:
+    """SAFE, and the precision probe for this shape.
+
+    This is the CORRECT idiom for a variable-length IN/OR clause: `+=` still
+    appears in a loop directly above an execute, but what accumulates is
+    placeholders, and the untrusted values travel bound. A matcher keying on
+    "augmented assignment near execute" flags this and is wrong.
+    """
+    query = "SELECT * FROM t WHERE 1=0"
+    params = []
+    for value in UNTRUSTED_VALUES:
+        query += " OR x = ?"
+        params.append(value)
+    cur.execute(query, params)
+
+
+# --- 5. rebinding on one branch --------------------------------------------
+# Oracle blind spot: "a name string-built on only one arm of an if/else is
+# treated as tainted, which is correct for reachability but coarse".
+
+
+def bs_one_branch_only(flag: bool) -> None:
+    """VULNERABLE on one path. Reachability says flag it; only one arm is unsafe."""
+    query = "SELECT * FROM t WHERE x = ?"
+    if flag:
+        query = f"SELECT * FROM t WHERE x = '{UNTRUSTED}'"
+    cur.execute(query)
+
+
+def bs_dead_interpolation() -> None:
+    """SAFE. Interpolation happens, an execute happens, and they never meet.
+
+    The tainted binding is unconditionally replaced before use. A matcher doing
+    "some interpolation, then some execute, same scope" flags this. The oracle
+    should get it right -- it clears taint on rebinding to a non-built value --
+    so this is a case where I predict a PASS rather than a miss.
+    """
+    query = f"SELECT * FROM t WHERE x = '{UNTRUSTED}'"
+    query = "SELECT * FROM t WHERE x = ?"
+    cur.execute(query, (UNTRUSTED,))
+
+
+# --- 6. tuple unpacking in a for target ------------------------------------
+# Oracle blind spot: "tuple unpacking: `for table, (ddl, cols) in TABLES.items()`
+# binds `ddl` without an Assign node". Named in the docstring as the shape
+# graphite's real migrations use.
+
+
+def bs_tuple_unpacking_safe() -> None:
+    """SAFE, and this is graphite's actual migration shape.
+
+    Every string comes from a module-level constant. It is here because the
+    oracle cannot attribute it and lands it in `unattributed` -- an honest
+    "I cannot see this", which must not be scored as a miss.
+    """
+    for _table, (ddl, _cols) in MIGRATIONS.items():
+        cur.execute(ddl)
+
+
+def bs_tuple_unpacking_tainted() -> None:
+    """VULNERABLE. Same unpacking shape, but the query is built from the loop
+    target inside the body -- which IS an Assign, so this one is within reach."""
+    for table, (suffix, _cols) in {"alpha": (UNTRUSTED, [])}.items():
+        ddl = f"ALTER TABLE {table} ADD COLUMN {suffix} TEXT"
+        cur.execute(ddl)
+
+
+# --- 7. how is "then executed" decided? ------------------------------------
+
+
+def bs_probe_unrelated_execute() -> None:
+    """SAFE, and a probe for the MECHANISM rather than for a shape.
+
+    An interpolated string is built and never executed. A different, wholly
+    constant query is executed in the same scope. Flagging this means the
+    matcher pairs a build with *any* execute in the scope rather than with the
+    one that consumes it -- and if so, then any true positive it scores on the
+    attribute/subscript shapes above was earned by the same mechanism that
+    produces its false positives, which is a different claim from catching them.
+    """
+    _unused = f"SELECT * FROM t WHERE x = '{UNTRUSTED}'"
+    cur.execute("SELECT 1")
