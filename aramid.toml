@@ -59,6 +59,31 @@ timeout_s = 1200
 #   ../.venvs/graphite-dev/Scripts/python.exe -m pip install -e ".[dev,mcp]"
 #
 # Still the whole suite, deliberately -- see the note above `[timeouts]`.
+#
+# KNOWN ARTIFACT OF THIS LINE, 2026-08-13: `aramid status` reports
+#
+#   per-tool skip streaks:
+#     pytest: skipped last N pre-push run(s)
+#
+# and it is a FALSE ALARM. The suite runs. aramid labels the tests slot by
+# `basename(argv[0])`, so setting this key renamed the slot from `pytest` to
+# `python.exe`, and the skip detector -- which on this version infers the
+# expected set from the tools it has observed before -- reads the vanished
+# `pytest` as a suite that stopped running. Straight from the ledger:
+#
+#   before this line  pre-push  tools = ['gitleaks', 'pytest',     'semgrep']
+#   after  this line  pre-push  tools = ['gitleaks', 'python.exe', 'semgrep']
+#
+# Not inferred: the push of `84b8aa9` ran the whole suite, ~12 minutes,
+# blocking=0, and incremented the counter 2 -> 3. A run that provably executed
+# the tests incremented "pytest skipped".
+#
+# So do NOT read that line as evidence about this repo's suite, and do not
+# "fix" it by reverting this command -- that would trade a cosmetic false alarm
+# for a gate that tests the released wheel instead of the tree, which is the
+# one failure mode this key exists to prevent. Whether the streak clears on its
+# own is aramid's to answer; asked in channel round 80, along with whether a
+# streak gates anything or is display-only.
 command = ["../.venvs/graphite-dev/Scripts/python.exe", "-m", "pytest"]
 
 # [mutation].baseline_timeout_s is deliberately NOT set. Measured 2026-08-11,
