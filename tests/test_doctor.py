@@ -965,11 +965,29 @@ def test_deep_bounded_runner_times_out_without_leaking_process_output(tmp_path: 
 
 
 @pytest.mark.parametrize(
-    ("emits", "expect_output"),
-    [("sys.stdout.write('RAW partial');sys.stdout.flush();", True), ("", False)],
+    ("emits", "expect_output", "budget"),
+    [
+        # The budget differs by case because the two cases need opposite things
+        # of it, and giving them one number made this test fail 4 runs in 15.
+        #
+        # Expecting output requires the child to START, write and flush inside
+        # the EXECUTION deadline -- which is the budget minus up to 40% reserved
+        # for cleanup, so 0.3 bought only ~0.18s. Measured on this machine, a
+        # fresh interpreter takes ~0.155-0.356s (median ~0.19s) just to reach its
+        # first byte. The precondition cost the whole budget: the test was a coin
+        # flip and had been passing on luck, before any gate load.
+        #
+        # 2.0 is derived, not reflexively raised: ~1.2s of execution deadline
+        # against a measured p90 of 0.27s is roughly 4x headroom. Re-derive it if
+        # `cleanup_reserve` changes -- do not tune it by re-running until green.
+        ("sys.stdout.write('RAW partial');sys.stdout.flush();", True, 2.0),
+        # Expecting NO output needs no headroom -- there is no startup to win --
+        # so this case stays fast. Load can only make silence more certain.
+        ("", False, 0.3),
+    ],
 )
 def test_a_bounded_timeout_carries_what_it_observed_before_giving_up(
-    tmp_path: Path, emits: str, expect_output: bool
+    tmp_path: Path, emits: str, expect_output: bool, budget: float
 ) -> None:
     """A timeout must report how long it waited and whether the child spoke.
 
@@ -998,18 +1016,31 @@ def test_a_bounded_timeout_carries_what_it_observed_before_giving_up(
     produced a byte, non-zero means it was alive and progressing. Asserted as
     presence/absence rather than an exact count, because an exact count would
     race the deadline -- the same mistake this file just finished removing.
+
+    ⚠️ AND THE PRESENCE/ABSENCE FORM RACED IT TOO, which the paragraph above
+    claims to have fixed. The load-direction argument two paragraphs up was
+    applied to `elapsed` and not to its neighbour, and the two run in OPPOSITE
+    directions: load pushes elapsed UP and away from its bound, but pushes
+    observed bytes DOWN and through theirs. Weakening the assertion shrank the
+    race without removing it, and the budget is what removed it -- see the
+    parametrize block. Measured 4 failures in 15 unloaded runs before the fix.
+
+    The residue worth naming: `stdout_bytes == 0` still cannot distinguish "the
+    child was alive and silent" from "the child had not finished starting". This
+    test now buys enough headroom that the second is not why it reads zero; it
+    does not make the field able to tell them apart.
     """
     from graphite.probe_process import ProbeProcessError, run_bounded_process
 
     child = f"import sys,time;{emits}time.sleep({_UNREACHABLE_CHILD_SECONDS})"
     with pytest.raises(ProbeProcessError) as exc_info:
-        run_bounded_process([sys.executable, "-c", child], cwd=tmp_path, timeout_seconds=0.3)
+        run_bounded_process([sys.executable, "-c", child], cwd=tmp_path, timeout_seconds=budget)
     error = exc_info.value
 
     assert error.code == "timeout"
-    assert error.budget_seconds == 0.3
+    assert error.budget_seconds == budget
     assert error.elapsed_seconds is not None
-    assert error.elapsed_seconds >= 0.3 * 0.6
+    assert error.elapsed_seconds >= budget * 0.6
     assert (error.stdout_bytes > 0) is expect_output
     # Counts are carried as NUMBERS precisely so they can travel where content
     # cannot. The child's bytes must still not reach the message.
