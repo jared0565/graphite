@@ -255,16 +255,47 @@ jobs:
   # here is what made a 9-leg matrix look necessary, and that matrix exhausted the
   # account's Actions allowance. Local first; dispatch for the OS axis only.
   portability:
-    # Opt-in on dispatch (see the `portability` input above), automatic on PR.
+    # Runs on PUSH TO MAIN, on PR, and opt-in on dispatch.
+    #
+    # Push was added 2026-08-13, and it closes a gap that made this job nearly
+    # dead. Work here lands by pushing straight to main -- there is usually no
+    # PR -- so "automatic on PR" meant automatic on almost nothing. Every commit
+    # on main was reaching consumers with ZERO evidence from any OS or Python
+    # other than the maintainer's own, and the run conclusion said `success`
+    # while this job's status was `skipped`. Not green: never asked.
+    #
+    # The cost argument that made it opt-in NO LONGER APPLIES, and this is
+    # measured rather than reasoned. The repository is PUBLIC, and GitHub does
+    # not meter standard runners on public repositories. From the timing API for
+    # run 31720053986:
+    #
+    #     billable: UBUNTU total_ms 0, WINDOWS total_ms 0
+    #     run_duration_ms: 415000
+    #
+    # A ~7 minute run that billed zero. The surrounding comments in this file
+    # still speak of "2x billing", "48 billed minutes" and an exhausted
+    # allowance; that was presumably true under different circumstances and is
+    # not true now. Re-measure the timing endpoint before reinstating any
+    # cost-driven restriction here -- do not restore it from these comments.
     #
     # The event name is tested explicitly rather than leaning on `inputs` being
     # null-and-therefore-falsy outside workflow_dispatch. That shortcut probably
     # works, but "probably" is doing real work in a condition that decides
-    # whether three 2x-billed legs run, and CI is currently down so it cannot be
-    # demonstrated. Written this way it is true by reading.
+    # whether the matrix runs at all. Written this way it is true by reading.
     if: >-
-      github.event_name == 'pull_request'
+      github.event_name == 'push'
+      || github.event_name == 'pull_request'
       || (github.event_name == 'workflow_dispatch' && inputs.portability)
+    # DELIBERATELY KEPT, and it has a cost you must know about: with this set,
+    # the RUN conclusion reads `success` even when a leg is red. Reading
+    # `.conclusion` is therefore NOT a portability signal -- read
+    # `.jobs[].conclusion`, per job. `gh run view <id> --json jobs`.
+    #
+    # Kept because the reasoning behind it is sound and unchanged: a slow runner
+    # naming a slow test "the hang" would turn main red, and a permanently red
+    # main is where the next real failure hides. That trade is only acceptable
+    # while someone actually reads the per-job result, which is now this job's
+    # standing requirement rather than an optional check.
     continue-on-error: true
     # 20, not the gating job's 45. The suite takes ~8 minutes here, so a leg
     # still running at 20 has already answered the question -- it is hung. The
