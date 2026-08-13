@@ -19,16 +19,39 @@
 # files. They pre-date that change; the gate scans changed files, so they had
 # simply never been in front of anyone.
 #
-# 2026-08-12, v0.3.0: two ids re-affirmed after their fingerprints moved. The
-# same two findings, same code, same reasoning -- adding explanatory comments
-# above those statements shifted their line numbers, and an id here is bound to
-# the finding's position. Nothing was newly adjudicated; `a376b978` replaces
-# `17a9d795` and `0bec96f6` replaces `93fce77a`.
+# 2026-08-12, v0.3.0: two ids re-affirmed after their fingerprints moved --
+# `a376b978` replaced `17a9d795`, `0bec96f6` replaced `93fce77a`. Same findings,
+# same code, same reasoning; nothing was newly adjudicated.
 #
-# Note the fragility, since it will recur: a purely cosmetic edit above a
-# suppressed line silently invalidates its entry, and the finding then returns
-# as NEW and blocks. That is fail-closed, which is the right direction, but it
-# means these ids are re-verified on every reflow rather than being durable.
+# 2026-08-13: THE MECHANISM RECORDED HERE ON THE DAY WAS WRONG, and the wrong
+# version is the dangerous one to leave standing, because it says the ids rot on
+# their own. They do not. An id is not bound to the finding's position: the
+# fingerprint hashes the line's CONTENT together with the tool, rule, path and
+# occurrence index, and no line number goes into it. Measured on a scratch repo
+# against the aramid this repo is pinned to, two arms:
+#
+#   A  comment inserted above the flagged line, STAGED    line 9 -> 10, id SAME
+#   B  the same insertion left UNSTAGED                   line 10 -> 11, id MOVED
+#
+# The line NUMBER comes from the scanner, which reads the working tree. The line
+# CONTENT is read from whichever blob the gate chose -- the index, at pre-commit.
+# The two agree until those snapshots diverge, and then the fingerprint hashes a
+# DIFFERENT line of code than the one that was flagged. So a cosmetic edit is
+# harmless once staged, and an edit still unstaged when the gate runs re-keys
+# every finding below it. Which snapshot pair diverged during the v0.3.0 commit
+# was not reconstructed; only that the ids listed below are the clean-tree ones.
+#
+# Verified 2026-08-13 with `git status` empty: a whole-repo
+# `aramid check --gate pre-commit --all` reports exactly these 19 ids, every one
+# `info`, `new_ids: []`. No entry here is dead and none needs re-adjudicating.
+#
+# STILL LIVE on the pinned version. aramid fixed it in `85644a1` by carrying the
+# scanner's own line content through instead of re-reading it from a ref; that
+# is post-0.3.0 and arrives at the next release. Until then, stage before you
+# let the gate run. aramid also measured the direction that matters more than
+# ours: under a skew, a suppression adjudicated for one statement can downgrade
+# a DIFFERENT one -- theirs covered a never-reviewed DELETE with a reviewed
+# SELECT's entry.
 #
 # The same v0.3.0 gate also surfaced the SEMGREP view of these identical
 # statements (rule `owasp-top-ten.a03-injection.python-sqli-string-concat`),
