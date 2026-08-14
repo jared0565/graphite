@@ -43,6 +43,12 @@ false binding (`sqlite3.connect`, `Thread.start`, a file handle's `write`).
 `calls` ratio.** That is honest accounting, not a regression — the same shape as the
 constructor-edge change that moved some javascript cells down. Do not "fix" it back.
 
+The gate resolves language through `LANGUAGE_BY_EXT`, the same table `collect_files`
+uses to choose an extractor, so it cannot disagree with the walk that produced the
+edge. Verified to reach a **warm** cache too: a graph built by the old code, rebuilt
+in place by the new code, loses the false binding — the dispatch pass runs after
+`cache.write`, so a stale partition cannot preserve it.
+
 Scoped to **Python only, on evidence**. The gate's premise — "the caller does not
 import the definer" standing in for "the caller cannot be holding one" — is never
 exact in a duck-typed language. TypeScript/JavaScript stay ungated because

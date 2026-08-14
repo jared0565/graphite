@@ -214,6 +214,30 @@ def test_an_unknown_language_is_exempt_rather_than_gated(tmp_path: Path) -> None
     assert _dispatch_is_gated(None) is False
 
 
+def test_the_gate_reads_the_extractors_own_language_table() -> None:
+    """The gate and the extractor must classify a file the same way.
+
+    The gate decides per file whether to restrict dispatch; `collect_files` decides
+    per file which extractor runs. Those are two classifications of the same thing,
+    and a private suffix list in the gate would match the extractor only by
+    coincidence -- `.py` is merely the sole extension currently mapping to `python`.
+    Add `.pyw` to `LANGUAGE_BY_EXT` and a hardcoded list would extract that file as
+    Python while exempting it from the gate, silently and in the permissive
+    direction. Deriving from the one table makes the drift impossible; this test
+    fails if anyone reintroduces the duplicate.
+    """
+    from graphite.extract.ast import _dispatch_is_gated
+    from graphite.ingest import LANGUAGE_BY_EXT
+
+    python_extensions = [ext for ext, lang in LANGUAGE_BY_EXT.items() if lang == "python"]
+    assert python_extensions, "the table stopped classifying anything as Python"
+
+    for ext, language in LANGUAGE_BY_EXT.items():
+        assert _dispatch_is_gated(f"src/sample{ext}") is (language == "python"), (
+            f"{ext} extracts as {language}; the gate disagrees with the extractor"
+        )
+
+
 def test_a_dotted_import_reaches_the_package_it_binds(tmp_path: Path) -> None:
     """`import pkg.sub` binds the name **`pkg`**, so `pkg.build()` is a real call.
 

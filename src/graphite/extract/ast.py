@@ -11,7 +11,7 @@ from typing import Any, Collection, Final
 
 from ..cache import Cache
 from ..config import Config
-from ..ingest import FileEntry
+from ..ingest import LANGUAGE_BY_EXT, FileEntry
 from ..resolve import SourceIndex, should_keep_call_target
 
 
@@ -1841,11 +1841,18 @@ _MAX_METHOD_DISPATCH_CANDIDATES = 3
 # Languages where the reachability gate has been MEASURED. Deliberately just
 # Python -- see `_dispatch_is_gated` for why this is not simply "every language
 # whose imports bind to a file node".
-_DISPATCH_GATED_SUFFIXES = frozenset({".py"})
+_DISPATCH_GATED_LANGUAGES = frozenset({"python"})
 
 
 def _dispatch_is_gated(source_file: str | None) -> bool:
     """Whether method dispatch from this file is restricted to reachable definitions.
+
+    Resolved through `LANGUAGE_BY_EXT` -- the same table `collect_files` uses to pick
+    an extractor -- so the gate cannot disagree with the walk that produced the edge.
+    A private suffix list here would agree with that table only by coincidence: `.py`
+    happens to be the sole extension mapping to `python` today, and a `.pyw` or `.pyi`
+    entry added there would silently escape a hardcoded list while still being
+    extracted as Python.
 
     FAILS OPEN, and the allowlist is narrower than the mechanism can support.
 
@@ -1871,7 +1878,8 @@ def _dispatch_is_gated(source_file: str | None) -> bool:
     """
     if not source_file:
         return False
-    return Path(source_file).suffix.casefold() in _DISPATCH_GATED_SUFFIXES
+    language = LANGUAGE_BY_EXT.get(Path(source_file).suffix.casefold())
+    return language in _DISPATCH_GATED_LANGUAGES
 
 
 def _resolve_method_dispatch(
