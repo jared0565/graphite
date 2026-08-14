@@ -12,6 +12,51 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
+## [Unreleased]
+
+### Fixed
+
+**Python method calls bound to any same-named definition in the repo, however
+unreachable** (#54). `_resolve_method_dispatch` re-pointed `recv.method()` to any
+`is_method` node sharing the name, justified in its own docstring by "method names
+are almost always globally unique" — true of domain names, false of every name a
+standard library already owns. On graphite's own graph `query "callers resolve"`
+returned **232 callers graded `decision_grade`**, every one an ordinary
+`pathlib.Path(...).resolve()` re-pointed to a test double's `resolve` in
+`tests/test_git_security.py`; `src/graphite/io.py::atomic_write_text` was recorded
+as calling a `write` defined in `tests/test_doctor.py`. The mis-bindings counted as
+`bound`, so the health ratio rose as the defect got worse.
+
+A Python call now dispatches only to a definition in the calling file or in a file
+it directly imports. Filtering happens **before** the ambiguity cap, because
+reachability is the disambiguation that cap was standing in for — so a common name
+with one reachable definition now resolves instead of being abandoned as "too
+generic to guess".
+
+Measured on this repo: `callers resolve` 232 → 5, `callers get` 87 → 0,
+`callers write` 30 → 0; `calls` edges 13498 → 12497 (−1428, +427); `calls.python`
+0.980 → 0.977. Every one of the 1428 dropped edges buckets as
+`src|scripts|tests → tests` or `src → src`, and every sampled member was another
+false binding (`sqlite3.connect`, `Thread.start`, a file handle's `write`).
+
+**Expect consumer graphs to lose call edges and report a slightly lower Python
+`calls` ratio.** That is honest accounting, not a regression — the same shape as the
+constructor-edge change that moved some javascript cells down. Do not "fix" it back.
+
+Scoped to **Python only, on evidence**. The gate's premise — "the caller does not
+import the definer" standing in for "the caller cannot be holding one" — is never
+exact in a duck-typed language. TypeScript/JavaScript stay ungated because
+`test_member_call_ambiguous_small_set_links_to_all` pins the documented fan-out on
+an `x: any` receiver with no import at all, a shape the gate would delete; Rust
+because this repo has none to measure. Go could not be gated at all: its in-repo
+imports target a synthesized package id that never equals any file's node id.
+Residual: the same defect survives in ungated JS/TS.
+
+`import pkg.sub` binds the name `pkg` and executes `pkg/__init__.py`, but graphite
+emits an import edge only to `pkg/sub.py`. The gate expands each imported module to
+its ancestor packages so it does not inherit that gap; the missing edge itself is
+**#55**, where it also understates `impact` for a package `__init__.py`.
+
 ## [0.3.0] — 2026-08-12
 
 **The first release consumers install as a built wheel.** Through 0.2.1 every

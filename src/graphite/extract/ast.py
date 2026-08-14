@@ -6,7 +6,7 @@ import re
 import sys
 import unicodedata
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Collection, Final
 
 from ..cache import Cache
@@ -1838,6 +1838,41 @@ def extract_all(entries: list[FileEntry], cfg: Config, cache: Cache | None = Non
 # edge is left untouched (pre-fix behavior).
 _MAX_METHOD_DISPATCH_CANDIDATES = 3
 
+# Languages where the reachability gate has been MEASURED. Deliberately just
+# Python -- see `_dispatch_is_gated` for why this is not simply "every language
+# whose imports bind to a file node".
+_DISPATCH_GATED_SUFFIXES = frozenset({".py"})
+
+
+def _dispatch_is_gated(source_file: str | None) -> bool:
+    """Whether method dispatch from this file is restricted to reachable definitions.
+
+    FAILS OPEN, and the allowlist is narrower than the mechanism can support.
+
+    The gate rests on a proxy: "the caller does not import the definer" standing in
+    for "the caller cannot be holding one of those". That proxy is never exact --
+    every language here is duck-typed or structurally typed, so a function can be
+    handed an instance of a class it never mentions. It is admitted for Python
+    because it was MEASURED there (#54): on this repo it removed 1400+ edges whose
+    every sampled member was a false binding, and added back ~350 real ones that the
+    ambiguity cap had been abandoning.
+
+    TypeScript/JavaScript are NOT gated, on evidence rather than caution.
+    `test_member_call_ambiguous_small_set_links_to_all` pins the documented
+    small-ambiguous-set fan-out using `x: any` and no import at all -- a shape that
+    is idiomatic in TS and that this gate would delete. Rust is ungated for the
+    duller reason that this repo contains none, so nothing here could measure it.
+    Extending the allowlist is a per-language measurement, not a one-line edit.
+
+    Go could not be gated even with evidence: its in-repo imports target a
+    synthesized PACKAGE id (`example_com_repo_store`) that never equals the file
+    node id of any file in that package, and files within one package see each
+    other with no import statement at all.
+    """
+    if not source_file:
+        return False
+    return Path(source_file).suffix.casefold() in _DISPATCH_GATED_SUFFIXES
+
 
 def _resolve_method_dispatch(
     nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
@@ -1870,6 +1905,53 @@ def _resolve_method_dispatch(
             methods_by_name.setdefault(n["name"].casefold(), set()).add(n["id"])
     known_ids = {n["id"] for n in nodes}
 
+    # Which file each definition lives in, and which files each file imports
+    # DIRECTLY. Both are needed to answer "could this caller have reached that
+    # definition at all" -- see the reachability filter below (#54).
+    file_of_node: dict[str, str] = {
+        n["id"]: _file_node_id(n["source_file"]) for n in nodes if n.get("source_file")
+    }
+    imports_by_file: dict[str, set[str]] = {}
+    for e in edges:
+        if e.get("relation") == "imports" and e.get("source") and e.get("target"):
+            imports_by_file.setdefault(e["source"], set()).add(e["target"])
+
+    path_of_file: dict[str, str] = {
+        n["id"]: n["source_file"]
+        for n in nodes
+        if n.get("kind") == "file" and n.get("source_file")
+    }
+    reachable_cache: dict[str, frozenset[str]] = {}
+
+    def _reachable_from(caller_file: str) -> frozenset[str]:
+        """Files `caller_file` imports, plus the ancestor packages that implies.
+
+        `import pkg.sub` binds the name **`pkg`** in the importer and executes
+        `pkg/__init__.py`, but graphite records only an edge to `pkg/sub.py`. Without
+        this expansion the gate refuses `pkg.build()` -- a call on the very name the
+        statement bound -- which is a real dispatch, not a false one. The missing
+        import edge is a separate defect in its own right (it understates `impact`
+        for a package `__init__.py` too); this only stops the gate from inheriting
+        it. Python-shaped by design, and the gate is Python-only.
+        """
+        cached = reachable_cache.get(caller_file)
+        if cached is not None:
+            return cached
+        expanded = set(imports_by_file.get(caller_file, ()))
+        for target in tuple(expanded):
+            rel = path_of_file.get(target)
+            if not rel:
+                continue
+            parent = PurePosixPath(rel.replace("\\", "/")).parent
+            while parent.name:
+                package_init = _file_node_id(f"{parent}/__init__.py")
+                if package_init in path_of_file:
+                    expanded.add(package_init)
+                parent = parent.parent
+        result = frozenset(expanded)
+        reachable_cache[caller_file] = result
+        return result
+
     out: list[dict[str, Any]] = []
     for e in edges:
         method = e.pop("_member", None)  # strip from every edge, resolved or not
@@ -1877,6 +1959,23 @@ def _resolve_method_dispatch(
             out.append(e)
             continue
         candidates = methods_by_name.get(method.casefold())
+        # Reachability gate (#54). A name-only match let `Path(...).resolve()` bind
+        # to a test double's `resolve`, and `f.write(text)` to a `write` defined in
+        # a test file -- 232 and 30 false callers respectively, graded
+        # decision_grade, with the mis-bindings counted as `bound` so the health
+        # ratio rose as the defect got worse. A definition the caller neither
+        # declares nor imports cannot be the receiver's method, whatever its name.
+        # Filtering BEFORE the cap is deliberate: reachability is exactly the
+        # disambiguation the cap was standing in for, so a common name with one
+        # reachable definition now resolves instead of being abandoned as
+        # "too generic to guess".
+        if candidates and _dispatch_is_gated(e.get("source_file")):
+            caller_file = _file_node_id(e["source_file"])
+            reachable = _reachable_from(caller_file)
+            candidates = {
+                c for c in candidates
+                if file_of_node.get(c) == caller_file or file_of_node.get(c) in reachable
+            }
         if not candidates or len(candidates) > _MAX_METHOD_DISPATCH_CANDIDATES:
             # Member call that resolves to no known definition. Keep it when
             # the target is a real node, or when the call was already
