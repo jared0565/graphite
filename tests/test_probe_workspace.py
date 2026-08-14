@@ -397,7 +397,18 @@ def test_core_probe_blocks_identity_change_before_next_phase_and_preserves_repla
     )
 
     assert check.status == "blocked"
-    assert check.details == {"error_type": "cleanup", "code": "cleanup_blocked"}
+    # The cleanup failure still headlines, and the cause it displaced now
+    # survives it (#53). This is the most valuable instance of that fix in the
+    # suite: the workspace was SUBSTITUTED underneath the probe, and before this
+    # the report said only `cleanup_blocked` -- a security-relevant cause
+    # replaced by a housekeeping one, with nothing to indicate a swap had been
+    # detected at all.
+    assert check.details == {
+        "error_type": "cleanup",
+        "code": "cleanup_blocked",
+        "masked_error_type": "isolation",
+        "masked_code": "workspace_isolation_changed",
+    }
     assert calls == 1
     assert sentinel is not None and sentinel.read_text(encoding="utf-8") == "keep"
     assert {path.name: path.read_bytes() for path in selected.iterdir()} == before

@@ -2963,6 +2963,71 @@ def test_nothing_masked_means_no_masked_fields(tmp_path: Path) -> None:
     assert check.details == {"error_type": "cleanup", "code": "cleanup_failed"}
 
 
+def test_an_isolation_failure_survives_a_blocked_cleanup_on_every_platform(tmp_path: Path) -> None:
+    """The isolation-cause-under-cleanup contract, without the POSIX mechanism.
+
+    `test_probe_workspace.py::test_core_probe_blocks_identity_change_before_
+    next_phase_and_preserves_replacement` covers this for real, by substituting
+    the workspace directory underneath the probe -- and **skips on Windows**,
+    because Windows lease handles prevent that substitution.
+
+    That skip is why a stale assertion here reached CI: the local suite reported
+    "254 passed, 5 skipped" and one of the skips was the only test that could
+    see the change. Six portability legs caught it; nothing on this machine
+    could.
+
+    So this drives the same reporting contract through injected failures, which
+    are platform-independent. It is not a replacement for the real-mechanism
+    test -- it is the half of it that every platform can run.
+
+    The pairing matters more than either test alone: an isolation failure is a
+    SECURITY-relevant cause. Reporting a bare `cleanup_blocked` for it said only
+    that housekeeping went wrong, with nothing to indicate a workspace swap had
+    been detected at all.
+    """
+    import graphite.doctor_probes as probes
+    from graphite.probe_workspace import ProbeWorkspaceLease, WorkspaceLeaseError
+
+    lease = ProbeWorkspaceLease.acquire()
+    validations = 0
+
+    def validate_then_change() -> None:
+        nonlocal validations
+        validations += 1
+        lease.validate()
+        if validations > 1:
+            raise WorkspaceLeaseError("workspace_identity_changed")
+
+    def blocked_cleanup() -> None:
+        lease.cleanup()
+        raise WorkspaceLeaseError("workspace_cleanup_blocked")
+
+    wrapped = SimpleNamespace(
+        path=lease.path,
+        temp_root=lease.temp_root,
+        validate=validate_then_change,
+        cleanup=blocked_cleanup,
+    )
+    frozen = time.monotonic()
+    check = probes.probe_core_pipeline(
+        tmp_path,
+        timeout_seconds=1,
+        _workspace_factory=lambda: wrapped,
+        _clock=lambda: frozen,
+    )
+
+    assert check.status == "blocked"
+    assert check.details == {
+        "error_type": "cleanup",
+        "code": "cleanup_blocked",
+        "masked_error_type": "isolation",
+        "masked_code": "workspace_isolation_changed",
+    }
+    leaked = list(_iter_strings(check.to_dict()))
+    assert not any(str(tmp_path) in s for s in leaked)
+    assert not any(str(lease.path) in s for s in leaked)
+
+
 def test_blocked_carries_a_cause_only_when_one_is_actually_there() -> None:
     """Exercise `_blocked`'s type check directly, because nothing else can.
 
