@@ -275,8 +275,27 @@ git push origin vVERSION
 
 Never force push. Publication to PyPI or another index may use only a separately approved
 mechanism from a secure environment with scoped credentials. Never place tokens in
-command-line arguments, shell history, repository files, or logs. This repository and
-guide do not claim that any package index is configured.
+command-line arguments, shell history, repository files, or logs.
+
+**An index IS configured as of 2026-08-14: PyPI, distribution `graphite-code`.**
+Publication runs from `.github/workflows/publish.yml` by Trusted Publishing (OIDC),
+`workflow_dispatch` only. There is no API token in this repository, in any secret, or on
+any maintainer machine — the credential is minted per run and expires in seconds, which
+satisfies the paragraph above by having no long-lived secret to mishandle. The workflow
+publishes the artifacts already attached to the GitHub Release and verifies both SHA256s
+against literals pinned in the reviewed workflow; it never builds. Releasing a new version
+therefore requires editing the approved version and both digests in that file and
+committing the change, so digests pass through review rather than a dispatch form.
+
+After publishing, verify from the INDEX rather than from this checkout:
+
+```text
+python scripts/verify_published_release.py VERSION --wheel-sha256 <from EVIDENCE.md>
+```
+
+Run it BEFORE publishing as well. Every arm must fail while the version does not exist —
+that negative control is what makes the throwaway venv's isolation from this checkout a
+measured fact instead of an assumption.
 
 ## Retention and rollback
 
