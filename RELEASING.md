@@ -297,6 +297,13 @@ Run it BEFORE publishing as well. Every arm must fail while the version does not
 that negative control is what makes the throwaway venv's isolation from this checkout a
 measured fact instead of an assumption.
 
+The digest is the load-bearing arm and the only one that may be omitted. Omitting it is
+legal, and the run then reports `1 arm(s) never ran` and exits 0 having compared no bytes
+— read the arm counts, not just `OVERALL`. An expected digest that is present but is not
+64 hex characters is a FAIL that says `malformed`, which is a different diagnosis from a
+substituted wheel. `tests/test_verify_published_release.py` holds every arm to this,
+including the ones that only fire on a bad release.
+
 ## Retention and rollback
 
 Every build that was ever deployed must be retained, with its SHA256 and an
