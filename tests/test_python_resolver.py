@@ -155,7 +155,102 @@ def test_import_edge_count_is_one_per_module(tmp_path):
     _py_fixture(tmp_path)
     result = _extract(tmp_path)
     edges = _import_edges(result, "src/pkg/pipeline.py")
-    assert len(edges) == 4  # json, pkg, pkg.ledger, .tdd
+    # json, pkg, pkg.ledger, .tdd. `pkg.ledger`'s ancestor package (#55) is `pkg`,
+    # which `from pkg import tdd` already edges, so the count is unchanged here.
+    assert len(edges) == 4
+
+
+def test_a_dotted_import_edges_the_ancestor_packages_it_executes(tmp_path):
+    """`import pkg.sub` also imports `pkg` -- it is what the name binds to (#55).
+
+    Python executes every ancestor package's `__init__.py` and binds the ROOT name
+    in the importer, so `pkg.build()` after `import pkg.sub` is a call into
+    `pkg/__init__.py`. Recording only the deepest module made every such importer
+    invisible as a dependent of the package.
+    """
+    _write(tmp_path / "pkg" / "__init__.py", "")
+    _write(tmp_path / "pkg" / "sub.py", "def helper():\n    return 1\n")
+    _write(tmp_path / "m.py", "import pkg.sub\n")
+
+    result = _extract(tmp_path)
+    targets = {(e["target"], e["confidence"]) for e in _import_edges(result, "m.py")}
+
+    assert ("pkg_sub", "EXACT_IMPORT") in targets, targets
+    assert ("pkg_init", "EXACT_IMPORT") in targets, targets
+
+
+def test_every_ancestor_package_of_a_deep_import_is_edged(tmp_path):
+    """`import a.b.c` executes a, a.b and a.b.c -- not just the leaf."""
+    for package in ("a", "a/b"):
+        _write(tmp_path / package / "__init__.py", "")
+    _write(tmp_path / "a" / "b" / "c.py", "def go():\n    return 1\n")
+    _write(tmp_path / "m.py", "import a.b.c\n")
+
+    result = _extract(tmp_path)
+    targets = {e["target"] for e in _import_edges(result, "m.py")}
+
+    assert {"a_init", "a_b_init", "a_b_c"} <= targets, targets
+
+
+def test_an_external_dotted_import_gains_no_ancestor_edges(tmp_path):
+    """Scoped to IN-REPO ancestors on purpose.
+
+    `import os.path` already emits one EXTERNAL_IMPORT. Adding a second for `os`
+    would inflate the external count and move the imports ratio for a package that
+    is not in this repo and can never be a blast-radius target.
+
+    NOTE this passes for a reason other than its name suggests, which a mutation
+    test exposed: the emission site only consults ancestors when the FULL module
+    resolved in-repo, so an external import never reaches that code at all. Kept as
+    a boundary check; `test_a_namespace_package_ancestor_emits_no_phantom_edge` is
+    what actually exercises the in-repo-only guard.
+    """
+    _write(tmp_path / "m.py", "import os.path\n")
+
+    result = _extract(tmp_path)
+    edges = _import_edges(result, "m.py")
+
+    assert len(edges) == 1, [(e["target"], e["confidence"]) for e in edges]
+    assert edges[0]["confidence"] == "EXTERNAL_IMPORT"
+
+
+def test_a_namespace_package_ancestor_emits_no_phantom_edge(tmp_path):
+    """A PEP 420 namespace package has no `__init__.py`, so there is nothing to edge.
+
+    This is the case where the leaf module resolves in-repo but its ancestor does
+    not, which is the only way to reach the in-repo check inside
+    `_python_ancestor_packages`. Without it that guard is unfalsifiable: a mutant
+    that emitted an unresolved ancestor as a synthetic target survived the whole
+    suite, because every other test either has an `__init__.py` or never reaches
+    the ancestor code.
+    """
+    _write(tmp_path / "space" / "mod.py", "def go():\n    return 1\n")
+    _write(tmp_path / "m.py", "import space.mod\n")
+
+    result = _extract(tmp_path)
+    targets = {e["target"] for e in _import_edges(result, "m.py")}
+
+    assert "space_mod" in targets, targets
+    assert "space" not in targets, f"no __init__.py exists to import: {targets}"
+    assert not any(t.endswith("_init") for t in targets), targets
+
+
+def test_impact_of_a_package_init_reaches_a_dotted_importer(tmp_path):
+    """The acceptance test recorded on #55, end to end through `impact`.
+
+    A package `__init__.py` is where re-exports and shared constants live, so it is
+    a high-traffic edit target whose blast radius was silently understated.
+    """
+    from graphite import cli
+
+    _write(tmp_path / "pkg" / "__init__.py", "VERSION = 1\n")
+    _write(tmp_path / "pkg" / "sub.py", "def helper():\n    return 1\n")
+    _write(tmp_path / "m.py", "import pkg.sub\n\ndef go():\n    return pkg.VERSION\n")
+
+    g = _graph_for(tmp_path)
+    result = cli._impact(g, ["pkg/__init__.py"], 2)
+
+    assert "m.py" in result["impacted_files"], result
 
 
 def _submodule_fixture(tmp_path: Path) -> None:

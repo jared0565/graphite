@@ -58,10 +58,30 @@ because this repo has none to measure. Go could not be gated at all: its in-repo
 imports target a synthesized package id that never equals any file's node id.
 Residual: the same defect survives in ungated JS/TS.
 
-`import pkg.sub` binds the name `pkg` and executes `pkg/__init__.py`, but graphite
-emits an import edge only to `pkg/sub.py`. The gate expands each imported module to
-its ancestor packages so it does not inherit that gap; the missing edge itself is
-**#55**, where it also understates `impact` for a package `__init__.py`.
+**`import pkg.sub` emitted no import edge to `pkg/__init__.py`** (#55), though that
+statement binds the name `pkg` and executes the package. Every dotted importer was
+therefore invisible as a dependent of that `__init__.py` — the file where re-exports
+and shared constants live, so a high-traffic edit target whose blast radius was
+understated. Silently: a missing edge cannot lower the imports ratio, which is
+computed over the edges that *were* emitted.
+
+Found because the #54 gate refused `pkg.build()` and a test caught it. The gate
+initially compensated with its own ancestor expansion; with the real edges emitted
+that compensation became unfalsifiable — removing it changed no test — so it was
+deleted rather than left looking like protection.
+`test_a_dotted_import_reaches_the_package_it_binds` now guards the coupling.
+
+Measured on this repo: import edges 1890 → 1920 (+30, −0), imports health 740/740 →
+770/770 with `ratio` 1.0 and `external` **unchanged** at 1148 — purely additive, no
+reclassification. `impact src/graphite/routing/__init__.py` went from 1 likely test
+to **8**.
+
+Scoped to `import a.b.c`, not `from a.b import c`. Both execute the package, but only
+the first binds `a`, so only the first can carry a `a.something()` call to attribute;
+the from-import spelling has two existing specifications pinning one edge per module,
+and expanding it would have added ~234 further edges here with no measured demand.
+Ancestors are edged only when they resolve in-repo, so a PEP 420 namespace package
+(no `__init__.py`) and an external `import os.path` both emit nothing extra.
 
 ## [0.3.0] — 2026-08-12
 

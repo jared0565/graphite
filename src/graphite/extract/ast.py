@@ -6,7 +6,7 @@ import re
 import sys
 import unicodedata
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Collection, Final
 
 from ..cache import Cache
@@ -1096,6 +1096,37 @@ def _python_import_modules(node: Any) -> list[tuple[str, int]]:
     return out
 
 
+def _python_ancestor_packages(
+    module: str, dots: int, rel_path: str, source_index: SourceIndex | None
+) -> list[str]:
+    """Resolved paths of the in-repo packages `import module` also executes (#55).
+
+    `import pkg.sub` imports `pkg` as well: Python executes `pkg/__init__.py` and
+    binds the ROOT name in the importer, so `pkg.build()` afterwards is a call into
+    the package. Recording only the deepest module made every dotted importer
+    invisible as a dependent of that `__init__.py` -- and a package `__init__.py` is
+    where re-exports and shared constants live, so `impact` understated the blast
+    radius of a high-traffic edit target. Silently: a missing edge cannot lower the
+    imports ratio, which is computed over the edges that WERE emitted.
+
+    Scoped to ancestors that resolve IN-REPO. `import os.path` gains nothing from a
+    second edge to `os`: it would inflate the external count and move the imports
+    ratio for a package that can never be a blast-radius target.
+
+    The counterpart for the other spelling is `_python_from_import_submodules`,
+    added for the mirror-image defect in issue #7.
+    """
+    if source_index is None or "." not in module:
+        return []
+    segments = module.split(".")
+    out: list[str] = []
+    for depth in range(1, len(segments)):
+        resolved = source_index.resolve_python_module(rel_path, ".".join(segments[:depth]), dots)
+        if resolved:
+            out.append(resolved)
+    return out
+
+
 def _python_from_import_submodules(
     node: Any, rel_path: str, source_index: SourceIndex | None
 ) -> list[str]:
@@ -1326,6 +1357,19 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                         file_id, _file_node_id(resolved), "imports", rel_path,
                         _line(node), confidence="EXACT_IMPORT",
                     ))
+                    # `import pkg.sub` also imports `pkg` (#55). Deliberately NOT
+                    # applied to `from pkg.sub import x`: that executes the package
+                    # too, but binds only `x`, so there is no `pkg.` call to
+                    # attribute -- and `test_from_import_symbol_only_edge_unchanged`
+                    # pins one edge per module for that spelling.
+                    for ancestor in (
+                        _python_ancestor_packages(module, dots, rel_path, source_index)
+                        if node.type == "import_statement" else ()
+                    ):
+                        result.edges.append(_edge(
+                            file_id, _file_node_id(ancestor), "imports", rel_path,
+                            _line(node), confidence="EXACT_IMPORT",
+                        ))
                 else:
                     result.edges.append(_edge(
                         file_id, _make_id(module) if module else _make_id("package"),
@@ -1924,41 +1968,14 @@ def _resolve_method_dispatch(
         if e.get("relation") == "imports" and e.get("source") and e.get("target"):
             imports_by_file.setdefault(e["source"], set()).add(e["target"])
 
-    path_of_file: dict[str, str] = {
-        n["id"]: n["source_file"]
-        for n in nodes
-        if n.get("kind") == "file" and n.get("source_file")
-    }
-    reachable_cache: dict[str, frozenset[str]] = {}
-
-    def _reachable_from(caller_file: str) -> frozenset[str]:
-        """Files `caller_file` imports, plus the ancestor packages that implies.
-
-        `import pkg.sub` binds the name **`pkg`** in the importer and executes
-        `pkg/__init__.py`, but graphite records only an edge to `pkg/sub.py`. Without
-        this expansion the gate refuses `pkg.build()` -- a call on the very name the
-        statement bound -- which is a real dispatch, not a false one. The missing
-        import edge is a separate defect in its own right (it understates `impact`
-        for a package `__init__.py` too); this only stops the gate from inheriting
-        it. Python-shaped by design, and the gate is Python-only.
-        """
-        cached = reachable_cache.get(caller_file)
-        if cached is not None:
-            return cached
-        expanded = set(imports_by_file.get(caller_file, ()))
-        for target in tuple(expanded):
-            rel = path_of_file.get(target)
-            if not rel:
-                continue
-            parent = PurePosixPath(rel.replace("\\", "/")).parent
-            while parent.name:
-                package_init = _file_node_id(f"{parent}/__init__.py")
-                if package_init in path_of_file:
-                    expanded.add(package_init)
-                parent = parent.parent
-        result = frozenset(expanded)
-        reachable_cache[caller_file] = result
-        return result
+    # This gate reads import edges literally, which is only sound while they are
+    # complete. It once carried its own ancestor-package expansion, because
+    # `import pkg.sub` emitted no edge to `pkg/__init__.py` and the gate would
+    # otherwise refuse `pkg.build()` -- a call on the very name that statement
+    # binds. #55 emits that edge, so the compensation became unfalsifiable (removing
+    # it changed no test) and was deleted rather than left looking like protection.
+    # `test_a_dotted_import_reaches_the_package_it_binds` is what now guards the
+    # coupling: it fails if those edges ever stop being emitted.
 
     out: list[dict[str, Any]] = []
     for e in edges:
@@ -1979,7 +1996,7 @@ def _resolve_method_dispatch(
         # "too generic to guess".
         if candidates and _dispatch_is_gated(e.get("source_file")):
             caller_file = _file_node_id(e["source_file"])
-            reachable = _reachable_from(caller_file)
+            reachable = imports_by_file.get(caller_file, frozenset())
             candidates = {
                 c for c in candidates
                 if file_of_node.get(c) == caller_file or file_of_node.get(c) in reachable
