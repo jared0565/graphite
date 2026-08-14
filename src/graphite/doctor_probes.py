@@ -10,7 +10,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from importlib import machinery, metadata
@@ -490,13 +490,36 @@ _TYPESCRIPT_REMEDIATION = (
 )
 
 
-def _blocked(error_type: str, code: str) -> DoctorCheck:
+def _blocked(error_type: str, code: str, *, masked: Mapping[str, object] | None = None) -> DoctorCheck:
+    """Report one failure, optionally carrying the cause it displaced.
+
+    `masked` is for the one place a result legitimately overrides another: a
+    cleanup failure outranks the primary error, because leaked state is more
+    urgent than a reproducible one. Overriding it must not ERASE it -- reporting
+    only `cleanup_timeout` for a pipeline that exited nonzero sends an operator
+    to temp directories instead of to the build (#53).
+
+    Both carried values come from a fixed vocabulary produced by
+    `_process_error_type` and this module's own literals, so neither can carry a
+    path. That is why they are copied by NAME rather than by merging the
+    displaced details wholesale -- a future detail key holding a path would
+    otherwise be promoted into this report for free.
+    """
+    details: dict[str, object] = {"error_type": error_type, "code": code}
+    if masked is not None:
+        masked_type = masked.get("error_type")
+        masked_code = masked.get("code")
+        # Absent, never null: `masked_error_type: null` would invite a reader to
+        # treat "nothing was displaced" as "something was, and it was nothing".
+        if isinstance(masked_type, str) and isinstance(masked_code, str):
+            details["masked_error_type"] = masked_type
+            details["masked_code"] = masked_code
     return DoctorCheck(
         "deep_core",
         "Deterministic pipeline",
         "blocked",
         "The isolated deterministic pipeline probe failed safely.",
-        {"error_type": error_type, "code": code},
+        details,
         ("Run the Graphite build, validate, and query commands locally and inspect their diagnostics.",),
     )
 
@@ -735,7 +758,18 @@ def probe_core_pipeline(
         if lease is not None:
             cleanup_error = _cleanup_workspace_lease(lease, deadline, _clock)
             if cleanup_error is not None:
-                candidate = _blocked("cleanup", cleanup_error)
+                # Passed unconditionally: `_blocked` carries a cause only when
+                # one is actually present. A probe that SUCCEEDED and then failed
+                # to tear down has details with no `error_type`, so nothing is
+                # carried -- which is the outcome we want.
+                #
+                # An earlier version also tested `candidate.status == "blocked"`
+                # here. It was removed because it could not be shown to guard: it
+                # made `masked` unreachable for a ready candidate, which in turn
+                # made the type check inside `_blocked` unreachable, so each
+                # guard's only effect was to hide the other from every test.
+                displaced = candidate.details if candidate is not None else None
+                candidate = _blocked("cleanup", cleanup_error, masked=displaced)
         else:
             _release_core_probe_slot()
 

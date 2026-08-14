@@ -2869,6 +2869,136 @@ def test_core_deep_probe_uses_one_total_budget_and_maps_cleanup_error(tmp_path: 
     assert "RAW" not in json.dumps(check.to_dict())
 
 
+def test_a_cleanup_failure_headlines_without_discarding_the_cause(tmp_path: Path) -> None:
+    """A cleanup failure outranks the primary error; it must not ERASE it.
+
+    Cleanup winning is deliberate -- a failed teardown means leaked state, which
+    is the more urgent thing to say. But before this, the `finally` replaced the
+    primary result outright, so a pipeline that exited nonzero AND failed to tear
+    down reported only `cleanup_timeout`. An operator reads that and goes looking
+    at temp directories and permissions, when the cause was the build.
+
+    That is worst exactly when it bites: cleanup outruns its budget under load,
+    so the report is least accurate on the busiest machine (refs #53).
+    """
+    import graphite.doctor_probes as probes
+    from graphite.probe_process import ProbeProcessError
+    from graphite.probe_workspace import ProbeWorkspaceLease
+
+    def fail(*args: object, **kwargs: object) -> object:
+        raise ProbeProcessError("nonzero")
+
+    lease = ProbeWorkspaceLease.acquire()
+    def fail_cleanup() -> None:
+        lease.cleanup()
+        raise RuntimeError("RAW cleanup path")
+    wrapped = SimpleNamespace(
+        path=lease.path,
+        temp_root=lease.temp_root,
+        validate=lease.validate,
+        cleanup=fail_cleanup,
+    )
+    frozen = time.monotonic()
+    check = probes.probe_core_pipeline(
+        tmp_path,
+        timeout_seconds=1,
+        _runner=fail,
+        _workspace_factory=lambda: wrapped,
+        _clock=lambda: frozen,
+    )
+
+    assert check.status == "blocked"
+    # Cleanup still headlines -- the precedence is not what changed.
+    assert check.details["error_type"] == "cleanup"
+    assert check.details["code"] == "cleanup_failed"
+    # ...and the cause it displaced survives.
+    assert check.details["masked_error_type"] == "process"
+    assert check.details["masked_code"] == "nonzero"
+
+    leaked = list(_iter_strings(check.to_dict()))
+    assert not any("RAW" in s for s in leaked)
+    assert not any(str(tmp_path) in s for s in leaked)
+
+
+def test_nothing_masked_means_no_masked_fields(tmp_path: Path) -> None:
+    """Absent, not empty: the fields appear only when something was displaced.
+
+    A probe that SUCCEEDED and then failed to clean up has no cause to preserve,
+    and `masked_error_type: null` would invite a reader to treat "ready" as an
+    error that was hidden. This is also what keeps the pre-existing exact-dict
+    assertion in test_core_deep_probe_uses_one_total_budget_and_maps_cleanup_error
+    correct rather than merely still-passing.
+    """
+    import graphite.doctor_probes as probes
+    from graphite.probe_workspace import ProbeWorkspaceLease
+
+    outputs = iter([
+        b"",
+        b'{"ok":true,"error_count":0,"errors":[],"node_count":2,"edge_count":1}',
+        b'{"node_count":2,"edge_count":1}',
+    ])
+    def run(*args: object, **kwargs: object) -> object:
+        return probes.ProbeProcessResult(0, next(outputs), b"", 0.01)
+
+    lease = ProbeWorkspaceLease.acquire()
+    def fail_cleanup() -> None:
+        lease.cleanup()
+        raise RuntimeError("cleanup path")
+    wrapped = SimpleNamespace(
+        path=lease.path,
+        temp_root=lease.temp_root,
+        validate=lease.validate,
+        cleanup=fail_cleanup,
+    )
+    frozen = time.monotonic()
+    check = probes.probe_core_pipeline(
+        tmp_path,
+        timeout_seconds=1,
+        _runner=run,
+        _workspace_factory=lambda: wrapped,
+        _clock=lambda: frozen,
+    )
+
+    assert check.status == "blocked"
+    assert check.details == {"error_type": "cleanup", "code": "cleanup_failed"}
+
+
+def test_blocked_carries_a_cause_only_when_one_is_actually_there() -> None:
+    """Exercise `_blocked`'s type check directly, because nothing else can.
+
+    This is the guard that decides whether a displaced result becomes a reported
+    cause, and it is unreachable from `probe_core_pipeline` for a SUCCESSFUL
+    probe -- so a mutation removing it survived the end-to-end tests. A guard no
+    test can reach is indistinguishable from dead code; this makes it reachable.
+
+    The `details` of a ready check (`node_count`, `duration_ms`, ...) is the real
+    shape being defended against: it is a perfectly valid mapping that simply
+    has no cause in it.
+    """
+    import graphite.doctor_probes as probes
+
+    ready_shaped = {"node_count": 2, "edge_count": 1, "duration_ms": 7, "commands_completed": 3}
+    assert probes._blocked("cleanup", "cleanup_failed", masked=ready_shaped).details == {
+        "error_type": "cleanup",
+        "code": "cleanup_failed",
+    }
+
+    # Half a cause is not a cause -- carrying one field would name a type with
+    # no code, or a code with no type.
+    for partial in ({"error_type": "process"}, {"code": "nonzero"}, {"error_type": 1, "code": 2}):
+        assert probes._blocked("cleanup", "cleanup_timeout", masked=partial).details == {
+            "error_type": "cleanup",
+            "code": "cleanup_timeout",
+        }
+
+    assert probes._blocked("cleanup", "cleanup_timeout", masked={"error_type": "process", "code": "nonzero"}).details == {
+        "error_type": "cleanup",
+        "code": "cleanup_timeout",
+        "masked_error_type": "process",
+        "masked_code": "nonzero",
+    }
+
+
 def test_core_probe_deadline_includes_temp_creation_and_verified_cleanup(tmp_path: Path) -> None:
     import graphite.doctor_probes as probes
     from graphite.probe_workspace import ProbeWorkspaceLease
