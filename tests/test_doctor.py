@@ -2635,10 +2635,61 @@ def test_core_deep_probe_uses_exact_offline_command_contract(tmp_path: Path) -> 
 def test_core_deep_probe_maps_runner_failures_safely(tmp_path: Path, failure_code: str, expected_type: str) -> None:
     import graphite.doctor_probes as probes
     from graphite.probe_process import ProbeProcessError
+    from graphite.probe_workspace import ProbeWorkspaceLease
 
     def fail(*args: object, **kwargs: object) -> object:
         raise ProbeProcessError(failure_code)
-    check = probes.probe_core_pipeline(tmp_path, timeout_seconds=1, _runner=fail)
+
+    # The subject here is the MAPPING from ProbeProcessError(code) to
+    # (error_type, code). Wall-clock is not part of that subject, and leaving it
+    # in made this test race -- twice over, both through `probe_core_pipeline`'s
+    # single end-to-end budget:
+    #
+    #   * teardown. `_cleanup_workspace_lease` joins a real rmtree thread for
+    #     `deadline - clock()` and returns "cleanup_timeout" if it is still
+    #     alive; the `finally` then OVERWRITES the injected error. Observed: the
+    #     pre-push gate (2926 tests alongside gitleaks and semgrep, 797s against
+    #     720s bare) turned the `nonzero` arm into
+    #     {"error_type": "cleanup", "code": "cleanup_timeout"}.
+    #   * the phase deadline. mkdir plus two file writes sit inside
+    #     `phase_deadline`, which at timeout_seconds=1 is 0.8s. Not observed, but
+    #     the same shape and the same direction.
+    #
+    # Load moves both durations UP, through their bounds, so this only fails on
+    # a busy machine -- and the `timeout` arm hides it, because its expected code
+    # is what a race produces anyway.
+    #
+    # Deliberately NOT fixed by raising the budget: that keeps the coupling and
+    # buys headroom until the machine gets busier. A frozen clock and a no-op
+    # teardown remove it instead. The lease stays REAL, so `validate()` and every
+    # isolation check still run against a genuine workspace.
+    #
+    # What this gives up is owned elsewhere, deliberately:
+    #   real teardown on the failure path ->
+    #     test_core_deep_probe_cleans_temp_after_success_and_failure
+    #   the single budget and the cleanup override ->
+    #     test_core_deep_probe_uses_one_total_budget_and_maps_cleanup_error
+    #   deadline coverage of creation and cleanup ->
+    #     test_core_probe_deadline_includes_temp_creation_and_verified_cleanup
+    lease = ProbeWorkspaceLease.acquire()
+    wrapped = SimpleNamespace(
+        path=lease.path,
+        temp_root=lease.temp_root,
+        validate=lease.validate,
+        cleanup=lambda: None,
+    )
+    frozen = time.monotonic()
+    try:
+        check = probes.probe_core_pipeline(
+            tmp_path,
+            timeout_seconds=1,
+            _runner=fail,
+            _workspace_factory=lambda: wrapped,
+            _clock=lambda: frozen,
+        )
+    finally:
+        # The probe no longer removes it, so this test owns the real teardown.
+        lease.cleanup()
     leaked = list(_iter_strings(check.to_dict()))
     assert check.status == "blocked"
     assert check.details == {"error_type": expected_type, "code": failure_code}
