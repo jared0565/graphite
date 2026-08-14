@@ -1,0 +1,128 @@
+name: Publish to PyPI
+
+# Publishes the artifacts ALREADY ATTACHED to a GitHub release. It never builds.
+#
+# Why not build here: `src/` on main has drifted from the v0.3.0 tag (the
+# `# nosemgrep` annotations), so a rebuild would produce bytes that match neither
+# the tag nor the GitHub release -- permanently, because PyPI refuses to re-upload
+# a version. The bytes that were reviewed, hashed and recorded in
+# `.graphite-releases/` are the only bytes allowed to reach the index.
+#
+# Authentication is PyPI Trusted Publishing (OIDC). There is deliberately no API
+# token anywhere in this repository, in any secret, or in any log: the credential
+# is a short-lived token minted per run and scoped to this repo + this workflow
+# filename. `RELEASING.md` requires scoped credentials and forbids tokens in
+# arguments, history, repository files, or logs; this satisfies all of it by
+# having no long-lived credential to mishandle.
+#
+# Trigger is workflow_dispatch ONLY -- never push, never release. Publication is a
+# deliberate act by a maintainer, and a tag push must not be able to cause one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish. Must equal APPROVED_VERSION below, or the run fails."
+        required: true
+        type: string
+
+concurrency:
+  group: publish-pypi
+  cancel-in-progress: false
+
+env:
+  # The approved release, pinned in the reviewed file rather than supplied at
+  # dispatch time. Publishing a NEW version therefore requires editing and
+  # committing these three lines -- which is the point: a version whose digests
+  # nobody approved cannot be published by typing a different number into a form.
+  #
+  # Source of truth: F:/Projects/.graphite-releases/0.3.0/EVIDENCE.md, and
+  # independently the `digest` field GitHub computed for each release asset.
+  APPROVED_VERSION: "0.3.0"
+  WHEEL_SHA256: "9744b035faf01e4598db5df6fe789cfe17f4b64ee0f9aa31e1ef8d0729582788"
+  SDIST_SHA256: "941dd6b5c5f18ad230b9060992217a1f196294dc178576f2ba7267437f4cc29d"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      # OIDC identity for Trusted Publishing. This is the credential.
+      id-token: write
+      # Read-only: enough to download the release assets, not enough to alter them.
+      contents: read
+    steps:
+      - name: Refuse to publish a version this workflow has not approved
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$REQUESTED" != "$APPROVED_VERSION" ]; then
+            echo "::error::Dispatched version '$REQUESTED' does not match the approved" \
+                 "version '$APPROVED_VERSION' pinned in this workflow."
+            echo "To publish a different version, edit APPROVED_VERSION and BOTH digests" \
+                 "in .github/workflows/publish.yml and commit that change first."
+            exit 1
+          fi
+          echo "Publishing approved version $APPROVED_VERSION."
+
+      - name: Download the artifacts attached to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Exact filenames, not a glob. A glob would silently widen what gets
+          # uploaded, and gh-action-pypi-publish uploads everything in packages-dir.
+          gh release download "v${APPROVED_VERSION}" --dir dist \
+            --pattern "graphite_code-${APPROVED_VERSION}-py3-none-any.whl" \
+            --pattern "graphite_code-${APPROVED_VERSION}.tar.gz"
+          ls -l dist
+
+      - name: Assert dist/ holds exactly the two approved files
+        run: |
+          set -euo pipefail
+          expected_whl="graphite_code-${APPROVED_VERSION}-py3-none-any.whl"
+          expected_sdist="graphite_code-${APPROVED_VERSION}.tar.gz"
+          actual="$(ls -A dist | sort | tr '\n' ' ')"
+          expected="$(printf '%s\n%s\n' "$expected_whl" "$expected_sdist" | sort | tr '\n' ' ')"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::dist/ contents differ from the approved set."
+            echo "  expected: $expected"
+            echo "  actual:   $actual"
+            exit 1
+          fi
+          echo "dist/ holds exactly: $actual"
+
+      - name: Verify SHA256 against the approved digests
+        run: |
+          set -euo pipefail
+          # Written OUTSIDE dist/ so the checksum file itself can never become a
+          # third thing that gets uploaded.
+          manifest="${RUNNER_TEMP}/approved.sha256"
+          {
+            printf '%s  dist/graphite_code-%s-py3-none-any.whl\n' "$WHEEL_SHA256" "$APPROVED_VERSION"
+            printf '%s  dist/graphite_code-%s.tar.gz\n'           "$SDIST_SHA256" "$APPROVED_VERSION"
+          } > "$manifest"
+          cat "$manifest"
+          # `-c` exits non-zero on any mismatch and `--strict` on any malformed
+          # line; `set -e` propagates it. This is the ONLY guard between a wrong
+          # artifact and a permanent, unrepeatable upload -- every other failure
+          # mode in this workflow leaves the index untouched.
+          sha256sum -c --strict "$manifest"
+          echo "Both artifacts match the approved digests."
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist
+          # Loud failure if something is already on the index, rather than a
+          # silent skip that would read exactly like a successful first upload.
+          skip-existing: false
+          print-hash: true
+          # These artifacts were built on the maintainer's machine under
+          # RELEASING.md and attached to the GitHub release -- they were NOT built
+          # by this workflow. Emitting a PEP 740 attestation here would assert a
+          # build provenance that did not happen. Leave it off until the build
+          # itself moves into CI.
+          attestations: false
