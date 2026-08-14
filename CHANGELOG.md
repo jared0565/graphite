@@ -12,7 +12,14 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
-## [Unreleased]
+## [0.4.0] — 2026-08-14
+
+**A minor bump because consumer graphs change, not because an API did.** Both fixes
+below remove or add graph edges, so every consumer that rebuilds will see different
+`callers`/`context` answers and a slightly different Python `calls` ratio. Nothing in
+the CLI or the JSON schema changed. Under this project's pre-1.0 rule — minor versions
+may break things — a patch number would have understated a release that silently
+changes what the graph says.
 
 ### Fixed
 

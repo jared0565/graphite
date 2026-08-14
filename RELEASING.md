@@ -72,12 +72,12 @@ not a harmless duplicate: Hatchling refuses to build a field declared both stati
 and dynamically, so the next build aborts in `_get_version` rather than producing a
 mismatched artifact.
 
-The single source is deliberate. Every consumer here imports from one shared editable
-install, and `importlib.metadata` reports whatever was written into the installed
-metadata at install time — so a version set only in `pyproject.toml` reaches a consumer
-only when someone reinstalls, which routine work never does. `graphite --version` reads
-`graphite.__version__` from the source tree for that reason, and reports a
-`stale-install` line when the installed metadata disagrees.
+The single source is deliberate. `importlib.metadata` reports whatever was written into
+the installed metadata at install time, so a version set only in `pyproject.toml` reaches
+a consumer only when someone reinstalls. `graphite --version` reads
+`graphite.__version__` for that reason, and reports a `stale-install` line when the
+installed metadata disagrees — which is how a development checkout and an installed
+build are told apart at all.
 
 Review the complete diff and confirm no unrelated changes exist, and that
 `pyproject.toml` still declares the version dynamic:
@@ -315,11 +315,18 @@ when a rollback is wanted. The store lives at
 rather than as a literal: this file ships inside the sdist, so an absolute path
 here is the maintainer's layout published as if it were policy.
 
-This is not bookkeeping. Consumers import Graphite from a single editable
-install pointed at the development tree, so a saved file is live for all of them
-with no build and no boundary. Rollback means "reinstall the last known-good
-wheel", and that is possible only for a wheel somebody kept. A build directed at
-a scratch directory satisfies the gate above and leaves the gap open.
+This is not bookkeeping. Rollback means "reinstall the last known-good wheel",
+and that is possible only for a wheel somebody kept. A build directed at a
+scratch directory satisfies the gate above and leaves the gap open.
+
+Through 0.2.1 consumers imported Graphite from one shared editable install
+pointed at the development tree, so a saved file was live for all of them with
+no build and no boundary. **That stopped being true at 0.3.0**, which ships as a
+built wheel: `graphite.__file__` resolves under `site-packages` and no editable
+`.pth` survives. The retention rule did not weaken — it got sharper. A fix now
+reaches nobody until a release is cut, so the store is the only record of what
+consumers are actually running, and `index.md`'s "Currently deployed" section is
+the only place that distinguishes it from what is on `main`.
 
 Rolling back, in an environment that already has the runtime dependencies:
 

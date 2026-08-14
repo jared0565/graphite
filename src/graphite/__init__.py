@@ -38,4 +38,4 @@ __all__ = ["__version__"]
 #: Coarse and hand-maintained by construction. It is a release label, not
 #: evidence that a given fix is present -- to answer that, survey for the marker
 #: the fix introduced, or compare `graphite --version` fingerprints.
-__version__ = "0.3.0"
+__version__ = "0.4.0"
