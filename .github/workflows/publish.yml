@@ -2,11 +2,13 @@ name: Publish to PyPI
 
 # Publishes the artifacts ALREADY ATTACHED to a GitHub release. It never builds.
 #
-# Why not build here: `src/` on main has drifted from the v0.3.0 tag (the
-# `# nosemgrep` annotations), so a rebuild would produce bytes that match neither
-# the tag nor the GitHub release -- permanently, because PyPI refuses to re-upload
-# a version. The bytes that were reviewed, hashed and recorded in
-# `.graphite-releases/` are the only bytes allowed to reach the index.
+# Why not build here: the only bytes allowed to reach the index are the ones that
+# were reviewed, hashed, smoke-tested and recorded in `.graphite-releases/`. A
+# rebuild in CI would produce different bytes the moment `main` drifts from the tag
+# by even a comment -- and that drift is normal between preparing a release and
+# publishing it. Publishing a rebuild is unrecoverable, because PyPI refuses to
+# re-upload a version. (For v0.3.0 the drift was already real at publication time:
+# `# nosemgrep` annotations added to `src/` after the tag.)
 #
 # Authentication is PyPI Trusted Publishing (OIDC). There is deliberately no API
 # token anywhere in this repository, in any secret, or in any log: the credential
@@ -36,11 +38,13 @@ env:
   # committing these three lines -- which is the point: a version whose digests
   # nobody approved cannot be published by typing a different number into a form.
   #
-  # Source of truth: F:/Projects/.graphite-releases/0.3.0/EVIDENCE.md, and
-  # independently the `digest` field GitHub computed for each release asset.
-  APPROVED_VERSION: "0.3.0"
-  WHEEL_SHA256: "9744b035faf01e4598db5df6fe789cfe17f4b64ee0f9aa31e1ef8d0729582788"
-  SDIST_SHA256: "941dd6b5c5f18ad230b9060992217a1f196294dc178576f2ba7267437f4cc29d"
+  # Source of truth: $GRAPHITE_PROJECTS_ROOT/.graphite-releases/0.4.0/EVIDENCE.md, and
+  # independently the `digest` field GitHub computed for each release asset. Both
+  # were compared before these lines were edited; a digest taken from only one of
+  # them is a single source agreeing with itself.
+  APPROVED_VERSION: "0.4.0"
+  WHEEL_SHA256: "f98a00506392624a4c5e739301fb5f04edbcd7f96496d575329869d33a2b3569"
+  SDIST_SHA256: "a303024cda5316f65d1b239c7335de56125145d9e3e24094b121d94ff8c8f1d4"
 
 jobs:
   publish:
