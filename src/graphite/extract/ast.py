@@ -1943,6 +1943,13 @@ def _interop_family(source_file: str | None) -> str | None:
 def _dispatch_is_gated(source_file: str | None) -> bool:
     """Whether method dispatch from this file is restricted to reachable definitions.
 
+    ONE OF THREE FILTERS, and the only optional one. Do not read "not gated here"
+    as "dispatch from this file is unconstrained": the evidence gate (never
+    re-point a proven-EXTERNAL_CALL) and the interop-family gate (never re-point
+    across `_interop_family`) both apply in EVERY language, gated or not. They are
+    exact -- an externality proof and a "no FFI is modelled" invariant -- so they
+    needed no per-language measurement. This one is a proxy, which is why it does.
+
     Resolved through `LANGUAGE_BY_EXT` -- the same table `collect_files` uses to pick
     an extractor -- so the gate cannot disagree with the walk that produced the edge.
     A private suffix list here would agree with that table only by coincidence: `.py`
@@ -1960,12 +1967,14 @@ def _dispatch_is_gated(source_file: str | None) -> bool:
     every sampled member was a false binding, and added back ~350 real ones that the
     ambiguity cap had been abandoning.
 
-    TypeScript/JavaScript are NOT gated, on evidence rather than caution.
-    `test_member_call_ambiguous_small_set_links_to_all` pins the documented
+    TypeScript/JavaScript are NOT gated BY THIS FILTER, on evidence rather than
+    caution. `test_member_call_ambiguous_small_set_links_to_all` pins the documented
     small-ambiguous-set fan-out using `x: any` and no import at all -- a shape that
     is idiomatic in TS and that this gate would delete. Rust is ungated for the
     duller reason that this repo contains none, so nothing here could measure it.
     Extending the allowlist is a per-language measurement, not a one-line edit.
+    (The two exact filters above still constrain TS/JS dispatch -- #56 removed a
+    `.mjs` call bound to a Python `def` without any help from this gate.)
 
     Go could not be gated even with evidence: its in-repo imports target a
     synthesized PACKAGE id (`example_com_repo_store`) that never equals the file

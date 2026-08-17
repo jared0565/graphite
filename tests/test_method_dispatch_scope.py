@@ -206,6 +206,10 @@ def test_an_unknown_language_is_exempt_rather_than_gated(tmp_path: Path) -> None
     assert _dispatch_is_gated("src/a.py") is True
     # Measured only on Python. TS/JS and Rust are ungated on purpose, not by
     # oversight -- widening this set is a per-language measurement.
+    #
+    # `False` here means "this REACHABILITY filter does not apply", NOT "dispatch
+    # from a .ts file is unconstrained". The evidence and interop-family gates
+    # (#56, tests/test_dispatch_evidence.py) apply in every language.
     assert _dispatch_is_gated("src/a.ts") is False
     assert _dispatch_is_gated("src/a.rs") is False
     assert _dispatch_is_gated("src/a.go") is False
