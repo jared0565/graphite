@@ -12,6 +12,75 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
+## [Unreleased]
+
+### Fixed
+
+**Method dispatch overruled the call classifier, in every language** (#56).
+`_call_confidence` tags an edge `EXTERNAL_CALL` only when the call *provably*
+leaves the repo — an attributable receiver root bound by an import that did not
+resolve in-repo, or an `_EXTERNAL_GLOBALS` name no in-repo binding shadows.
+`_resolve_method_dispatch` then re-pointed that same edge to an in-repo definition
+by bare method name alone, producing an edge whose `confidence` said the call left
+the repo and whose `target` was a function inside it.
+
+The #54 reachability gate cannot catch these: the import that makes the definition
+"reachable" is real and irrelevant, because the receiver is `os`. Externality is
+evidence that gate never consults.
+
+Measured on this repo, two builds through one interpreter differing only in this
+pass: **42 `calls` edges removed, every one `EXTERNAL_CALL`, none `LOCAL_CALL`.**
+Every removed edge read at its source line is a standard-library call —
+`os.close`/`os.open`/`os.write`/`os.kill` (24), `subprocess.run` (8),
+`threading.Event` (4), Node's `path.resolve` (2), `sys.stdin.read` (1).
+`os.kill(pid, 0)` in one test was bound to **three** different in-repo `kill`s.
+
+    callers resolve   5 decision_grade → 3 decision_grade
+    callers kill      4 decision_grade → 1 decision_grade
+    callers event     6 decision_grade → 2 decision_grade
+    callers run       3 decision_grade → 0 ADVISORY
+
+The last line is the honest-answer contract working: the answer is now empty *and
+says so*, rather than confidently naming three wrong callers.
+
+It is a **refusal to re-point, not a deletion**. The edge stays where it already
+pointed, so `health.py` can go on excluding it from the resolution denominator —
+it can only exclude what is present. **The ratio therefore does not move**
+(`calls.python` 0.977 → 0.977, total 9427 → 9387, external 3044 → 3076): under
+schema 3 these edges were already excluded as external, so the fix shifts them
+from `total` to `external` in the same step. Grading this on health would have
+read as "no effect" — the trap #54's first acceptance criterion fell into,
+arriving from the other direction.
+
+**Dispatch could cross a language boundary** (#56). No FFI is modelled, so a
+JavaScript call site cannot reach a Python `def` — but the name match ran across
+the whole node set with no notion of language, and did:
+`path.resolve(input.root)` in `src/graphite/ts_resolver.mjs` bound to a `resolve`
+defined in `tests/test_git_security.py`, at `decision_grade`. Dispatch is now
+confined to one interop **family** (`javascript`/`typescript`/`jsx`/`tsx` together;
+every other language its own), never to the raw `LANGUAGE_BY_EXT` label — `.ts`
+and `.tsx` are different labels and one ecosystem. Unlike the #54 gate this is an
+exact invariant rather than a proxy, so it needs no per-language census: it removes
+only bindings that are impossible. **Zero marginal effect on this repo** — both
+crossings here were also `EXTERNAL_CALL` and already gone — which is why its
+fixture makes the crossing a `LOCAL_CALL`.
+
+**A Rust call on an unnameable receiver was a false external** (#56).
+`_simple_rust_value` returns `None` for anything but an identifier or `self`, so
+`build().format()` reached `_call_confidence` as the bare name `format`, which is
+in `_EXTERNAL_GLOBALS`. The Rust site passed no `attributable=`, so the edge came
+out `EXTERNAL_CALL` — excused from the health denominator without ever being shown
+to leave the repo. That is #14 mechanism A, which Python and TS/JS were threaded
+for and Rust was not. Go is deliberately unchanged: its `selector_expression`
+branch builds the call name from the operand's raw source text, so nothing here
+reaches its bare-name fallback, and a guard nothing can trip is not a guard.
+
+### Still open
+
+The #54 reachability gate remains Python-only. That is a separate, weaker
+question — bindings that are *possible but unlikely* in duck-typed code — and it
+still owes the per-language measurement `_dispatch_is_gated` describes.
+
 ## [0.4.0] — 2026-08-14
 
 **A minor bump because consumer graphs change, not because an API did.** Both fixes
