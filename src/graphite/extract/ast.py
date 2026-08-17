@@ -1994,7 +1994,25 @@ def _resolve_method_dispatch(
         if not method or e.get("relation") != "calls":
             out.append(e)
             continue
-        candidates = methods_by_name.get(method.casefold())
+        # Evidence gate (#56), applied BEFORE the name lookup and in every language.
+        # `_call_confidence` tags EXTERNAL_CALL only when the call PROVABLY leaves
+        # the repo: an attributable receiver root bound by an import that did not
+        # resolve in-repo, or an `_EXTERNAL_GLOBALS` name no in-repo binding shadows.
+        # An unnameable receiver returns LOCAL_CALL precisely so a bare method name
+        # can never be classified external (#14 mechanism A). Re-pointing such an
+        # edge by bare method name overrules evidence with a guess -- and did, 52
+        # times on graphite's own graph: `os.close(fd)` bound to an in-repo `close`,
+        # `sys.stdin.read()` to `cache.py::read`, `os.kill(pid, 0)` to three
+        # different in-repo `kill`s, `path.resolve()` in a .mjs file to a `resolve`
+        # defined in a PYTHON test.
+        #
+        # The #54 gate below cannot catch these: the import that makes the
+        # definition "reachable" is real and irrelevant, because the receiver is
+        # `os`. Externality is evidence that gate never consults.
+        if e.get("confidence") == "EXTERNAL_CALL":
+            candidates: set[str] | None = None
+        else:
+            candidates = methods_by_name.get(method.casefold())
         # Reachability gate (#54). A name-only match let `Path(...).resolve()` bind
         # to a test double's `resolve`, and `f.write(text)` to a `write` defined in
         # a test file -- 232 and 30 false callers respectively, graded
@@ -2013,17 +2031,20 @@ def _resolve_method_dispatch(
                 if file_of_node.get(c) == caller_file or file_of_node.get(c) in reachable
             }
         if not candidates or len(candidates) > _MAX_METHOD_DISPATCH_CANDIDATES:
-            # Member call that resolves to no known definition. Keep it when
-            # the target is a real node, or when the call was already
-            # classified EXTERNAL_CALL. That classification does NOT require
-            # an attributable receiver: _call_confidence tests the call's
-            # classified root, and _call_target_name (:603-619) falls back to
-            # the bare method name whenever _simple_object_name (:585-600)
-            # can't stringify the receiver -- so a member call with an
-            # unresolvable receiver is ALSO kept when its bare method name
-            # alone collides with _EXTERNAL_GLOBALS (e.g. `/re/.test(x)`,
-            # `"{}".format(x)`), even though the receiver was never proven
-            # external.
+            # Member call that resolves to no known definition -- or one the
+            # evidence gate above refused to resolve. Keep it when the target
+            # is a real node, or when the call was classified EXTERNAL_CALL.
+            #
+            # The EXTERNAL_CALL arm is what makes the evidence gate a REFUSAL TO
+            # RE-POINT rather than a deletion: the edge stays, pointing where it
+            # already pointed, so health.py can go on excluding it from the
+            # resolution denominator. It can only exclude what is present.
+            #
+            # (This comment used to justify that arm by saying EXTERNAL_CALL "does
+            # NOT require an attributable receiver". That was already false when it
+            # was written: _call_confidence:139 returns LOCAL_CALL when
+            # `attributable` is False, which is #14 mechanism A. The Rust site was
+            # the one place the argument still held, and it was threaded in fefe350.)
             #
             # Everything else still DROPS: `c.json()`, `db.prepare()`,
             # `stmt.bind()` -- unattributable receivers whose bare method name
