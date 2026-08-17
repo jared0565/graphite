@@ -1898,6 +1898,47 @@ _MAX_METHOD_DISPATCH_CANDIDATES = 3
 # whose imports bind to a file node".
 _DISPATCH_GATED_LANGUAGES = frozenset({"python"})
 
+# Languages that share one runtime and can therefore hold one another's objects.
+# Dispatch may cross freely INSIDE a family and never BETWEEN two of them.
+#
+# Only entries that MERGE distinct `LANGUAGE_BY_EXT` labels belong here; anything
+# absent is its own family (see `_interop_family`), so a new extractor is isolated
+# by default rather than silently pooled with an existing ecosystem.
+_INTEROP_FAMILY_BY_LANGUAGE: Final = {
+    "javascript": "ecmascript",
+    "typescript": "ecmascript",
+    "jsx": "ecmascript",
+    "tsx": "ecmascript",
+}
+
+
+def _interop_family(source_file: str | None) -> str | None:
+    """Which call-compatible ecosystem this file belongs to, or None if unknown.
+
+    An EXACT invariant, unlike the reachability proxy in `_dispatch_is_gated`:
+    graphite models no FFI, so a JavaScript call site cannot reach a Python `def`
+    under any typing discipline. That is why this gate needs no per-language
+    measurement before being applied everywhere -- it removes only bindings that
+    are impossible, never ones that are merely unlikely.
+
+    Scoped to a FAMILY rather than to the raw language label because
+    `LANGUAGE_BY_EXT` maps `.ts -> typescript` and `.tsx -> tsx`: a plain label
+    comparison would delete every call from a `.ts` module into a `.tsx`
+    component, which is ordinary code in every React repo graphite is pointed at.
+
+    Resolved through `LANGUAGE_BY_EXT` for the same reason `_dispatch_is_gated` is
+    -- a private suffix list would agree with the extractor only by coincidence.
+
+    FAILS OPEN on `None`: a file whose extension the extractor does not classify
+    has no family, and dispatch from or to it is left exactly as it was.
+    """
+    if not source_file:
+        return None
+    language = LANGUAGE_BY_EXT.get(Path(source_file).suffix.casefold())
+    if language is None:
+        return None
+    return _INTEROP_FAMILY_BY_LANGUAGE.get(language, language)
+
 
 def _dispatch_is_gated(source_file: str | None) -> bool:
     """Whether method dispatch from this file is restricted to reachable definitions.
@@ -1974,6 +2015,10 @@ def _resolve_method_dispatch(
     file_of_node: dict[str, str] = {
         n["id"]: _file_node_id(n["source_file"]) for n in nodes if n.get("source_file")
     }
+    # Which interop family each definition belongs to, for the family gate below.
+    family_of_node: dict[str, str | None] = {
+        n["id"]: _interop_family(n["source_file"]) for n in nodes if n.get("source_file")
+    }
     imports_by_file: dict[str, set[str]] = {}
     for e in edges:
         if e.get("relation") == "imports" and e.get("source") and e.get("target"):
@@ -2013,6 +2058,24 @@ def _resolve_method_dispatch(
             candidates: set[str] | None = None
         else:
             candidates = methods_by_name.get(method.casefold())
+        # Interop-family gate (#56). An EXACT invariant rather than a proxy:
+        # graphite models no FFI, so a JavaScript call site cannot reach a Python
+        # `def` under any typing discipline. Measured live before this existed --
+        # `path.resolve(input.root)` in `src/graphite/ts_resolver.mjs` bound to a
+        # `resolve` defined in `tests/test_git_security.py`, and reported at
+        # decision_grade.
+        #
+        # Applies in EVERY language, gated or not, because it removes only bindings
+        # that are impossible; the per-language census the reachability gate below
+        # still waits on is about bindings that are merely unlikely. Fails open on
+        # either side: an unclassified extension has no family and is left alone.
+        if candidates:
+            caller_family = _interop_family(e.get("source_file"))
+            if caller_family is not None:
+                candidates = {
+                    c for c in candidates
+                    if family_of_node.get(c) in (None, caller_family)
+                }
         # Reachability gate (#54). A name-only match let `Path(...).resolve()` bind
         # to a test double's `resolve`, and `f.write(text)` to a `write` defined in
         # a test file -- 232 and 30 false callers respectively, graded
