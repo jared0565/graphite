@@ -215,6 +215,47 @@ def test_rust_use_binds_in_repo_and_tags_only_confirmed_external(tmp_path: Path)
     assert confidence["typo_crate_thing"] != "EXTERNAL_IMPORT"
 
 
+def test_rust_bare_method_on_an_unnameable_receiver_is_not_called_external(tmp_path: Path) -> None:
+    """An unnameable receiver says nothing about where the call goes (#56).
+
+    `_simple_rust_value` returns None for anything but an identifier or `self`, so
+    `build().format()` reaches `_call_confidence` as the bare name `format` -- which
+    is in `_EXTERNAL_GLOBALS`. Python (`:1414`) and TS/JS (`:474`) pass
+    `attributable=` for exactly this case; the Rust and Go sites did not, so Rust
+    produced the **false external** that #14 mechanism A fixed everywhere else: an
+    edge excused from the health denominator without ever being shown to leave the
+    repo.
+
+    Go is deliberately not changed alongside this. Its `selector_expression` branch
+    builds `called` from the operand's raw source text, so the bare-name fallback
+    needs an operand that parses with no text at all -- no fixture here reaches it,
+    and a guard nothing can trip is not a guard.
+    """
+    _write(
+        tmp_path / "src" / "sink.rs",
+        "pub struct Sink;\n"
+        "\n"
+        "impl Sink {\n"
+        "    pub fn format(&self) -> i32 { 1 }\n"
+        "}\n"
+        "\n"
+        "pub fn build() -> Sink { Sink }\n"
+        "\n"
+        "pub fn caller() -> i32 { build().format() }\n",
+    )
+    result = _extract(tmp_path)
+    confidence = {
+        e["target"]: e.get("confidence")
+        for e in result.edges
+        if e["relation"] == "calls" and e["source"] == "src_sink_caller"
+    }
+
+    assert confidence, "the format() call produced no edge at all"
+    assert "EXTERNAL_CALL" not in confidence.values(), (
+        f"a bare method name off an unnameable receiver was classified external: {confidence}"
+    )
+
+
 def test_rust_use_super_in_inline_test_module_emits_no_self_edge(tmp_path: Path) -> None:
     _write(tmp_path / "crates" / "a" / "Cargo.toml", '[package]\nname = "a"\n')
     _write(

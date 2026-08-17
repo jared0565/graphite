@@ -1675,9 +1675,17 @@ def _extract_rust(
             if func is not None:
                 called: str | None
                 member: str | None = None
+                # False when `called` degrades to the bare method name because the
+                # receiver could not be named -- `build().format()`, `(a + b).test()`.
+                # Such a name says nothing about where the call goes, so classifying
+                # it against _EXTERNAL_GLOBALS produces a false external (#14
+                # mechanism A, threaded for Python at :1414 and TS/JS at :474 and
+                # missed here until #56).
+                attributable = True
                 if func.type == "field_expression":
                     value = _simple_rust_value(func.child_by_field_name("value"), _text)
                     field = _text(func.child_by_field_name("field"))
+                    attributable = bool(value and field)
                     called = _short_name(f"{value}.{field}" if value and field else field)
                     member = field
                 elif func.type == "scoped_identifier":
@@ -1691,7 +1699,10 @@ def _extract_rust(
                 else:
                     called = _call_target_name(func, source)
                 if called and called not in _LANGUAGE_BUILTIN_GLOBALS and should_keep_call_target(called):
-                    edge = _edge(scope_id, _resolve_call(file_id, called), "calls", rel_path, _line(node), confidence=_call_confidence(called))
+                    edge = _edge(
+                        scope_id, _resolve_call(file_id, called), "calls", rel_path, _line(node),
+                        confidence=_call_confidence(called, attributable=attributable),
+                    )
                     if member:
                         edge["_member"] = member
                     result.edges.append(edge)
