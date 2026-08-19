@@ -16,6 +16,43 @@ machine-checkable identity; the version is for humans.
 
 ### Fixed
 
+**Distinct definitions collapsed into one node id** (#57, #58). Two independent
+mechanisms, one silent symptom: the losing definition vanished from the graph
+entirely, every edge naming either landed on whichever survived, and nothing in
+the answer signalled it — a contaminated `callers` list grades exactly like a
+clean one, and an empty one for the vanished name reads as a trustworthy absence.
+
+`_make_id` had **five** lossy operations — `strip("_.")` per part, `[^\w]+ -> _`,
+`_+ -> _`, `casefold()` and truncation — so within one file `Path`, `path` and
+`_path` were one id. Measured on this repo: **5 collisions, 6 definitions absent**.
+`routing/storage.py` defines `initialize` (L950) and `_initialize` (L3965); the
+graph kept `initialize`, and `self._initialize()` was recorded as a call to it.
+
+Removing a normalisation does not fix this, which is worth knowing before trying:
+drop the strip and `path`/`_path` are *still* merged, because the `_+` collapse
+puts them back; drop both and `path`/`Path` remain merged by the casefold. An
+ambiguous input now gets a short **hex** discriminator — the one alphabet that
+survives both. A canonical input keeps its plain, readable id.
+
+`_file_node_id` built its id from `path.stem`, **discarding the extension**, so
+`index.ts` and `index.js`, or a component and its stylesheet, were one node — the
+shape that most affects the TypeScript consumers. It also inherited the
+sanitisation collisions: `src/graphite/init.py` (791 lines) and
+`src/graphite/__init__.py` (41) were one node, so the larger module had no file
+node at all and its 21 symbols hung off the smaller one. Both are fixed; file ids
+now carry the full filename.
+
+**Every node id in the graph changes.** Consumers re-extract on the engine
+fingerprint anyway, so the rebuild costs nothing extra — but any node id written
+down in a document or a script must be re-read from the new graph. Both
+docstrings on `_file_node_id` claimed the old scheme kept every file distinct;
+both were false and are rewritten rather than appended to.
+
+Known residual, measured at zero occurrences here: a path separator and a literal
+underscore are still indistinguishable, so `a/b.py` and `a_b.py` would collide.
+Closing it would mean discriminating every path containing an underscore.
+
+
 **Method dispatch overruled the call classifier, in every language** (#56).
 `_call_confidence` tags an edge `EXTERNAL_CALL` only when the call *provably*
 leaves the repo — an attributable receiver root bound by an import that did not

@@ -1,6 +1,8 @@
 """EXTERNAL_CALL classification: never-imported globals and external imports."""
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 
 from graphite.config import Config
@@ -27,9 +29,16 @@ def _calls(result, source_file):
     ]
 
 
+#: The ambiguity discriminator `_make_id` appends to a non-canonical name
+#: (#57) -- `addOne` and `ValueError` carry one, `expect` does not. Stripped
+#: here so this helper keys on the NAME segment rather than on the marker,
+#: which is what it always meant to do.
+_ID_MARKER = re.compile(r"_[0-9a-f]{6}$")
+
+
 def _confidence_by_target_suffix(result, source_file):
     return {
-        e["target"].rsplit("_", 1)[-1]: e["confidence"]
+        _ID_MARKER.sub("", e["target"]).rsplit("_", 1)[-1]: e["confidence"]
         for e in _calls(result, source_file)
     }
 

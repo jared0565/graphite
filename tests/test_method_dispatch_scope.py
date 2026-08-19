@@ -75,7 +75,7 @@ def test_a_stdlib_call_does_not_bind_to_an_unimported_double(tmp_path: Path) -> 
         "    return Path(__file__).resolve()\n",
     )
 
-    assert ("src_prod_where", "tests_test_double_resolve") not in _calls(tmp_path)
+    assert ("src_prod_py_where", "tests_test_double_py_resolve") not in _calls(tmp_path)
 
 
 def test_a_local_receiver_does_not_bind_to_an_unimported_double(tmp_path: Path) -> None:
@@ -92,7 +92,7 @@ def test_a_local_receiver_does_not_bind_to_an_unimported_double(tmp_path: Path) 
         "    return path.resolve()\n",
     )
 
-    assert ("src_prod_where", "tests_test_double_resolve") not in _calls(tmp_path)
+    assert ("src_prod_py_where", "tests_test_double_py_resolve") not in _calls(tmp_path)
 
 
 def test_a_file_handle_write_does_not_bind_to_an_unimported_double(tmp_path: Path) -> None:
@@ -105,7 +105,7 @@ def test_a_file_handle_write_does_not_bind_to_an_unimported_double(tmp_path: Pat
         "        f.write(text)\n",
     )
 
-    assert ("src_prod_save", "tests_test_double_write") not in _calls(tmp_path)
+    assert ("src_prod_py_save", "tests_test_double_py_write") not in _calls(tmp_path)
 
 
 # --- the recall the gate must NOT cost ----------------------------------------
@@ -129,7 +129,7 @@ def test_an_imported_classs_method_still_binds_across_files(tmp_path: Path) -> N
         "    return ledger.record_run(run_id)\n",
     )
 
-    assert ("src_pipeline_run", "src_ledger_record_run") in _calls(tmp_path)
+    assert ("src_pipeline_py_run", "src_ledger_py_record_run") in _calls(tmp_path)
 
 
 def test_a_self_call_still_binds_in_the_same_file(tmp_path: Path) -> None:
@@ -142,7 +142,7 @@ def test_a_self_call_still_binds_in_the_same_file(tmp_path: Path) -> None:
         "        return self.helper()\n",
     )
 
-    assert ("svc_run", "svc_helper") in _calls(tmp_path)
+    assert ("svc_py_run", "svc_py_helper") in _calls(tmp_path)
 
 
 def test_typescript_dispatch_is_untouched(tmp_path: Path) -> None:
@@ -159,7 +159,7 @@ def test_typescript_dispatch_is_untouched(tmp_path: Path) -> None:
     _write(tmp_path / "src" / "user.ts", "export function use(store: any) { return store.load(); }\n")
 
     # No import anywhere -- the Python gate would refuse this; TS must not.
-    assert ("src_user_use", "src_store_load") in _calls(tmp_path)
+    assert ("src_user_ts_use", "src_store_ts_load") in _calls(tmp_path)
 
 
 def test_go_dispatch_still_crosses_files(tmp_path: Path) -> None:
@@ -191,7 +191,7 @@ def test_go_dispatch_still_crosses_files(tmp_path: Path) -> None:
         "}\n",
     )
 
-    assert ("app_app_use", "store_store_load") in _calls(tmp_path)
+    assert ("app_app_go_use_0718fe", "store_store_go_load_4cf55b") in _calls(tmp_path)
 
 
 def test_an_unknown_language_is_exempt_rather_than_gated(tmp_path: Path) -> None:
@@ -261,7 +261,7 @@ def test_a_dotted_import_reaches_the_package_it_binds(tmp_path: Path) -> None:
     _write(tmp_path / "pkg" / "sub.py", "def helper():\n    return 1\n")
     _write(tmp_path / "m.py", "import pkg.sub\n\ndef go():\n    return pkg.build()\n")
 
-    assert ("m_go", "pkg_init_build") in _calls(tmp_path)
+    assert ("m_py_go", "pkg_init_py_56bf3f_build") in _calls(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -291,4 +291,4 @@ def test_both_import_spellings_reach_their_target(tmp_path: Path, statement: str
         "    return ledger.record_run(run_id)\n",
     )
 
-    assert ("src_pkg_pipeline_run", "src_pkg_ledger_record_run") in _calls(tmp_path)
+    assert ("src_pkg_pipeline_py_run", "src_pkg_ledger_py_record_run") in _calls(tmp_path)

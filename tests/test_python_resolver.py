@@ -139,11 +139,11 @@ def test_import_edges_shapes(tmp_path):
     # stdlib: phantom + EXTERNAL_IMPORT
     assert ("json", "EXTERNAL_IMPORT") in by_target
     # from pkg import tdd -> module edge for pkg (resolved to package __init__)
-    assert ("src_pkg_init", "EXACT_IMPORT") in by_target
+    assert ("src_pkg_init_py_ff9286", "EXACT_IMPORT") in by_target
     # from pkg.ledger import Ledger -> ONE edge for the module, file-node target
-    assert ("src_pkg_ledger", "EXACT_IMPORT") in by_target
+    assert ("src_pkg_ledger_py", "EXACT_IMPORT") in by_target
     # relative .tdd -> file node
-    assert ("src_pkg_tdd", "EXACT_IMPORT") in by_target
+    assert ("src_pkg_tdd_py", "EXACT_IMPORT") in by_target
     # imported NAMES never make import edges
     all_targets = {e["target"] for e in edges}
     assert "ledger" not in all_targets  # no dotted-module phantom for resolved module
@@ -175,8 +175,8 @@ def test_a_dotted_import_edges_the_ancestor_packages_it_executes(tmp_path):
     result = _extract(tmp_path)
     targets = {(e["target"], e["confidence"]) for e in _import_edges(result, "m.py")}
 
-    assert ("pkg_sub", "EXACT_IMPORT") in targets, targets
-    assert ("pkg_init", "EXACT_IMPORT") in targets, targets
+    assert ("pkg_sub_py", "EXACT_IMPORT") in targets, targets
+    assert ("pkg_init_py_56bf3f", "EXACT_IMPORT") in targets, targets
 
 
 def test_every_ancestor_package_of_a_deep_import_is_edged(tmp_path):
@@ -189,7 +189,7 @@ def test_every_ancestor_package_of_a_deep_import_is_edged(tmp_path):
     result = _extract(tmp_path)
     targets = {e["target"] for e in _import_edges(result, "m.py")}
 
-    assert {"a_init", "a_b_init", "a_b_c"} <= targets, targets
+    assert {"a_init_py_89a155", "a_b_init_py_ca1a78", "a_b_c_py"} <= targets, targets
 
 
 def test_an_external_dotted_import_gains_no_ancestor_edges(tmp_path):
@@ -230,7 +230,7 @@ def test_a_namespace_package_ancestor_emits_no_phantom_edge(tmp_path):
     result = _extract(tmp_path)
     targets = {e["target"] for e in _import_edges(result, "m.py")}
 
-    assert "space_mod" in targets, targets
+    assert "space_mod_py" in targets, targets
     assert "space" not in targets, f"no __init__.py exists to import: {targets}"
     assert not any(t.endswith("_init") for t in targets), targets
 
@@ -370,8 +370,8 @@ def test_parenthesized_from_import_first_name_binds(tmp_path):
         "    second_fn()\n",
     )
     g = _graph_for(tmp_path)
-    assert g.has_edge("consumer_run", "pkg_mod_first_fn")
-    assert g.has_edge("consumer_run", "pkg_mod_second_fn")
+    assert g.has_edge("consumer_py_run", "pkg_mod_py_first_fn")
+    assert g.has_edge("consumer_py_run", "pkg_mod_py_second_fn")
 
 
 def test_parenthesized_from_import_multiline_trailing_comma_binds(tmp_path):
@@ -392,7 +392,7 @@ def test_parenthesized_from_import_multiline_trailing_comma_binds(tmp_path):
         "    only_fn()\n",
     )
     g = _graph_for(tmp_path)
-    assert g.has_edge("consumer_run", "pkg_mod_only_fn")
+    assert g.has_edge("consumer_py_run", "pkg_mod_py_only_fn")
 
 
 def test_parenthesized_from_import_single_edge_per_module(tmp_path):
@@ -415,7 +415,7 @@ def test_parenthesized_from_import_single_edge_per_module(tmp_path):
     result = _extract(tmp_path)
     edges = _import_edges(result, "consumer.py")
     assert len(edges) == 1
-    assert edges[0]["target"] == "pkg_mod"
+    assert edges[0]["target"] == "pkg_mod_py"
 
 
 def test_module_attribute_call_binds_cross_module(tmp_path):
@@ -423,7 +423,7 @@ def test_module_attribute_call_binds_cross_module(tmp_path):
     g = _graph_for(tmp_path)
     out = query(g, "callers auto_resolve_tdd")
     ids = [c["id"] for c in out.get("callers", [])]
-    assert "src_pkg_pipeline_run" in ids  # tdd.auto_resolve_tdd(...) bound
+    assert "src_pkg_pipeline_py_run" in ids  # tdd.auto_resolve_tdd(...) bound
 
 
 def test_from_import_aliased_symbol_call_binds(tmp_path):
@@ -432,7 +432,7 @@ def test_from_import_aliased_symbol_call_binds(tmp_path):
     # run() calls the def twice: tdd.auto_resolve_tdd(...) AND art(...) (alias).
     # build_graph merges duplicate edges by incrementing weight -> weight >= 2
     # proves BOTH the module-attr path and the aliased-symbol path bound.
-    edge = g.get_edge_data("src_pkg_pipeline_run", "src_pkg_tdd_auto_resolve_tdd")
+    edge = g.get_edge_data("src_pkg_pipeline_py_run", "src_pkg_tdd_py_auto_resolve_tdd")
     assert edge is not None and edge.get("weight", 0) >= 2.0
 
 
@@ -440,7 +440,7 @@ def test_class_instantiation_binds_to_class_node(tmp_path):
     _py_fixture(tmp_path)
     g = _graph_for(tmp_path)
     # Ledger() in pipeline.run binds to the class node in ledger.py
-    assert g.has_edge("src_pkg_pipeline_run", "src_pkg_ledger_ledger")
+    assert g.has_edge("src_pkg_pipeline_py_run", "src_pkg_ledger_py_ledger_cf3e6e")
 
 
 def test_same_file_call_binding_unchanged(tmp_path):
@@ -450,7 +450,7 @@ def test_same_file_call_binding_unchanged(tmp_path):
     )
     g = _graph_for(tmp_path)
     out = query(g, "callers helper")
-    assert [c["id"] for c in out.get("callers", [])] == ["solo_main"]
+    assert [c["id"] for c in out.get("callers", [])] == ["solo_py_main"]
 
 
 def test_aliased_dotted_import_binds_cross_module(tmp_path):
@@ -475,7 +475,7 @@ def test_aliased_dotted_import_binds_cross_module(tmp_path):
         "    return lg.scan()\n",
     )
     g = _graph_for(tmp_path)
-    assert g.has_edge("src_pkg_consumer_run", "src_pkg_ledger_scan")
+    assert g.has_edge("src_pkg_consumer_py_run", "src_pkg_ledger_py_scan")
 
 
 def test_plain_import_binds_cross_module(tmp_path):
@@ -492,7 +492,7 @@ def test_plain_import_binds_cross_module(tmp_path):
         "    return flatmod.func()\n",
     )
     g = _graph_for(tmp_path)
-    assert g.has_edge("consumer_run", "flatmod_func")
+    assert g.has_edge("consumer_py_run", "flatmod_py_func")
 
 
 def test_function_local_import_binds(tmp_path):
@@ -506,14 +506,14 @@ def test_function_local_import_binds(tmp_path):
     )
     g = _graph_for(tmp_path)
     out = query(g, "callers deep")
-    assert "src_pkg_lazy_caller" in [c["id"] for c in out.get("callers", [])]
+    assert "src_pkg_lazy_py_caller" in [c["id"] for c in out.get("callers", [])]
 
 
 def test_instance_method_call_binds_via_dispatch(tmp_path):
     _py_fixture(tmp_path)
     g = _graph_for(tmp_path)
     out = query(g, "callers record_run")
-    assert "src_pkg_pipeline_run" in [c["id"] for c in out.get("callers", [])]
+    assert "src_pkg_pipeline_py_run" in [c["id"] for c in out.get("callers", [])]
 
 
 def test_self_call_binds_to_own_class_method(tmp_path):
@@ -527,7 +527,7 @@ def test_self_call_binds_to_own_class_method(tmp_path):
     )
     g = _graph_for(tmp_path)
     out = query(g, "callers helper")
-    assert "svc_run" in [c["id"] for c in out.get("callers", [])]
+    assert "svc_py_run" in [c["id"] for c in out.get("callers", [])]
 
 
 def test_unresolved_member_phantom_dropped(tmp_path):
@@ -560,8 +560,8 @@ def test_python_methods_tagged_top_level_functions_not(tmp_path):
     _py_fixture(tmp_path)
     result = _extract(tmp_path)
     by_id = {n["id"]: n for n in result.nodes}
-    assert by_id["src_pkg_ledger_record_run"].get("is_method") is True
-    assert by_id["src_pkg_tdd_auto_resolve_tdd"].get("is_method") is None
+    assert by_id["src_pkg_ledger_py_record_run"].get("is_method") is True
+    assert by_id["src_pkg_tdd_py_auto_resolve_tdd"].get("is_method") is None
 
 
 def test_end_to_end_build_binds_and_is_healthy(tmp_path, monkeypatch):

@@ -683,8 +683,8 @@ def test_ts_import_resolution_handles_index_files_and_tsconfig_paths(tmp_path: P
     result = extract_all(entries, Config(workers=1, typescript_resolver="disabled", cache_dir=tmp_path / ".cache" / "graphite"))
     imports = {(e["source"], e["target"], e["relation"], e.get("confidence")) for e in result.edges if e["relation"] == "imports"}
 
-    assert ("src_app", "src_util_index", "imports", "EXACT_IMPORT") in imports
-    assert ("src_app", "src_lib_service", "imports", "EXACT_IMPORT") in imports
+    assert ("src_app_ts", "src_util_index_ts", "imports", "EXACT_IMPORT") in imports
+    assert ("src_app_ts", "src_lib_service_ts", "imports", "EXACT_IMPORT") in imports
 
 
 def test_ts_call_noise_filter_keeps_local_calls_and_drops_builtin_member_calls(tmp_path: Path) -> None:
@@ -697,10 +697,10 @@ def test_ts_call_noise_filter_keeps_local_calls_and_drops_builtin_member_calls(t
     result = extract_all(entries, Config(workers=1, typescript_resolver="disabled", cache_dir=tmp_path / ".cache" / "graphite"))
     call_targets = {e["target"] for e in result.edges if e["relation"] == "calls"}
 
-    assert "src_app_localhelper" in call_targets
-    assert "src_app_items_map" not in call_targets
-    assert "src_app_json_parse" not in call_targets
-    assert "src_app_console_log" not in call_targets
+    assert "src_app_ts_localhelper_436bcc" in call_targets
+    assert "src_app_ts_items_map" not in call_targets
+    assert "src_app_ts_json_parse" not in call_targets
+    assert "src_app_ts_console_log" not in call_targets
 
 
 def test_check_reports_fresh_and_then_stale_changed_file(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -782,14 +782,14 @@ def test_impact_suggests_reverse_dependencies_and_likely_tests(tmp_path: Path, m
 def test_analysis_rankings_ignore_external_import_nodes() -> None:
     graph = build_graph(
         nodes=[
-            {"id": "src_app", "kind": "file", "name": "app.ts", "source_file": "src/app.ts"},
-            {"id": "src_store", "kind": "file", "name": "store.ts", "source_file": "src/store.ts"},
-            {"id": "src_store_read", "kind": "function", "name": "read", "source_file": "src/store.ts"},
+            {"id": "src_app_ts", "kind": "file", "name": "app.ts", "source_file": "src/app.ts"},
+            {"id": "src_store_ts", "kind": "file", "name": "store.ts", "source_file": "src/store.ts"},
+            {"id": "src_store_ts_read", "kind": "function", "name": "read", "source_file": "src/store.ts"},
         ],
         edges=[
-            {"source": "src_app", "target": "vitest", "relation": "imports", "source_file": "src/app.ts", "confidence": "EXTERNAL_IMPORT"},
-            {"source": "src_app", "target": "src_store", "relation": "imports", "source_file": "src/app.ts", "confidence": "EXACT_IMPORT"},
-            {"source": "src_store", "target": "src_store_read", "relation": "contains", "source_file": "src/store.ts"},
+            {"source": "src_app_ts", "target": "vitest", "relation": "imports", "source_file": "src/app.ts", "confidence": "EXTERNAL_IMPORT"},
+            {"source": "src_app_ts", "target": "src_store_ts", "relation": "imports", "source_file": "src/app.ts", "confidence": "EXACT_IMPORT"},
+            {"source": "src_store_ts", "target": "src_store_ts_read", "relation": "contains", "source_file": "src/store.ts"},
         ],
     )
 

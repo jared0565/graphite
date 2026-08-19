@@ -56,8 +56,8 @@ def test_arrow_assigned_const_binds_within_one_file(tmp_path: Path, resolver: st
 
     result = _extract(tmp_path, resolver)
 
-    assert "src_theme_getthing" in _node_ids(result), "arrow-assigned const produced no bindable node"
-    assert ("src_theme_run", "src_theme_getthing") in _calls(result)
+    assert "src_theme_ts_getthing_3e9756" in _node_ids(result), "arrow-assigned const produced no bindable node"
+    assert ("src_theme_ts_run", "src_theme_ts_getthing_3e9756") in _calls(result)
 
 
 @pytest.mark.parametrize("resolver", ["auto", "disabled"])
@@ -72,13 +72,13 @@ def test_arrow_assigned_const_binds_across_files(tmp_path: Path, resolver: str) 
 
     result = _extract(tmp_path, resolver)
 
-    assert ("src_app_run", "src_util_helper") in _calls(result)
+    assert ("src_app_ts_run", "src_util_ts_helper") in _calls(result)
     # The edge alone proves nothing: the import machinery emits it whether or
     # not the definition node exists, and an edge to a non-existent node is a
     # phantom that health counts as UNBOUND. The node must actually be there.
-    assert "src_util_helper" in _node_ids(result), "edge points at a phantom, not a definition"
+    assert "src_util_ts_helper" in _node_ids(result), "edge points at a phantom, not a definition"
     assert not any(
-        tgt == "src_app_helper" for _src, tgt in _calls(result)
+        tgt == "src_app_ts_helper" for _src, tgt in _calls(result)
     ), "cross-file call must not resolve to a same-file phantom"
 
 
@@ -93,8 +93,8 @@ def test_const_assigned_function_expression_also_binds(tmp_path: Path, resolver:
 
     result = _extract(tmp_path, resolver)
 
-    assert ("src_legacy_run", "src_legacy_buildthing") in _calls(result)
-    assert "src_legacy_buildthing" in _node_ids(result), "edge points at a phantom, not a definition"
+    assert ("src_legacy_ts_run", "src_legacy_ts_buildthing_a6ac14") in _calls(result)
+    assert "src_legacy_ts_buildthing_a6ac14" in _node_ids(result), "edge points at a phantom, not a definition"
 
 
 @pytest.mark.parametrize("resolver", ["auto", "disabled"])
@@ -107,7 +107,7 @@ def test_bare_parameter_arrow_is_not_named_after_its_parameter(tmp_path: Path, r
 
     result = _extract(tmp_path, resolver)
 
-    assert "src_list_x" not in _node_ids(result)
+    assert "src_list_ts_x" not in _node_ids(result)
 
 
 @pytest.mark.parametrize("resolver", ["auto", "disabled"])
@@ -120,7 +120,7 @@ def test_object_property_arrow_is_not_a_bare_call_target(tmp_path: Path, resolve
 
     result = _extract(tmp_path, resolver)
 
-    assert "src_obj_tolabel" not in _node_ids(result)
+    assert "src_obj_ts_tolabel_659c13" not in _node_ids(result)
 
 
 @pytest.mark.parametrize("resolver", ["auto", "disabled"])
@@ -134,7 +134,7 @@ def test_new_expression_produces_a_calls_edge(tmp_path: Path, resolver: str) -> 
 
     result = _extract(tmp_path, resolver)
 
-    assert ("src_shapes_buildthing", "src_shapes_widget") in _calls(result)
+    assert ("src_shapes_ts_buildthing_3dcd5a", "src_shapes_ts_widget_0de36c") in _calls(result)
 
 
 @pytest.mark.parametrize("resolver", ["auto", "disabled"])
@@ -149,7 +149,7 @@ def test_new_expression_binds_across_files(tmp_path: Path, resolver: str) -> Non
 
     result = _extract(tmp_path, resolver)
 
-    assert ("src_main_buildthing", "src_parser_parser") in _calls(result)
+    assert ("src_main_ts_buildthing_200fb6", "src_parser_ts_parser_bd59b9") in _calls(result)
 
 
 @pytest.mark.parametrize("resolver", ["auto", "disabled"])
@@ -166,7 +166,7 @@ def test_new_member_expression_is_construction_not_dispatch(tmp_path: Path, reso
 
     emitted = [
         e for e in result.edges
-        if e["relation"] == "calls" and e["source"] == "src_ns_buildthing"
+        if e["relation"] == "calls" and e["source"] == "src_ns_ts_buildthing_43d8e5"
     ]
     assert emitted, "construction should still produce an edge"
     assert all("_member" not in e for e in emitted), "construction must not be treated as dispatch"

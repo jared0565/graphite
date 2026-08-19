@@ -67,8 +67,8 @@ def test_class_field_arrow_produces_a_bindable_node(tmp_path: Path, resolver: st
     result = _extract(tmp_path, resolver)
     ids = _node_ids(result)
 
-    assert "src_w_plain" in ids, f"control failed -- #16 regressed: {sorted(ids)}"
-    assert "src_w_handle" in ids, (
+    assert "src_w_ts_plain" in ids, f"control failed -- #16 regressed: {sorted(ids)}"
+    assert "src_w_ts_handle" in ids, (
         f"class-field arrow produced no bindable node: {sorted(ids)}"
     )
 
@@ -84,7 +84,7 @@ def test_this_dot_field_call_binds_to_the_field_definition(
 
     result = _extract(tmp_path, resolver)
 
-    assert ("src_w_run", "src_w_handle") in _calls(result), (
+    assert ("src_w_ts_run", "src_w_ts_handle") in _calls(result), (
         f"this.handle() emitted no edge to the field definition: {sorted(_calls(result))}"
     )
 
@@ -106,7 +106,7 @@ def test_member_call_from_another_file_binds_to_the_field(tmp_path: Path) -> Non
 
     result = _extract(tmp_path)
 
-    assert ("src_use_go", "src_w_handle") in _calls(result), (
+    assert ("src_use_ts_go", "src_w_ts_handle") in _calls(result), (
         f"cross-file member call did not reach the field definition: {sorted(_calls(result))}"
     )
 
@@ -125,6 +125,6 @@ def test_object_literal_property_arrows_stay_anonymous(tmp_path: Path) -> None:
 
     ids = _node_ids(_extract(tmp_path))
 
-    assert "src_o_run" not in ids, (
+    assert "src_o_ts_run" not in ids, (
         f"object-literal property arrow was wrongly made bindable by name: {sorted(ids)}"
     )

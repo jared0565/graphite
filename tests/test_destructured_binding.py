@@ -74,10 +74,10 @@ def test_usestate_setter_binds_within_one_file(tmp_path: Path, resolver: str) ->
 
     result = _extract(tmp_path, resolver)
 
-    assert "src_panel_setcopied" in _node_ids(result), (
+    assert "src_panel_tsx_setcopied_55c89f" in _node_ids(result), (
         "destructured useState setter produced no bindable definition node"
     )
-    assert ("src_panel_mark", "src_panel_setcopied") in _calls(result)
+    assert ("src_panel_tsx_mark", "src_panel_tsx_setcopied_55c89f") in _calls(result)
 
 
 @pytest.mark.parametrize("resolver", ["auto", "disabled"])
@@ -95,10 +95,10 @@ def test_object_destructured_callable_binds(tmp_path: Path, resolver: str) -> No
 
     result = _extract(tmp_path, resolver)
 
-    assert "src_label_t" in _node_ids(result), (
+    assert "src_label_tsx_t" in _node_ids(result), (
         "object-destructured callable produced no bindable definition node"
     )
-    assert ("src_label_render", "src_label_t") in _calls(result)
+    assert ("src_label_tsx_render", "src_label_tsx_t") in _calls(result)
 
 
 @pytest.mark.parametrize("resolver", ["auto", "disabled"])
@@ -117,8 +117,8 @@ def test_typescript_generic_hook_call_still_binds(tmp_path: Path, resolver: str)
 
     result = _extract(tmp_path, resolver)
 
-    assert "src_form_setname" in _node_ids(result)
-    assert ("src_form_reset", "src_form_setname") in _calls(result)
+    assert "src_form_tsx_setname_eedc29" in _node_ids(result)
+    assert ("src_form_tsx_reset", "src_form_tsx_setname_eedc29") in _calls(result)
 
 
 @pytest.mark.parametrize("resolver", ["auto", "disabled"])
@@ -151,12 +151,12 @@ def test_same_named_setters_bind_to_their_own_file(tmp_path: Path, resolver: str
     # Assert the NODES exist first: the call machinery emits an edge to a
     # phantom whether or not the target is real, so edge-only assertions here
     # passed against unfixed code.
-    assert "src_alpha_setopen" in ids and "src_beta_setopen" in ids
+    assert "src_alpha_tsx_setopen_963925" in ids and "src_beta_tsx_setopen_c22d73" in ids
 
-    assert ("src_alpha_toggle", "src_alpha_setopen") in calls
-    assert ("src_beta_toggle", "src_beta_setopen") in calls
-    assert ("src_alpha_toggle", "src_beta_setopen") not in calls
-    assert ("src_beta_toggle", "src_alpha_setopen") not in calls
+    assert ("src_alpha_tsx_toggle", "src_alpha_tsx_setopen_963925") in calls
+    assert ("src_beta_tsx_toggle", "src_beta_tsx_setopen_c22d73") in calls
+    assert ("src_alpha_tsx_toggle", "src_beta_tsx_setopen_c22d73") not in calls
+    assert ("src_beta_tsx_toggle", "src_alpha_tsx_setopen_963925") not in calls
 
 
 @pytest.mark.parametrize("resolver", ["auto", "disabled"])
@@ -177,7 +177,7 @@ def test_uncalled_destructured_binding_creates_no_definition(tmp_path: Path, res
     result = _extract(tmp_path, resolver)
     ids = _node_ids(result)
 
-    assert "src_view_setcopied" in ids, "the called half must bind"
-    assert "src_view_copied" not in ids, (
+    assert "src_view_tsx_setcopied_ae9b2b" in ids, "the called half must bind"
+    assert "src_view_tsx_copied" not in ids, (
         "never-called destructured binding was fabricated as a definition"
     )

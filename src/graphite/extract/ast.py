@@ -1,13 +1,14 @@
 """Deterministic structural extraction via tree-sitter."""
 from __future__ import annotations
 
+import hashlib
 import importlib
 import re
 import sys
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Collection, Final
+from typing import Any, Collection, Final, Sequence
 
 from ..cache import Cache
 from ..config import Config
@@ -153,28 +154,100 @@ _RESOLVER_LANGUAGES: Final = frozenset({"python", "javascript", "typescript", "t
 _MAX_ID_LEN = 120
 
 
+#: Length, in hex characters, of the ambiguity discriminator appended by
+#: `_make_id`. Hex is the only alphabet that survives BOTH normalisations that
+#: caused #57: `_+ -> _` cannot collapse it (it holds no underscores) and
+#: `casefold()` cannot flatten it (it holds no case). A marker built from
+#: anything else would be eaten by the very code it exists to defeat.
+_ID_DISCRIMINATOR_LEN: Final = 6
+
+
+def _identity_preserving_form(parts: Sequence[str]) -> str:
+    """The id these parts would produce if the only loss were separator identity.
+
+    Applies `[^\\w] -> _` one character at a time — deliberately NOT per run, so
+    `a.b` and `a..b` stay distinct here even though the real pipeline collapses
+    both. Everything else the sanitiser does is skipped.
+
+    Comparing the real id against this answers the only question that matters:
+    did the sanitiser throw away something that distinguished this input from a
+    different one? If it did, the id is ambiguous and needs a discriminator.
+    """
+    return "_".join(
+        re.sub(r"[^\w]", "_", unicodedata.normalize("NFKC", p), flags=re.UNICODE)
+        for p in parts
+    )
+
+
 def _make_id(*parts: str) -> str:
-    combined = "_".join(p.strip("_.") for p in parts if p)
-    combined = unicodedata.normalize("NFKC", combined)
+    """Node id for a file or a symbol, ambiguous inputs discriminated (#57).
+
+    The sanitiser has FIVE lossy operations — `strip("_.")` per part,
+    `[^\\w]+ -> _`, `_+ -> _`, `casefold()` and truncation — and each of them
+    merged real definitions. Measured on this repo before the fix: 5 same-file
+    collisions and 6 definitions absent from the graph, including
+    `routing/storage.py`'s `initialize` (L950) swallowing `_initialize` (L3965),
+    so `self._initialize()` was recorded as a call to an unrelated method.
+
+    Removing a normalisation does not fix this, which is worth knowing before
+    trying: drop the strip and `path`/`_path` are STILL merged, because the
+    `_+` collapse two lines down puts them back together; drop both and
+    `path`/`Path` remain merged by the casefold. Only an appended discriminator
+    works, and only one made of hex.
+
+    A canonical input keeps its plain, readable id — the discriminator is for
+    ambiguity, not decoration, and hashing everything would cost a far larger
+    migration for no extra correctness.
+
+    Known residual: two DIFFERENT part tuples can still produce one id when the
+    only difference is a separator versus a literal underscore — `a/b.py` and
+    `a_b.py` both reach `a_b_py`, and both are ambiguity-free by this test.
+    Closing it would mean discriminating every path containing an underscore,
+    which is most of `tests/`. Measured occurrences in this repo: zero.
+    """
+    kept = [p for p in parts if p]
+    combined = unicodedata.normalize("NFKC", "_".join(p.strip("_.") for p in kept))
     cleaned = re.sub(r"[^\w]+", "_", combined, flags=re.UNICODE)
     cleaned = re.sub(r"_+", "_", cleaned)
     cleaned = cleaned.strip("_").casefold()
-    if len(cleaned) > _MAX_ID_LEN:
-        cleaned = cleaned[:_MAX_ID_LEN]
-    return cleaned
+    if cleaned == _identity_preserving_form(kept) and len(cleaned) <= _MAX_ID_LEN:
+        return cleaned
+    # Hashed over the exact input with a separator no name can contain, so the
+    # marker distinguishes ("a_b", "c") from ("a", "b_c") even though both
+    # sanitise alike.
+    marker = hashlib.blake2s(
+        "\x00".join(kept).encode("utf-8"), digest_size=_ID_DISCRIMINATOR_LEN // 2
+    ).hexdigest()
+    return f"{cleaned[: _MAX_ID_LEN - len(marker) - 1].rstrip('_')}_{marker}"
 
 
 def _file_node_id(rel_path: str) -> str:
-    """Stable node id for a file: a slug of the FULL repo-relative path.
+    """Stable node id for a file: a slug of the FULL repo-relative path AND name.
 
-    Using only the parent dir + stem (the pre-v4 scheme) silently merged any
-    two files sharing that tail — a monorepo with `apps/worker/src/db/queries.ts`
-    and `apps/workers/booking/src/db/queries.ts` got ONE `db_queries` node and
-    every symbol in both files collided. Full-path ids keep every file (and
-    therefore every symbol id derived from the file id) distinct.
+    Two claims this docstring used to make were false, and both were disproved
+    on graphite's own source rather than in theory.
+
+    It said full-path ids "keep every file distinct". They did not. `ARAMID.md`
+    and `aramid.toml` both reached `aramid` (case), and `src/graphite/init.py`
+    and `src/graphite/__init__.py` both reached `src_graphite_init` (underscore
+    strip plus collapse) — so a 791-line module had NO file node of its own and
+    its 21 symbols hung off a 41-line `__init__.py`. `_make_id`'s discriminator
+    is what fixes that half.
+
+    It also built the id from `path.stem`, silently DISCARDING the extension, so
+    `index.ts` and `index.js`, or `Button.tsx` and its `Button.css`, were one
+    node (#58). That is not a sanitisation loss and no discriminator could fix
+    it — the two inputs were already identical by the time `_make_id` saw them.
+    The extension is part of a file's identity and is now kept.
+
+    The original reason for full-path ids stands: parent-dir + stem merged any
+    two files sharing that tail, so a monorepo with `apps/worker/src/db/queries.ts`
+    and `apps/workers/booking/src/db/queries.ts` got ONE `db_queries` node.
     """
     path = Path(rel_path)
-    parts = [*path.parts[:-1], path.stem]
+    # `path.parts` already ends in the full filename; the old scheme replaced
+    # that last element with `path.stem` and lost the suffix with it.
+    parts = list(path.parts)
     return _make_id(".".join(p for p in parts if p not in (".", "")))
 
 

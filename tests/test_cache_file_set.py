@@ -51,7 +51,7 @@ def test_adding_a_sibling_module_rebinds_an_unchanged_importer(tmp_path: Path) -
     importer = _seed_package(tmp_path)
 
     before = _import_targets(_extract(tmp_path), "pkg/app.py")
-    assert "pkg_helper" not in before, f"fixture must start unbound: {before}"
+    assert "pkg_helper_py" not in before, f"fixture must start unbound: {before}"
 
     original_bytes = importer.read_bytes()
     _write(tmp_path / "pkg" / "helper.py", "def go():\n    return 1\n")
@@ -59,7 +59,7 @@ def test_adding_a_sibling_module_rebinds_an_unchanged_importer(tmp_path: Path) -
     assert importer.read_bytes() == original_bytes
 
     after = _import_targets(_extract(tmp_path), "pkg/app.py")
-    assert "pkg_helper" in after, (
+    assert "pkg_helper_py" in after, (
         f"unchanged importer served a stale cached resolution: {after}"
     )
 
@@ -69,14 +69,14 @@ def test_removing_a_sibling_module_unbinds_an_unchanged_importer(tmp_path: Path)
     importer = _seed_package(tmp_path)
     _write(tmp_path / "pkg" / "helper.py", "def go():\n    return 1\n")
 
-    assert "pkg_helper" in _import_targets(_extract(tmp_path), "pkg/app.py")
+    assert "pkg_helper_py" in _import_targets(_extract(tmp_path), "pkg/app.py")
 
     original_bytes = importer.read_bytes()
     (tmp_path / "pkg" / "helper.py").unlink()
     assert importer.read_bytes() == original_bytes
 
     after = _import_targets(_extract(tmp_path), "pkg/app.py")
-    assert "pkg_helper" not in after, (
+    assert "pkg_helper_py" not in after, (
         f"removed sibling still served as resolved from cache: {after}"
     )
 

@@ -66,19 +66,19 @@ def test_calls_are_function_scoped_and_cross_file_resolved(tmp_path: Path, resol
 
     # (a) cross-file: the call resolves to the *definition* node in mod.ts,
     # not a phantom in the calling file's namespace.
-    assert ("src_consumer_alpha", "src_mod_target") in calls
-    assert not any(tgt == "src_consumer_target" for _src, tgt in calls), (
+    assert ("src_consumer_ts_alpha", "src_mod_ts_target") in calls
+    assert not any(tgt == "src_consumer_ts_target" for _src, tgt in calls), (
         "cross-file call must not resolve to a same-file phantom"
     )
 
     # (c) a second, distinct function calling the same target survives dedup.
-    assert ("src_consumer_beta", "src_mod_target") in calls
+    assert ("src_consumer_ts_beta", "src_mod_ts_target") in calls
 
     # The source is the enclosing function, never the file node.
-    assert not any(src == "src_consumer" for src, tgt in calls if tgt == "src_mod_target")
+    assert not any(src == "src_consumer_ts" for src, tgt in calls if tgt == "src_mod_ts_target")
 
     # (b) the arrow function nested in the array/object literal is its own caller.
-    arrow_callers = [src for src, tgt in calls if tgt == "src_mod_target" and src.startswith("src_consumer_run")]
+    arrow_callers = [src for src, tgt in calls if tgt == "src_mod_ts_target" and src.startswith("src_consumer_ts_run")]
     assert len(arrow_callers) == 1, f"expected one arrow caller, got {arrow_callers}"
 
 
@@ -88,7 +88,7 @@ def test_arrow_caller_is_a_materialized_function_node(tmp_path: Path) -> None:
     nodes = {n["id"]: n for n in result.nodes}
 
     calls = [e for e in result.edges if e["relation"] == "calls"]
-    arrow_src = next(e["source"] for e in calls if e["target"] == "src_mod_target" and e["source"].startswith("src_consumer_run"))
+    arrow_src = next(e["source"] for e in calls if e["target"] == "src_mod_ts_target" and e["source"].startswith("src_consumer_ts_run"))
 
     # The anonymous arrow must have been materialized as a real function node
     # (not left dangling for build_graph to invent as kind="unknown").
@@ -140,9 +140,9 @@ def test_require_emits_an_import_edge(tmp_path: Path) -> None:
     result = _extract(tmp_path, "disabled")
     imports = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "imports"}
 
-    assert ("src_consumer", "src_mod") in imports
+    assert ("src_consumer_js", "src_mod_js") in imports
     # The ESM control: it always worked, and must keep working.
-    assert ("src_esmconsumer", "src_esmmod") in imports
+    assert ("src_esmconsumer_js", "src_esmmod_js") in imports
 
 
 def test_unresolvable_require_is_an_external_import_like_its_esm_twin(tmp_path: Path) -> None:
@@ -156,17 +156,17 @@ def test_unresolvable_require_is_an_external_import_like_its_esm_twin(tmp_path: 
         e["source"]: e for e in result.edges if e["relation"] == "imports"
     }
 
-    assert by_source["src_a"]["confidence"] == "EXTERNAL_IMPORT"
-    assert by_source["src_a"]["confidence"] == by_source["src_b"]["confidence"]
+    assert by_source["src_a_js"]["confidence"] == "EXTERNAL_IMPORT"
+    assert by_source["src_a_js"]["confidence"] == by_source["src_b_js"]["confidence"]
 
 
 @pytest.mark.parametrize(
     ("caller", "target"),
     [
-        ("src_consumer_destructured", "src_mod_objlit"),
-        ("src_consumer_nsobjlit", "src_mod_objlit"),
-        ("src_consumer_nspropassign", "src_mod_propassign"),
-        ("src_esmconsumer_esmnamespace", "src_esmmod_esmnamed"),
+        ("src_consumer_js_destructured", "src_mod_js_objlit_cea379"),
+        ("src_consumer_js_nsobjlit_2108d6", "src_mod_js_objlit_cea379"),
+        ("src_consumer_js_nspropassign_0f039e", "src_mod_js_propassign_1672d4"),
+        ("src_esmconsumer_js_esmnamespace_e6d461", "src_esmmod_js_esmnamed_0d70f3"),
     ],
     ids=["cjs-destructured", "cjs-namespace", "cjs-namespace-propassign", "esm-namespace"],
 )
@@ -221,7 +221,7 @@ def test_a_shadowed_module_local_does_not_bind_to_the_module(
     result = _extract(tmp_path, "disabled")
     calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
 
-    assert ("src_consumer_f", "src_mod_real") not in calls, (
+    assert ("src_consumer_js_f", "src_mod_js_real") not in calls, (
         "the local binding shadows the module one; claiming the module's "
         "definition here would put a caller in `callers real` that does not exist"
     )
@@ -243,7 +243,7 @@ def test_an_unshadowed_module_local_still_binds(tmp_path: Path) -> None:
     result = _extract(tmp_path, "disabled")
     calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
 
-    assert ("src_consumer_f", "src_mod_real") in calls
+    assert ("src_consumer_js_f", "src_mod_js_real") in calls
 
 
 def test_a_module_object_call_is_not_classified_external(tmp_path: Path) -> None:
@@ -258,8 +258,8 @@ def test_a_module_object_call_is_not_classified_external(tmp_path: Path) -> None
     edge = next(
         e for e in result.edges
         if e["relation"] == "calls"
-        and e["source"] == "src_consumer_nsobjlit"
-        and e["target"] == "src_mod_objlit"
+        and e["source"] == "src_consumer_js_nsobjlit_2108d6"
+        and e["target"] == "src_mod_js_objlit_cea379"
     )
 
     assert edge.get("confidence") != "EXTERNAL_CALL"
@@ -580,10 +580,10 @@ def test_call_graph_query_verbs(tmp_path: Path) -> None:
     # callers <symbol> — function-level predecessors, file node excluded.
     callers = query(g, "callers target")
     ids = {c["id"] for c in callers["callers"]}
-    assert "src_consumer_alpha" in ids
-    assert "src_consumer_beta" in ids
-    assert any(i.startswith("src_consumer_run") for i in ids)
-    assert "src_consumer" not in ids  # the file must NOT be a caller
+    assert "src_consumer_ts_alpha" in ids
+    assert "src_consumer_ts_beta" in ids
+    assert any(i.startswith("src_consumer_ts_run") for i in ids)
+    assert "src_consumer_ts" not in ids  # the file must NOT be a caller
     assert len(callers["callers"]) == 3
     for c in callers["callers"]:
         assert c["kind"] == "function"
@@ -591,15 +591,15 @@ def test_call_graph_query_verbs(tmp_path: Path) -> None:
 
     # calls <symbol> (and its callees alias) — function-level successors.
     callees = query(g, "calls alpha")
-    assert any(c["id"] == "src_mod_target" for c in callees["calls"])
+    assert any(c["id"] == "src_mod_ts_target" for c in callees["calls"])
     assert query(g, "callees alpha")["calls"] == callees["calls"]
 
     # reaches <a> -> <b> — directed path restricted to call/reference edges.
     reach = query(g, "reaches delta -> target")
     path_ids = [p["id"] for p in reach["path"]]
-    assert path_ids[0] == "src_consumer_delta"
-    assert path_ids[-1] == "src_mod_target"
-    assert "src_consumer_alpha" in path_ids
+    assert path_ids[0] == "src_consumer_ts_delta"
+    assert path_ids[-1] == "src_mod_ts_target"
+    assert "src_consumer_ts_alpha" in path_ids
 
 
 def test_reaches_reports_no_path_when_unreachable(tmp_path: Path) -> None:
@@ -637,7 +637,7 @@ def test_stats_includes_breakdowns_and_top_degree_nodes(tmp_path: Path) -> None:
     assert 1 <= len(stats["top_outgoing"]) <= 5
     # target is the most-called symbol in the fixture.
     top_ids = {n["id"] for n in stats["top_incoming"]}
-    assert "src_mod_target" in top_ids
+    assert "src_mod_ts_target" in top_ids
     for entry in stats["top_incoming"]:
         assert {"id", "name", "kind", "source_file", "in_degree"} <= set(entry)
     assert "community_count" in stats
@@ -650,17 +650,17 @@ def test_query_reports_match_type_and_alternates(tmp_path: Path) -> None:
     result = _extract(tmp_path, "disabled")
     g = build_graph(result.nodes, result.edges)
 
-    exact = query(g, "calls src_a_dupe")
-    assert exact["match"] == {"input": "src_a_dupe", "node": "src_a_dupe", "type": "exact-id"}
+    exact = query(g, "calls src_a_ts_dupe")
+    assert exact["match"] == {"input": "src_a_ts_dupe", "node": "src_a_ts_dupe", "type": "exact-id"}
 
     by_name = query(g, "calls dupe")
     assert by_name["match"]["type"] == "name"
     assert by_name["match"]["alternates"], "second same-named fn must be reported"
-    assert {by_name["node"], *by_name["match"]["alternates"]} == {"src_a_dupe", "src_b_dupe"}
+    assert {by_name["node"], *by_name["match"]["alternates"]} == {"src_a_ts_dupe", "src_b_ts_dupe"}
 
     by_path = query(g, "depends-on src/a.ts")
     assert by_path["match"]["type"] == "path-suffix"
-    assert by_path["node"] == "src_a"
+    assert by_path["node"] == "src_a_ts"
 
 
 def test_query_by_name_prefers_shallower_path_on_basename_collision(tmp_path: Path) -> None:
@@ -669,7 +669,7 @@ def test_query_by_name_prefers_shallower_path_on_basename_collision(tmp_path: Pa
     repo-root file, not whichever node id happens to sort first
     alphabetically (found via operation-firewall dogfooding, 2026-07-31:
     "README.md" matched hooks/README.md over the root file purely because
-    "hooks_readme" < "readme" as strings, with zero preference for path
+    "hooks_readme_md_393895" < "readme" as strings, with zero preference for path
     depth)."""
     _write(tmp_path / "README.md", "# root\n")
     _write(tmp_path / "hooks" / "README.md", "# hooks\n")
@@ -692,7 +692,7 @@ def test_not_found_error_suggests_close_candidates(tmp_path: Path) -> None:
     res = query(g, "callers src/consumer.ts:nosuchfn alpha()")
     assert "error" in res
     candidate_ids = {c["id"] for c in res["candidates"]}
-    assert "src_consumer_alpha" in candidate_ids
+    assert "src_consumer_ts_alpha" in candidate_ids
 
     # path variant reports candidates for the missing endpoint too.
     res = query(g, "path src/consumer.ts -> mod.zz")
@@ -726,7 +726,7 @@ def test_synthetic_callback_name_from_unicode_string_arg_is_ascii(tmp_path: Path
         "route('sync ↔ store', () => { target(); });\n",
     )
     result = _extract(tmp_path, "disabled")
-    calls = [e for e in result.edges if e["relation"] == "calls" and e["target"] == "src_svc_target"]
+    calls = [e for e in result.edges if e["relation"] == "calls" and e["target"] == "src_svc_ts_target"]
     assert calls, "callback should call the cross-file target"
     nodes = {n["id"]: n for n in result.nodes}
     for e in calls:
@@ -754,15 +754,15 @@ def test_python_calls_are_function_scoped(tmp_path: Path) -> None:
     result = _extract(tmp_path, "disabled")
     calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
 
-    assert ("mod_caller_one", "mod_helper") in calls
-    assert ("mod_caller_two", "mod_helper") in calls
+    assert ("mod_py_caller_one", "mod_py_helper") in calls
+    assert ("mod_py_caller_two", "mod_py_helper") in calls
     # attributed to the enclosing function, never the file node.
-    assert not any(src == "mod" for src, tgt in calls if tgt == "mod_helper")
+    assert not any(src == "mod" for src, tgt in calls if tgt == "mod_py_helper")
 
     g = build_graph(result.nodes, result.edges)
     callers = query(g, "callers helper")
     ids = {c["id"] for c in callers["callers"]}
-    assert ids == {"mod_caller_one", "mod_caller_two"}
+    assert ids == {"mod_py_caller_one", "mod_py_caller_two"}
 
 
 # --- method dispatch: `recv.method()` resolves to the class method definition ---
@@ -798,24 +798,24 @@ def test_member_call_links_to_class_method_cross_file(tmp_path: Path) -> None:
     calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
 
     # The member call on the instance links to the *definition* in store.ts.
-    assert ("src_consumer_loadconsole", "src_store_listverdicts") in calls
+    assert ("src_consumer_ts_loadconsole_de4e83", "src_store_ts_listverdicts_9dd977") in calls
     # ...and not to a leftover file-namespaced phantom in the calling file.
-    assert not any(tgt == "src_consumer_store_listverdicts" for _s, tgt in calls)
+    assert not any(tgt == "src_consumer_ts_store_listverdicts" for _s, tgt in calls)
 
     # The private dispatch annotation must never leak into the graph.
     assert all("_member" not in e for e in result.edges)
 
     # The method definition node is tagged so the post-pass can find it.
     nodes = {n["id"]: n for n in result.nodes}
-    assert nodes["src_store_listverdicts"].get("is_method") is True
+    assert nodes["src_store_ts_listverdicts_9dd977"].get("is_method") is True
 
     g = build_graph(result.nodes, result.edges)
     # callers <method> now includes the cross-file dispatch caller.
     callers = query(g, "callers listVerdicts")
-    assert "src_consumer_loadconsole" in {c["id"] for c in callers["callers"]}
+    assert "src_consumer_ts_loadconsole_de4e83" in {c["id"] for c in callers["callers"]}
     # calls <caller> lists the resolved method as a callee.
     callees = query(g, "calls loadConsole")
-    assert any(c["id"] == "src_store_listverdicts" for c in callees["calls"])
+    assert any(c["id"] == "src_store_ts_listverdicts_9dd977" for c in callees["calls"])
 
 
 def test_member_call_ambiguous_small_set_links_to_all(tmp_path: Path) -> None:
@@ -827,12 +827,12 @@ def test_member_call_ambiguous_small_set_links_to_all(tmp_path: Path) -> None:
 
     result = _extract(tmp_path, "disabled")
     calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
-    assert ("src_use_run", "src_a_refresh") in calls
-    assert ("src_use_run", "src_b_refresh") in calls
+    assert ("src_use_ts_run", "src_a_ts_refresh") in calls
+    assert ("src_use_ts_run", "src_b_ts_refresh") in calls
 
     g = build_graph(result.nodes, result.edges)
     caller_ids = {c["id"] for c in query(g, "callers refresh")["callers"]}
-    assert "src_use_run" in caller_ids
+    assert "src_use_ts_run" in caller_ids
 
 
 def test_member_call_over_cap_is_left_unresolved(tmp_path: Path) -> None:
@@ -849,13 +849,13 @@ def test_member_call_over_cap_is_left_unresolved(tmp_path: Path) -> None:
     calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
 
     real_method_ids = {f"src_c{i}_shared" for i in range(4)}
-    assert not any(src == "src_use_run" and tgt in real_method_ids for src, tgt in calls), (
+    assert not any(src == "src_use_ts_run" and tgt in real_method_ids for src, tgt in calls), (
         "over-cap dispatch must not link to any candidate"
     )
     # v4: the unresolved member-call phantom is dropped entirely (it points at
     # no real node and previously only polluted degree stats).
-    assert ("src_use_run", "src_use_x_shared") not in calls
-    assert not any(src == "src_use_run" for src, _tgt in calls)
+    assert ("src_use_ts_run", "src_use_ts_x_shared") not in calls
+    assert not any(src == "src_use_ts_run" for src, _tgt in calls)
     # And no annotation leaked.
     assert all("_member" not in e for e in result.edges)
 

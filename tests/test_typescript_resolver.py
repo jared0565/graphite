@@ -62,9 +62,9 @@ def test_typescript_compiler_resolves_alias_barrel_exports_and_dynamic_imports(t
     result = extract_all(entries, cfg)
     edges = {(e["source"], e["target"], e["relation"], e.get("confidence")) for e in result.edges}
 
-    assert ("src_app", "lib_index", "imports", "TS_COMPILER_IMPORT") in edges
+    assert ("src_app_ts", "lib_index", "imports", "TS_COMPILER_IMPORT") in edges
     assert ("lib_index", "lib_foo", "exports", "TS_COMPILER_EXPORT") in edges
-    assert ("src_app", "src_feature", "imports", "TS_COMPILER_DYNAMIC_IMPORT") in edges
+    assert ("src_app_ts", "src_feature_ts", "imports", "TS_COMPILER_DYNAMIC_IMPORT") in edges
 
 
 def test_typescript_resolver_can_be_disabled_for_heuristic_fallback(tmp_path: Path) -> None:
@@ -87,7 +87,7 @@ def test_typescript_resolver_can_be_disabled_for_heuristic_fallback(tmp_path: Pa
 
     result = extract_all(entries, cfg)
     imports = {(e["source"], e["target"], e["relation"], e.get("confidence")) for e in result.edges if e["relation"] == "imports"}
-    assert ("src_app", "src_lib_foo", "imports", "EXACT_IMPORT") in imports
+    assert ("src_app_ts", "src_lib_foo_ts", "imports", "EXACT_IMPORT") in imports
 
 
 def test_heuristic_resolves_js_extension_import_to_ts_source(tmp_path: Path) -> None:
@@ -115,7 +115,7 @@ def test_heuristic_resolves_js_extension_import_to_ts_source(tmp_path: Path) -> 
 
     result = extract_all(entries, cfg)
     imports = {(e["source"], e["target"], e["relation"], e.get("confidence")) for e in result.edges if e["relation"] == "imports"}
-    assert ("src_routes_invites", "src_db_queries", "imports", "EXACT_IMPORT") in imports
+    assert ("src_routes_invites_ts", "src_db_queries_ts", "imports", "EXACT_IMPORT") in imports
 
 
 def test_heuristic_prefers_ts_source_over_js_twin_for_js_extension_import(tmp_path: Path) -> None:
@@ -168,8 +168,8 @@ def test_heuristic_resolves_alias_from_package_level_tsconfig(tmp_path: Path) ->
     result = extract_all(entries, cfg)
     imports = {(e["source"], e["target"], e["relation"], e.get("confidence")) for e in result.edges if e["relation"] == "imports"}
     assert (
-        "apps_web_app_components_review",
-        "apps_web_app_lib_usemodal",
+        "apps_web_app_components_review_ts",
+        "apps_web_app_lib_usemodal_ts_5991d0",
         "imports",
         "EXACT_IMPORT",
     ) in imports
@@ -245,8 +245,8 @@ def test_typescript_compiler_adds_file_level_symbol_reference_edges(tmp_path: Pa
     result = extract_all(entries, cfg)
     edges = {(e["source"], e["target"], e["relation"], e.get("confidence")) for e in result.edges}
 
-    assert ("src_app", "src_domain", "references", "TS_COMPILER_SYMBOL_REFERENCE") in edges
-    assert ("src_app", "src_domain", "type_references", "TS_COMPILER_TYPE_REFERENCE") in edges
+    assert ("src_app_ts", "src_domain_ts", "references", "TS_COMPILER_SYMBOL_REFERENCE") in edges
+    assert ("src_app_ts", "src_domain_ts", "type_references", "TS_COMPILER_TYPE_REFERENCE") in edges
 
 
 def test_typescript_symbol_reference_edges_can_be_disabled(tmp_path: Path) -> None:

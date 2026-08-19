@@ -46,8 +46,8 @@ def test_same_named_files_in_different_workspaces_stay_distinct(tmp_path: Path) 
     result = _extract(tmp_path)
 
     file_nodes = {n["id"]: n for n in result.nodes if n["kind"] == "file"}
-    assert "apps_worker_src_db_queries" in file_nodes
-    assert "apps_workers_booking_src_db_queries" in file_nodes
+    assert "apps_worker_src_db_queries_ts" in file_nodes
+    assert "apps_workers_booking_src_db_queries_ts" in file_nodes
 
     fn_nodes = [n for n in result.nodes if n.get("name") == "getShopById"]
     assert len(fn_nodes) == 2, "each worker's getShopById must be its own node"
@@ -91,13 +91,13 @@ def test_workspace_package_import_resolves_to_entry_file(tmp_path: Path) -> None
         if e["relation"] == "imports"
     }
     assert (
-        "apps_worker_src_route",
-        "packages_utils_src_index",
+        "apps_worker_src_route_ts",
+        "packages_utils_src_index_ts",
         "WORKSPACE_IMPORT",
     ) in imports, f"@repo/utils must resolve to the workspace entry file; got {sorted(imports)}"
     assert (
-        "apps_worker_src_route",
-        "packages_utils_src_money",
+        "apps_worker_src_route_ts",
+        "packages_utils_src_money_ts",
         "WORKSPACE_IMPORT",
     ) in imports, "@repo/utils/money subpath must resolve inside the package"
 
@@ -108,12 +108,12 @@ def test_workspace_named_import_call_links_to_defining_symbol(tmp_path: Path) ->
 
     calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
     assert (
-        "apps_worker_src_route_checkout",
-        "packages_utils_src_index_calculatecommissionpence",
+        "apps_worker_src_route_ts_checkout",
+        "packages_utils_src_index_ts_calculatecommissionpence_2b8a1e",
     ) in calls, f"cross-workspace call must reach the real definition; got {sorted(calls)}"
     assert (
-        "apps_worker_src_route_checkout",
-        "packages_utils_src_money_formatpence",
+        "apps_worker_src_route_ts_checkout",
+        "packages_utils_src_money_ts_formatpence_97a3e5",
     ) in calls
 
 
@@ -134,7 +134,7 @@ def test_workspace_exports_dot_object_entry(tmp_path: Path) -> None:
         for e in result.edges
         if e["relation"] == "imports" and e["confidence"] == "WORKSPACE_IMPORT"
     }
-    assert ("apps_web_app", "packages_types_src_index") in imports
+    assert ("apps_web_app_ts", "packages_types_src_index_ts") in imports
 
 
 # ─── Unresolved member-call phantom suppression ───────────────────────────────
@@ -159,7 +159,7 @@ def test_unresolved_member_calls_are_dropped(tmp_path: Path) -> None:
         f"unresolved member-call phantoms must be dropped; got {sorted(calls)}"
     )
     # Real same-file calls to defined functions still resolve.
-    assert ("src_handler_caller", "src_handler_helper") in calls
+    assert ("src_handler_ts_caller", "src_handler_ts_helper") in calls
     # Every surviving call target is a real node (no phantom member targets).
     for _src, tgt in calls:
         if tgt not in node_ids:
@@ -179,7 +179,7 @@ def test_method_dispatch_still_resolves_member_calls(tmp_path: Path) -> None:
     )
     result = _extract(tmp_path)
     calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
-    assert ("src_user_use", "src_store_load") in calls
+    assert ("src_user_ts_use", "src_store_ts_load") in calls
 
 
 # ─── Nested project discovery ─────────────────────────────────────────────────

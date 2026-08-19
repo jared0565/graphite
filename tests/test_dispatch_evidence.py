@@ -90,7 +90,7 @@ def test_a_stdlib_call_is_not_re_pointed_to_an_imported_definition(tmp_path: Pat
         "    return os.read(fd, 8)\n",
     )
 
-    assert ("app_go", "cache_read") not in _calls(tmp_path)
+    assert ("app_py_go", "cache_py_read") not in _calls(tmp_path)
 
 
 def test_a_proven_external_typescript_call_is_not_re_pointed(tmp_path: Path) -> None:
@@ -107,7 +107,7 @@ def test_a_proven_external_typescript_call_is_not_re_pointed(tmp_path: Path) -> 
         "export function go() { return pool.connect(); }\n",
     )
 
-    assert ("src_app_go", "src_db_connect") not in _calls(tmp_path)
+    assert ("src_app_ts_go", "src_db_ts_connect") not in _calls(tmp_path)
 
 
 def test_the_external_edge_is_kept_rather_than_dropped(tmp_path: Path) -> None:
@@ -136,10 +136,10 @@ def test_the_external_edge_is_kept_rather_than_dropped(tmp_path: Path) -> None:
 
     external = [
         e for e in _edges(tmp_path)
-        if e["source"] == "app_go" and e.get("confidence") == "EXTERNAL_CALL"
+        if e["source"] == "app_py_go" and e.get("confidence") == "EXTERNAL_CALL"
     ]
     assert external, "the os.read call lost its EXTERNAL_CALL edge entirely"
-    assert all(e["target"] != "cache_read" for e in external)
+    assert all(e["target"] != "cache_py_read" for e in external)
 
 
 # --- the recall this must NOT cost --------------------------------------------
@@ -164,7 +164,7 @@ def test_a_local_receiver_still_dispatches_to_the_same_method_name(tmp_path: Pat
         "    return cache.read()\n",
     )
 
-    assert ("app_go", "cache_read") in _calls(tmp_path)
+    assert ("app_py_go", "cache_py_read") in _calls(tmp_path)
 
 
 def test_an_in_repo_binding_still_beats_an_external_name_collision(tmp_path: Path) -> None:
@@ -190,7 +190,7 @@ def test_an_in_repo_binding_still_beats_an_external_name_collision(tmp_path: Pat
         "    return formatter.format(value)\n",
     )
 
-    assert ("app_go", "helpers_format") in _calls(tmp_path)
+    assert ("app_py_go", "helpers_py_format") in _calls(tmp_path)
 
 
 # --- interop family: dispatch may not cross a language boundary ---------------
@@ -217,7 +217,7 @@ def test_a_javascript_call_does_not_dispatch_to_a_python_method(tmp_path: Path) 
         "        return 1\n",
     )
 
-    assert ("web_app_run", "api_worker_handle") not in _calls(tmp_path)
+    assert ("web_app_js_run", "api_worker_py_handle") not in _calls(tmp_path)
 
 
 def test_typescript_and_tsx_are_one_interop_family(tmp_path: Path) -> None:
@@ -236,7 +236,7 @@ def test_typescript_and_tsx_are_one_interop_family(tmp_path: Path) -> None:
         "export function draw(widget: any) { return widget.render(); }\n",
     )
 
-    assert ("src_page_draw", "src_widget_render") in _calls(tmp_path)
+    assert ("src_page_ts_draw", "src_widget_tsx_render") in _calls(tmp_path)
 
 
 def test_javascript_and_typescript_are_one_interop_family(tmp_path: Path) -> None:
@@ -247,7 +247,7 @@ def test_javascript_and_typescript_are_one_interop_family(tmp_path: Path) -> Non
         "export function use(store) { return store.load(); }\n",
     )
 
-    assert ("src_use_use", "src_store_load") in _calls(tmp_path)
+    assert ("src_use_js_use", "src_store_ts_load") in _calls(tmp_path)
 
 
 def test_the_family_table_is_derived_from_the_extractors_language_table() -> None:

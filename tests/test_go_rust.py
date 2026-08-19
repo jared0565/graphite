@@ -68,10 +68,10 @@ def test_go_functions_types_and_same_file_calls(tmp_path: Path) -> None:
     nodes = {n["id"]: n for n in result.nodes}
     calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
 
-    assert nodes["store_store_helper"]["kind"] == "function"
-    assert nodes["store_store_store"]["kind"] == "class"  # type Store struct{}
-    assert nodes["store_store_load"].get("is_method") is True
-    assert ("store_store_caller", "store_store_helper") in calls
+    assert nodes["store_store_go_helper_b0636a"]["kind"] == "function"
+    assert nodes["store_store_go_store_e25930"]["kind"] == "class"  # type Store struct{}
+    assert nodes["store_store_go_load_4cf55b"].get("is_method") is True
+    assert ("store_store_go_caller_6c08c3", "store_store_go_helper_b0636a") in calls
 
 
 def test_go_method_dispatch_resolves_cross_file_and_noise_dropped(tmp_path: Path) -> None:
@@ -80,7 +80,7 @@ def test_go_method_dispatch_resolves_cross_file_and_noise_dropped(tmp_path: Path
     calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
 
     # s.Load() in app.go re-points to the method definition in store.go.
-    assert ("app_app_use", "store_store_load") in calls
+    assert ("app_app_go_use_0718fe", "store_store_go_load_4cf55b") in calls
     # fmt.Println matches no project method -> dropped, not a phantom.
     assert not any("println" in tgt for _s, tgt in calls)
 
@@ -90,8 +90,8 @@ def test_go_imports_recorded_per_spec(tmp_path: Path) -> None:
     result = _extract(tmp_path)
     imports = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "imports"}
 
-    assert ("app_app", "fmt") in imports
-    assert ("app_app", "example_com_repo_store") in imports
+    assert ("app_app_go", "fmt") in imports
+    assert ("app_app_go", "example_com_repo_store") in imports
 
 
 # ─── Rust ──────────────────────────────────────────────────────────────────────
@@ -134,14 +134,14 @@ def test_rust_functions_types_and_same_file_calls(tmp_path: Path) -> None:
     nodes = {n["id"]: n for n in result.nodes}
     calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
 
-    assert nodes["src_store_helper"]["kind"] == "function"
-    assert nodes["src_store_store"]["kind"] == "class"  # pub struct Store
-    assert nodes["src_store_load"].get("is_method") is True
-    assert nodes["src_store_new"].get("is_method") is True
-    assert ("src_store_caller", "src_store_helper") in calls
+    assert nodes["src_store_rs_helper"]["kind"] == "function"
+    assert nodes["src_store_rs_store_fa7824"]["kind"] == "class"  # pub struct Store
+    assert nodes["src_store_rs_load"].get("is_method") is True
+    assert nodes["src_store_rs_new"].get("is_method") is True
+    assert ("src_store_rs_caller", "src_store_rs_helper") in calls
     # impl methods hang off the struct node via contains.
     contains = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "contains"}
-    assert ("src_store_store", "src_store_load") in contains
+    assert ("src_store_rs_store_fa7824", "src_store_rs_load") in contains
 
 
 def test_rust_method_and_assoc_fn_dispatch_cross_file(tmp_path: Path) -> None:
@@ -150,9 +150,9 @@ def test_rust_method_and_assoc_fn_dispatch_cross_file(tmp_path: Path) -> None:
     calls = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
 
     # store.load() (field_expression) resolves to the impl method.
-    assert ("src_app_use_store", "src_store_load") in calls
+    assert ("src_app_rs_use_store", "src_store_rs_load") in calls
     # Store::new() (scoped_identifier) resolves to the associated fn.
-    assert ("src_app_make", "src_store_new") in calls
+    assert ("src_app_rs_make", "src_store_rs_new") in calls
     # .clone() matches no project method -> dropped; println! is a macro,
     # never extracted as a call.
     assert not any("clone" in tgt for _s, tgt in calls)
@@ -166,20 +166,20 @@ def test_rust_use_declarations_become_import_edges(tmp_path: Path) -> None:
     confidence = {
         e["target"]: e.get("confidence")
         for e in result.edges
-        if e["relation"] == "imports" and e["source"] == "src_app"
+        if e["relation"] == "imports" and e["source"] == "src_app_rs"
     }
 
     # std is *confirmed* external: unbound synthetic target, tagged so the
     # health ratio excludes it rather than counting it as a resolver failure.
-    assert ("src_app", "std_collections_hashmap") in imports
-    assert confidence["std_collections_hashmap"] == "EXTERNAL_IMPORT"
+    assert ("src_app_rs", "std_collections_hashmap_ea9e65") in imports
+    assert confidence["std_collections_hashmap_ea9e65"] == "EXTERNAL_IMPORT"
 
     # crate::store::Store now binds to the real file node -- this assertion
     # used to read "crate_store_store", a synthetic id that matched no node.
     # The fixture ships no Cargo.toml, so this also covers the nearest-`src`
     # fallback in _rust_crate_for.
-    assert ("src_app", "src_store") in imports
-    assert confidence["src_store"] != "EXTERNAL_IMPORT"
+    assert ("src_app_rs", "src_store_rs") in imports
+    assert confidence["src_store_rs"] != "EXTERNAL_IMPORT"
 
 
 def _rust_workspace_fixture(tmp_path: Path) -> None:
@@ -201,18 +201,18 @@ def test_rust_use_binds_in_repo_and_tags_only_confirmed_external(tmp_path: Path)
     confidence = {
         e["target"]: e.get("confidence")
         for e in result.edges
-        if e["relation"] == "imports" and e["source"] == "crates_a_src_lib"
+        if e["relation"] == "imports" and e["source"] == "crates_a_src_lib_rs"
     }
 
     # A sibling workspace crate binds to its real lib.rs node.
-    assert "crates_b_src_lib" in confidence
-    assert confidence["crates_b_src_lib"] != "EXTERNAL_IMPORT"
+    assert "crates_b_src_lib_rs" in confidence
+    assert confidence["crates_b_src_lib_rs"] != "EXTERNAL_IMPORT"
     # Allowlisted root and a declared Cargo dependency are confirmed external.
-    assert confidence["std_collections_btreeset"] == "EXTERNAL_IMPORT"
-    assert confidence["serde_serialize"] == "EXTERNAL_IMPORT"
+    assert confidence["std_collections_btreeset_c9300d"] == "EXTERNAL_IMPORT"
+    assert confidence["serde_serialize_d44030"] == "EXTERNAL_IMPORT"
     # The anti-laundering guard: an unresolvable target must stay counted
     # against the ratio, never be excused as "external".
-    assert confidence["typo_crate_thing"] != "EXTERNAL_IMPORT"
+    assert confidence["typo_crate_thing_e09050"] != "EXTERNAL_IMPORT"
 
 
 def test_rust_bare_method_on_an_unnameable_receiver_is_not_called_external(tmp_path: Path) -> None:
@@ -247,7 +247,7 @@ def test_rust_bare_method_on_an_unnameable_receiver_is_not_called_external(tmp_p
     confidence = {
         e["target"]: e.get("confidence")
         for e in result.edges
-        if e["relation"] == "calls" and e["source"] == "src_sink_caller"
+        if e["relation"] == "calls" and e["source"] == "src_sink_rs_caller"
     }
 
     assert confidence, "the format() call produced no edge at all"
@@ -276,7 +276,7 @@ def test_rust_mod_declaration_links_to_the_module_file(tmp_path: Path) -> None:
     result = _extract(tmp_path)
 
     imports = {(e["source"], e["target"]) for e in result.edges if e["relation"] == "imports"}
-    assert ("crates_a_src_lib", "crates_a_src_rule") in imports
+    assert ("crates_a_src_lib_rs", "crates_a_src_rule_rs") in imports
 
 
 def test_rust_inline_mod_emits_no_module_edge(tmp_path: Path) -> None:
@@ -297,15 +297,15 @@ def test_go_rust_query_verbs_work_end_to_end(tmp_path: Path) -> None:
     g = build_graph(result.nodes, result.edges)
 
     # Exact ids disambiguate the two same-named methods across languages.
-    go_callers = query(g, "callers store_store_load")
-    assert "app_app_use" in {c["id"] for c in go_callers["callers"]}
+    go_callers = query(g, "callers store_store_go_load_4cf55b")
+    assert "app_app_go_use_0718fe" in {c["id"] for c in go_callers["callers"]}
     assert go_callers["match"]["type"] == "exact-id"
-    rust_callers = query(g, "callers src_store_load")
-    assert "src_app_use_store" in {c["id"] for c in rust_callers["callers"]}
+    rust_callers = query(g, "callers src_store_rs_load")
+    assert "src_app_rs_use_store" in {c["id"] for c in rust_callers["callers"]}
 
     # A bare ambiguous name is answered deterministically AND flags the
     # other candidate as an alternate, so agents see the ambiguity.
     ambiguous = query(g, "callers load")
     assert ambiguous["match"]["type"] == "name"
     picked = {ambiguous["node"], *ambiguous["match"].get("alternates", [])}
-    assert {"src_store_load", "store_store_load"} <= picked
+    assert {"src_store_rs_load", "store_store_go_load_4cf55b"} <= picked
