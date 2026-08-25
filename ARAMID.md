@@ -18,7 +18,7 @@ check --strict --json`.
 | Gate | Budget | Scope | Tools | Failure mode |
 |---|---|---|---|---|
 | pre-commit | `[timeouts].pre_commit` (default 5s) | staged files | gitleaks, ruff (security rules) | fail-open |
-| pre-push | `[timeouts].pre_push` (default 300s) | changed files | gitleaks, semgrep, eslint, typecheck, dependency audit, tests | fail-closed |
+| pre-push | `[timeouts].pre_push` (default 300s) | changed files | gitleaks, semgrep, eslint, clippy, typecheck, dependency audit, tests | fail-closed |
 
 Budgets are named rather than fixed here because a repo can raise them in
 `aramid.toml`, and this file is regenerated from a template that cannot see
@@ -26,6 +26,85 @@ that config -- a hardcoded number would silently drift out of date.
 
 Secrets (gitleaks) always **BLOCK**. Everything else is severity-tiered:
 security-relevant findings block, quality findings warn.
+
+**"WARN tier" does not mean "will not block you."** At pre-push a
+no-new-warnings ratchet escalates every finding that is NEW in this run from
+WARN to BLOCK. It applies to all tools -- ruff, eslint, clippy, semgrep,
+dependency audit -- so the tier describes what a *pre-existing* finding does.
+Anything you are about to write blocks the push on its first appearance,
+whatever its tier, and the intended response is to fix it, override it
+(`aramid override <id> --reason "..."`, ledger-logged) or configure the rule
+away in the tool's own config.
+
+Two consequences worth stating outright, because both surprise people:
+
+- The ledger baseline, not the tier, is what keeps day-one lint from blocking
+  a repo. A brand-new runner reports its existing findings once, they land in
+  the baseline, and only later additions escalate.
+- **The semgrep WARN-only bake is not a ratchet exemption.** It stops
+  pre-existing BLOCK-tier findings from blocking; it does not stop a newly
+  written one, which escalates like any other new WARN. That is deliberate,
+  not an oversight: the bake exists to absorb the **existing backlog** when a
+  repo turns on a large ruleset, and it still does that in full. End it with
+  `aramid arm`. The other disarmable producers ARE ratchet-exempt while
+  disarmed -- `tdd` and `red-proof` by name, and the LLM and mutation gates
+  structurally, by being appended after the ratchet runs.
+
+**What decides whether something is exempt.** One rule, and it is falsifiable
+per candidate:
+
+> A new WARN finding is ratchet-exempt if and only if the push's author cannot
+> make it go away by changing what they are pushing.
+
+The deps shape-drift advisory qualifies (aramid cannot parse the audit tool's
+output; the fix belongs to aramid). `cargo-audit-warnings` qualifies (an
+upstream RUSTSEC publication event, usually with no fix available). A semgrep
+finding on new code does not, and neither does a clippy lint -- you wrote it and
+you can fix it.
+
+`tdd` and `red-proof` are a **documented exception** rather than an application
+of that rule: they fail it outright -- you caused them and you can fix them --
+and are exempt only because an operator deliberately disarmed the producer. The
+LLM and mutation gates are the same exception, implemented structurally. If you
+are adding an entry, it belongs under the rule or under that named exception;
+"it is noisy" is not a third category.
+
+The full exemption list, since "everything escalates" above is otherwise
+absolute: `tdd`, `red-proof`, the deps shape-drift advisory, and
+`cargo-audit-warnings`. That last one is the opt-in
+`[deps].cargo_audit_warnings`, which surfaces RUSTSEC's informational
+advisories (unmaintained/unsound/yanked crates). It is off by default, and
+when on it can never block by three independent mechanisms -- it sits outside
+the tunable `deps.block_severity` comparison, `policy.classify` returns WARN
+for it unconditionally ahead of any `block_rules` promotion, and it is exempt
+here. All three are needed: an unmaintained crate stays unmaintained, so a
+newly published advisory would otherwise fail a push with no fix available.
+
+**Noisy WARN-tier rule (e.g. ruff `S101` on test asserts)?** `aramid.toml`'s
+`block_rules` only demotes/promotes the BLOCK/WARN boundary -- it has nothing
+to say about a rule that was WARN-tier to begin with. `aramid override <id>
+--reason "..."` suppresses one finding at a time (ledger-logged) but doesn't
+scale to a rule that fires on every test file. For that, configure the tool
+itself -- e.g. ruff's own `per-file-ignores`:
+
+```toml
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+```
+
+aramid's own `--extend-select S` flag still respects this; it only adds
+rules to what ruff selects, it does not override the target repo's ignores.
+
+**Demoting a BLOCK-tier rule?** Setting `block_rules.<tool>.block` in
+`aramid.toml` can only ADD to what your own machine's config (packaged
+defaults plus `~/.aramid/config.toml`) already established -- an incomplete
+or empty list in a repo's `aramid.toml` no longer drops any OTHER rule, and
+aramid prints a stderr notice naming exactly which rule ids it restored when
+this happens. This is deliberate: a repo you clone (or a contributor's PR
+inside one) cannot silently weaken your BLOCK-tier coverage for everyone who
+uses it. To genuinely demote a rule, do it in `~/.aramid/config.toml` on
+your own machine -- that layer is the actual floor, and repo config can no
+longer remove anything from it.
 
 **Slow test suite?** `tests` is BLOCK-tier at pre-push, so a suite that
 overruns the budget blocks every push. Point the gate at a fast subset in
