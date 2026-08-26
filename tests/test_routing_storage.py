@@ -174,6 +174,12 @@ def test_schema_migration_is_idempotent_and_enables_safety_pragmas(tmp_path: Pat
 def _downgrade_fixture_to_v3(store: RepositoryStore) -> None:
     """Turn a fresh v5 test database into a representative committed v3 database."""
     with closing(sqlite3.connect(store.path)) as connection, connection:
+        # The `# nosemgrep` markers in this file cover table IDENTIFIER interpolation,
+        # here and at the five other sites. SQL binds values, never identifiers, so
+        # dropping or dumping a table BY NAME cannot use a parameter. `table` is never
+        # caller input at any of them: each iterates a literal tuple written at the loop
+        # head, a literal tuple defined a few lines above, or the keys of a dict built
+        # from one.
         for table in (
             "lifecycle_attempt_bindings",
             "lifecycle_approval_bindings",
@@ -187,7 +193,7 @@ def _downgrade_fixture_to_v3(store: RepositoryStore) -> None:
             "task_worktrees",
             "capability_snapshots",
         ):
-            connection.execute(f"DROP TABLE IF EXISTS {table}")
+            connection.execute(f"DROP TABLE IF EXISTS {table}")  # nosemgrep
         connection.execute(
             "UPDATE schema_meta SET value='3' WHERE key='schema_version'"
         )
@@ -196,12 +202,14 @@ def _downgrade_fixture_to_v3(store: RepositoryStore) -> None:
 def _downgrade_fixture_to_v4(store: RepositoryStore) -> None:
     """Turn a fresh v5 test database into a representative committed v4 database."""
     with closing(sqlite3.connect(store.path)) as connection, connection:
+        # `table` iterates the literal tuple at the loop head below; see the note in
+        # `_downgrade_fixture_to_v3`.
         for table in (
             "lifecycle_attempt_bindings",
             "lifecycle_approval_bindings",
             "lifecycle_snapshot_bindings",
         ):
-            connection.execute(f"DROP TABLE IF EXISTS {table}")
+            connection.execute(f"DROP TABLE IF EXISTS {table}")  # nosemgrep
         connection.execute("UPDATE schema_meta SET value='4' WHERE key='schema_version'")
 
 
@@ -999,8 +1007,9 @@ def test_v1_database_migrates_to_v2_without_losing_rows(tmp_path: Path) -> None:
             "INSERT INTO confidence_stats VALUES ('kimi-k2.7-code:cloud','default',"
             "'isolated_code','low',1,1,0)"
         )
+        # `table` iterates the literal tuple below; see the note in `_downgrade_fixture_to_v3`.
         before = {
-            table: connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+            table: connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()  # nosemgrep
             for table in (
                 "tasks", "decisions", "approvals", "executions", "execution_receipts",
                 "execution_evidence", "outcomes", "budget_ledger", "incident_reviews",
@@ -1021,8 +1030,9 @@ def test_v1_database_migrates_to_v2_without_losing_rows(tmp_path: Path) -> None:
         version = connection.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
         ).fetchone()[0]
+        # `table` iterates `before`'s keys -- the same literal tuple as above.
         after = {
-            table: connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+            table: connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()  # nosemgrep
             for table in before
         }
         attempts = connection.execute(
@@ -1202,8 +1212,10 @@ def test_v2_digestless_recovery_is_quarantined_without_fabrication(tmp_path: Pat
             "confidence_stats", "execution_evidence", "execution_receipts",
             "incident_reviews", "blind_comparisons", "registry_snapshots",
         )
+        # `table` iterates `preserved_tables`, a literal tuple defined just above.
+        # See the identifier note in `_downgrade_fixture_to_v3`.
         before = {
-            table: connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+            table: connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()  # nosemgrep
             for table in preserved_tables
         }
         before_attempts = connection.execute(
@@ -1232,8 +1244,9 @@ def test_v2_digestless_recovery_is_quarantined_without_fabrication(tmp_path: Pat
             "SELECT attempt_id,status,failure_reason,inventory_digest "
             "FROM execution_attempts ORDER BY attempt_id"
         ).fetchall()
+        # `table` iterates `preserved_tables`, the literal tuple above.
         after = {
-            table: connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+            table: connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()  # nosemgrep
             for table in preserved_tables
         }
         after_attempts = connection.execute(

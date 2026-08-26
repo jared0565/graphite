@@ -166,29 +166,51 @@ rule = "S608"
 path = "src/graphite/routing/storage.py"
 reason = "The correct parameterized-IN idiom: the interpolation is a generated run of '?' placeholders and every value is bound."
 
+
+# 2026-08-26: the four `tests/test_routing_storage.py` ids below were RE-AFFIRMED,
+# not newly adjudicated -- same statements, same code, same reasoning. Their
+# fingerprints moved because the semgrep half of the same four lines was annotated
+# with trailing `# nosemgrep` markers on that date, and the fingerprint hashes the
+# line's CONTENT. Old -> new, by line:
+#
+#   ff9a7fbb -> 0cc685a0   line 1003 -> 1012
+#   d4e7050e -> 2f29e454   line 1025 -> 1035
+#   63ef049e -> 14ca4a0b   line 1206 -> 1218
+#   4950d00c -> 8ac7dff3   line 1236 -> 1249
+#
+# WORTH KNOWING, because it will happen again: annotating for ONE tool re-keys the
+# OTHER tool's entry for the same line. The `# nosemgrep` marker that silences
+# semgrep is itself a content change, so every committed ruff id on a line you
+# annotate goes stale in the same commit. Budget for both halves, or the gate
+# blocks on the tool you were not thinking about -- which is exactly how this was
+# caught, by the pre-commit gate refusing the annotation commit.
+#
+# Note also that only FOUR of the six semgrep sites in that file have a ruff twin:
+# S608 does not flag the two `DROP TABLE IF EXISTS {table}` statements, so those
+# two need the `# nosemgrep` marker and no entry here.
 [[suppress]]
-id = "ff9a7fbb6f1e2903c75899bc7f61331a2a7817a69033d09a7a56f4cc4d33981e"
+id = "0cc685a0fe115b88e35add822fe6a78ac314f26affb85686aeb3430ea753bf3d"
 tool = "ruff"
 rule = "S608"
 path = "tests/test_routing_storage.py"
 reason = "A test iterating a fixed, in-test list of table names to compare snapshots. No external input reaches the statement."
 
 [[suppress]]
-id = "d4e7050efa097e34ae3ea2f94f94330e335b7080afb7bfc35b75b16d8e34850e"
+id = "2f29e454ce42a46ea8b01eae1509a26613b111bf6738fe402d98d6367875d3a1"
 tool = "ruff"
 rule = "S608"
 path = "tests/test_routing_storage.py"
 reason = "A test iterating a fixed, in-test list of table names to compare snapshots. No external input reaches the statement."
 
 [[suppress]]
-id = "63ef049e0f2b27162978e413a4f852e6dd0e55b7615754069d6717d6a6c8e55e"
+id = "14ca4a0bddcc31e82626297c4329e3bf7818d3010dbf7ac135f68c34770efd98"
 tool = "ruff"
 rule = "S608"
 path = "tests/test_routing_storage.py"
 reason = "A test iterating a fixed, in-test list of table names to compare snapshots. No external input reaches the statement."
 
 [[suppress]]
-id = "4950d00c3941c052cb3401752b12f564e797d29d36446b39717a52041316ffab"
+id = "8ac7dff3bc325ba671974ade172f0af8323f03568335768893bd03beaac0afa2"
 tool = "ruff"
 rule = "S608"
 path = "tests/test_routing_storage.py"
