@@ -134,3 +134,52 @@ command = ["../.venvs/graphite-dev/Scripts/python.exe", "-m", "pytest"]
 #
 # Left open deliberately. The point of aramid's fix is that the operator is now
 # TOLD which knob applies; guessing one here would waste that.
+
+# Arms the `shadow` runner (aramid 0.4.0, channel round 120): it reports a
+# repo-root file that hijacks `python -m <name>`. It SHIPS DISARMED because
+# `graphite` is a real distribution name and a repo may legitimately vendor one
+# at its root -- BLOCK-by-default would hand those repos an unattended red on
+# upgrade. aramid arms it in its own repo, verified clean first, and recommends
+# the same for consumers. Armed here 2026-08-26, on the operator's decision.
+#
+# Verified clean FIRST, then armed, then proven able to FAIL. Full 2x2, measured
+# on this tree with `aramid check --gate pre-commit --json`, exit status read
+# from a file rather than through a pipe:
+#
+#                clean root           aramid.py + graphite.py planted at root
+#   disarmed     exit 0, no findings  exit 0, 2 x critical, verdict=warn
+#   armed        exit 0, no findings  exit 1, 2 x critical, verdict=block
+#
+# `shadow` appears in `tools_ran` in ALL FOUR cells, so a clean cell is a
+# measurement and not a runner that silently never fired. `verdict_before_ratchet`
+# was already `block` in the armed cell, so the block is THIS KEY and not a
+# ratchet escalation standing in for it.
+#
+# The plants were the known-positive CONTROL, and there were two of them on
+# purpose. `aramid.py` reproduces round 120's own measured shape, proving the
+# detector fires at all; `graphite.py` then answers the question that decides
+# whether arming is worth anything HERE. Both were reported -- so `graphite` IS
+# in the runner's name set, measured rather than inferred from round 120's prose.
+# That matters: `graphite.py` at this root is the exact shape behind the
+# eight-surface `-P` migration, so this arming defends the hazard this repo
+# actually has. Planting only `graphite.py` could not have distinguished "runner
+# works, graphite out of scope" from "runner never fired" -- the same shape as
+# the two survey markers that named strings production never emits and returned
+# a confident clean.
+#
+# LEDGER NOTE for whoever reads the history: findings 615feb29 (aramid.py) and
+# 733bafea (graphite.py) are DELIBERATE TEST PLANTS from that 2x2, detected
+# 01:52:38Z and resolved 01:53:51Z, the same minute the files were deleted. They
+# are not a past incident in this repo.
+#
+# SCOPE, kept separate on purpose. `shadow` detects a hazard FILE at the root.
+# It says nothing about whether this repo's launch points carry `-P`, which is
+# what decides whether such a file would matter. Arming costs nothing today
+# because no hazard file exists -- NOT because the launch points are guarded.
+# Do not let a green `shadow` stand in for a `-P` sweep; they are orthogonal
+# instruments answering different questions.
+#
+# Unrelated despite the name: `aramid status` prints an "autolearn: shadow (...)"
+# line. That is autolearn's shadow MODE and says nothing about this runner.
+[shadow]
+shadow_block_armed = true
