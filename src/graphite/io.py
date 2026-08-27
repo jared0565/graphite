@@ -28,7 +28,12 @@ _monotonic = time.monotonic
 _sleep = time.sleep
 
 
-def _replace(src: Path, dst: Path) -> None:
+def replace_file(src: Path, dst: Path) -> None:
+    """`os.replace`, waiting out a reader that holds `dst` open on Windows.
+
+    Every temp-file-then-rename writer in graphite goes through here so the
+    retry lives in one place; see the module comment for why it exists.
+    """
     if not _RETRY_REPLACE_ON_ACCESS_DENIED:
         os.replace(src, dst)
         return
@@ -55,7 +60,7 @@ def atomic_write_text(path: Path, text: str) -> None:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        _replace(tmp_path, path)
+        replace_file(tmp_path, path)
     except Exception:
         # The cleanup's own failure must not replace the error that matters:
         # a WinError 32 on the temp file once stood in for whatever the

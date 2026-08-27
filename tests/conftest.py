@@ -144,3 +144,59 @@ def assert_json_omits() -> Callable[[object, object], None]:
         assert escaped not in blob, f"{text!r} leaked, escaped as {escaped!r}"
 
     return _check
+
+
+# --- drive graphite.io's replace-retry loop deterministically -----------------
+#
+# `io.replace_file` waits out a reader that holds the target open (Windows
+# WinError 5, #59). These stand-ins are patched on graphite.io's OWN aliases,
+# never on the global `time` module: freezing `time.monotonic` process-wide is
+# how #45 hung a test run.
+class ReplaceRetryClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def replace_retry_clock(monkeypatch: pytest.MonkeyPatch) -> ReplaceRetryClock:
+    """Force the retry path on every platform and make its waits observable."""
+    from graphite import io as graphite_io
+
+    clock = ReplaceRetryClock()
+    monkeypatch.setattr(graphite_io, "_RETRY_REPLACE_ON_ACCESS_DENIED", True)
+    monkeypatch.setattr(graphite_io, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(graphite_io, "_sleep", clock.sleep)
+    return clock
+
+
+@pytest.fixture
+def replace_denied(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], list[int]]:
+    """`os.replace` raises EACCES for the first `times` calls, then succeeds.
+
+    Returns the attempts list so a test can assert how many tries it took.
+    """
+    import errno
+    import os
+
+    def install(times: int) -> list[int]:
+        real_replace = os.replace
+        attempts: list[int] = []
+
+        def denied(src: object, dst: object) -> None:
+            attempts.append(len(attempts) + 1)
+            if len(attempts) <= times:
+                raise PermissionError(errno.EACCES, "held open by a reader")
+            real_replace(src, dst)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(os, "replace", denied)
+        return attempts
+
+    return install
