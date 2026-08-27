@@ -10,6 +10,7 @@ import pytest
 
 from graphite.cli import main
 from graphite.config import Config
+from graphite.overlays import _atomic_write_secure
 from graphite.overlays import (
     OverlayError,
     OverlayRequest,
@@ -608,3 +609,21 @@ def test_overlay_cli_rejects_credential_in_argv_before_enrichment(
         "error": "overlay_credential_argv_forbidden"
     }
     assert not (output / "overlays").exists()
+
+
+def test_overlay_write_outlasts_a_reader_holding_the_file_open(
+    tmp_path: Path,
+    replace_retry_clock: object,
+    replace_denied: object,
+) -> None:
+    # Same Windows rename race as the graph writer (#59): a reader's handle
+    # made the single os.replace raise, surfacing as overlay_write_failed.
+    target = tmp_path / "manifest.json"
+    _atomic_write_secure(target, {"n": 1})
+    attempts = replace_denied(2)  # type: ignore[operator]
+
+    _atomic_write_secure(target, {"n": 2})
+
+    assert attempts == [1, 2, 3]
+    assert json.loads(target.read_text(encoding="utf-8")) == {"n": 2}
+    assert list(tmp_path.glob(".manifest.json.*.tmp")) == []

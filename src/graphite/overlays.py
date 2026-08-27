@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from .config import Config
 from .freshness import FreshnessLimitError, check_graph_freshness
 from .graph_io import GraphReadError, load_validated_graph_bundle
+from .io import replace_file
 from .llm import enrich_report
 
 OVERLAY_SCHEMA_VERSION: Final = 1
@@ -318,7 +319,7 @@ def _atomic_write_secure(path: Path, payload: dict[str, Any]) -> str:
             handle.flush()
             os.fsync(handle.fileno())
         _validate_directory(path.parent)
-        os.replace(temporary, path)
+        replace_file(temporary, path)
         if os.name == "nt":
             from .probe_workspace import _set_private_windows_dacl
 

@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .io import replace_file
+
 ACTIVATION_TTL_SECONDS: float = 3600.0
 ENV_STATE_DIR = "GRAPHITE_STATE_DIR"
 ENV_DAEMON_CHILD = "GRAPHITE_DAEMON_CHILD"
@@ -148,7 +150,7 @@ def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
             json.dump(payload, fh)
-        os.replace(tmp, path)
+        replace_file(tmp, path)
     except Exception:
         try:
             tmp.unlink(missing_ok=True)

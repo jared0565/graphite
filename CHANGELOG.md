@@ -33,8 +33,12 @@ file held by an indexer made `unlink` raise inside `finally: raise`, so the one
 `WinError 32` in the log named only the temp file and nothing else. Cleanup
 failures are now suppressed and the original error propagates.
 
-Not changed: `activation._atomic_write` and `overlays._atomic_write_secure`
-carry the same unguarded `os.replace`; neither has been observed failing.
+The same retry now backs every temp-file-then-rename writer in graphite, not
+only the graph's: `activation._atomic_write` (the marker every hook refreshes
+and the daemon reads each discovery cycle — a lost refresh was silent, because
+`mark_active` is fail-open) and `overlays._atomic_write_secure`, through one
+public `io.replace_file`. Neither had been observed failing; both had the
+same single `os.replace`.
 
 ## [0.5.0] — 2026-08-26
 

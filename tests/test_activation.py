@@ -162,3 +162,23 @@ def test_marker_file_is_valid_json_with_expected_keys(tmp_path: Path) -> None:
     assert payload["agent"] == "claude"
     assert payload["first_seen"] == 1000.0
     assert payload["last_seen"] == 1000.0
+
+
+def test_mark_active_outlasts_a_reader_holding_the_marker_open(
+    tmp_path: Path,
+    replace_retry_clock: object,
+    replace_denied: object,
+) -> None:
+    # The daemon reads every marker with a plain open() each discovery cycle;
+    # on Windows that handle made the hook's refresh fail with WinError 5 (#59),
+    # and mark_active is fail-open, so the refresh was silently lost.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert activation.mark_active(repo, agent="hook", now=1000.0) is not None
+    attempts = replace_denied(2)  # type: ignore[operator]
+
+    assert activation.mark_active(repo, agent="hook", now=1010.0) is not None
+
+    assert attempts == [1, 2, 3]
+    (record,) = activation.read_active(now=1010.0)
+    assert record.last_seen == 1010.0
