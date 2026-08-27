@@ -12,6 +12,30 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
+## [Unreleased]
+
+### Fixed
+
+**A reader holding the graph open made the writer fail on Windows** (#59).
+`MoveFileEx` cannot replace a file another handle holds open without
+`FILE_SHARE_DELETE`, and neither `open()` nor `os.open()` grants that share
+mode — so graphite's own readers (`graph_io`, the MCP server, a hook running
+`query`) made `atomic_write_text`'s single `os.replace` raise `WinError 5` for
+the length of a read. Three occurrences in 1,585 daemon builds; the daemon
+masked each by rebuilding next cycle, while a hook- or agent-driven `build`
+exited 1 and left the previous graph in place. The rename is now retried with
+bounded backoff (2 s) on Windows only — on POSIX an EACCES from rename is the
+directory's permissions, which no wait changes. Reproduced by a test that holds
+the target open in a thread: red on the old writer, green now.
+
+The writer's cleanup path could also **mask the error that mattered**: a temp
+file held by an indexer made `unlink` raise inside `finally: raise`, so the one
+`WinError 32` in the log named only the temp file and nothing else. Cleanup
+failures are now suppressed and the original error propagates.
+
+Not changed: `activation._atomic_write` and `overlays._atomic_write_secure`
+carry the same unguarded `os.replace`; neither has been observed failing.
+
 ## [0.5.0] — 2026-08-26
 
 ### Fixed
