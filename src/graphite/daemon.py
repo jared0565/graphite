@@ -380,7 +380,10 @@ def run_graphite_build(root: Path, cfg: Config, timeout_seconds: float) -> Build
     # relative cache_dir to the repo, and so must the release below.
     cache_dir = cfg.cache_dir if Path(cfg.cache_dir).is_absolute() else root / cfg.cache_dir
     try:
-        with subprocess.Popen(
+        # argv comes from _build_command: sys.executable, fixed flags, this
+        # daemon's own config values and the repo root. No shell, nothing
+        # user-typed -- the same adjudication as the run() call it replaced.
+        with subprocess.Popen(  # noqa: S603
             cmd,
             cwd=root,
             stdin=subprocess.DEVNULL,
