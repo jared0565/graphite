@@ -47,22 +47,31 @@ def test_build_proceeds_when_the_lock_is_free(
     assert not buildlock.lock_path(repo / ".cache" / "graphite").exists()
 
 
-def test_env_escape_hatch_bypasses_the_lock(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_refused_build_reports_the_refusal_when_the_parent_asks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A child whose parent already holds the lock must not deadlock on it."""
+    """The daemon's child holds the lock itself (#60); the daemon never does.
+
+    A human or a git hook still gets exit 0 for a skipped build -- it is a
+    normal outcome, not a failure. The daemon needs to tell "another builder
+    owns the repo" from "the build failed" without parsing output, so it asks
+    its child for a distinct status.
+    """
     from graphite.cli import main
 
     repo = _seed_repo(tmp_path)
     monkeypatch.chdir(repo)
     monkeypatch.setenv("GRAPHITE_DAEMON_CHILD", "1")
-    monkeypatch.setenv(buildlock.ENV_LOCK_HELD, "1")
+    monkeypatch.setenv(buildlock.ENV_REPORT_REFUSAL, "1")
 
     with buildlock.build_lock(repo / ".cache" / "graphite") as held:
         assert held is True
-        assert main(["build", "."]) == 0
+        assert main(["build", "."]) == buildlock.REFUSED_EXIT_STATUS
+        out = capsys.readouterr().out
+        assert buildlock.lock_path(repo / ".cache" / "graphite").exists(), "a refused child unlinked a lock it did not own"
 
-    assert (repo / "graph-out" / "graph.json").exists(), "escape hatch did not build"
+    assert "skipped" in out.lower(), f"a refused build must still say so: {out!r}"
+    assert not (repo / "graph-out" / "graph.json").exists(), "refused build produced a graph"
 
 
 def test_spawn_detached_uses_platform_isolation_flags(monkeypatch: pytest.MonkeyPatch) -> None:

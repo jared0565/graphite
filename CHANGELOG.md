@@ -12,6 +12,35 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
+## [Unreleased]
+
+### Fixed
+
+**Force-stopping the daemon mid-build no longer wedges its successor for the
+lock TTL** (#60). The build lock was held by the daemon on its child's behalf
+(`ENV_LOCK_HELD` told the child not to contend), so `Stop-Process -Force` --
+the documented post-install restart, which runs no `finally` -- left
+`.build.lock` on disk naming a dead pid while the orphaned child kept writing
+`graph-out/`. The successor could neither trust "holder dead" (the writer was
+still alive) nor see "writer done", so it logged `build_skipped_locked` every
+cycle and `daemon-health` warned for up to 600 s over a graph that was already
+correct. A pid-liveness probe would not have helped and would have raced the
+orphan in the very incident that filed the issue.
+
+The lock now follows the writer: the daemon's child takes it itself, exactly
+as a hook or manual `graphite build` does, and a killed daemon leaves no lock
+at all. `build_skipped_locked` is therefore true for as long as a build is
+really running and not a second longer. Two consequences are handled. The
+child answers a refusal with exit status 75 (`EX_TEMPFAIL`) when the daemon
+asks for it via `GRAPHITE_BUILD_LOCK_REPORT_REFUSAL`, so the cycle can book
+"another builder owns the repo" as a skip and not a failed build; a human or a
+hook still gets exit 0. And because the daemon's timeout kill now kills the
+holder, the daemon releases the lock its dead child left -- by pid match only,
+never by guessing. Under a Windows venv launcher `Popen.pid` is the launcher,
+not the writer, so there the timeout path falls back to the TTL instead of
+retrying next cycle: conservative by design, and noted here so nobody reads it
+as a hang. `GRAPHITE_BUILD_LOCK_HELD` is gone; nothing outside the daemon set it.
+
 ## [0.5.1] — 2026-08-27
 
 ### Fixed
