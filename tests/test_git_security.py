@@ -810,15 +810,16 @@ def _trusted_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
 def test_a_version_probe_that_timed_out_does_not_read_as_an_old_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The likeliest reading of graphite#37, and today it is unfalsifiable.
+    """The likeliest reading of graphite#37, and before this it was unfalsifiable.
 
-    `_ensure_supported_version` spends at most `_GIT_VERSION_TIMEOUT_SECONDS`
-    (2.0) on `git --version`, and folds GitTimeoutError, GitLaunchError and
-    GitOutputLimitError into `GitUnsupportedVersionError` -- which `_run_git`
-    then buckets into `git_unavailable`. So "this runner was too slow to spawn a
-    process for two seconds" and "this machine has Git 2.20" arrive as the same
-    string, and the first is exactly what a loaded Windows CI runner produces
-    intermittently while every earlier Git call in the same test succeeded.
+    `_ensure_supported_version` runs `git --version` under a budget (once a
+    fixed 2.0 seconds of its own; now the caller's) and folds GitTimeoutError,
+    GitLaunchError and GitOutputLimitError into `GitUnsupportedVersionError`
+    -- which `_run_git` then buckets into `git_unavailable`. So "this runner was
+    too slow to spawn a process inside the budget" and "this machine has Git
+    2.20" arrived as the same string, and the first is exactly what a loaded
+    Windows CI runner produces intermittently while every earlier Git call in
+    the same test succeeded.
 
     Naming the inner cause is what makes the next sighting decide between them
     instead of restating the bucket.
@@ -927,3 +928,35 @@ def test_a_genuinely_old_git_stays_distinguishable_from_a_slow_one(
     diagnostic = error.value.diagnostic()
     assert "GitTimeoutError" not in diagnostic, "an old Git must not report a timeout"
     assert "too_old" in diagnostic
+
+
+@pytest.mark.parametrize("budget", [7.5, 1.0])
+def test_the_version_probe_runs_under_the_budget_the_caller_gave_its_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget: float
+) -> None:
+    """graphite#37: the probe had a fixed two-second budget of its own.
+
+    Every production caller gives its real command 5-300 seconds and then paid
+    a fixed 2.0 seconds for the `git --version` that gates it -- a number tuned
+    to a quiet machine, in the one path that runs first on a loaded CI runner.
+    `--version` is Git's cheapest command, so a budget the caller's own command
+    can survive is one the probe can survive: derive it, and the number goes.
+
+    Both parameters carry weight. 7.5 shows the caller's budget reaches the
+    probe; 1.0 shows no floor was smuggled back in under the derivation.
+    """
+    version_process = _FakeProcess(b"git version 2.38.0\n")
+    process = _FakeProcess(b"tracked.py\0")
+    runner, _calls = _runner_with_fake_process(
+        tmp_path, monkeypatch, process, version_process=version_process
+    )
+
+    runner.run(["ls-files", "-z"], timeout_seconds=budget)
+
+    assert version_process.wait_calls == [budget], (
+        "the version probe must run under the budget the caller gave its command"
+    )
+    # Falsifiability control: the command keeps its own, full budget. A shared
+    # deadline would make the command's budget vary with probe latency, which
+    # is a new way to time out spuriously, not a fix for one.
+    assert process.wait_calls == [budget]
