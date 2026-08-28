@@ -12,6 +12,29 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
+## [Unreleased]
+
+### Fixed
+
+**The `git --version` probe no longer has a fixed two-second budget of its
+own** (#37). Every production caller gave its real Git command 5–300 seconds
+and then paid a fixed 2.0 seconds for the version probe that gates it -- the
+one number in that path tuned to a quiet machine, in the step that runs first
+on a loaded CI runner. A probe that outlived it was folded into
+`GitUnsupportedVersionError` and widened upstream to `git_unavailable`, which
+is how #37's single Windows sighting logged an installed, working Git as
+unavailable. The probe now runs under the budget the caller gave its command:
+`--version` is Git's cheapest command, so a budget the real command can
+survive is one the probe can survive -- a derivation, not a wider number.
+Probe and command keep separate budgets on purpose; a shared deadline would
+make the command's budget vary with probe latency, a new way to time out
+spuriously. `_GIT_VERSION_TIMEOUT_SECONDS` is gone. Recorded rather than
+fixed: `_version` is still cached per `GitRunner`, so one routing operation
+still runs the probe several times (exposure, not cause), and the 0.1 s
+reader-thread join in `_run_bounded` is a second fixed bound feeding the same
+bucket -- measured 0 of 400 runs live on a loaded 12-core box, so left alone
+on evidence.
+
 ## [0.5.2] — 2026-08-28
 
 ### Fixed

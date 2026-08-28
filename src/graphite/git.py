@@ -12,7 +12,6 @@ from typing import Sequence
 
 DEFAULT_GIT_STDOUT_MAX_BYTES = 16 * 1024 * 1024
 _MINIMUM_GIT_VERSION = (2, 38, 0)
-_GIT_VERSION_TIMEOUT_SECONDS = 2.0
 _GIT_VERSION_STDOUT_MAX_BYTES = 256
 _READ_CHUNK_BYTES = 64 * 1024
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 0.1
@@ -124,17 +123,18 @@ class GitUnsupportedVersionError(_StepGitError):
     Three unrelated conditions land here, and the failure this class is NAMED
     for is the rarest of them. Git really being older than 2.38 is a permanent,
     obvious, one-machine fact. The other two are transient: the `--version`
-    probe timed out inside `_GIT_VERSION_TIMEOUT_SECONDS`, or it could not be
-    launched at all. Both then widen into `git_unavailable` upstream, which is
-    how graphite#37 got a CI log saying an installed, working Git was
-    unavailable.
+    probe timed out, or it could not be launched at all. Both then widen into
+    `git_unavailable` upstream, which is how graphite#37 got a CI log saying an
+    installed, working Git was unavailable.
 
-    The probe's budget is two seconds for one process spawn, and `_version` is
-    cached per RUNNER -- `collect_diff_evidence`, `create_task_worktree` and
-    `accept` each build their own -- so a single routing operation pays that
-    race several times over. On a loaded Windows runner that is a plausible
-    intermittent failure, and `reason` is what lets the next sighting say so
-    instead of blaming the Git version.
+    The probe runs under the budget the caller gave its command. It used to
+    have a fixed two seconds of its own -- the one number in this path tuned to
+    a quiet machine, and #37's leading mechanism on a loaded Windows runner.
+    `_version` is still cached per RUNNER -- `collect_diff_evidence`,
+    `create_task_worktree` and `accept` each build their own -- so a single
+    routing operation pays the probe several times over. `reason` is what lets
+    a sighting say which of the three conditions it was instead of blaming the
+    Git version.
     """
 
 
@@ -165,7 +165,7 @@ class GitRunner:
         """Run one bounded Git command with fixed process security controls."""
         if max_stdout_bytes <= 0:
             raise GitOutputLimitError("Git command output limit exceeded")
-        self._ensure_supported_version()
+        self._ensure_supported_version(timeout_seconds)
         command = [
             str(self.executable),
             "--no-optional-locks",
@@ -181,24 +181,31 @@ class GitRunner:
             max_stdout_bytes=max_stdout_bytes,
         )
 
-    def _ensure_supported_version(self) -> None:
+    def _ensure_supported_version(self, timeout_seconds: float) -> None:
         if self._version is not None:
             return
         with self._version_lock:
             if self._version is not None:
                 return
             try:
+                # The probe runs under the caller's own budget, not a fixed one
+                # of its own. `--version` is Git's cheapest command, so a budget
+                # the caller's real command can survive is one the probe can
+                # survive -- a derivation, where the old two seconds was a
+                # number tuned to a quiet machine (graphite#37). The two budgets
+                # stay separate on purpose: sharing one deadline would make the
+                # command's budget vary with probe latency.
                 result = self._run_bounded(
                     [str(self.executable), "--version"],
-                    timeout_seconds=_GIT_VERSION_TIMEOUT_SECONDS,
+                    timeout_seconds=timeout_seconds,
                     max_stdout_bytes=_GIT_VERSION_STDOUT_MAX_BYTES,
                 )
             except (GitTimeoutError, GitLaunchError, GitOutputLimitError) as exc:
                 # The probe never returned a version, so nothing here is
                 # evidence about Git's version -- carry what actually happened.
                 # `os_error` rides along when the inner failure had one; the
-                # class name alone cannot separate "spawn took longer than two
-                # seconds" from "spawn was refused".
+                # class name alone cannot separate "spawn outlived its budget"
+                # from "spawn was refused".
                 probe_reason = f"probe_{type(exc).__name__}"
                 raise GitUnsupportedVersionError(
                     git_version_failure_message(probe_reason),
