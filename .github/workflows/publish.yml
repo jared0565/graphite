@@ -38,13 +38,13 @@ env:
   # committing these three lines -- which is the point: a version whose digests
   # nobody approved cannot be published by typing a different number into a form.
   #
-  # Source of truth: $GRAPHITE_PROJECTS_ROOT/.graphite-releases/0.5.2/EVIDENCE.md, and
+  # Source of truth: $GRAPHITE_PROJECTS_ROOT/.graphite-releases/0.5.3/EVIDENCE.md, and
   # independently the `digest` field GitHub computed for each release asset. Both
   # were compared before these lines were edited; a digest taken from only one of
   # them is a single source agreeing with itself.
-  APPROVED_VERSION: "0.5.2"
-  WHEEL_SHA256: "52f44021bb5066589ff7ff0387e0fe9a066d8a1b3edd53c6ebadee39b863cc3f"
-  SDIST_SHA256: "3cc9c80f2c85e7d16451124830af0aa5548f963f7362165a010d6d5dac2639b7"
+  APPROVED_VERSION: "0.5.3"
+  WHEEL_SHA256: "e399ccbf223b275305444f8b4bfda001ead9942e80cb825076b3f23d42b8609c"
+  SDIST_SHA256: "5d536d9a2771c124ab1c9c404db4b266c387d9f3d0c17d5ebcdf26ef72a9c54d"
 
 jobs:
   publish:
