@@ -572,15 +572,17 @@ def cmd_build(args: argparse.Namespace) -> int:
     # daemon takes it at `<root>/.cache/graphite`, so the two never contended.
     cfg = _project_scoped_config(args, root, canonical=True)
 
-    # A parent that already holds the lock (the daemon) sets this for its child,
-    # which would otherwise deadlock against its own parent.
-    if os.environ.get(buildlock.ENV_LOCK_HELD):
-        _build_project(root, cfg)
-        return 0
-
+    # Every builder takes the lock itself, the daemon's child included (#60):
+    # the holder must be the process that writes, so a killed daemon leaves
+    # no lock behind and a refusal means a build is really running.
     with buildlock.build_lock(cfg.cache_dir) as acquired:
         if not acquired:
             print("[graphite] build skipped: another build is already running for this repo")
+            # A skipped build is a normal outcome: exit 0 for a human or a
+            # hook. The daemon asks for a distinct status so it can tell this
+            # from a failure without parsing output.
+            if os.environ.get(buildlock.ENV_REPORT_REFUSAL):
+                return buildlock.REFUSED_EXIT_STATUS
             return 0
         _build_project(root, cfg)
     return 0

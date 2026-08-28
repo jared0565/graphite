@@ -155,6 +155,14 @@ class BuildResult:
     stderr: str = ""
     error: str | None = None
 
+    @property
+    def locked(self) -> bool:
+        """Another builder owned the repo, so the child never built (#60).
+
+        Not a failure: the cycle books it as `build_skipped_locked` and retries.
+        """
+        return self.returncode == buildlock.REFUSED_EXIT_STATUS
+
 
 @dataclass
 class ProjectRuntime:
@@ -355,9 +363,12 @@ def _build_command(cfg: Config, root: Path) -> tuple[list[str], dict[str, str]]:
     # os.environ; the filtering is what keeps provider credentials out of a
     # daemon child (test_daemon_child_build_has_no_provider_argv_or_environment).
     env[activation.ENV_DAEMON_CHILD] = "1"
-    # The cycle already holds the repo build lock; without this the child would
-    # contend with its own parent and skip the build it was spawned to do.
-    env[buildlock.ENV_LOCK_HELD] = "1"
+    # The child takes the repo build lock itself (#60): the lock must be held
+    # by the process that writes, so a force-stopped daemon leaves no lock
+    # behind. Ask it to report a refusal by exit status rather than the 0 a
+    # human sees, so the cycle can book "another builder owns the repo" as a
+    # skip and not as a failed build.
+    env[buildlock.ENV_REPORT_REFUSAL] = "1"
     return cmd, env
 
 
@@ -365,12 +376,16 @@ def run_graphite_build(root: Path, cfg: Config, timeout_seconds: float) -> Build
     """Build one project in an isolated child process with bounded runtime."""
     start = time.time()
     cmd, env = _build_command(cfg, root)
+    # Where the child takes the lock: `_project_scoped_config` anchors a
+    # relative cache_dir to the repo, and so must the release below.
+    cache_dir = cfg.cache_dir if Path(cfg.cache_dir).is_absolute() else root / cfg.cache_dir
     try:
-        result = subprocess.run(
+        with subprocess.Popen(
             cmd,
             cwd=root,
             stdin=subprocess.DEVNULL,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             # graphite forces UTF-8 on redirected output (#17). Without this the
             # daemon decodes a supervised build's log with the locale codec, and
@@ -378,25 +393,33 @@ def run_graphite_build(root: Path, cfg: Config, timeout_seconds: float) -> Build
             # than raise -- recording a build failure nobody can explain.
             encoding="utf-8",
             errors="replace",
-            check=False,
-            timeout=timeout_seconds,
             env=env,
-        )
+        ) as proc:
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                # The kill ran none of the child's `finally`, so the lock it
+                # took (#60) is still on disk in its name. Nothing else can hold
+                # a record carrying this pid -- the child is dead and its file
+                # refuses every other acquirer until the TTL -- so this is the
+                # parent releasing on its child's behalf, not a steal.
+                buildlock.release_if_held_by(cache_dir, pid=proc.pid)
+                return BuildResult(
+                    success=False,
+                    returncode=None,
+                    duration_seconds=time.time() - start,
+                    stdout=_tail(stdout or ""),
+                    stderr=_tail(stderr or ""),
+                    error=f"build timed out after {timeout_seconds:.1f}s",
+                )
         return BuildResult(
-            success=result.returncode == 0,
-            returncode=result.returncode,
+            success=proc.returncode == 0,
+            returncode=proc.returncode,
             duration_seconds=time.time() - start,
-            stdout=_tail(result.stdout),
-            stderr=_tail(result.stderr),
-        )
-    except subprocess.TimeoutExpired as exc:
-        return BuildResult(
-            success=False,
-            returncode=None,
-            duration_seconds=time.time() - start,
-            stdout=_tail(exc.stdout or ""),
-            stderr=_tail(exc.stderr or ""),
-            error=f"build timed out after {timeout_seconds:.1f}s",
+            stdout=_tail(stdout),
+            stderr=_tail(stderr),
         )
     except OSError as exc:
         return BuildResult(
@@ -699,29 +722,40 @@ def run_daemon(
                 )
                 continue
 
-            with buildlock.build_lock(project_cfg.cache_dir) as acquired:
-                if not acquired:
-                    # Another builder (a git hook, or a manual `graphite build`)
-                    # owns this repo right now. Deliberately NOT recorded as a
-                    # failure: _record_build_result would set last_error and
-                    # write a ledger incident, and daemon_health counts any
-                    # project with last_error as failing. Retry next cycle --
-                    # needs_initial_build is intentionally left untouched.
-                    logger.event("build_skipped_locked", project=str(project))
-                    continue
+            # The daemon does not take the lock: its child does (#60), so the
+            # holder is the process that writes and a force-stopped daemon
+            # leaves no lock behind. This read is advisory -- it only saves
+            # spawning a child each cycle to be refused; the child's own
+            # acquisition is what serializes builders.
+            #
+            # Another builder (a git hook, or a manual `graphite build`) owns
+            # this repo right now. Deliberately NOT recorded as a failure:
+            # _record_build_result would set last_error and write a ledger
+            # incident, and daemon_health counts any project with last_error
+            # as failing. Retry next cycle -- needs_initial_build is
+            # intentionally left untouched.
+            if buildlock.is_held(project_cfg.cache_dir):
+                logger.event("build_skipped_locked", project=str(project))
+                continue
 
-                was_initial_build = state.needs_initial_build
-                state.last_build_started_at = utc_now()
-                logger.event("build_started", project=str(project), change=summarize_change(change))
-                result = build_project(project, project_cfg, options.build_timeout_seconds)
-                _record_build_result(state, change, result)
-                if result.success:
-                    if not was_initial_build:
-                        state.snapshot = current
-                    logger.event("build_succeeded", project=str(project), seconds=state.last_build_seconds)
-                else:
-                    logger.event("build_failed", project=str(project), seconds=state.last_build_seconds, error=state.last_error)
-                builds_this_cycle += 1
+            was_initial_build = state.needs_initial_build
+            build_started_at = utc_now()
+            logger.event("build_started", project=str(project), change=summarize_change(change))
+            result = build_project(project, project_cfg, options.build_timeout_seconds)
+            if result.locked:
+                # Lost the race between the read above and the child's own
+                # acquisition. Same outcome as the skip, for the same reasons.
+                logger.event("build_skipped_locked", project=str(project))
+                continue
+            state.last_build_started_at = build_started_at
+            _record_build_result(state, change, result)
+            if result.success:
+                if not was_initial_build:
+                    state.snapshot = current
+                logger.event("build_succeeded", project=str(project), seconds=state.last_build_seconds)
+            else:
+                logger.event("build_failed", project=str(project), seconds=state.last_build_seconds, error=state.last_error)
+            builds_this_cycle += 1
 
         last_status = _write_status(
             state_dir,
