@@ -75,6 +75,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
 ]
 # Deliberately NOT "Typing :: Typed". The source is annotated throughout, but
 # that classifier ships a promise to consumers that the type information is
