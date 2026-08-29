@@ -966,7 +966,7 @@ def test_readme_documents_system_readiness_and_optional_activation() -> None:
         "POSIX process group",
         "same-user process namespace",
         "best-effort trust boundary",
-        'python -m pip install -e ".[mcp]"',
+        'python -m pip install --user "graphite-code[mcp]"',
         "guarded distribution-record import manifest",
         "current working directory, user-site, and attacker-controlled selected-root shadows",
         "validate-packages.cjs typescript",

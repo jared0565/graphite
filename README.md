@@ -2,6 +2,21 @@
 
 Local-first, deterministic knowledge graph extraction for codebases. A safer, faster, cheaper replacement for `graphify`.
 
+**Status: 1.0.0, production/stable.** Published on PyPI as
+[`graphite-code`](https://pypi.org/project/graphite-code/) with PEP 740
+attestations; supported on Windows, Linux and macOS with Python 3.11–3.14
+(every cell gates CI). What 1.x promises — CLI, JSON outputs, `graph.json`,
+configuration, exit codes, the launch contract — is in
+[docs/compatibility.md](docs/compatibility.md).
+
+## Documentation
+
+- [User guide](docs/user-guide.md) — install, build the first graph, ask questions, onboard a repository for agents, keep graphs fresh with the daemon, upgrade and verify a release.
+- [Knowledge base](docs/knowledge-base.md) — symptoms, causes and remedies collected from operating graphite; read it before filing an issue.
+- [Agent integration guide](docs/agent-integration.md) — how a coding agent or script drives the query interface and grades its answers.
+- Reference, each page kept in lockstep with the code by a test: [CLI](docs/reference/cli.md), [configuration](docs/reference/configuration.md), [exit codes](docs/reference/exit-codes.md), [compatibility and support](docs/compatibility.md), [benchmarks](docs/benchmarks.md).
+- [Security policy](SECURITY.md) — supported versions and the private reporting path.
+
 ## Principles
 
 - **Inference-free canonical graph** — structural extraction never reads provider credentials or invokes a model.
@@ -22,16 +37,26 @@ Local-first, deterministic knowledge graph extraction for codebases. A safer, fa
 ## Installation
 
 ```bash
-git clone https://github.com/jared0565/graphite
-cd graphite
-pip install -e .
+python -m pip install --user graphite-code
+graphite --version          # version, engine fingerprint, cache and schema versions
 ```
 
-Requires Python 3.11 or newer. No model SDK or provider credential is required
-for canonical graph operation.
+The distribution is `graphite-code` (PyPI's `graphite` is another project);
+the import package is `graphite` and the console scripts are `graphite` and
+`graphite-mcp`. Requires Python 3.11–3.14. No model SDK or provider
+credential is required for canonical graph operation. Every release is built
+by CI from its tag, published with PEP 740 attestations, and verifiable from
+the index — see "Upgrading and verifying a release" in the
+[user guide](docs/user-guide.md).
 
-An editable install is what makes `python -m graphite` work from any repository
-on the machine, which is how every onboarded project reaches it.
+Installing for one interpreter is what makes `python -P -m graphite` work
+from any repository on the machine, which is how every onboarded project
+reaches it. Keep the `-P`: without it Python puts the current directory
+first on `sys.path`, so a `graphite.py` or `graphite/__init__.py` planted at
+a repository root would be imported instead of the installed package. The
+console scripts are immune by construction. Contributors install the clone
+editable into a virtual environment **outside** the checkout — see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## System readiness and optional integrations
 
@@ -84,7 +109,7 @@ node "$GRAPHITE_PACKAGE_VALIDATOR" mcp || exit 1
 Only after the applicable validator command succeeds, enable the declared extra:
 
 ```bash
-python -m pip install -e ".[mcp]"
+python -m pip install --user "graphite-code[mcp]"
 ```
 
 The deep MCP probe launches an isolated interpreter from a guarded distribution-record import manifest. It rejects current working directory, user-site, and attacker-controlled selected-root shadows. The exact origin-verified trusted Graphite source may be inside the selected repository, but it is accepted only when its expected lexical, canonical, filesystem-identity, and module-origin checks all match; overlapping MCP dependency or distribution-metadata roots and alternate Graphite origins remain rejected.
@@ -116,7 +141,7 @@ Canonical commands ignore ambient `GRAPHITE_LLM*` settings and never read `GRAPH
 
 ## Machine-wide usage
 
-Installed editable, `python -m graphite` works from any project in any shell. The `graphite` / `graphite-mcp` console-script shims are equivalent wherever they are on PATH, but a shim directory that PowerShell and cmd see is not always on Git Bash's PATH — prefer `python -m graphite` in scripts and agent instructions.
+Installed for an interpreter, `python -P -m graphite` works from any project in any shell. The `graphite` / `graphite-mcp` console scripts are equivalent wherever they are on PATH — and shadow-proof by construction — but a scripts directory that PowerShell and cmd see is not always on Git Bash's PATH, so prefer `python -P -m graphite` in scripts, hooks and agent instructions. Everything `graphite init` generates (hooks, `.mcp.json`, editor tasks, daemon launchers) already carries the `-P`.
 
 To onboard a new or existing project, run one command from anywhere:
 
@@ -127,9 +152,9 @@ python -m graphite bootstrap /path/to/MyApp   # minimal variant: gitignore + AGE
 
 The machine-wide daemon (`graphite daemon /path/to/projects`) auto-discovers any project with standard markers (`.git`, `package.json`, `pyproject.toml`, `wrangler.toml`, `go.mod`, `Cargo.toml`) and keeps its graph fresh, so `init` is about wiring agent instructions, not registration. To exclude a directory (and its whole subtree) from supervision — e.g. a third-party SDK checkout — drop a `.graphite-ignore` file in it; the daemon skips it at the next discovery cycle.
 
-Set `GRAPHITE_PROJECTS_ROOT` to change the default base folder used by `daemon`, `daemon-status`, `daemon-health`, the Windows startup installers, and init/bootstrap daemon-visibility checks (defaults to the current directory when unset).
+Set `GRAPHITE_PROJECTS_ROOT` to change the default base folder used by `daemon`, `daemon-status`, `daemon-health`, the platform daemon installers, and init/bootstrap daemon-visibility checks (defaults to the current directory when unset).
 
-After upgrading graphite itself, restart the daemon: a long-running daemon keeps executing the code it loaded at start, and daemon state is in-memory only, so a restart both loads the new code and rebuilds every supervised graph — clearing `engine_changed` staleness across all managed projects in one pass.
+After upgrading graphite itself, restart the daemon — stop it, install, then start — because a long-running daemon keeps executing the code it loaded at start. A daemon started under the new code detects the engine change itself and rebuilds every supervised graph, clearing `engine_changed` staleness across all managed projects in one pass.
 
 ## Usage
 
@@ -704,14 +729,17 @@ Then use `/graphite [path]` inside Claude Code. The skill defaults to zero-LLM m
 
 Complete the mandatory package-validation policy and MCP activation steps in [System readiness and optional integrations](#system-readiness-and-optional-integrations). Do not bypass or reorder the validator and install steps.
 
-Then configure Claude Code (Desktop) to use the local server. Add this to your `claude_desktop_config.json`:
+`graphite init` writes a project-local `.mcp.json` entry for Claude Code and
+Codex (and rewrites its own entry on every run, preserving foreign ones). To
+configure a client by hand, launch the server with `-P` — or use the
+`graphite-mcp` console script, which needs no flag:
 
 ```json
 {
   "mcpServers": {
     "graphite": {
       "command": "python",
-      "args": ["-m", "graphite.mcp"],
+      "args": ["-P", "-m", "graphite.mcp"],
       "cwd": "C:/Projects/YourProject"
     }
   }

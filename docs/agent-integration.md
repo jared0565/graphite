@@ -3,6 +3,10 @@
 How a coding agent (or any script) should drive graphite's query interface.
 Everything on this page is canonical: deterministic, offline, inference-free.
 The JSON contracts referenced here are published in [`docs/schemas/`](schemas/).
+From 1.0.0 every output that carries `schema_version` is part of the
+[compatibility promise](compatibility.md): a field is removed, renamed or
+changes meaning only with a `schema_version` bump. Before acting on any
+answer, read its `answer.grade` (section "The answer block" below).
 
 ## 1. Discover, don't guess
 

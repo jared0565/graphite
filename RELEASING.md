@@ -418,6 +418,15 @@ Verify the remote branch commit and annotated tag object against the release evi
 If published, download the destination artifact into a new isolated environment, verify
 its SHA256 digest and provenance when provided, and repeat archive inspection and smoke
 testing. Do not use the local build as evidence that the published artifact is correct.
+`scripts/verify_published_release.py <version> --wheel-sha256 <approved digest>` does
+this from the index in six arms and prints `OVERALL: PASS` only when all six pass; run it
+before publication as the negative control (every arm must fail) and after. Its
+provenance arm reads the PEP 691 Simple JSON index — the legacy
+`/pypi/<project>/<version>/json` endpoint never carries provenance — so a checkout older
+than that fix reports 5 of 6 on an attested release; confirm with
+`https://pypi.org/integrity/<project>/<version>/<file>/provenance` (HTTP 200 with the
+bundle) before reading that as a missing attestation. The index lags uploads by minutes:
+a lone listing failure with the digest arm passing is propagation, not a failed release.
 
 Recovery depends on the completed state:
 

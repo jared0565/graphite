@@ -37,6 +37,18 @@ regression to the legacy API fails. Re-run against 1.0.0: 6 of 6 arms.
   entries that bridged the defect are deleted rather than kept — a
   workaround that outlives its root cause misdirects the next reader.
 
+### Documentation
+
+- New [user guide](docs/user-guide.md) and [knowledge base](docs/knowledge-base.md).
+- README: installation is `pip install graphite-code` (it had still said
+  `git clone` + `pip install -e .`, wrong since the 0.3.0 wheel), the `-P`
+  launch rule is explained where the command is introduced, the MCP
+  examples launch with `-P`, and a documentation index points at every
+  support page. CONTRIBUTING puts the dev environment outside the clone
+  and lists what CI enforces. ARCHITECTURE covers the platform
+  supervisors and the bounded cycle search. The Claude Code skill is
+  machine-neutral and versioned 1.0.0.
+
 ## [1.0.0] — 2026-08-29
 
 The production-grade release. Nothing here is a claim CI cannot turn red:

@@ -4,17 +4,19 @@ Contributions should be focused, reviewable changes that preserve Graphite's det
 
 ## Development setup
 
-Graphite requires Python 3.11 or newer, Git, and an isolated virtual environment. Clone and enter the repository using paths appropriate for your system:
+Graphite requires Python 3.11–3.14, Git, and an isolated virtual environment **outside the clone**. Clone and enter the repository using paths appropriate for your system, then create the environment beside it rather than inside it:
 
 ```bash
 git clone https://github.com/jared0565/graphite.git
 cd graphite
-python -m venv .venv
+python -m venv ../.venvs/graphite-dev
 ```
+
+Two reasons for the location. An environment inside the checkout is read by the MCP trusted-source probe as an import shadow of the repository it was asked to trust, so `doctor --deep` reports it. And the release checks (`aramid.toml`, the CI `security` job) run the test suite through exactly that interpreter, `../.venvs/graphite-dev`, so that the suite tests the editable clone rather than whatever `graphite-code` wheel the machine interpreter has installed — a green run against the wrong distribution proves nothing.
 
 If you contribute from a fork, clone the fork's verified URL instead. Keep URLs and other environment-specific values outside shell metacharacters.
 
-Activate `.venv` using the command for your shell. Before installing already-declared extras, inspect `pyproject.toml` and confirm the exact extra and dependency names. Then install the declared development extra:
+Activate the environment using the command for your shell. Before installing already-declared extras, inspect `pyproject.toml` and confirm the exact extra and dependency names. Then install the declared development extra:
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -87,15 +89,18 @@ Run a focused test while iterating. Replace the placeholder path with the test m
 python -m pytest tests/test_relevant_area.py -q
 ```
 
-Before requesting review, run all required checks:
+Before requesting review, run all required checks through the dev environment's interpreter:
 
 ```bash
 python -m ruff check .
-python -m pytest -q
+python -m mypy                 # [tool.mypy] in pyproject.toml; 0 errors is the gate
+python -m pytest -q -rs        # -rs: a skip is visible, not a silent pass
 python -m graphite --help
 ```
 
-Focused tests shorten the feedback loop; they do not replace the full Ruff, pytest, and CLI smoke checks. Add behavior-level tests for new or changed contracts and ensure failures are meaningful rather than dependent on local machine state.
+Focused tests shorten the feedback loop; they do not replace the full Ruff, mypy, pytest, and CLI smoke checks. Add behavior-level tests for new or changed contracts and ensure failures are meaningful rather than dependent on local machine state.
+
+What CI enforces on every push and pull request (`.github/workflows/ci.yml`): a `lint` job (ruff, mypy, the generated CLI reference in sync); a `test` matrix of Windows, Linux and macOS × Python 3.11–3.14 in which **every cell gates**; a `security` job that runs the same aramid pre-commit and pre-push gates as the local hooks (gitleaks, semgrep, ruff security rules, the repo-root shadow check, pip-audit, mypy, the suite); the `coverage` floor; a `benchmark` job against the synthetic corpus; and an `artifact` job that builds the distribution twice and requires byte-identical results. The local git hooks are installed by `aramid` from the committed `aramid.toml`; do not push with `--no-verify`.
 
 Doctor changes require focused tests for stable doctor JSON, deterministic ordering, redaction, end-to-end deadlines, process cleanup, missing tools, and optional semantics. Cover both successful and adversarial outcomes. Cross-platform behavior must have Windows and POSIX coverage; use narrowly scoped platform skips only when an operating-system primitive truly has no counterpart, and test the portable contract on every platform.
 
