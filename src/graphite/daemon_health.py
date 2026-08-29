@@ -314,13 +314,42 @@ def check_daemon_process(base: Path) -> dict[str, Any]:
 
 
 def check_startup_launcher(base: Path, name: str) -> dict[str, Any]:
-    if platform.system().lower() != "windows":
-        return {"checked": True, "supported": False, "installed": None, "error": "startup check only applies on Windows"}
+    """Is the daemon set up to start by itself on this machine?
+
+    Windows: the Startup-folder launcher (`name` is its name). Linux: the
+    systemd user unit. macOS: the launchd agent. The POSIX lookups use the
+    platform defaults; `name` is a Windows launcher name and does not apply.
+    """
+    system = platform.system().lower()
     try:
-        status = startup_status(base, name=name)
+        if system == "windows":
+            status = startup_status(base, name=name)
+            return {"checked": True, "supported": True, **status}
+        if system == "linux":
+            from .systemd_unit import DEFAULT_UNIT_NAME, query_unit
+
+            unit = query_unit(DEFAULT_UNIT_NAME)
+            return {
+                "checked": True,
+                "supported": True,
+                "installed": bool(unit.get("exists")),
+                "supervisor": "systemd",
+                "detail": unit.get("unit", {}),
+            }
+        if system == "darwin":
+            from .launchd_agent import DEFAULT_LABEL, query_agent
+
+            agent = query_agent(DEFAULT_LABEL)
+            return {
+                "checked": True,
+                "supported": True,
+                "installed": bool(agent.get("exists")),
+                "supervisor": "launchd",
+                "detail": agent.get("agent", {}),
+            }
     except Exception as exc:
         return {"checked": True, "supported": True, "installed": False, "error": str(exc)}
-    return {"checked": True, "supported": True, **status}
+    return {"checked": True, "supported": False, "installed": None, "error": f"startup check unsupported on {system}"}
 
 
 _MAX_GROUP_DETAILS = 5

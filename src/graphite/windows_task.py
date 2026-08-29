@@ -102,41 +102,29 @@ def daemon_task_command(
     build_timeout: float = 240.0,
     debounce: float = 1.0,
 ) -> TaskCommand:
-    base = base_path.resolve()
-    # `-P` is the whole point: it keeps the working directory off `sys.path[0]`.
-    # `-B` is deliberately NOT included -- it only suppresses bytecode and does
-    # nothing to `sys.path`, and pairing them here would re-suggest the reading
-    # that caused this defect.
-    args = (
-        "-P",
-        "-m",
-        "graphite",
-        "daemon",
-        str(base),
-        "--scan-interval",
-        _fmt_number(scan_interval),
-        "--discover-interval",
-        _fmt_number(discover_interval),
-        "--max-projects",
-        str(max_projects),
-        "--max-depth",
-        str(max_depth),
-        "--max-builds-per-cycle",
-        str(max_builds_per_cycle),
-        "--build-timeout",
-        _fmt_number(build_timeout),
-        "--debounce",
-        _fmt_number(debounce),
+    # The argv itself -- `-P -m graphite daemon ...` -- is built by
+    # `daemon_launch`, shared with the systemd and launchd installers so the
+    # three supervisors cannot drift apart on the flags that matter. Imported
+    # here rather than at module level because daemon_launch imports
+    # `resolve_launcher_interpreter` from this module.
+    from .daemon_launch import daemon_launch
+
+    launch = daemon_launch(
+        base_path,
+        interpreter=graphite_executable,
+        scan_interval=scan_interval,
+        discover_interval=discover_interval,
+        max_projects=max_projects,
+        max_depth=max_depth,
+        max_builds_per_cycle=max_builds_per_cycle,
+        build_timeout=build_timeout,
+        debounce=debounce,
     )
     return TaskCommand(
-        executable=resolve_launcher_interpreter(graphite_executable),
-        arguments=args,
-        working_dir=base,
+        executable=launch.interpreter,
+        arguments=launch.arguments,
+        working_dir=launch.working_dir,
     )
-
-
-def _fmt_number(value: float) -> str:
-    return str(int(value)) if float(value).is_integer() else str(value)
 
 
 def create_daemon_task(
