@@ -180,15 +180,32 @@ wheel's `METADATA` fields `Name`, `Version`, and every `Requires-Dist`, plus
 source and build files. Both archives must exclude credentials, caches, VCS files,
 local configuration, scratch output, and absolute developer paths.
 
-Compute and record a SHA256 hash for each exact artifact. These are the SECOND source:
-the first is the `artifact` job of the CI run on the release commit, whose log prints
-`dist.sha256` after building twice and proving the two builds byte-identical, and which
-keeps `dist/` as a workflow artifact for 90 days. The two sources must agree before
-either digest is pinned in `publish.yml`; a digest taken from only one of them is a
-single source agreeing with itself. (This is also the cross-platform reproducibility
-check: the local build is Windows, the runner is Linux. Before 1.0.0 they DID differ --
-v0.5.3 rebuilt under Linux gave a different wheel -- because the working copy carried
-CRLF in files hatchling packages; `.gitattributes` and a normalised checkout fixed it.)
+The digests that get PINNED in `publish.yml` are CI's: the `artifact` job of the CI run
+on the release commit builds twice with the same pins, proves the two builds
+byte-identical, prints `dist.sha256`, and keeps `dist/` as a workflow artifact for 90
+days. Dispatch that workflow a second time on the same commit and confirm the second run
+prints the same digests -- two runs agreeing is what "CI reproduces CI" means, and the
+publish job's digest guard then proves it a third time before any upload.
+
+The local build is the SECOND source, compared by CONTENT rather than by digest.
+Download the CI artifact and run:
+
+```text
+python scripts/compare_dist.py "ARTIFACT_DIR" "CI_DIST_DIR"
+```
+
+It exits 0 only when every wheel member (name, CRC, size, mode, timestamp) and the
+decompressed sdist are identical; a content difference is a stop condition. Archive
+digests are NOT expected to match across operating systems, and the reasons are not
+content: the zip central directory records `create_system` (0 on Windows, 3 on Unix)
+for every member, and the deflate stream depends on the platform's zlib. Measured at
+`cd0f528`: a Windows build (CPython bundling zlib-ng 1.3.1) and an ubuntu-latest build
+(zlib 1.3.2) had 111 wheel members of different compressed size, identical CRCs, and a
+byte-identical decompressed sdist. Before that, the working copy also carried CRLF in
+files hatchling packages -- a real content difference -- which `.gitattributes` and a
+normalised checkout removed; `compare_dist.py` is what tells the two cases apart.
+
+Compute and record a SHA256 hash for each local artifact as well, for the evidence record.
 Paths are quoted shell arguments and are never embedded in Python source:
 
 ```text
