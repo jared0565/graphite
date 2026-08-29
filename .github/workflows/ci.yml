@@ -248,8 +248,20 @@ jobs:
         run: |
           mkdir -p ~/.aramid
           printf '[llm]\nenabled = false\n' > ~/.aramid/config.toml
-      - name: aramid doctor --fix
-        run: aramid doctor --fix
+      - name: aramid doctor --fix (informational)
+        shell: bash
+        # doctor exits 1 when an OPTIONAL LLM provider is absent, which is
+        # every hosted runner. It is run for its report, not its verdict: the
+        # two `--strict` gates below fail on any DEGRADED tool, and the
+        # tools_ran assertions fail on a scanner that silently never fired.
+        # Measured on run 33237751838: every BLOCK-tier tool OK, only
+        # claude-cli/codex-cli/openrouter/ollama-cloud MISSING.
+        run: |
+          aramid doctor --fix > doctor.txt 2>&1; echo "EXIT=$?" >> doctor.txt
+          cat doctor.txt
+          if grep -qE '^\s+MISSING\s+(gitleaks|semgrep|ruff|pip-audit|tests|interpreter)' doctor.txt; then
+            echo "::error::a BLOCK-tier tool is missing on the runner"; exit 1
+          fi
       - name: Pre-commit gate (gitleaks, ruff security rules, shadow)
         shell: bash
         run: |
