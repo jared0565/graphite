@@ -19,6 +19,10 @@ from graphite.cli import build_parser  # noqa: E402
 
 OUT = ROOT / "docs" / "reference" / "cli.md"
 
+#: Argument destinations whose default is `str(default_projects_root())` in
+#: cli.py -- the only defaults that come from the environment.
+_ENVIRONMENT_DERIVED_DESTS = frozenset({"base_path"})
+
 
 def _cell(text: str) -> str:
     return " ".join(text.split()).replace("|", "\\|")
@@ -27,7 +31,17 @@ def _cell(text: str) -> str:
 def _default(action: argparse.Action) -> str:
     if action.default in (None, argparse.SUPPRESS, False) or isinstance(action, argparse._StoreTrueAction):
         return ""
-    return f" (default: `{action.default}`)"
+    rendered = str(action.default)
+    # Defaults derived from the environment are the machine's, not the
+    # tool's. The first cut of this page rendered `F:\Projects` -- the value
+    # of GRAPHITE_PROJECTS_ROOT on the maintainer's box -- and the lockstep
+    # test then failed on every CI leg, where the same default is `.`. Name
+    # the rule, never the value. Keyed on the DESTINATION, not the value: with
+    # the variable unset the value is `.`, which is also the honest default
+    # of every plain `path` argument and must keep rendering as `.`.
+    if action.dest in _ENVIRONMENT_DERIVED_DESTS or Path(rendered).is_absolute():
+        return " (default: the projects root -- `GRAPHITE_PROJECTS_ROOT`, else the current directory)"
+    return f" (default: `{rendered}`)"
 
 
 def _option_rows(parser: argparse.ArgumentParser) -> list[str]:

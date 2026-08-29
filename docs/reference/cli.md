@@ -333,7 +333,7 @@ Watch all discovered projects under a base folder
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `base_path` | Base folder to discover projects under (default: `F:\Projects`) |
+| `base_path` | Base folder to discover projects under (default: the projects root -- `GRAPHITE_PROJECTS_ROOT`, else the current directory) |
 | `--scan-interval` | Polling interval in seconds (default: `10.0`) |
 | `--discover-interval` | Project rediscovery interval in seconds (default: `60.0`) |
 | `--debounce` | Stable-change debounce seconds (default: `1.0`) |
@@ -355,7 +355,7 @@ Read the latest Graphite daemon status
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `base_path` | Base folder used by the daemon (default: `F:\Projects`) |
+| `base_path` | Base folder used by the daemon (default: the projects root -- `GRAPHITE_PROJECTS_ROOT`, else the current directory) |
 | `--state-dir` | Daemon state directory (default: <base>/.graphite-daemon) |
 | `--json` | Emit status as JSON |
 
@@ -366,7 +366,7 @@ Run operational health checks for the Graphite daemon
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `base_path` | Base folder used by the daemon (default: `F:\Projects`) |
+| `base_path` | Base folder used by the daemon (default: the projects root -- `GRAPHITE_PROJECTS_ROOT`, else the current directory) |
 | `--state-dir` | Daemon state directory (default: <base>/.graphite-daemon) |
 | `--max-status-age` | Maximum acceptable status age in seconds (default: `180.0`) |
 | `--max-project-success-age` | Warn when a project has not built successfully within this many seconds (default: `86400.0`) |
@@ -383,7 +383,7 @@ Install the Graphite daemon as a Windows Scheduled Task
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `base_path` | Base folder to supervise (default: `F:\Projects`) |
+| `base_path` | Base folder to supervise (default: the projects root -- `GRAPHITE_PROJECTS_ROOT`, else the current directory) |
 | `--task-name` | Windows Scheduled Task name (default: `GraphiteDaemon-FProjects`) |
 | `--graphite-executable` | Python interpreter for the generated launcher (default: this one). A console script is refused: it cannot carry -P. |
 | `--scan-interval` | Polling interval in seconds (default: `15.0`) |
@@ -424,7 +424,7 @@ Install hidden Windows Startup-folder launcher for Graphite daemon
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `base_path` | Base folder to supervise (default: `F:\Projects`) |
+| `base_path` | Base folder to supervise (default: the projects root -- `GRAPHITE_PROJECTS_ROOT`, else the current directory) |
 | `--name` | Startup launcher name (default: `GraphiteDaemon-FProjects`) |
 | `--graphite-executable` | Python interpreter for the generated launcher (default: this one). A console script is refused: it cannot carry -P. |
 | `--scan-interval` | Polling interval in seconds (default: `15.0`) |
@@ -443,7 +443,7 @@ Read Windows Startup-folder launcher status for Graphite daemon
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `base_path` | Base folder supervised by the launcher (default: `F:\Projects`) |
+| `base_path` | Base folder supervised by the launcher (default: the projects root -- `GRAPHITE_PROJECTS_ROOT`, else the current directory) |
 | `--name` | Startup launcher name (default: `GraphiteDaemon-FProjects`) |
 | `--json` | Emit startup status as JSON |
 
@@ -454,7 +454,7 @@ Remove hidden Windows Startup-folder launcher for Graphite daemon
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `base_path` | Base folder supervised by the launcher (default: `F:\Projects`) |
+| `base_path` | Base folder supervised by the launcher (default: the projects root -- `GRAPHITE_PROJECTS_ROOT`, else the current directory) |
 | `--name` | Startup launcher name (default: `GraphiteDaemon-FProjects`) |
 | `--json` | Emit removal result as JSON |
 
@@ -465,7 +465,7 @@ Install the Graphite daemon as a systemd user unit (Linux)
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `base_path` | Base folder to supervise (default: `F:\Projects`) |
+| `base_path` | Base folder to supervise (default: the projects root -- `GRAPHITE_PROJECTS_ROOT`, else the current directory) |
 | `--name` | systemd user unit name (default: `graphite-daemon`) |
 | `--graphite-executable` | Python interpreter for the generated launcher (default: this one). A console script is refused: it cannot carry -P. |
 | `--scan-interval` | Polling interval in seconds (default: `15.0`) |
@@ -485,7 +485,7 @@ Install the Graphite daemon as a launchd agent (macOS)
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `base_path` | Base folder to supervise (default: `F:\Projects`) |
+| `base_path` | Base folder to supervise (default: the projects root -- `GRAPHITE_PROJECTS_ROOT`, else the current directory) |
 | `--label` | launchd agent label (default: `com.graphite.daemon`) |
 | `--graphite-executable` | Python interpreter for the generated launcher (default: this one). A console script is refused: it cannot carry -P. |
 | `--scan-interval` | Polling interval in seconds (default: `15.0`) |
@@ -525,7 +525,7 @@ Report the daemon supervisor for this platform (systemd, launchd, or the Windows
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `base_path` | Base folder supervised (Windows startup launcher lookup) (default: `F:\Projects`) |
+| `base_path` | Base folder supervised (Windows startup launcher lookup) (default: the projects root -- `GRAPHITE_PROJECTS_ROOT`, else the current directory) |
 | `--name` | systemd user unit name (default: `graphite-daemon`) |
 | `--label` | launchd agent label (default: `com.graphite.daemon`) |
 | `--task-name` | Windows Scheduled Task / startup launcher name (default: `GraphiteDaemon-FProjects`) |
