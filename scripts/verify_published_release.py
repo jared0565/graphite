@@ -219,10 +219,18 @@ def verify(
     if not expected_provenance:
         skip(provenance_arm, f"not expected for {version} (pre-1.0 artifacts were built off CI)")
     else:
+        # PEP 740 exposes provenance through the PEP 691 Simple JSON index
+        # (a `provenance` URL per file) and the Integrity API; the legacy
+        # `/pypi/<project>/<version>/json` endpoint never carries it. Measured
+        # on 1.0.0: legacy API -> no key at all, Simple JSON -> a URL per file,
+        # Integrity API -> HTTP 200 with the GitHub attestation bundle.
         script = (
             "import json, urllib.request;"
-            f"d = json.load(urllib.request.urlopen('https://pypi.org/pypi/{DISTRIBUTION}/{version}/json', timeout=30));"
-            "print(json.dumps({u['filename']: bool(u.get('provenance')) for u in d.get('urls', [])}))"
+            f"req = urllib.request.Request('https://pypi.org/simple/{DISTRIBUTION}/', "
+            "headers={'Accept': 'application/vnd.pypi.simple.v1+json'});"
+            "d = json.load(urllib.request.urlopen(req, timeout=30));"
+            f"files = [f for f in d.get('files', []) if f['filename'].endswith(('-{version}.tar.gz',)) or '-{version}-' in f['filename']];"
+            "print(json.dumps({f['filename']: bool(f.get('provenance')) for f in files}))"
         )
         fetched = run([str(python), "-c", script], work)
         files: dict[str, bool] = {}

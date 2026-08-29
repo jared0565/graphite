@@ -452,6 +452,19 @@ def test_provenance_can_be_required_explicitly_below_one_point_zero(tmp_path: Pa
     assert PROVENANCE_ARM in outcome.passed
 
 
+def test_the_provenance_arm_asks_the_simple_json_index_not_the_legacy_api(tmp_path: Path) -> None:
+    """The legacy `/pypi/<project>/<version>/json` endpoint has no provenance
+    key at all -- measured on 1.0.0 right after publication, where the
+    Integrity API already served both attestation bundles. Only the PEP 691
+    Simple JSON index (or the Integrity API) can answer this arm."""
+    _, runner = _verify(tmp_path)
+
+    script = " ".join(runner.argv_for("provenance"))
+    assert "application/vnd.pypi.simple.v1+json" in script
+    assert f"https://pypi.org/simple/{vpr.DISTRIBUTION}/" in script
+    assert "/pypi/" not in script
+
+
 def test_an_index_that_cannot_be_read_fails_the_provenance_arm(tmp_path: Path) -> None:
     """Unable to verify is not verified."""
     replies = {"provenance": Reply(returncode=1, stderr="urllib.error.HTTPError: HTTP Error 404: Not Found")}

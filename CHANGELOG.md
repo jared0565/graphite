@@ -13,6 +13,20 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
+## [Unreleased]
+
+### Fixed
+
+**The post-publication verifier's provenance arm asked an endpoint that
+never carries provenance.** `scripts/verify_published_release.py` read
+`urls[].provenance` from PyPI's legacy `/pypi/<project>/<version>/json`
+API, which has no such key, so the arm reported "no provenance" for 1.0.0
+while the Integrity API was already serving both GitHub attestation bundles
+(`jared0565/graphite`, `publish.yml`). The arm now reads the PEP 691 Simple
+JSON index (`Accept: application/vnd.pypi.simple.v1+json`), where PEP 740
+publishes a `provenance` URL per file; a test pins the endpoint so a
+regression to the legacy API fails. Re-run against 1.0.0: 6 of 6 arms.
+
 ## [1.0.0] — 2026-08-29
 
 The production-grade release. Nothing here is a claim CI cannot turn red:
