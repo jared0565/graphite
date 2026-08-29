@@ -1906,6 +1906,12 @@ class RepositoryStore:
 
     @staticmethod
     def _validate_attempt_binding(attempt: sqlite3.Row, receipt: ExecutionReceipt) -> None:
+        input_tokens = receipt.input_tokens
+        output_tokens = receipt.output_tokens
+        if input_tokens is None or output_tokens is None:
+            # Every caller runs _validate_receipt_shape first, which rejects a
+            # receipt without token counts under this same code.
+            raise ValueError("execution_receipt_invalid")
         if (
             attempt["approval_id"] != receipt.approval_id
             or attempt["model_id"] != receipt.model_id
@@ -1913,9 +1919,9 @@ class RepositoryStore:
             or attempt["max_input_tokens"] is None
             or attempt["max_output_tokens"] is None
             or attempt["expected_prompt_hash"] is None
-            or receipt.input_tokens > attempt["max_input_tokens"]
-            or receipt.output_tokens > attempt["max_output_tokens"]
-            or receipt.input_tokens + receipt.output_tokens > attempt["reserved_tokens"]
+            or input_tokens > attempt["max_input_tokens"]
+            or output_tokens > attempt["max_output_tokens"]
+            or input_tokens + output_tokens > attempt["reserved_tokens"]
             or receipt.prompt_hash != attempt["expected_prompt_hash"]
         ):
             raise StorageError("execution_attempt_conflict")

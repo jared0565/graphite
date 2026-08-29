@@ -579,10 +579,10 @@ def rank_cli_candidates(
     if failures:
         return CliPolicyResult(None, (), True, tuple(sorted(set(failures))))
     snapshot_by_digest: dict[str, CapabilitySnapshot] = {}
-    for snapshot in snapshots:
-        if not isinstance(snapshot, CapabilitySnapshot) or snapshot.digest in snapshot_by_digest:
+    for entry in snapshots:
+        if not isinstance(entry, CapabilitySnapshot) or entry.digest in snapshot_by_digest:
             raise ValueError("capability_snapshot_invalid")
-        snapshot_by_digest[snapshot.digest] = snapshot
+        snapshot_by_digest[entry.digest] = entry
     authenticated = {ProviderId(item) for item in gates.authenticated_providers}
     current_identities = {item.provider: item for item in gates.current_cli_identities}
     required_permission = PermissionMode(gates.permission_mode)

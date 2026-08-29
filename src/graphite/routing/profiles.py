@@ -448,7 +448,7 @@ def verify_and_save_approved_edit_profile(
             verified_snapshot.identity,
             promoted_profile,
         )
-        telemetry = {
+        telemetry: dict[str, object] = {
             "provider": promoted.profile.provider.value,
             "requested_model": promoted.profile.requested_model,
             "effective_model": promoted.profile.effective_model,

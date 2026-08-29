@@ -25,8 +25,11 @@ _REPARSE_POINT: Final = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 def _is_reparse_point(path: Path) -> bool:
     try:
-        attributes = path.stat(follow_symlinks=False).st_file_attributes
-    except (OSError, AttributeError):
+        # Windows-only field; absent on POSIX, where nothing is a reparse point.
+        attributes = getattr(path.stat(follow_symlinks=False), "st_file_attributes", None)
+    except OSError:
+        return False
+    if attributes is None:
         return False
     return bool(attributes & _REPARSE_POINT)
 

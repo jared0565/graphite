@@ -184,5 +184,9 @@ def observe_openrouter_with_pricing(
     raw = entry.get("pricing")
     if not isinstance(raw, dict):
         raise ProviderProbeError("probe_protocol_invalid")
-    pricing = OpenRouterPricing(prompt=raw.get("prompt"), completion=raw.get("completion"))
+    prompt = raw.get("prompt")
+    completion = raw.get("completion")
+    if not isinstance(prompt, str) or not isinstance(completion, str):
+        raise ProviderProbeError("probe_protocol_invalid")
+    pricing = OpenRouterPricing(prompt=prompt, completion=completion)
     return OpenRouterObservation(identity, pricing)

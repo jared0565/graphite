@@ -12,6 +12,7 @@ dependencies by design.
 from __future__ import annotations
 
 import re
+from typing import TypeGuard
 
 # Keywords that combine/redirect subschemas and thus change what "valid" means. This
 # validator cannot approximate them, so a schema using any of them fails closed at
@@ -136,7 +137,7 @@ def _matches_array(value: list, schema: dict) -> bool:
     return True
 
 
-def _is_bound(value: object) -> bool:
+def _is_bound(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 

@@ -9,12 +9,14 @@ from typing import ClassVar
 from .contracts import Effort, PublicRecord
 from .lifecycle import (
     IdentityChange,
+    LifecycleProviderId,
     LifecycleReasonCode,
     ProviderCompatibilityAssessment,
     ProviderCompatibilityPolicy,
     ProviderLifecycleEvent,
     ProviderLifecycleState,
     ProviderRuntimeIdentity,
+    RuntimeKind,
     assess_identity_change,
 )
 from .lifecycle_storage import CurrentLifecycleObservation, LifecycleStore, LifecycleStorageError
@@ -450,10 +452,12 @@ class ProviderLifecycleService:
                 identity = None
                 current_digest = None
             repeated = current is not None and current.state is ProviderLifecycleState.UNAVAILABLE
+            if not isinstance(provider, str) or not isinstance(runtime_kind, str):
+                raise ValueError("provider_invalid")
             event = ProviderLifecycleEvent(
                 hashlib.sha256(f"{boundary_digest}:{observed_at}:unavailable".encode()).hexdigest(),
-                provider,
-                runtime_kind,
+                LifecycleProviderId(provider),
+                RuntimeKind(runtime_kind),
                 None if current is None or current.identity is None else current.identity.digest,
                 current_digest,
                 None if current is None else current.state,

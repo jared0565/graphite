@@ -77,11 +77,18 @@ class RoutingServiceError(RuntimeError):
 
 
 class AdapterResult(Protocol):
-    effective_model: str
-    message: str
-    input_tokens: int | None
-    output_tokens: int | None
-    duration_seconds: float
+    # Read-only members: the concrete results are frozen dataclasses, which
+    # cannot satisfy settable protocol attributes.
+    @property
+    def effective_model(self) -> str: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def input_tokens(self) -> int | None: ...
+    @property
+    def output_tokens(self) -> int | None: ...
+    @property
+    def duration_seconds(self) -> float: ...
 
 
 IdentityLoader = Callable[[ProviderId], CliIdentity]
@@ -290,14 +297,19 @@ class RoutingService:
         return self._credential_homes.get(provider) or _default_credential_home(provider)
 
     def _preflight(self, provider: ProviderId) -> CliIdentity:
-        kwargs = {
-            "executable": self._executable(provider),
-            "workspace": self.root,
-            "credential_home": self._credential_home(provider),
-        }
+        executable = self._executable(provider)
+        credential_home = self._credential_home(provider)
         if provider is ProviderId.CLAUDE_CODE:
-            return preflight_claude(**kwargs)
-        return preflight_codex(**kwargs)
+            return preflight_claude(
+                executable=executable,
+                workspace=self.root,
+                credential_home=credential_home,
+            )
+        return preflight_codex(
+            executable=executable,
+            workspace=self.root,
+            credential_home=credential_home,
+        )
 
     @staticmethod
     def _graph_fingerprint(bundle: object) -> str:
@@ -680,6 +692,10 @@ class RoutingService:
         try:
             if self._lifecycle_service is not None:
                 assert live_runtime_identity is not None
+                assert prepared.lifecycle_identity_digest is not None, (
+                    "run_approved raised lifecycle_authority_missing above when the "
+                    "lifecycle service is configured without a bound identity digest"
+                )
                 self._lifecycle_service.require_execution_authority(
                     boundary_digest=self._lifecycle_boundaries[manifest.provider],
                     lifecycle_identity_digest=prepared.lifecycle_identity_digest,

@@ -150,6 +150,8 @@ def _relative_path(value: object) -> str:
 
 def _enum(value: object, enum_type: type[StrEnum], *, code: str) -> StrEnum:
     try:
+        if not isinstance(value, str):
+            raise TypeError(code)
         return enum_type(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(code) from exc

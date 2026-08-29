@@ -143,7 +143,23 @@ class CliProcessResult:
 
 
 class ProcessRunner(Protocol):
-    def __call__(self, argv: list[str], **kwargs: object) -> ProbeProcessResult: ...
+    """The keyword signature of ``run_bounded_process``, the default runner."""
+
+    def __call__(
+        self,
+        argv: list[str],
+        /,
+        *,
+        cwd: Path,
+        stdin: bytes | str | None = ...,
+        timeout_seconds: float,
+        max_output_bytes: int = ...,
+        max_input_bytes: int = ...,
+        check: bool = ...,
+        environment: Mapping[str, str] | None = ...,
+        cancelled: Callable[[], bool] | None = ...,
+        stdin_close_when: Callable[[bytes], bool] | None = ...,
+    ) -> ProbeProcessResult: ...
 
 
 def require_process_containment() -> None:

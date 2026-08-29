@@ -8,7 +8,7 @@ import secrets
 import sqlite3
 import stat
 from contextlib import closing, contextmanager, suppress
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -90,7 +90,7 @@ def _timestamp(value: object, code: str) -> int:
     return value
 
 
-def _canonical_json(value: dict[str, object]) -> str:
+def _canonical_json(value: Mapping[str, object]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
@@ -606,6 +606,7 @@ class LifecycleStore:
                 current["provider"] != event.provider.value
                 or current["runtime_kind"] != event.runtime_kind.value
                 or current["identity_digest"] != event.previous_identity_digest
+                or event.previous_state is None
                 or current["state"] != event.previous_state.value
             ):
                 raise LifecycleStorageError("lifecycle_transition_stale")
