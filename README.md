@@ -133,6 +133,13 @@ After upgrading graphite itself, restart the daemon: a long-running daemon keeps
 
 ## Usage
 
+Reference pages, each kept in lockstep with the code by a test:
+[CLI](docs/reference/cli.md) (generated from the parser),
+[configuration](docs/reference/configuration.md) (every `GRAPHITE_*` variable),
+[exit codes](docs/reference/exit-codes.md),
+[compatibility and support](docs/compatibility.md) (what 1.x promises), and
+[benchmarks](docs/benchmarks.md) (what `supported_repo_files` rests on).
+
 ```bash
 # Scan a repo (zero tokens)
 graphite scan .
