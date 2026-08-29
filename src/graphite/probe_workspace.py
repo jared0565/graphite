@@ -16,6 +16,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._win32_ctypes import win32 as _win32
+
 
 class WorkspaceLeaseError(RuntimeError):
     """A workspace could not be acquired, revalidated, or safely cleaned."""
@@ -440,7 +442,7 @@ def _open_directory_handle(path: Path) -> tuple[int, tuple[int, int, int]]:
 
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _win32().WinDLL("kernel32", use_last_error=True)
     create_file = kernel32.CreateFileW
     create_file.argtypes = [
         wintypes.LPCWSTR,
@@ -463,15 +465,15 @@ def _open_directory_handle(path: Path) -> tuple[int, tuple[int, int, int]]:
     )
     invalid_handle = ctypes.c_void_p(-1).value
     if handle == invalid_handle:
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise _win32().WinError(_win32().get_last_error())
     raw_handle = int(handle)
     set_handle_information = kernel32.SetHandleInformation
     set_handle_information.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD]
     set_handle_information.restype = wintypes.BOOL
     if not set_handle_information(raw_handle, 0x1, 0):
-        error = ctypes.get_last_error()
+        error = _win32().get_last_error()
         _close_raw_handle(raw_handle)
-        raise ctypes.WinError(error)
+        raise _win32().WinError(error)
     try:
         identity = _windows_handle_identity(raw_handle)
         _reject_windows_handle_reparse(raw_handle)
@@ -492,7 +494,7 @@ def _close_raw_handle(handle: int | None) -> None:
         return
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _win32().WinDLL("kernel32", use_last_error=True)
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = [wintypes.HANDLE]
     close_handle.restype = wintypes.BOOL
@@ -516,13 +518,13 @@ def _windows_handle_identity(handle: int) -> tuple[int, int, int]:
             ("file_index_low", wintypes.DWORD),
         ]
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _win32().WinDLL("kernel32", use_last_error=True)
     function = kernel32.GetFileInformationByHandle
     function.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
     function.restype = wintypes.BOOL
     information = ByHandleFileInformation()
     if not function(handle, ctypes.byref(information)):
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise _win32().WinError(_win32().get_last_error())
     return (
         information.volume_serial_number,
         information.file_index_high,
@@ -533,14 +535,14 @@ def _windows_handle_identity(handle: int) -> tuple[int, int, int]:
 def _windows_handle_final_path(handle: int) -> Path:
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _win32().WinDLL("kernel32", use_last_error=True)
     function = kernel32.GetFinalPathNameByHandleW
     function.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
     function.restype = wintypes.DWORD
     buffer = ctypes.create_unicode_buffer(32768)
     length = function(handle, buffer, len(buffer), 0)
     if not length or length >= len(buffer):
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise _win32().WinError(_win32().get_last_error())
     value = buffer.value
     if value.startswith("\\\\?\\UNC\\"):
         value = "\\\\" + value[8:]
@@ -573,13 +575,13 @@ def _reject_windows_handle_reparse(handle: int) -> None:
     class FileAttributeTagInformation(ctypes.Structure):
         _fields_ = [("file_attributes", wintypes.DWORD), ("reparse_tag", wintypes.DWORD)]
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _win32().WinDLL("kernel32", use_last_error=True)
     function = kernel32.GetFileInformationByHandleEx
     function.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
     function.restype = wintypes.BOOL
     information = FileAttributeTagInformation()
     if not function(handle, 9, ctypes.byref(information), ctypes.sizeof(information)):
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise _win32().WinError(_win32().get_last_error())
     if information.file_attributes & 0x400 or information.reparse_tag:
         raise WorkspaceLeaseError("workspace_isolation_failed")
 
@@ -589,13 +591,13 @@ def _windows_path_is_reparse(path: Path) -> bool:
         return False
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _win32().WinDLL("kernel32", use_last_error=True)
     function = kernel32.GetFileAttributesW
     function.argtypes = [wintypes.LPCWSTR]
     function.restype = wintypes.DWORD
     attributes = function(str(path))
     if attributes == 0xFFFFFFFF:
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise _win32().WinError(_win32().get_last_error())
     return bool(attributes & 0x400)
 
 
@@ -603,8 +605,8 @@ def _windows_private_security_descriptor() -> int:
     """Allocate a protected DACL granting full control only to the current user."""
     from ctypes import wintypes
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = _win32().WinDLL("advapi32", use_last_error=True)
+    kernel32 = _win32().WinDLL("kernel32", use_last_error=True)
     open_process_token = advapi32.OpenProcessToken
     open_process_token.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
     open_process_token.restype = wintypes.BOOL
@@ -637,23 +639,26 @@ def _windows_private_security_descriptor() -> int:
 
     token = wintypes.HANDLE()
     if not open_process_token(get_current_process(), 0x0008, ctypes.byref(token)):
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise _win32().WinError(_win32().get_last_error())
     sid_text = wintypes.LPWSTR()
     descriptor = wintypes.LPVOID()
     try:
         needed = wintypes.DWORD()
         get_token_information(token, 1, None, 0, ctypes.byref(needed))
         if not needed.value:
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32().WinError(_win32().get_last_error())
         buffer = ctypes.create_string_buffer(needed.value)
         if not get_token_information(token, 1, buffer, needed, ctypes.byref(needed)):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32().WinError(_win32().get_last_error())
         sid = ctypes.cast(buffer, ctypes.POINTER(wintypes.LPVOID))[0]
         if not convert_sid(sid, ctypes.byref(sid_text)):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32().WinError(_win32().get_last_error())
         sddl = f"D:P(A;OICI;FA;;;{sid_text.value})"
         if not convert_descriptor(sddl, 1, ctypes.byref(descriptor), None):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32().WinError(_win32().get_last_error())
+        if descriptor.value is None:
+            # The conversion reported success, so the out-pointer was filled.
+            raise RuntimeError("security descriptor conversion succeeded without a descriptor")
         result = int(descriptor.value)
         descriptor = wintypes.LPVOID()
         return result
@@ -668,7 +673,7 @@ def _windows_private_security_descriptor() -> int:
 def _free_windows_security_descriptor(descriptor: int) -> None:
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _win32().WinDLL("kernel32", use_last_error=True)
     local_free = kernel32.LocalFree
     local_free.argtypes = [wintypes.HLOCAL]
     local_free.restype = wintypes.HLOCAL
@@ -686,7 +691,7 @@ def _create_private_windows_directory(parent: Path, name: str | None = None) -> 
             ("inherit_handle", wintypes.BOOL),
         ]
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _win32().WinDLL("kernel32", use_last_error=True)
     create_directory = kernel32.CreateDirectoryW
     create_directory.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(SecurityAttributes)]
     create_directory.restype = wintypes.BOOL
@@ -702,9 +707,9 @@ def _create_private_windows_directory(parent: Path, name: str | None = None) -> 
             path = parent / child_name
             if create_directory(str(path), ctypes.byref(attributes)):
                 return path
-            error = ctypes.get_last_error()
+            error = _win32().get_last_error()
             if name is not None or error != 183:
-                raise ctypes.WinError(error)
+                raise _win32().WinError(error)
         raise FileExistsError("unable to allocate a unique probe workspace parent")
     finally:
         _free_windows_security_descriptor(descriptor)
@@ -716,13 +721,13 @@ def _set_private_windows_dacl(path: Path) -> None:
         return
     from ctypes import wintypes
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32 = _win32().WinDLL("advapi32", use_last_error=True)
     set_file_security = advapi32.SetFileSecurityW
     set_file_security.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID]
     set_file_security.restype = wintypes.BOOL
     descriptor = _windows_private_security_descriptor()
     try:
         if not set_file_security(str(path), 0x80000004, descriptor):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32().WinError(_win32().get_last_error())
     finally:
         _free_windows_security_descriptor(descriptor)

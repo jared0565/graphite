@@ -13,7 +13,24 @@ import sys
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
+
+
+class _Win32Ctypes(Protocol):
+    """The Windows-only `ctypes` surface, declared so the type gate passes on
+    every platform. A private copy of `graphite._win32_ctypes.Win32Ctypes`:
+    this file runs under `python -I` and must not import from the package.
+    Same module object, attributes looked up at the call."""
+
+    def WinDLL(self, name: str, *, use_last_error: bool = ...) -> ctypes.CDLL: ...
+
+    def WinError(self, code: int | None = ..., descr: str | None = ...) -> OSError: ...
+
+    def get_last_error(self) -> int: ...
+
+
+def _win32() -> _Win32Ctypes:
+    return cast(_Win32Ctypes, ctypes)
 
 
 EXIT_UNSAFE = 73
@@ -244,7 +261,7 @@ class _NativeWindowsBackend:
         from ctypes import wintypes
 
         self._wintypes = wintypes
-        self._api = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._api = _win32().WinDLL("kernel32", use_last_error=True)
         self._api.CreateFileW.argtypes = (
             wintypes.LPCWSTR,
             wintypes.DWORD,
@@ -291,7 +308,7 @@ class _NativeWindowsBackend:
             None,
         )
         if handle == self._invalid_handle:
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32().WinError(_win32().get_last_error())
         return int(handle)
 
     def open_identity(self, path: Path) -> int:
@@ -310,7 +327,7 @@ class _NativeWindowsBackend:
             None,
         )
         if handle == self._invalid_handle:
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32().WinError(_win32().get_last_error())
         return int(handle)
 
     def information(self, handle: int) -> tuple[int, int, int]:
@@ -318,12 +335,12 @@ class _NativeWindowsBackend:
         if not self._api.GetFileInformationByHandleEx(
             handle, 18, ctypes.byref(identity), ctypes.sizeof(identity)
         ):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32().WinError(_win32().get_last_error())
         attributes = _FileAttributeTagInformation()
         if not self._api.GetFileInformationByHandleEx(
             handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)
         ):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32().WinError(_win32().get_last_error())
         file_id = int.from_bytes(bytes(identity.file_id), "little")
         return identity.volume_serial, file_id, attributes.file_attributes
 
@@ -335,10 +352,10 @@ class _NativeWindowsBackend:
             if not self._api.GetFileInformationByHandleEx(
                 handle, information_class, buffer, len(buffer)
             ):
-                error = ctypes.get_last_error()
+                error = _win32().get_last_error()
                 if error == self._error_no_more_files:
                     return []
-                raise ctypes.WinError(error)
+                raise _win32().WinError(error)
             information_class = 19
             offset = 0
             while True:
@@ -381,14 +398,14 @@ class _NativeWindowsBackend:
         if not self._api.SetFileInformationByHandle(
             handle, 0, ctypes.byref(details), ctypes.sizeof(details)
         ):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32().WinError(_win32().get_last_error())
 
     def _clear_readonly(self, handle: int) -> None:
         details = _FileBasicInformation()
         if not self._api.GetFileInformationByHandleEx(
             handle, 0, ctypes.byref(details), ctypes.sizeof(details)
         ):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32().WinError(_win32().get_last_error())
         if details.file_attributes & self._readonly_attribute:
             details.file_attributes &= ~self._readonly_attribute
             self._set_basic_information(handle, details)
@@ -399,19 +416,19 @@ class _NativeWindowsBackend:
             handle, 21, ctypes.byref(extended), ctypes.sizeof(extended)
         ):
             return
-        error = ctypes.get_last_error()
+        error = _win32().get_last_error()
         if error not in self._fallback_errors:
-            raise ctypes.WinError(error)
+            raise _win32().WinError(error)
         self._clear_readonly(handle)
         fallback = _FileDispositionInformation(1)
         if not self._api.SetFileInformationByHandle(
             handle, 4, ctypes.byref(fallback), ctypes.sizeof(fallback)
         ):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32().WinError(_win32().get_last_error())
 
     def close(self, handle: int) -> None:
         if handle and not self._api.CloseHandle(handle):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win32().WinError(_win32().get_last_error())
 
 
 def _delete_windows_handle(
