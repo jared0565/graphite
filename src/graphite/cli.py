@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import platform
+import subprocess
 import contextlib
 import json
 import math
@@ -98,6 +100,9 @@ from .windows_task import (
     query_daemon_task,
 )
 from .windows_startup import install_startup_launcher, startup_status, uninstall_startup_launcher
+from .daemon_launch import DaemonLaunch, daemon_launch
+from .launchd_agent import DEFAULT_LABEL, install_agent, query_agent, uninstall_agent
+from .systemd_unit import DEFAULT_UNIT_NAME, install_unit, query_unit, uninstall_unit
 
 _TEST_SUFFIXES = (
     ".test.ts",
@@ -153,6 +158,11 @@ _ACTIVATION_EXEMPT_COMMANDS = frozenset({
     "daemon-install-startup-windows",
     "daemon-startup-status",
     "daemon-uninstall-startup-windows",
+    "daemon-install-linux",
+    "daemon-uninstall-linux",
+    "daemon-install-macos",
+    "daemon-uninstall-macos",
+    "daemon-service-status",
     "agent-hook",
     # `debt` reads the engine's own caveat registry and touches no repository at
     # all. Marking the cwd active would enrol whatever directory the operator
@@ -1913,6 +1923,148 @@ def cmd_daemon_uninstall_startup_windows(args: argparse.Namespace) -> int:
     return 0
 
 
+def _daemon_launch_from_args(args: argparse.Namespace) -> DaemonLaunch:
+    return daemon_launch(
+        Path(args.base_path),
+        interpreter=args.graphite_executable,
+        scan_interval=args.scan_interval,
+        discover_interval=args.discover_interval,
+        max_projects=args.max_projects,
+        max_depth=args.max_depth,
+        max_builds_per_cycle=args.max_builds_per_cycle,
+        build_timeout=args.build_timeout,
+        debounce=args.debounce,
+    )
+
+
+def _print_supervisor_result(payload: dict[str, Any], *, json_mode: bool, ok_line: str, fail_line: str) -> int:
+    """The POSIX installers all return the windows_task payload shape:
+    `ok`, plus a `steps` list of per-command results."""
+    if json_mode:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif payload.get("ok"):
+        print(f"[graphite] {ok_line}")
+        for key in ("unit_path", "agent_path"):
+            if payload.get(key):
+                print(f"[graphite] file: {payload[key]}")
+    else:
+        print(f"[graphite] {fail_line}", file=sys.stderr)
+        if payload.get("error"):
+            print(str(payload["error"]), file=sys.stderr)
+        for step in payload.get("steps") or []:
+            if isinstance(step, dict) and (step.get("stderr") or step.get("stdout")):
+                print(f"  {' '.join(str(part) for part in step.get('command', []))}: {step.get('stderr') or step.get('stdout')}", file=sys.stderr)
+    return 0 if payload.get("ok") else 1
+
+
+def _supervisor_refused(args: argparse.Namespace, exc: Exception, *, head: str) -> int:
+    """The wrong platform, or a launcher that cannot carry `-P`: refused
+    before anything is written, with the same message shape as Windows."""
+    payload = {"ok": False, "error": str(exc)}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"[graphite] {head}: {exc}", file=sys.stderr)
+    return 1
+
+
+def cmd_daemon_install_linux(args: argparse.Namespace) -> int:
+    try:
+        launch = _daemon_launch_from_args(args)
+        result = install_unit(launch, name=args.name, home=None, start_now=not args.no_start, run=subprocess.run)
+    except (RuntimeError, ValueError, FileNotFoundError, OSError) as exc:
+        return _supervisor_refused(args, exc, head="daemon-install-linux")
+    payload: dict[str, Any] = {"name": args.name, "argv": list(launch.argv), **result}
+    return _print_supervisor_result(
+        payload,
+        json_mode=args.json,
+        ok_line=f"systemd user unit installed: {args.name}",
+        fail_line=f"failed to install systemd user unit: {args.name}",
+    )
+
+
+def cmd_daemon_uninstall_linux(args: argparse.Namespace) -> int:
+    try:
+        result = uninstall_unit(args.name, home=None, run=subprocess.run)
+    except (RuntimeError, OSError) as exc:
+        return _supervisor_refused(args, exc, head="daemon-uninstall-linux")
+    payload: dict[str, Any] = {"name": args.name, **result}
+    return _print_supervisor_result(
+        payload,
+        json_mode=args.json,
+        ok_line=f"systemd user unit removed: {args.name}",
+        fail_line=f"failed to remove systemd user unit: {args.name}",
+    )
+
+
+def cmd_daemon_install_macos(args: argparse.Namespace) -> int:
+    try:
+        launch = _daemon_launch_from_args(args)
+        result = install_agent(launch, label=args.label, home=None, uid=None, run=subprocess.run)
+    except (RuntimeError, ValueError, FileNotFoundError, OSError) as exc:
+        return _supervisor_refused(args, exc, head="daemon-install-macos")
+    payload: dict[str, Any] = {"label": args.label, "argv": list(launch.argv), **result}
+    return _print_supervisor_result(
+        payload,
+        json_mode=args.json,
+        ok_line=f"launchd agent installed: {args.label}",
+        fail_line=f"failed to install launchd agent: {args.label}",
+    )
+
+
+def cmd_daemon_uninstall_macos(args: argparse.Namespace) -> int:
+    try:
+        result = uninstall_agent(args.label, home=None, uid=None, run=subprocess.run)
+    except (RuntimeError, OSError) as exc:
+        return _supervisor_refused(args, exc, head="daemon-uninstall-macos")
+    payload: dict[str, Any] = {"label": args.label, **result}
+    return _print_supervisor_result(
+        payload,
+        json_mode=args.json,
+        ok_line=f"launchd agent removed: {args.label}",
+        fail_line=f"failed to remove launchd agent: {args.label}",
+    )
+
+
+def cmd_daemon_service_status(args: argparse.Namespace) -> int:
+    """One question, answered by whichever supervisor this platform uses."""
+    system = platform.system().lower()
+    payload: dict[str, Any]
+    try:
+        if system == "linux":
+            payload = {**query_unit(args.name, run=subprocess.run), "supervisor": "systemd"}
+        elif system == "darwin":
+            payload = {**query_agent(args.label, uid=None, run=subprocess.run), "supervisor": "launchd"}
+        elif system == "windows":
+            task = query_daemon_task(args.task_name)
+            startup = startup_status(Path(args.base_path), name=args.task_name)
+            payload = {
+                "ok": True,
+                "exists": bool(task.get("exists")) or bool(startup.get("installed")),
+                "task": task,
+                "startup": startup,
+                "supervisor": "windows",
+            }
+        else:
+            payload = {"ok": False, "exists": False, "supervisor": None, "error": f"unsupported platform: {system}"}
+    except (RuntimeError, OSError) as exc:
+        return _supervisor_refused(args, exc, head="daemon-service-status")
+    payload["platform"] = system
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif payload.get("exists"):
+        print(f"[graphite] daemon supervisor installed ({payload['supervisor']})")
+        detail = payload.get("unit") or payload.get("agent") or {}
+        if isinstance(detail, dict):
+            for key, value in detail.items():
+                print(f"  {key}: {value}")
+    else:
+        print(f"[graphite] daemon supervisor not installed ({payload.get('supervisor') or system})")
+        if payload.get("error"):
+            print(str(payload["error"]), file=sys.stderr)
+    return 0 if payload.get("exists") else 1
+
+
 def _route_print(payload: dict[str, Any], *, json_mode: bool) -> None:
     if json_mode:
         print(json.dumps(payload, sort_keys=True))
@@ -3007,6 +3159,49 @@ def main(argv: list[str] | None = None) -> int:
     p_startup_uninstall.add_argument("--name", default=DEFAULT_TASK_NAME, help="Startup launcher name")
     p_startup_uninstall.add_argument("--json", action="store_true", help="Emit removal result as JSON")
     p_startup_uninstall.set_defaults(func=cmd_daemon_uninstall_startup_windows)
+
+    # POSIX supervision (PRD WS-F): the same daemon, under the platform's own
+    # supervisor. The argument set mirrors daemon-install-windows so the
+    # launch argv -- built once, in daemon_launch -- is identical everywhere.
+    for posix_name, posix_func, posix_help in (
+        ("daemon-install-linux", cmd_daemon_install_linux, "Install the Graphite daemon as a systemd user unit (Linux)"),
+        ("daemon-install-macos", cmd_daemon_install_macos, "Install the Graphite daemon as a launchd agent (macOS)"),
+    ):
+        p_posix = sub.add_parser(posix_name, help=posix_help)
+        p_posix.add_argument("base_path", nargs="?", default=default_root, help="Base folder to supervise")
+        if posix_name.endswith("linux"):
+            p_posix.add_argument("--name", default=DEFAULT_UNIT_NAME, help="systemd user unit name")
+        else:
+            p_posix.add_argument("--label", default=DEFAULT_LABEL, help="launchd agent label")
+        p_posix.add_argument("--graphite-executable", default=None, help="Python interpreter for the generated launcher (default: this one). A console script is refused: it cannot carry -P.")
+        p_posix.add_argument("--scan-interval", type=float, default=15.0, help="Polling interval in seconds")
+        p_posix.add_argument("--discover-interval", type=float, default=90.0, help="Project rediscovery interval in seconds")
+        p_posix.add_argument("--debounce", type=float, default=1.0, help="Stable-change debounce seconds")
+        p_posix.add_argument("--max-depth", type=int, default=6, help="Maximum discovery depth below base folder")
+        p_posix.add_argument("--max-projects", type=int, default=128, help="Maximum projects to supervise")
+        p_posix.add_argument("--max-builds-per-cycle", type=int, default=1, help="Maximum project rebuilds per daemon cycle")
+        p_posix.add_argument("--build-timeout", type=float, default=240.0, help="Per-project build timeout in seconds")
+        p_posix.add_argument("--no-start", action="store_true", help="Install and enable without starting now")
+        p_posix.add_argument("--json", action="store_true", help="Emit installation result as JSON")
+        p_posix.set_defaults(func=posix_func)
+
+    p_linux_uninstall = sub.add_parser("daemon-uninstall-linux", help="Disable and remove the Graphite daemon systemd user unit")
+    p_linux_uninstall.add_argument("--name", default=DEFAULT_UNIT_NAME, help="systemd user unit name")
+    p_linux_uninstall.add_argument("--json", action="store_true", help="Emit removal result as JSON")
+    p_linux_uninstall.set_defaults(func=cmd_daemon_uninstall_linux)
+
+    p_macos_uninstall = sub.add_parser("daemon-uninstall-macos", help="Boot out and remove the Graphite daemon launchd agent")
+    p_macos_uninstall.add_argument("--label", default=DEFAULT_LABEL, help="launchd agent label")
+    p_macos_uninstall.add_argument("--json", action="store_true", help="Emit removal result as JSON")
+    p_macos_uninstall.set_defaults(func=cmd_daemon_uninstall_macos)
+
+    p_service_status = sub.add_parser("daemon-service-status", help="Report the daemon supervisor for this platform (systemd, launchd, or the Windows task and startup launcher)")
+    p_service_status.add_argument("base_path", nargs="?", default=default_root, help="Base folder supervised (Windows startup launcher lookup)")
+    p_service_status.add_argument("--name", default=DEFAULT_UNIT_NAME, help="systemd user unit name")
+    p_service_status.add_argument("--label", default=DEFAULT_LABEL, help="launchd agent label")
+    p_service_status.add_argument("--task-name", default=DEFAULT_TASK_NAME, help="Windows Scheduled Task / startup launcher name")
+    p_service_status.add_argument("--json", action="store_true", help="Emit status as JSON")
+    p_service_status.set_defaults(func=cmd_daemon_service_status)
 
     args = parser.parse_args(argv)
     if getattr(args, "version", False):

@@ -466,6 +466,24 @@ graphite daemon-uninstall-startup-windows C:\Projects
 
 The fallback writes a hidden VBS launcher in the current user's Startup folder and an idempotent PowerShell launcher in `C:\Projects\.graphite-daemon`.
 
+Linux and macOS supervision, same daemon, same bounded defaults:
+
+```bash
+# Linux: a systemd USER unit (~/.config/systemd/user/graphite-daemon.service),
+# reloaded, enabled and started; no privilege needed
+graphite daemon-install-linux ~/Projects
+graphite daemon-service-status
+graphite daemon-uninstall-linux
+
+# macOS: a launchd agent (~/Library/LaunchAgents/com.graphite.daemon.plist),
+# bootstrapped into the user's GUI domain; logs under ~/Library/Logs/graphite
+graphite daemon-install-macos ~/Projects
+graphite daemon-service-status
+graphite daemon-uninstall-macos
+```
+
+`daemon-service-status` answers for whichever supervisor the platform uses (on Windows it reports the scheduled task and the startup launcher), and `daemon-health` reports the same fact as `startup installed`. Every generated launcher runs the interpreter with `-P` -- the systemd unit and the plist are built from the same argument vector as the Windows task. A systemd user unit runs only while you have a login session unless you enable lingering (`loginctl enable-linger $USER`); that is a policy choice graphite does not make for you.
+
 ## Canonical graph and enrichment isolation
 
 `scan`, `build`, `report`, `check`, `validate`, `query`, `context`, `impact`, `watch`, and `daemon` are canonical operations. They force an internal no-inference configuration, ignore ambient `GRAPHITE_LLM*` values, exclude provider data from graph artifacts, and reject legacy non-`none` `--llm` or provider flags. `--llm none` remains a temporary compatibility no-op.
