@@ -632,7 +632,7 @@ def _bounded_bfs_path(
             if v == dst:
                 path = [v]
                 while prev[path[-1]] is not None:
-                    path.append(prev[path[-1]])  # type: ignore[arg-type]
+                    path.append(prev[path[-1]])
                 path.reverse()
                 return path, False
             queue.append(v)

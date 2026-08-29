@@ -1290,7 +1290,9 @@ def _collect_python_import_maps(
                             external.add(root)
                 elif child.type == "aliased_import":
                     module = _text(child.child_by_field_name("name"))
-                    local = _text(child.child_by_field_name("alias"))
+                    # Optional by declaration: the `from` branch below starts
+                    # the name at None and narrows before every use.
+                    local: str | None = _text(child.child_by_field_name("alias"))
                     if module and local:
                         resolved = source_index.resolve_python_module(rel_path, module)
                         if resolved:
@@ -2170,7 +2172,7 @@ def _resolve_method_dispatch(
         # "too generic to guess".
         if candidates and _dispatch_is_gated(e.get("source_file")):
             caller_file = _file_node_id(e["source_file"])
-            reachable = imports_by_file.get(caller_file, frozenset())
+            reachable: set[str] | frozenset[str] = imports_by_file.get(caller_file, frozenset())
             candidates = {
                 c for c in candidates
                 if file_of_node.get(c) == caller_file or file_of_node.get(c) in reachable

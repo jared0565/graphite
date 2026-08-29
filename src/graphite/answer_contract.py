@@ -229,8 +229,8 @@ def non_detecting_relations(
         for relation in set(relations)
         if relation in NON_DETECTION_RELATIONS
         and (
-            NON_DETECTION_RELATIONS[relation] is None
-            or language_set & NON_DETECTION_RELATIONS[relation]
+            (scope := NON_DETECTION_RELATIONS[relation]) is None
+            or language_set & scope
         )
     )
 

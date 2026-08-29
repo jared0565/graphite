@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeGuard
 
 from .daemon import DaemonStatusInvalidError, DaemonStatusTooLargeError, read_daemon_status
 from .routing.lifecycle import LifecycleReasonCode, ProviderLifecycleState
@@ -241,8 +241,8 @@ def evaluate_daemon_health(
 
     startup = {"checked": False}
     if opts.require_startup:
-        checker = startup_checker or check_startup_launcher
-        startup = checker(base, opts.startup_name)
+        startup_check = startup_checker or check_startup_launcher
+        startup = startup_check(base, opts.startup_name)
         if startup.get("supported") is False:
             warnings.append({"code": "startup_check_unsupported", "message": str(startup.get("error", "startup check unsupported"))})
         elif not startup.get("installed"):
@@ -437,7 +437,7 @@ def _schema_issue(field: str, index: int | None = None) -> dict[str, Any]:
     return issue
 
 
-def _nonnegative_int(value: object) -> bool:
+def _nonnegative_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
@@ -482,7 +482,8 @@ def _safe_text(value: object) -> str:
 def _invalid_project_field(item: Mapping[str, Any]) -> str | None:
     root = item.get("root")
     if (
-        not _bounded_clean_string(root, _MAX_ROOT_LENGTH, nullable=False)
+        not isinstance(root, str)
+        or not _bounded_clean_string(root, _MAX_ROOT_LENGTH, nullable=False)
         or not root.strip()
     ):
         return "root"
