@@ -179,6 +179,9 @@ include = [
 [tool.coverage.run]
 source = ["src/graphite"]
 branch = true
+# The three OS legs each upload a data file and one job combines them;
+# absolute paths would make every file look like a different tree.
+relative_files = true
 
 [tool.coverage.report]
 show_missing = true

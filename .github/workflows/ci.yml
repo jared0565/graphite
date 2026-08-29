@@ -27,6 +27,15 @@ on:
   # OS at total_ms 0, macOS included). Re-measure before restoring any
   # cost-driven restriction; do not restore one from prose.
   workflow_dispatch:
+    inputs:
+      # Overrides COVERAGE_FLOOR for one run. Its purpose is the negative
+      # control of the coverage gate: dispatch with a value above the
+      # measurement and the `coverage` job must go red. Empty means "use the
+      # committed floor", which is what every push and PR run does.
+      coverage_floor:
+        description: "COVERAGE_FLOOR for this run only (negative control: set above the measurement)"
+        type: string
+        default: ""
 
 concurrency:
   # push/PR still coalesce -- a superseded commit's run is wasted work.
@@ -117,11 +126,12 @@ jobs:
         python: ["3.11", "3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
     name: test (${{ matrix.os }}, py${{ matrix.python }})
-    # 25: push runs of the old gating job landed at 6-9 minutes and the
-    # advisory legs at ~8, so this is ~3x headroom over the slowest real run.
+    # 30: push runs of the old gating job landed at 6-9 minutes, the
+    # advisory legs at ~8, and the three coverage legs below run ~1.5x
+    # slower under the tracer, so this is ~2x headroom over the slowest.
     # It caps a HANG; `--timeout` below caps a TEST. Raise it only after
     # re-measuring the distribution, not on instinct.
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       # These majors track the runner's Node runtime, so they need a periodic
       # bump: v4/v5 were built for Node 20, which the runner now force-migrates
@@ -169,7 +179,83 @@ jobs:
         continue-on-error: true
         run: python -m pytest tests/test_doctor.py -k real_server -rA -q
       - name: Test
+        if: matrix.python != '3.12'
         run: python -m pytest -q --timeout=120 --timeout-method=thread
+      # Coverage is collected on ONE Python per OS -- the tracer costs ~1.5x
+      # wall time, and the line-coverage question is not a version question.
+      # 3.12 on every OS so the platform-only code (windows_task, systemd,
+      # launchd, the POSIX process paths) is all measured and combined below.
+      - name: Test with coverage
+        if: matrix.python == '3.12'
+        env:
+          COVERAGE_FILE: .coverage.${{ matrix.os }}
+        run: python -m pytest -q --timeout=120 --timeout-method=thread --cov --cov-branch --cov-report=
+      - name: Upload coverage data
+        if: matrix.python == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}
+          path: .coverage.${{ matrix.os }}
+          # Dotfiles are skipped by default -- an omission here uploads
+          # nothing and the combine job would then combine nothing.
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # ONE number for the whole matrix, with a floor that can only rise.
+  #
+  # Each OS leg's data file is combined here; the result includes code that
+  # only runs on one platform, which is why no single leg's figure is the
+  # measurement. COVERAGE_FLOOR is the integer part of the first combined run
+  # and is raised when a release measures higher; lowering it needs a
+  # CHANGELOG entry saying what was removed and why (CONTRIBUTING.md,
+  # "Coverage floor").
+  coverage:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install coverage
+        run: python -m pip install "coverage[toml]>=7.6"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+      - name: Combine the three OS runs
+        run: |
+          set -euo pipefail
+          ls -la .coverage.*
+          count=$(ls .coverage.* | wc -l)
+          if [ "$count" -ne 3 ]; then
+            echo "::error::expected 3 coverage data files (one per OS), found $count"
+            exit 1
+          fi
+          python -m coverage combine .coverage.*
+          python -m coverage json -o coverage.json
+          python -m coverage report --format=markdown > coverage.md
+          cat coverage.md >> "$GITHUB_STEP_SUMMARY"
+          python -m coverage report | tail -1
+      - name: Enforce the floor
+        # A dispatch may override the floor for ONE run -- that is the
+        # negative control: dispatch with a floor above the measurement and
+        # this step must fail. Push and PR runs always use the committed value.
+        env:
+          COVERAGE_FLOOR: ${{ inputs.coverage_floor || '82' }}
+        run: |
+          set -euo pipefail
+          echo "floor: $COVERAGE_FLOOR"
+          python -m coverage report --fail-under="$COVERAGE_FLOOR" > floor.txt 2>&1; echo "EXIT=$?" >> floor.txt
+          tail -2 floor.txt
+          grep -q '^EXIT=0$' floor.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.json
+            coverage.md
 
   # The ARTIFACT, which nothing else here tests.
   #

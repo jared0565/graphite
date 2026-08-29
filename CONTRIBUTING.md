@@ -101,6 +101,15 @@ Doctor changes require focused tests for stable doctor JSON, deterministic order
 
 No live provider calls in automated tests are permitted. Exercise network and subprocess behavior through a fake worker, fake provider, and fake process boundary with controlled time, output, failures, and descendants. Tests must remain offline, deterministic, and safe to run without credentials.
 
+### Coverage floor
+
+CI collects branch coverage on the 3.12 leg of every OS, combines the three
+data files in the `coverage` job, and fails under `COVERAGE_FLOOR` in
+`.github/workflows/ci.yml`. The floor is the integer part of the measured
+total: raise it when a release measures higher, and never lower it without a
+CHANGELOG entry saying what was removed and why. No single leg's figure is
+the measurement -- platform-only code is covered on one OS each.
+
 ## Security expectations
 
 Treat repository files, file names, symlinks, Git metadata, generated graph data, and model output as untrusted input. Pass subprocess arguments as an argument vector and never interpolate untrusted values into a shell command. Preserve path containment, bounded I/O, explicit timeouts, atomic writes, output encoding, and safe error redaction at every relevant boundary.
