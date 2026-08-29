@@ -36,7 +36,8 @@ VERSION = "1.2.3"
 WHEEL_BYTES = b"PK\x03\x04 stand-in for graphite_code-1.2.3-py3-none-any.whl"
 APPROVED = hashlib.sha256(WHEEL_BYTES).hexdigest()
 DIGEST_ARM = "served wheel matches the approved digest"
-ARMS = ("index", "install", "probe", "download", "cli")
+ARMS = ("index", "install", "probe", "download", "cli", "provenance")
+PROVENANCE_ARM = "index reports PEP 740 provenance for the served files"
 
 
 @dataclass
@@ -60,6 +61,11 @@ def _default(kind: str) -> Reply:
         }) + "\n")
     if kind == "download":
         return Reply(stdout=f"Saved dl/graphite_code-{VERSION}-py3-none-any.whl\n")
+    if kind == "provenance":
+        return Reply(stdout=json.dumps({
+            f"graphite_code-{VERSION}-py3-none-any.whl": True,
+            f"graphite_code-{VERSION}.tar.gz": True,
+        }) + "\n")
     return Reply(stdout=f"graphite {VERSION}\n")
 
 
@@ -70,7 +76,8 @@ def _classify(argv: list[str]) -> str:
     these tests must go red rather than quietly receive a default reply.
     """
     if "-c" in argv:
-        return "probe"
+        # Two arms are `python -c`: the import probe and the provenance fetch.
+        return "provenance" if any("urllib" in part for part in argv) else "probe"
     if "pip" in argv:
         for kind in ("index", "install", "download"):
             if kind in argv:
@@ -118,9 +125,12 @@ def _verify(
     version: str = VERSION,
     replies: dict[str, Reply] | None = None,
     wheels: tuple[bytes, ...] = (WHEEL_BYTES,),
+    expect_provenance: bool | None = None,
 ) -> tuple[vpr.Outcome, FakeRunner]:
     runner = FakeRunner(replies=replies or {}, wheels=wheels)
-    outcome = vpr.verify(version, sha, tmp_path / "python", tmp_path, run=runner)
+    outcome = vpr.verify(
+        version, sha, tmp_path / "python", tmp_path, run=runner, expect_provenance=expect_provenance
+    )
     return outcome, runner
 
 
@@ -407,3 +417,45 @@ def test_venv_python_falls_back_to_the_posix_layout(tmp_path: Path) -> None:
     (tmp_path / "bin" / "python").write_text("", encoding="utf-8")
 
     assert vpr._venv_python(tmp_path) == tmp_path / "bin" / "python"
+
+
+# --- ARM 6: provenance ------------------------------------------------------
+
+
+def test_a_served_file_without_provenance_fails(tmp_path: Path) -> None:
+    """From 1.0.0 the publish workflow attests every file it uploads; a file the
+    index serves without provenance was not built by that workflow."""
+    replies = {"provenance": Reply(stdout=json.dumps({
+        f"graphite_code-{VERSION}-py3-none-any.whl": True,
+        f"graphite_code-{VERSION}.tar.gz": False,
+    }))}
+
+    outcome, _ = _verify(tmp_path, replies=replies)
+
+    assert PROVENANCE_ARM in outcome.failed
+
+
+def test_provenance_is_a_visible_skip_below_one_point_zero(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    """0.x artifacts were built on a maintainer's machine and honestly carry
+    no attestation; the arm says so instead of failing or passing."""
+    outcome, runner = _verify(tmp_path, version="0.9.9")
+
+    assert PROVENANCE_ARM in outcome.skipped
+    assert "provenance" not in runner.kinds
+    assert "not expected for 0.9.9" in capsys.readouterr().out
+
+
+def test_provenance_can_be_required_explicitly_below_one_point_zero(tmp_path: Path) -> None:
+    outcome, runner = _verify(tmp_path, version="0.9.9", expect_provenance=True)
+
+    assert "provenance" in runner.kinds
+    assert PROVENANCE_ARM in outcome.passed
+
+
+def test_an_index_that_cannot_be_read_fails_the_provenance_arm(tmp_path: Path) -> None:
+    """Unable to verify is not verified."""
+    replies = {"provenance": Reply(returncode=1, stderr="urllib.error.HTTPError: HTTP Error 404: Not Found")}
+
+    outcome, _ = _verify(tmp_path, replies=replies)
+
+    assert PROVENANCE_ARM in outcome.failed
