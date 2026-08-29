@@ -249,7 +249,13 @@ module = [
     "community",
     "community.*",
     "tree_sitter",
-    "tree_sitter_*",
+    # mypy module patterns take '*' only as a dotted component, so the five
+    # grammar packages are listed by name rather than as `tree_sitter_*`.
+    "tree_sitter_javascript",
+    "tree_sitter_typescript",
+    "tree_sitter_python",
+    "tree_sitter_go",
+    "tree_sitter_rust",
     "louvain",
     "mcp",
     "mcp.*",

@@ -259,7 +259,7 @@ jobs:
         run: |
           aramid doctor --fix > doctor.txt 2>&1; echo "EXIT=$?" >> doctor.txt
           cat doctor.txt
-          if grep -qE '^\s+MISSING\s+(gitleaks|semgrep|ruff|pip-audit|tests|interpreter)' doctor.txt; then
+          if grep -qE '^\s+MISSING\s+(gitleaks|semgrep|ruff|pip-audit|tests|interpreter)\b' doctor.txt; then
             echo "::error::a BLOCK-tier tool is missing on the runner"; exit 1
           fi
       - name: Pre-commit gate (gitleaks, ruff security rules, shadow)
