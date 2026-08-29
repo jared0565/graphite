@@ -42,6 +42,8 @@ _GIT_VERSION_FAILURE_FALLBACK = "Git version could not be verified"
 
 def git_version_failure_message(reason: str | None) -> str:
     """Map a version-check `reason` to its sanitized operator-facing message."""
+    if reason is None:
+        return _GIT_VERSION_FAILURE_FALLBACK
     return _GIT_VERSION_FAILURE_MESSAGES.get(reason, _GIT_VERSION_FAILURE_FALLBACK)
 
 
@@ -254,6 +256,9 @@ class GitRunner:
         if process.stdout is None:
             _bounded_cleanup(process)
             raise GitLaunchError("unable to run Git command", reason="no_stdout")
+        # Bound here, where the check above has narrowed it: the reader below is
+        # a closure, and a narrowing does not carry into one.
+        stdout_pipe = process.stdout
 
         stdout = bytearray()
         overflow = threading.Event()
@@ -268,7 +273,7 @@ class GitRunner:
         def read_stdout() -> None:
             try:
                 while True:
-                    chunk = process.stdout.read(_READ_CHUNK_BYTES)
+                    chunk = stdout_pipe.read(_READ_CHUNK_BYTES)
                     if not chunk:
                         return
                     remaining = max_stdout_bytes - len(stdout)

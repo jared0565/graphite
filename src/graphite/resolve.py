@@ -8,10 +8,13 @@ import tomllib
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from typing import Final, Iterable
+from typing import TYPE_CHECKING, Final, Iterable
 
 from .config import Config
 from .ts_bridge import TypeScriptCompilerEdge, TypeScriptCompilerIndex, build_typescript_index
+
+if TYPE_CHECKING:
+    from .ingest import FileEntry
 
 
 @lru_cache(maxsize=8)
@@ -91,7 +94,7 @@ class SourceIndex:
     cargo_crate_dependencies: tuple[tuple[str, frozenset[str]], ...] = ()
 
     @classmethod
-    def from_entries(cls, entries: Iterable[object], cfg: Config | None = None) -> "SourceIndex":
+    def from_entries(cls, entries: Iterable[FileEntry], cfg: Config | None = None) -> "SourceIndex":
         entries = list(entries)
         root = Path.cwd().resolve()
         rel_paths: set[str] = set()

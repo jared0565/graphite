@@ -231,6 +231,40 @@ def test_transition_rejects_stale_previous_authority(tmp_path: Path) -> None:
         )
 
 
+def test_transition_claiming_no_prior_observation_over_unavailable_row_is_stale(
+    tmp_path: Path,
+) -> None:
+    """An UNAVAILABLE row has no identity digest, so a fresh-boundary claim
+    (previous digest None, previous state None) matches on digest and must be
+    rejected on state -- as ``lifecycle_transition_stale``, not by dereferencing
+    the absent previous state."""
+    store = _store(tmp_path)
+    boundary = "b" * 64
+    unavailable = ProviderLifecycleEvent(
+        event_id="event-unavailable",
+        provider=LifecycleProviderId.CLAUDE_CODE,
+        runtime_kind=RuntimeKind.LOCAL_CLI,
+        previous_identity_digest=None,
+        current_identity_digest=None,
+        previous_state=None,
+        current_state=ProviderLifecycleState.UNAVAILABLE,
+        reason=LifecycleReasonCode.RUNTIME_MISSING,
+        policy_version="1.0.0",
+        occurred_at=1_721_347_100,
+    )
+    assert store.record_transition(boundary, None, unavailable) is True
+
+    identity = _identity()
+    fresh_claim = _event(identity, event_id="event-fresh-claim")
+    assert fresh_claim.previous_state is None
+    assert fresh_claim.previous_identity_digest is None
+    with pytest.raises(LifecycleStorageError, match="^lifecycle_transition_stale$"):
+        store.record_transition(boundary, identity, fresh_claim)
+    current = store.current_observation(boundary)
+    assert current is not None
+    assert current.state is ProviderLifecycleState.UNAVAILABLE
+
+
 def test_lifecycle_events_are_database_immutable(tmp_path: Path) -> None:
     store = _store(tmp_path)
     identity = _identity()

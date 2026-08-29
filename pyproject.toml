@@ -75,12 +75,12 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
 ]
-# Deliberately NOT "Typing :: Typed". The source is annotated throughout, but
-# that classifier ships a promise to consumers that the type information is
-# usable, and nothing in the gate type-checks it -- there is no `py.typed`
-# marker and no mypy/pyright run. Add the marker and a checker together, or
-# neither.
+# `Typing :: Typed` is backed, not aspirational: `src/graphite/py.typed` ships
+# (scripts/verify_artifact.py refuses a wheel without it) and `python -m mypy`
+# gates in CI. The marker and the checker arrived together (PRD WS-D) -- the
+# classifier alone would be a promise nothing enforces.
 dependencies = [
     "networkx>=3.3",
     "python-louvain>=0.16",
@@ -111,7 +111,7 @@ mcp = ["mcp>=1.0,<3"]
 # here because that job installs `[dev]`, and a `--timeout` flag without the
 # plugin is an unknown-argument error -- which would turn a hang into a
 # different silent failure rather than naming it. See #45.
-dev = ["pytest>=8.0", "ruff>=0.5", "pytest-timeout>=2.3", "pytest-cov>=5.0"]
+dev = ["pytest>=8.0", "ruff>=0.5", "pytest-timeout>=2.3", "pytest-cov>=5.0", "mypy>=1.14"]
 
 # Without these the package advertises no way back to its own source. A
 # distribution page with no repository link is the shape a typosquat has, and it
@@ -216,3 +216,35 @@ select = ["E4", "E7", "E9", "F"]
 # died in collection the other -- which is how it reached aramid's pre-push
 # gate as a blocking "pytest exited 2" while a local run read green.
 pythonpath = ["."]
+
+[tool.mypy]
+# The type gate (PRD WS-D). `python -m mypy` with no arguments checks exactly
+# this; the CI lint job runs it and `src/graphite/py.typed` ships because it
+# is clean. Platform-conditional code narrows on `sys.platform` -- mypy
+# understands that and does not understand `os.name` -- so the gate reads the
+# same on a Windows dev box and the ubuntu lint runner.
+files = ["src/graphite"]
+python_version = "3.11"
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+show_error_codes = true
+pretty = false
+
+[[tool.mypy.overrides]]
+# No stubs are published for these. `ignore_missing_imports` is scoped to the
+# module list rather than set globally so a typo in an import elsewhere still
+# fails the gate.
+module = [
+    "networkx",
+    "networkx.*",
+    "community",
+    "community.*",
+    "tree_sitter",
+    "tree_sitter_*",
+    "louvain",
+    "mcp",
+    "mcp.*",
+]
+ignore_missing_imports = true

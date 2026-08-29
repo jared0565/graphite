@@ -615,7 +615,7 @@ def ensure_platform_file(path: Path, *, spec: PlatformSpec, adopt: bool = False)
     return {"platform": spec.key, "path": str(path), "changed": new_text is not None, "action": action}
 
 
-def gitignored_managed_paths(root: Path, rel_paths: Iterable[Path]) -> tuple[str, ...]:
+def gitignored_managed_paths(root: Path, rel_paths: Iterable[str | Path]) -> tuple[str, ...]:
     """Managed paths Git will never hand to a clone: untracked AND ignored.
 
     The conjunction matters in both directions, and each half alone is a bug
@@ -651,7 +651,7 @@ def gitignored_managed_paths(root: Path, rel_paths: Iterable[Path]) -> tuple[str
     return tuple(sorted(found & wanted))
 
 
-def ensure_gitignore_allowlist(path: Path, rel_paths: Iterable[Path], *, swallowed: Iterable[Path] = ()) -> dict[str, Any]:
+def ensure_gitignore_allowlist(path: Path, rel_paths: Iterable[Path], *, swallowed: Iterable[str | Path] = ()) -> dict[str, Any]:
     if not path.exists():
         return {"path": str(path), "changed": False, "added": [], "reason": "missing gitignore"}
     original = path.read_text(encoding="utf-8")

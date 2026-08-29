@@ -13,7 +13,7 @@ from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Literal, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping, Protocol
 
 from .agent_settings import classify_hook_command, read_settings
 from .config import Config, default_projects_root
@@ -29,7 +29,7 @@ from .validation import validate_graph_bundle
 
 DoctorStatus = Literal["ready", "optional", "degraded", "blocked"]
 STATUSES: tuple[DoctorStatus, ...] = ("ready", "optional", "degraded", "blocked")
-_RANK = {name: rank for rank, name in enumerate(STATUSES)}
+_RANK: dict[DoctorStatus, int] = {name: rank for rank, name in enumerate(STATUSES)}
 _ARTIFACT_LIMIT = 128 * 1024 * 1024
 _TEXT_LIMIT = 500
 _MANIFEST_LIMIT = 16 * 1024 * 1024
@@ -98,7 +98,7 @@ def build_report(root: Path, checks: Iterable[DoctorCheck], deep: bool, llm_incl
     ordered = sorted(checks, key=lambda check: check.code)
     if any(check.status not in _RANK for check in ordered):
         raise ValueError("invalid doctor check status")
-    status = max((check.status for check in ordered), key=_RANK.get, default="ready")
+    status = max((check.status for check in ordered), key=lambda name: _RANK[name], default="ready")
     return {"schema_version": 1, "root": root.resolve().name, "deep": bool(deep), "llm_included": bool(llm_included), "status": status, "exit_code": 1 if status == "blocked" else 0, "checks": [check.to_dict() for check in ordered]}
 
 
@@ -429,6 +429,8 @@ def check_daemon(root: Path, daemon_base: Path) -> DoctorCheck:
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             raw_status = None
         raw_projects = raw_status.get("projects", []) if isinstance(raw_status, MappingABC) else []
+        if not isinstance(raw_projects, list):
+            raw_projects = []
         registered = any(
             isinstance(item, MappingABC) and _normalized_root(item.get("root")) == selected
             for item in raw_projects
@@ -561,12 +563,13 @@ def _run_bounded_process(command: list[str], *, cwd: Path, env: Mapping[str, str
     process = subprocess.Popen(command, cwd=cwd, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=dict(env))
     if process.stdout is None:
         raise OSError("bounded process stdout unavailable")
+    stdout = process.stdout
     output: list[bytes] = []
     read_failed = threading.Event()
 
     def read_bounded() -> None:
         try:
-            output.append(process.stdout.read(max_stdout_bytes + 1))
+            output.append(stdout.read(max_stdout_bytes + 1))
         except Exception:
             read_failed.set()
 
@@ -634,7 +637,7 @@ def _incidents_check(root: Path) -> DoctorCheck:
     summary = f"{len(open_views)} open / {len(views) - len(open_views)} acked"
     if skipped:
         summary += f", {skipped} corrupt line(s)"
-    status = "degraded" if open_views else "ready"
+    status: DoctorStatus = "degraded" if open_views else "ready"
     return DoctorCheck(
         code="incidents",
         label="Incident ledger",
@@ -658,7 +661,13 @@ def _fast_checks(root: Path, cfg: Config, daemon_base: Path | None) -> list[Doct
     return results
 
 
-def run_doctor(root: Path, cfg: Config, daemon_base: Path | None = None, deep: bool = False, include_llm: bool = False, deep_runner: Callable[[Path, Config, bool], Iterable[DoctorCheck]] | None = None) -> dict[str, Any]:
+class DeepRunner(Protocol):
+    """The keyword shape `run_doctor` calls its deep probe runner with."""
+
+    def __call__(self, root: Path, *, cfg: Config, include_llm: bool) -> Iterable[DoctorCheck]: ...
+
+
+def run_doctor(root: Path, cfg: Config, daemon_base: Path | None = None, deep: bool = False, include_llm: bool = False, deep_runner: DeepRunner | None = None) -> dict[str, Any]:
     selected = root.resolve()
     selected_daemon_base = (daemon_base or default_projects_root()).resolve()
     checks = _fast_checks(selected, cfg, selected_daemon_base)

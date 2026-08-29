@@ -586,20 +586,23 @@ def select_route(
     used_output = sum(item.output_tokens for item in attempts)
     used_duration = sum(item.duration_ms for item in attempts)
     costs = tuple(item.cost_microunits for item in attempts)
-    if pool.max_cost_microunits is None:
+    max_cost = pool.max_cost_microunits
+    if max_cost is None:
         if any(value is not None for value in costs):
             raise RoutePoolError("route_pool_cost_invalid")
-        used_cost: int | None = None
+        cost_exhausted = False
+        remaining_cost: int | None = None
     else:
         if any(value is None for value in costs):
             raise RoutePoolError("route_pool_cost_invalid")
         used_cost = sum(value for value in costs if value is not None)
+        cost_exhausted = used_cost >= max_cost
+        remaining_cost = max_cost - used_cost
     if attempts and (
         used_input >= pool.max_input_tokens
         or used_output >= pool.max_output_tokens
         or used_duration >= pool.max_duration_ms
-        or used_cost is not None
-        and used_cost >= pool.max_cost_microunits
+        or cost_exhausted
     ):
         raise RoutePoolError("route_pool_budget_exhausted")
     if attempts:
@@ -625,5 +628,5 @@ def select_route(
         pool.max_input_tokens - used_input,
         pool.max_output_tokens - used_output,
         pool.max_duration_ms - used_duration,
-        None if used_cost is None else pool.max_cost_microunits - used_cost,
+        remaining_cost,
     )

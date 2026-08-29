@@ -1241,7 +1241,6 @@ def _install_with_isolation(
 ) -> ActivationResult:
     temporary = None
     isolated_lease: _TemporaryDirectoryLease | None = None
-    isolated_home: Path | None = None
     result = _result_for_detection(
         detection,
         ActivationOutcome.INSTALLATION_FAILED,
@@ -1251,7 +1250,6 @@ def _install_with_isolation(
     try:
         temporary = dependencies.temporary_directory()
         isolated_lease = _validated_isolated_lease(temporary, root)
-        isolated_home = Path(isolated_lease.name) if isolated_lease is not None else None
         if isolated_lease is None:
             result = _result_for_detection(
                 detection,
@@ -1267,6 +1265,11 @@ def _install_with_isolation(
                 attempted=True,
             )
         else:
+            if detection.manager is None:
+                # detect_activation only yields a detection without a terminal
+                # result once it has settled on a manager.
+                raise RuntimeError("activation detection without a manager")
+            isolated_home = Path(isolated_lease.name)
             install = run_install(
                 root,
                 command,
@@ -1425,6 +1428,10 @@ def activate_typescript(
             )
         )
         if local_available:
+            if evidence.result is None:
+                # detect_activation(local_typescript_available=True) always
+                # returns a terminal detection.
+                raise RuntimeError("activation evidence without a result")
             return evidence.result
         detection = detect_activation(
             canonical_root,
@@ -1433,6 +1440,11 @@ def activate_typescript(
         )
         if detection.result is not None:
             return detection.result
+        manager = detection.manager
+        if manager is None:
+            # detect_activation only yields a detection without a terminal
+            # result once it has settled on a manager.
+            raise RuntimeError("activation detection without a manager")
         if (
             not request.stdin_is_tty
             or not request.stdout_is_tty
@@ -1452,7 +1464,7 @@ def activate_typescript(
             )
         command = _resolve_manager_command(
             canonical_root,
-            detection.manager,
+            manager,
             path_source,
             node,
         )
@@ -1462,7 +1474,7 @@ def activate_typescript(
                 ActivationOutcome.GUIDANCE_ONLY,
                 "manager_unavailable",
             )
-        if os.name == "nt" and detection.manager is Manager.NPM:
+        if os.name == "nt" and manager is Manager.NPM:
             node = command.references[0]
         version = run_manager_version(
             command,
@@ -1480,7 +1492,7 @@ def activate_typescript(
                 ActivationOutcome.GUIDANCE_ONLY,
                 reason,
             )
-        if not adapter_for(detection.manager).supports(version.version):
+        if not adapter_for(manager).supports(version.version):
             return _result_for_detection(
                 detection,
                 ActivationOutcome.GUIDANCE_ONLY,
@@ -1488,7 +1500,7 @@ def activate_typescript(
             )
         question = (
             "Project-local TypeScript is missing. Install it with "
-            f"{detection.manager.value} as a development dependency? [y/N]"
+            f"{manager.value} as a development dependency? [y/N]"
         )
         try:
             answer = deps.prompt(question)

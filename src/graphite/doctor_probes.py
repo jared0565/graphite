@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from importlib import machinery, metadata
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from .config import Config
 from .doctor import DoctorCheck
@@ -1140,11 +1140,16 @@ def _marker_comparison_holds(condition: str) -> bool:
             prefix = _version_tuple(expected[: -len(".*")])
             matches = _version_tuple(actual)[: len(prefix)] == prefix
             return matches if operator == "==" else not matches
-        actual_value: object = _version_tuple(actual)
-        expected_value: object = _version_tuple(expected)
-    else:
-        actual_value = actual
-        expected_value = expected
+        return _marker_values_compare(operator, _version_tuple(actual), _version_tuple(expected))
+    return _marker_values_compare(operator, actual, expected)
+
+
+_MarkerValue = TypeVar("_MarkerValue", tuple[int, ...], str)
+
+
+def _marker_values_compare(operator: str, actual_value: _MarkerValue, expected_value: _MarkerValue) -> bool:
+    # Constrained rather than `object`: both operands are version tuples or
+    # both are strings, never one of each, and only those two orderings exist.
     comparisons = {
         "==": actual_value == expected_value,
         "!=": actual_value != expected_value,
@@ -1238,6 +1243,14 @@ def _requirement_applies(
         raise
 
 
+def _declared_distribution_name(distribution: metadata.Distribution) -> str | None:
+    # `PackageMetadata.get` is only typed from 3.12 and the gate targets 3.11.
+    # `in` and `[]` are in the protocol on every version and read the same
+    # first `Name` header `get` would; the guard keeps a missing header None.
+    meta = distribution.metadata
+    return meta["Name"] if "Name" in meta else None
+
+
 def _mcp_distribution_closure(
     metadata_roots: tuple[Path, ...] | None = None,
 ) -> dict[str, metadata.Distribution]:
@@ -1247,7 +1260,7 @@ def _mcp_distribution_closure(
         for distribution in metadata.Distribution.discover(
             path=[str(root) for root in metadata_roots]
         ):
-            declared_name = distribution.metadata.get("Name")
+            declared_name = _declared_distribution_name(distribution)
             if not isinstance(declared_name, str):
                 raise ValueError
             normalized = _normalized_distribution_name(declared_name)
@@ -1289,7 +1302,7 @@ def _mcp_distribution_closure(
             if len(candidates) != 1:
                 raise ValueError
             distribution = candidates[0]
-        declared_name = distribution.metadata.get("Name")
+        declared_name = _declared_distribution_name(distribution)
         if not isinstance(declared_name, str) or _normalized_distribution_name(declared_name) != normalized:
             raise ValueError
         distributions[normalized] = distribution
@@ -1351,7 +1364,7 @@ def _mcp_import_inventory(
             if top_level.isidentifier() and first == top_level and first not in examined_tops:
                 examined_tops.add(first)
                 try:
-                    top_path = Path(distribution.locate_file(first)).resolve(strict=True)
+                    top_path = Path(str(distribution.locate_file(first))).resolve(strict=True)
                 except OSError:
                     pass
                 else:
@@ -1362,7 +1375,7 @@ def _mcp_import_inventory(
             declared_parts = str(declared).replace("\\", "/").split("/")
             if "__pycache__" in declared_parts:
                 continue
-            raw_import_files.append(Path(distribution.locate_file(declared)))
+            raw_import_files.append(Path(str(distribution.locate_file(declared))))
         def bind_candidate(path: Path) -> dict[str, object] | None:
             try:
                 return _path_binding(path, require_directory=False)
@@ -1371,14 +1384,14 @@ def _mcp_import_inventory(
         with ThreadPoolExecutor(max_workers=min(32, max(1, len(raw_import_files)))) as executor:
             bound_candidates = executor.map(bind_candidate, raw_import_files)
             candidate_bindings = list(bound_candidates)
-        for binding in candidate_bindings:
-            if binding is None:
+        for candidate_binding in candidate_bindings:
+            if candidate_binding is None:
                 continue
-            candidate = Path(str(binding["canonical"]))
+            candidate = Path(str(candidate_binding["canonical"]))
             if not candidate.is_file() or not _path_is_within(candidate, import_root):
                 continue
             declared_files.add(candidate)
-            all_files[candidate] = binding
+            all_files[candidate] = candidate_binding
         if not declared_files:
             raise ValueError
         files_by_distribution[name] = declared_files
@@ -1428,7 +1441,7 @@ def _mcp_import_manifest(
         if _paths_overlap(canonical, selected):
             raise ValueError
 
-    packages: dict[str, dict[str, str | None]] = {}
+    packages: dict[str, dict[str, dict[str, object] | None]] = {}
     for top_level, raw_owners in ownership.items():
         if len(raw_owners) != 1:
             raise ValueError

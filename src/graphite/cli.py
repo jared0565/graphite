@@ -202,7 +202,7 @@ def _config_from_args(args: argparse.Namespace, *, canonical: bool = False) -> C
         kwargs["verbose"] = True
     if getattr(args, "no_typescript_symbol_references", False):
         kwargs["typescript_symbol_references"] = False
-    configurable = (
+    configurable: tuple[tuple[str, str], ...] = (
         ("typescript_resolver", "typescript_resolver"),
         ("typescript_resolver_timeout", "typescript_resolver_timeout_seconds"),
     )
@@ -1285,7 +1285,7 @@ def _cmd_channel_action(args: argparse.Namespace, action: str) -> int:
 
 
 def cmd_capabilities(args: argparse.Namespace) -> int:
-    payload = {
+    payload: dict[str, Any] = {
         "ok": True,
         "schema_version": 1,
         "commands": sorted(_CANONICAL_COMMANDS),
@@ -1358,7 +1358,7 @@ def cmd_savings(args: argparse.Namespace) -> int:
     if args.action in ("on", "off"):
         usage_ledger.set_savings_display(root, args.action == "on")
     if args.action in ("on", "off", "status"):
-        payload = {"ok": True, "savings_display": usage_ledger.savings_display_enabled(root)}
+        payload: dict[str, Any] = {"ok": True, "savings_display": usage_ledger.savings_display_enabled(root)}
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
@@ -1756,8 +1756,9 @@ def cmd_daemon_status(args: argparse.Namespace) -> int:
             f"{status.get('pending_projects')} pending)"
         )
         print(f"[graphite] updated: {status.get('updated_at')}")
+        projects = status.get("projects", [])
         for line in listing_lines(
-            status.get("projects", []),
+            projects if isinstance(projects, list) else [],
             lambda p: (
                 f"{p.get('root')} | builds={p.get('build_count')} "
                 f"failures={p.get('failure_count')} files={p.get('file_count')}"
@@ -1812,7 +1813,8 @@ def cmd_daemon_install_windows(args: argparse.Namespace) -> int:
         print(f"[graphite] task command: {command.task_run}")
         if args.start_now:
             started = result.get("started", {})
-            print(f"[graphite] task start requested: {started.get('ok')}")
+            started_ok = started.get("ok") if isinstance(started, dict) else None
+            print(f"[graphite] task start requested: {started_ok}")
     else:
         print(f"[graphite] failed to install scheduled task: {args.task_name}", file=sys.stderr)
         if result.get("stderr"):
@@ -1903,7 +1905,10 @@ def cmd_daemon_uninstall_startup_windows(args: argparse.Namespace) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print(f"[graphite] startup launcher removed: {args.name}")
-        for path in result["removed"]:
+        removed = result["removed"]
+        if not isinstance(removed, list):
+            raise RuntimeError("uninstall_startup_launcher reports removed paths as a list")
+        for path in removed:
             print(f"  - {path}")
     return 0
 
@@ -2250,7 +2255,9 @@ def _force_utf8_when_redirected() -> None:
                 continue
             if (getattr(stream, "encoding", "") or "").lower().replace("-", "") == "utf8":
                 continue
-            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+            reconfigure = getattr(stream, "reconfigure", None)
+            if callable(reconfigure):
+                reconfigure(encoding="utf-8", errors="backslashreplace")
         except Exception:
             # Never let output plumbing break a command.
             pass

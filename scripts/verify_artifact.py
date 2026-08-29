@@ -119,6 +119,11 @@ def verify(dist_dir: Path) -> list[str]:
 
         if not any(n.endswith("ts_resolver.mjs") for n in wheel_names):
             problems.append("wheel is missing graphite/ts_resolver.mjs (the TypeScript resolver)")
+        # PEP 561: the package advertises inline types only if this marker
+        # ships. `Typing :: Typed` in the classifiers is a claim; this is the
+        # artifact that makes it true for a type checker on the consumer's side.
+        if "graphite/py.typed" not in wheel_names:
+            problems.append("wheel does not ship graphite/py.typed (PEP 561 marker)")
         metadata = next((n for n in wheel_names if n.endswith("METADATA")), None)
         if metadata is None:
             problems.append("wheel has no METADATA")

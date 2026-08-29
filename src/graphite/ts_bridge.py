@@ -5,9 +5,12 @@ import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Any
+from typing import Iterable, Any, TYPE_CHECKING
 
 from .config import Config
+
+if TYPE_CHECKING:
+    from .ingest import FileEntry
 
 _TS_LANGUAGES = {"javascript", "typescript", "tsx", "jsx"}
 
@@ -42,7 +45,7 @@ class TypeScriptCompilerIndex:
 _DISABLED = {"0", "false", "off", "none", "disabled", "heuristic"}
 
 
-def build_typescript_index(root: Path, entries: Iterable[object], cfg: Config) -> TypeScriptCompilerIndex:
+def build_typescript_index(root: Path, entries: Iterable[FileEntry], cfg: Config) -> TypeScriptCompilerIndex:
     """Build a compiler-backed TS module-resolution index, falling back silently on failure."""
     mode = cfg.typescript_resolver.strip().lower()
     if mode in _DISABLED:

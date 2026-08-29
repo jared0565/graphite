@@ -238,9 +238,14 @@ def _parse_result(
         if not message or len(message) > MAX_MESSAGE_LENGTH:
             raise AdapterError("protocol")
     else:
-        message = payload.get("result")
-        if not isinstance(message, str) or not message or len(message) > MAX_MESSAGE_LENGTH:
+        result_message = payload.get("result")
+        if (
+            not isinstance(result_message, str)
+            or not result_message
+            or len(result_message) > MAX_MESSAGE_LENGTH
+        ):
             raise AdapterError("protocol")
+        message = result_message
     assistant_models: list[str] = []
     for event in events[:-1]:
         if event.get("type") != "assistant":

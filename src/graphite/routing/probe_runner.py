@@ -11,11 +11,11 @@ import socket
 import ssl
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Any, Final, Protocol
 
 from graphite.probe_process import run_bounded_process
 
@@ -197,18 +197,37 @@ class HttpProbeResult:
     duration_seconds: float
 
 
-class _Response(Protocol):
-    status: int
-    headers: object
+class _TransportSocket(Protocol):
+    def getpeername(self) -> tuple[Any, ...]: ...
+    def settimeout(self, value: float | None, /) -> None: ...
 
-    def read(self, amount: int) -> bytes: ...
+
+class _Headers(Protocol):
+    def items(self) -> Iterable[tuple[object, object]]: ...
+    def get(self, name: str, /) -> object: ...
+
+
+class _Response(Protocol):
+    @property
+    def status(self) -> int: ...
+    @property
+    def headers(self) -> _Headers: ...
+    def read(self, amount: int, /) -> bytes: ...
 
 
 class _Connection(Protocol):
-    sock: object
+    sock: _TransportSocket
 
     def connect(self) -> None: ...
-    def request(self, method: str, path: str, **kwargs: object) -> None: ...
+    def request(
+        self,
+        method: str,
+        url: str,
+        /,
+        *,
+        body: bytes | None,
+        headers: Mapping[str, str],
+    ) -> None: ...
     def getresponse(self) -> _Response: ...
     def close(self) -> None: ...
 
@@ -218,6 +237,9 @@ ConnectionFactory = Callable[[HttpProbeEndpoint, str, float], _Connection]
 
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):
+    # Real http.client instance attributes that typeshed does not declare.
+    source_address: tuple[str, int] | None
+
     def __init__(self, host: str, port: int, address: str, timeout: float) -> None:
         super().__init__(host, port, timeout=timeout)
         self._pinned_address = address
@@ -231,6 +253,10 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    # Real http.client instance attributes that typeshed does not declare.
+    source_address: tuple[str, int] | None
+    _context: ssl.SSLContext
+
     def __init__(self, host: str, port: int, address: str, timeout: float) -> None:
         super().__init__(host, port, timeout=timeout, context=ssl.create_default_context())
         self._pinned_address = address
@@ -339,7 +365,7 @@ def _read_response(
     response: _Response,
     maximum: int,
     *,
-    transport_socket: object,
+    transport_socket: _TransportSocket,
     deadline: float,
     clock: Callable[[], float],
 ) -> bytes:
@@ -361,6 +387,9 @@ def _read_response(
     declared_value = response.headers.get("Content-Length")
     declared: int | None = None
     if declared_value is not None:
+        if not isinstance(declared_value, (str, bytes, bytearray)):
+            # int(value, 10) raised TypeError for any other type; same outcome.
+            raise ProviderProbeError("probe_headers_invalid")
         try:
             declared = int(declared_value, 10)
         except (TypeError, ValueError):

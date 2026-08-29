@@ -237,32 +237,44 @@ class GraphiteMCPServer:
                 "to": entry.to,
                 "posted": entry.posted,
                 "body": entry.body,
-                "status": (current_status(root, entry.number) or {}).get("status"),
+                # `read_round` matched on `entry.number == number`, so the
+                # requested int IS the entry's number, minus the Optional.
+                "status": (current_status(root, number) or {}).get("status"),
             }
 
         return self._channel_call(_run)
+
+
+def _tool(*, name: str, description: str, input_schema: dict[str, Any]) -> Tool:
+    """Build a tool definition on either mcp major.
+
+    mcp 1.x names the field `inputSchema`; 2.x renames it `input_schema` and
+    keeps `inputSchema` as the alias. Validating from a dict takes the alias
+    on both, so the definitions type-check against whichever is installed.
+    """
+    return Tool.model_validate({"name": name, "description": description, "inputSchema": input_schema})
 
 
 def channel_tool_definitions() -> list[Tool]:
     """Advertised so agents can discover them; a tool nobody can find is the
     problem this was built to solve."""
     return [
-        Tool(
+        _tool(
             name="graphite_channel_inbox",
             description=(
                 "Messages addressed to you that you have not been handed yet. Call this at "
                 "the start of a session. Delivery is recorded as they are returned."
             ),
-            inputSchema={"type": "object", "properties": {}},
+            input_schema={"type": "object", "properties": {}},
         ),
-        Tool(
+        _tool(
             name="graphite_channel_post",
             description=(
                 "Post a new round to the shared agent channel. You are identified by the "
                 "repository this server runs in; you cannot post as another agent. Rounds are "
                 "immutable -- correct one by posting another with `supersedes`."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "One-line subject"},
@@ -277,13 +289,13 @@ def channel_tool_definitions() -> list[Tool]:
                 "required": ["title", "body"],
             },
         ),
-        Tool(
+        _tool(
             name="graphite_channel_status",
             description=(
                 "Update a message's status: acknowledged, blocked (give a reason), done, or "
                 "withdrawn if you wrote it. Only the recipient may acknowledge/block/complete."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "number": {"type": "integer"},
@@ -296,15 +308,15 @@ def channel_tool_definitions() -> list[Tool]:
                 "required": ["number", "status"],
             },
         ),
-        Tool(
+        _tool(
             name="graphite_channel_list",
             description="List every round in the channel with its author and current status.",
-            inputSchema={"type": "object", "properties": {}},
+            input_schema={"type": "object", "properties": {}},
         ),
-        Tool(
+        _tool(
             name="graphite_channel_read",
             description="Read one round by number.",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {"number": {"type": "integer"}},
                 "required": ["number"],
@@ -319,10 +331,10 @@ def _result(content: dict[str, Any]) -> list[TextContent]:
 
 def _tool_definitions() -> list[Tool]:
     return [
-        Tool(
+        _tool(
             name="graphite_query",
             description="Query the Graphite knowledge graph. Supported queries: depends-on <node>, imported-by <node>, path <a> -> <b>, stats.",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "query": {
@@ -333,10 +345,10 @@ def _tool_definitions() -> list[Tool]:
                 "required": ["query"],
             },
         ),
-        Tool(
+        _tool(
             name="graphite_community",
             description="Describe the community/cluster a node belongs to, including fellow members.",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "node_id": {
@@ -347,15 +359,15 @@ def _tool_definitions() -> list[Tool]:
                 "required": ["node_id"],
             },
         ),
-        Tool(
+        _tool(
             name="graphite_summary",
             description="Return high-level graph stats, god nodes, entry points, and top files.",
-            inputSchema={"type": "object", "properties": {}},
+            input_schema={"type": "object", "properties": {}},
         ),
-        Tool(
+        _tool(
             name="graphite_refresh",
             description="Rebuild graph-out/graph.json and reload it.",
-            inputSchema={"type": "object", "properties": {}},
+            input_schema={"type": "object", "properties": {}},
         ),
         *channel_tool_definitions(),
     ]
@@ -424,9 +436,10 @@ def _register_tool_handlers(server: Any, graphite: GraphiteMCPServer) -> None:
         return ListToolsResult(tools=_tool_definitions())
 
     async def handle_call_tool(ctx: Any, params: Any) -> CallToolResult:
-        return CallToolResult(
-            content=_dispatch(graphite, params.name, params.arguments or {})
-        )
+        # `list` is invariant: a list[TextContent] is not the list of the content
+        # union CallToolResult declares, so it is handed over as list[Any].
+        content: list[Any] = _dispatch(graphite, params.name, params.arguments or {})
+        return CallToolResult(content=content)
 
     server.add_request_handler("tools/list", PaginatedRequestParams, handle_list_tools)
     server.add_request_handler("tools/call", CallToolRequestParams, handle_call_tool)

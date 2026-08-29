@@ -7,9 +7,11 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 DEFAULT_TASK_NAME = "GraphiteDaemon-FProjects"
+#: What the `run` seams accept: `subprocess.run`, or a test double of its shape.
+Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 @dataclass(frozen=True)
@@ -143,7 +145,7 @@ def create_daemon_task(
     *,
     force: bool = True,
     start_now: bool = False,
-    run: callable = subprocess.run,
+    run: Runner = subprocess.run,
 ) -> dict[str, object]:
     require_windows()
     cmd = [
@@ -168,21 +170,21 @@ def create_daemon_task(
     return payload
 
 
-def start_daemon_task(task_name: str, *, run: callable = subprocess.run) -> dict[str, object]:
+def start_daemon_task(task_name: str, *, run: Runner = subprocess.run) -> dict[str, object]:
     require_windows()
     cmd = ["schtasks.exe", "/Run", "/TN", task_name]
     result = run(cmd, capture_output=True, text=True, check=False)
     return _result_payload(result, command=cmd)
 
 
-def delete_daemon_task(task_name: str, *, run: callable = subprocess.run) -> dict[str, object]:
+def delete_daemon_task(task_name: str, *, run: Runner = subprocess.run) -> dict[str, object]:
     require_windows()
     cmd = ["schtasks.exe", "/Delete", "/TN", task_name, "/F"]
     result = run(cmd, capture_output=True, text=True, check=False)
     return _result_payload(result, command=cmd)
 
 
-def query_daemon_task(task_name: str, *, run: callable = subprocess.run) -> dict[str, object]:
+def query_daemon_task(task_name: str, *, run: Runner = subprocess.run) -> dict[str, object]:
     require_windows()
     cmd = ["schtasks.exe", "/Query", "/TN", task_name, "/FO", "CSV", "/V"]
     result = run(cmd, capture_output=True, text=True, check=False)
