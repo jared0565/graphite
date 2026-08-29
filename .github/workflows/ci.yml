@@ -19,22 +19,14 @@ on:
   # Manual trigger exists to measure #29's failure rate. Without it, sampling
   # meant pushing empty commits to main, which is why the rate was never
   # measured and every argument about "is it deterministic" stayed an argument.
+  #
+  # There is no longer a `portability` input: the matrix below is the gating
+  # job, on every event. The input existed while extra legs were metered; this
+  # repository is public and standard runners bill zero on public repositories
+  # (measured from the timing API on runs 31720053986 and 31748503731 -- every
+  # OS at total_ms 0, macOS included). Re-measure before restoring any
+  # cost-driven restriction; do not restore one from prose.
   workflow_dispatch:
-    inputs:
-      # Sampling and portability are different questions, and until now every
-      # dispatch paid for both: `portability` fired on `workflow_dispatch`
-      # unconditionally, so each #29 sample also ran three windows legs at the
-      # 2x multiplier -- roughly 48 billed minutes to re-answer a version
-      # question the sample was not asking. Sampling is by design repeated N
-      # times, so that overcharge multiplied by N, and it is a plausible share
-      # of what exhausted the account.
-      #
-      # Default false: the cheap dispatch stays cheap, and the matrix is opted
-      # into when the OS/version axis is actually the question.
-      portability:
-        description: "Also run the portability matrix (3 extra windows legs, 2x billing)"
-        type: boolean
-        default: false
 
 concurrency:
   # push/PR still coalesce -- a superseded commit's run is wasted work.
@@ -45,22 +37,87 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Platform-independent checks, run once. Ruff findings do not vary by OS or
+  # interpreter, so running them twelve times below would measure nothing.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: python -m pip install -e ".[dev,mcp]"
+      - name: Ruff
+        run: python -m ruff check .
+
+  # EVERY SUPPORTED CELL GATES. `pyproject.toml` claims `requires-python =
+  # ">=3.11"` on Windows, Linux and macOS -- twelve cells -- and until
+  # 2026-08-29 exactly one of them (windows-latest, 3.14) could turn a run red.
+  # The other nine ran as an advisory `portability` job with
+  # `continue-on-error` at the job level, and two (ubuntu/macOS 3.13) never ran
+  # at all. A cell that cannot fail a merge is not a supported platform; it is
+  # a classifier.
+  #
+  # History that still matters, kept short because #45 and #46 hold it in
+  # full: the ubuntu legs once HUNG and burned their whole timeout (#45 -- a
+  # test froze the GLOBAL monotonic clock, fixed in 2029a41), and macOS once
+  # showed 102 failures (#46 -- stale by the time it was re-measured, and
+  # closed). Those were the reasons the legs were advisory, and both are gone:
+  # all nine advisory legs passed on run 33217126451 before this job was made
+  # gating.
+  #
+  # `fail-fast: false` is load-bearing -- the default cancels surviving legs
+  # on the first failure, which would report "Linux is broken" while leaving
+  # macOS and every other Python unmeasured. That is the sample-size-of-1 trap
+  # the `concurrency` group above already had to defuse once.
+  #
+  # `--timeout` is what makes a hung leg INFORMATIVE. #45's ubuntu legs each
+  # ran to `timeout-minutes` and were killed by the runner, emitting no pytest
+  # summary whatsoever -- so after three full matrix runs the blocking test
+  # still had no name. A per-test cap converts that into a named test plus a
+  # traceback on the first run that reproduces it. `--timeout-method=thread`
+  # because `signal` raises in the MAIN thread and cannot describe a deadlock
+  # in one of `run_bounded_process`'s reader threads -- the subsystem most
+  # likely to be responsible; the thread method dumps EVERY thread's stack.
+  # 120s, not 60: the deep-probe tests legitimately take ~31s on Windows, and
+  # naming a merely-slow test "the hang" would send the investigation
+  # somewhere there is no bug.
+  #
+  # The old objection to a per-test timeout on the gating job -- "a slow
+  # machine naming a slow test would turn main red" -- is answered by the
+  # measurement above: 120s is roughly 4x the slowest legitimate test, and a
+  # leg that trips it has found something. Read the named test, do not raise
+  # the number.
+  #
+  # BEFORE DISPATCHING THIS FOR A *VERSION* QUESTION, RUN IT LOCALLY -- IT IS
+  # FREE AND FASTER. `uv` installs any interpreter on demand:
+  #
+  #     uv python install 3.12
+  #     uv venv --python 3.12 --seed --clear <somewhere>   # --seed: uv omits pip
+  #     <somewhere>/Scripts/python -m pip install -e ".[dev,mcp]"
+  #     <somewhere>/Scripts/python -m pytest -q
+  #
+  # Safe alongside the machine-wide install because hatchling writes a .pth
+  # into site-packages and NOTHING into the source tree. Linux and macOS
+  # cannot be reached from a Windows dev box that way; WSL covers Linux
+  # (native ext4, via `uv`), and this matrix is the authority for macOS.
   test:
-    runs-on: windows-latest
-    # 20, not 45. Measured over this workflow's successful history: push runs
-    # land at 6-7 minutes and the slowest dispatch observed was 9, so 20 leaves
-    # better than 2x headroom over the worst real run. The 45 it replaces was
-    # ~6.5x, and on a 2x-billed windows runner that made a HUNG run cost about
-    # 90 billed minutes against a normal run's ~13. Hangs are not hypothetical
-    # here -- #45 is exactly that failure, and legs burning their full timeout
-    # are what took the account's Actions allowance down.
-    #
-    # This caps a hang; it does not cap a test. Per-test `--timeout` stays off
-    # the gating job on purpose (see the portability job's note): a slow machine
-    # naming a slow test "the hang" would turn main red, which is where the next
-    # real failure hides. Raise this if a legitimate run ever approaches it --
-    # but re-measure the distribution first rather than restoring 45 on instinct.
-    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    # 25: push runs of the old gating job landed at 6-9 minutes and the
+    # advisory legs at ~8, so this is ~3x headroom over the slowest real run.
+    # It caps a HANG; `--timeout` below caps a TEST. Raise it only after
+    # re-measuring the distribution, not on instinct.
+    timeout-minutes: 25
     steps:
       # These majors track the runner's Node runtime, so they need a periodic
       # bump: v4/v5 were built for Node 20, which the runner now force-migrates
@@ -77,25 +134,24 @@ jobs:
       # with an intermittent fault: the two failures hit DIFFERENT tests, and
       # at a ~30% flake rate that pattern arises by chance.
       #
-      # So the real defect is flaky probe_mcp real-server tests, tracked in
-      # #29, independent of action versions. v6 is kept only because it is
-      # measured-green here and nothing yet justifies moving; it is NOT a
+      # So the real defect was flaky probe_mcp real-server tests, tracked in
+      # #29 (fixed), independent of action versions. v6 is kept only because it
+      # is measured-green here and nothing yet justifies moving; it is NOT a
       # workaround for a v7 incompatibility, because no such incompatibility
       # has been shown. Do not infer one from this pin.
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.14"
+          python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install
         run: python -m pip install -e ".[dev,mcp]"
-      - name: Lint
-        run: python -m ruff check .
-      # Cold-cache sample of the #29 pair, dispatch only.
+      # Cold-cache sample of the #29 pair, dispatch only, on the cell the
+      # maintainer develops on.
       #
       # `--runxfail` is gone with the quarantine (fixed in 7db0d40); these tests
       # now gate in the `Test` step below like everything else. What this keeps
-      # is the ORDERING: the fault was cold-cache sensitive, and running 2700
+      # is the ORDERING: the fault was cold-cache sensitive, and running 3000
       # tests first warms the filesystem enough to hide it. Running the pair
       # before the suite preserves a genuinely cold sample on demand.
       #
@@ -105,11 +161,11 @@ jobs:
       # (returncode, input_complete, outlived_close_s, and the child's own MCP
       # log) to stderr, which pytest surfaces for a failing test.
       - name: Sample deep-probe cold (dispatch only)
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && matrix.os == 'windows-latest' && matrix.python == '3.14'
         continue-on-error: true
         run: python -m pytest tests/test_doctor.py -k real_server -rA -q
       - name: Test
-        run: python -m pytest -q
+        run: python -m pytest -q --timeout=120 --timeout-method=thread
 
   # The ARTIFACT, which nothing else here tests.
   #
@@ -289,247 +345,3 @@ jobs:
           PY
           test -f graph-out/graph.json
           echo "onboarding works from a packaged wheel, not just from the source tree"
-
-  # Portability MEASUREMENT, not a gate. `pyproject.toml` claims
-  # `requires-python = ">=3.11"` and the gating job above proves exactly one
-  # cell of that claim: windows-latest on 3.14. Linux, macOS, and 3.11-3.13 are
-  # asserted and have never been run, so today "does graphite work off this
-  # machine" is an unknown rather than a yes or a no. This job converts it into
-  # data.
-  #
-  # `continue-on-error` at the JOB level, for the same reason the cold-probe
-  # step above carries it: the gating verdict belongs to `test`, and a red main
-  # is where the next real failure hides. A leg failing here is EVIDENCE.
-  #
-  # `fail-fast: false` is load-bearing -- the default cancels surviving legs on
-  # the first failure, which would report "Linux is broken" while leaving macOS
-  # and every other Python unmeasured. That is the sample-size-of-1 trap the
-  # `concurrency` group above already had to defuse once.
-  #
-  # ~~Deliberately NOT run on push~~ -- REVERSED 2026-08-13, and the reversal is
-  # measured. It now runs on push to main; see the `if:` on the job below.
-  #
-  # The reasoning this replaces was sound and its premise expired. "Extra legs
-  # on every commit is a standing cost" is only true where legs cost something.
-  # This repository is PUBLIC and GitHub does not meter standard runners on
-  # public repositories. Timing API for run 31748503731, which is the first run
-  # that actually contained macOS legs:
-  #
-  #     UBUNTU  total_ms 0 (4 jobs)
-  #     WINDOWS total_ms 0 (4 jobs)
-  #     MACOS   total_ms 0 (3 jobs)     <- the 10x multiplier below, measured
-  #     run_duration_ms 660000
-  #
-  # An 11-minute run that billed nothing, with run_duration as the control that
-  # the endpoint reports anything at all. The 10x macOS multiplier is real and
-  # applies to METERED usage; it does not apply here.
-  #
-  # ⚠️ The first version of this reversal was justified on a run where
-  # portability was SKIPPED, so it had no macOS job -- ubuntu and windows were
-  # measured and macOS was generalised, which is precisely the cell this comment
-  # warned about. Do not repeat that: if the cost question is reopened, measure
-  # the timing endpoint on a run that CONTAINS the runner in question.
-  #
-  # What would make the old reasoning true again: this repository going private,
-  # or a move to larger/self-hosted runners. Either re-arms the cost argument
-  # entirely. Re-measure before restoring the restriction -- do not restore it
-  # from prose, including this prose.
-  #
-  # SCOPE IS DELIBERATELY SMALL, and it cost real money to learn why. The first
-  # version ran 9 legs including 4x ubuntu and 2x macOS. The ubuntu legs HANG and
-  # burn the full timeout doing nothing (#45), and macOS bills at a **10x minute
-  # multiplier**. Three runs of that matrix exhausted the account's Actions
-  # allowance and took CI down for the whole repository -- gating job included.
-  #
-  # An instrument nobody can afford to run is not an instrument. Those legs are
-  # not deleted, they are BANKED: #45 and #46 hold their findings in full, so
-  # re-running them re-learns what is already written down. Restore them while
-  # working those issues, not before:
-  #
-  #     - { os: ubuntu-latest, python: "3.11" }   # ... 3.12, 3.13, 3.14  -> #45
-  #     - { os: macos-latest,  python: "3.11" }   # ... and 3.14          -> #46
-  #
-  # When they ARE restored they will now self-diagnose: the `--timeout` below
-  # means a hang names itself instead of dying silently at `timeout-minutes`.
-  # Restoring one ubuntu leg is worth more than restoring all four -- #45 hung on
-  # every version, so one is a sufficient sample and costs a quarter as much.
-  #
-  # What remains is the cheap, currently-actionable question: does graphite work
-  # on the Python versions it CLAIMS, on the platform it already supports? Three
-  # windows legs at the 2x multiplier, ~8 minutes each.
-  #
-  # BEFORE DISPATCHING THIS FOR A *VERSION* QUESTION, RUN IT LOCALLY -- IT IS FREE.
-  # `uv` installs any interpreter on demand, so every windows leg below reproduces
-  # on a dev machine in minutes with no billing and no queue:
-  #
-  #     uv python install 3.12
-  #     uv venv --python 3.12 --seed --clear <somewhere>   # --seed: uv omits pip
-  #     <somewhere>/Scripts/python -m pip install -e ".[dev,mcp]"
-  #     <somewhere>/Scripts/python -m pytest -q
-  #
-  # Measured: 2772 passed / 44 skipped on local Windows 3.12.13 at 8cd3a92.
-  # Safe alongside the machine-wide editable install because hatchling writes a
-  # .pth into site-packages and NOTHING into the source tree (setuptools would
-  # share `*.egg-info` and clobber it).
-  #
-  # This job is still the authority for the OS axis -- Linux (#45) and macOS (#46)
-  # cannot be reached from a Windows dev box. But routing a *version* question
-  # here is what made a 9-leg matrix look necessary, and that matrix exhausted the
-  # account's Actions allowance. Local first; dispatch for the OS axis only.
-  portability:
-    # Runs on PUSH TO MAIN, on PR, and opt-in on dispatch.
-    #
-    # Push was added 2026-08-13, and it closes a gap that made this job nearly
-    # dead. Work here lands by pushing straight to main -- there is usually no
-    # PR -- so "automatic on PR" meant automatic on almost nothing. Every commit
-    # on main was reaching consumers with ZERO evidence from any OS or Python
-    # other than the maintainer's own, and the run conclusion said `success`
-    # while this job's status was `skipped`. Not green: never asked.
-    #
-    # The cost argument that made it opt-in NO LONGER APPLIES, and this is
-    # measured rather than reasoned. The repository is PUBLIC, and GitHub does
-    # not meter standard runners on public repositories. From the timing API for
-    # run 31720053986:
-    #
-    #     billable: UBUNTU total_ms 0, WINDOWS total_ms 0
-    #     run_duration_ms: 415000
-    #
-    # A ~7 minute run that billed zero. The surrounding comments in this file
-    # still speak of "2x billing", "48 billed minutes" and an exhausted
-    # allowance; that was presumably true under different circumstances and is
-    # not true now. Re-measure the timing endpoint before reinstating any
-    # cost-driven restriction here -- do not restore it from these comments.
-    #
-    # The event name is tested explicitly rather than leaning on `inputs` being
-    # null-and-therefore-falsy outside workflow_dispatch. That shortcut probably
-    # works, but "probably" is doing real work in a condition that decides
-    # whether the matrix runs at all. Written this way it is true by reading.
-    if: >-
-      github.event_name == 'push'
-      || github.event_name == 'pull_request'
-      || (github.event_name == 'workflow_dispatch' && inputs.portability)
-    # DELIBERATELY KEPT, and it has a cost you must know about: with this set,
-    # the RUN conclusion reads `success` even when a leg is red. Reading
-    # `.conclusion` is therefore NOT a portability signal -- read
-    # `.jobs[].conclusion`, per job. `gh run view <id> --json jobs`.
-    #
-    # Kept because the reasoning behind it is sound and unchanged: a slow runner
-    # naming a slow test "the hang" would turn main red, and a permanently red
-    # main is where the next real failure hides. That trade is only acceptable
-    # while someone actually reads the per-job result, which is now this job's
-    # standing requirement rather than an optional check.
-    continue-on-error: true
-    # 20, not the gating job's 45. The suite takes ~8 minutes here, so a leg
-    # still running at 20 has already answered the question -- it is hung. The
-    # original 45 was copied from `test` without asking what it was for, and it
-    # is what made each hung ubuntu leg cost three quarters of an hour.
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: windows-latest, python: "3.11" }
-          - { os: windows-latest, python: "3.12" }
-          - { os: windows-latest, python: "3.13" }
-          # ONE ubuntu leg, restored 2026-08-09 -- the last thing #45 needs.
-          #
-          # #45's hang is fixed (`2029a41`: a test froze the GLOBAL monotonic
-          # clock, wedging `_terminate_process_tree`'s POSIX grace loop) and the
-          # suite now runs 2841 passed / 37 skipped / 0 failed in 3m46s with
-          # ZERO `Failed: Timeout >` markers. But that was measured on WSL, and
-          # the issue was filed against this runner, so the ticket stays open on
-          # an environment gap rather than a known defect. This leg closes it.
-          #
-          # ONE, not four: #45 hung on every version, so one is a sufficient
-          # sample at a quarter of the cost -- and ubuntu bills at 1x, the
-          # cheapest runner there is. 3.12 specifically, to match the local
-          # measurement exactly: same cell, different environment, so the RUNNER
-          # is the only variable left.
-          #
-          - { os: ubuntu-latest, python: "3.12" }
-          # ENDPOINTS on the non-Windows OSes, added 2026-08-10 to close the gap
-          # between what `pyproject.toml` claims and what CI proves.
-          #
-          # The claim is `requires-python = ">=3.11"` across three operating
-          # systems, i.e. 12 cells. Windows was already complete -- 3.11/3.12/3.13
-          # here plus 3.14 in the `test` job -- while ubuntu and macOS were 3.12
-          # only. Six cells were published and untested, on the two platforms
-          # where #45, #46 and #47 each found real defects Windows never showed.
-          #
-          # Endpoints rather than all four: version breakage clusters at the ends
-          # of the range. The oldest supported version is where newer syntax and
-          # stdlib additions break, and the newest is where deprecations land and
-          # where an interpreter's own behaviour shifts -- 3.14 is the one this
-          # machine develops on. The middles (3.13 here) are interpolation
-          # between two tested points and are the cheapest cells to omit.
-          #
-          # 10 of 12 tested. The two omitted are ubuntu/macOS 3.13, and that is a
-          # deliberate, recorded gap rather than an oversight -- if a defect ever
-          # lands specifically there, this comment is wrong and the cell should
-          # be added.
-          - { os: ubuntu-latest, python: "3.11" }
-          - { os: ubuntu-latest, python: "3.14" }
-          # macOS, restored 2026-08-09 to re-measure #46. Its 102 failures were
-          # counted on 9ff1242, BEFORE the frozen-clock fix, the Windows-kernel
-          # skips, both venv-launcher fixes, the node landmark, the mcp deep-probe
-          # stub and #47 -- and 86 of the 102 sat in exactly the probe/subprocess
-          # machinery those touched. So the number on file is stale by
-          # construction; re-measuring is cheaper than reasoning about it.
-          #
-          # py3.12 to match the ubuntu leg above, which is green: same cell,
-          # different OS, so the PLATFORM is the only variable. #46 already
-          # established this is platform-not-version -- identical 102 on both
-          # 3.11 and 3.14 -- so one leg is a sufficient sample, as with ubuntu.
-          #
-          # COST, and it is the reason this was banked: macOS bills at a **10x
-          # minute multiplier** on a private repository, and three runs of the
-          # original 9-leg matrix exhausted the account's allowance and took CI
-          # down entirely. It is free here only while the repo is public and the
-          # matrix is dispatch-opt-in. If the repo goes private again, weigh this
-          # leg against that multiplier before dispatching -- and note it still
-          # fires automatically on `pull_request`.
-          - { os: macos-latest, python: "3.12" }
-          # macOS endpoints -- see the ubuntu block above for the reasoning.
-          #
-          # These two carry the cost warning with them: at the 10x multiplier a
-          # private repo pays for macOS, going from one leg to three triples the
-          # most expensive line on the bill. Free while public; re-weigh if that
-          # changes, and prefer dropping these two before the 3.12 leg, which is
-          # the one #46 is measured against.
-          - { os: macos-latest, python: "3.11" }
-          - { os: macos-latest, python: "3.14" }
-    runs-on: ${{ matrix.os }}
-    name: portability (${{ matrix.os }}, py${{ matrix.python }})
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python }}
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install
-        run: python -m pip install -e ".[dev,mcp]"
-      # Lint is deliberately absent: ruff findings are platform-independent, so
-      # re-running them nine times measures nothing the gating job has not.
-      #
-      # `--timeout` is what makes a hung leg INFORMATIVE. #45's four ubuntu legs
-      # each ran to `timeout-minutes` and were killed by the runner, emitting no
-      # pytest summary whatsoever -- so after three full matrix runs the blocking
-      # test still has no name. A per-test cap converts that into a named test
-      # plus a traceback on the first run that reproduces it.
-      #
-      # `--timeout-method=thread` because `signal` raises in the MAIN thread and
-      # cannot describe a deadlock in one of `run_bounded_process`'s reader
-      # threads -- the subsystem most likely to be responsible. The thread method
-      # dumps EVERY thread's stack before terminating.
-      #
-      # 120s, not the 60 originally proposed: the deep-probe tests legitimately
-      # take ~31s on Windows, and naming a merely-slow test as "the hang" would
-      # send the investigation somewhere there is no bug. Measured locally at
-      # 4m55s for the whole Linux suite, so 120s per test is ample headroom.
-      #
-      # Note this is on the NON-GATING job only. The gating `test` job above is
-      # deliberately untouched: a timeout there could turn a slow machine into a
-      # red main, which is exactly where the next real failure hides.
-      - name: Test
-        run: python -m pytest -q --timeout=120 --timeout-method=thread
