@@ -1,24 +1,27 @@
 name: Publish to PyPI
 
-# Publishes the artifacts ALREADY ATTACHED to a GitHub release. It never builds.
+# Builds the approved tag HERE, in CI, and publishes only if the bytes equal
+# the digests a maintainer reviewed and pinned below.
 #
-# Why not build here: the only bytes allowed to reach the index are the ones that
-# were reviewed, hashed, smoke-tested and recorded in `.graphite-releases/`. A
-# rebuild in CI would produce different bytes the moment `main` drifts from the tag
-# by even a comment -- and that drift is normal between preparing a release and
-# publishing it. Publishing a rebuild is unrecoverable, because PyPI refuses to
-# re-upload a version. (For v0.3.0 the drift was already real at publication time:
-# `# nosemgrep` annotations added to `src/` after the tag.)
+# Until 1.0.0 this workflow never built: it uploaded artifacts a maintainer
+# had built locally and attached to the GitHub Release, because a rebuild on
+# a drifted `main` would produce different bytes. Building FROM THE TAG with
+# pinned tools removes the drift, and the digest guard turns "reproducible"
+# from an assumption into the thing that decides whether the upload happens:
+# a build that does not match the approved digests stops before any upload,
+# and PyPI is never touched. Because the artifact is now built by this
+# workflow from this tag, the PEP 740 attestation it emits is true.
 #
-# Authentication is PyPI Trusted Publishing (OIDC). There is deliberately no API
-# token anywhere in this repository, in any secret, or in any log: the credential
-# is a short-lived token minted per run and scoped to this repo + this workflow
-# filename. `RELEASING.md` requires scoped credentials and forbids tokens in
-# arguments, history, repository files, or logs; this satisfies all of it by
-# having no long-lived credential to mishandle.
+# Authentication is PyPI Trusted Publishing (OIDC). There is deliberately no
+# API token anywhere in this repository, in any secret, or in any log: the
+# credential is a short-lived token minted per run and scoped to this repo +
+# this workflow filename. `RELEASING.md` requires scoped credentials and
+# forbids tokens in arguments, history, repository files, or logs; this
+# satisfies all of it by having no long-lived credential to mishandle.
 #
-# Trigger is workflow_dispatch ONLY -- never push, never release. Publication is a
-# deliberate act by a maintainer, and a tag push must not be able to cause one.
+# Trigger is workflow_dispatch ONLY -- never push, never release. Publication
+# is a deliberate act by a maintainer, and a tag push must not be able to
+# cause one.
 
 on:
   workflow_dispatch:
@@ -35,14 +38,17 @@ concurrency:
 env:
   # The approved release, pinned in the reviewed file rather than supplied at
   # dispatch time. Publishing a NEW version therefore requires editing and
-  # committing these three lines -- which is the point: a version whose digests
-  # nobody approved cannot be published by typing a different number into a form.
+  # committing these four lines -- which is the point: a version whose digests
+  # nobody approved cannot be published by typing a different number into a
+  # form.
   #
-  # Source of truth: $GRAPHITE_PROJECTS_ROOT/.graphite-releases/0.5.3/EVIDENCE.md, and
-  # independently the `digest` field GitHub computed for each release asset. Both
-  # were compared before these lines were edited; a digest taken from only one of
-  # them is a single source agreeing with itself.
+  # Two independent sources for the digests, compared before these lines are
+  # edited: the `artifact` job's `dist.sha256` on APPROVED_COMMIT (a Linux
+  # build with the pins in release-build-constraints.txt) and the maintainer's
+  # local build with the same pins. A digest taken from only one of them is a
+  # single source agreeing with itself.
   APPROVED_VERSION: "0.5.3"
+  APPROVED_COMMIT: "eadba9c13e49c68e7b9172a54de4d1812e6c6a9d"
   WHEEL_SHA256: "e399ccbf223b275305444f8b4bfda001ead9942e80cb825076b3f23d42b8609c"
   SDIST_SHA256: "5d536d9a2771c124ab1c9c404db4b266c387d9f3d0c17d5ebcdf26ef72a9c54d"
 
@@ -52,8 +58,8 @@ jobs:
     permissions:
       # OIDC identity for Trusted Publishing. This is the credential.
       id-token: write
-      # Read-only: enough to download the release assets, not enough to alter them.
-      contents: read
+      # Attach the built artifacts to the GitHub Release for the tag.
+      contents: write
     steps:
       - name: Refuse to publish a version this workflow has not approved
         env:
@@ -63,27 +69,45 @@ jobs:
           if [ "$REQUESTED" != "$APPROVED_VERSION" ]; then
             echo "::error::Dispatched version '$REQUESTED' does not match the approved" \
                  "version '$APPROVED_VERSION' pinned in this workflow."
-            echo "To publish a different version, edit APPROVED_VERSION and BOTH digests" \
-                 "in .github/workflows/publish.yml and commit that change first."
+            echo "To publish a different version, edit APPROVED_VERSION, APPROVED_COMMIT" \
+                 "and BOTH digests in .github/workflows/publish.yml and commit that change first."
             exit 1
           fi
           echo "Publishing approved version $APPROVED_VERSION."
 
-      - name: Download the artifacts attached to the release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/v${{ env.APPROVED_VERSION }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Assert the tag points at the approved commit
         run: |
           set -euo pipefail
-          mkdir -p dist
-          # Exact filenames, not a glob. A glob would silently widen what gets
-          # uploaded, and gh-action-pypi-publish uploads everything in packages-dir.
-          gh release download "v${APPROVED_VERSION}" --dir dist \
-            --pattern "graphite_code-${APPROVED_VERSION}-py3-none-any.whl" \
-            --pattern "graphite_code-${APPROVED_VERSION}.tar.gz"
-          ls -l dist
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$APPROVED_COMMIT" ]; then
+            echo "::error::tag v$APPROVED_VERSION is at $actual; the approved commit is $APPROVED_COMMIT"
+            exit 1
+          fi
+          echo "tag v$APPROVED_VERSION -> $actual (approved)"
 
-      - name: Assert dist/ holds exactly the two approved files
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build from the tag with pinned tools
+        # `--no-isolation` so the hatchling version is the one pinned in
+        # release-build-constraints.txt, not whatever `build` would resolve
+        # into a fresh isolated environment today.
+        run: |
+          set -euo pipefail
+          python -m pip install -c release-build-constraints.txt build hatchling
+          python -m pip list | grep -Ei '^(build|hatchling) '
+          python -m build --no-isolation --sdist --wheel --outdir dist
+          ls -l dist
+          python scripts/verify_artifact.py dist
+
+      - name: Assert dist/ holds exactly the two expected files
         run: |
           set -euo pipefail
           expected_whl="graphite_code-${APPROVED_VERSION}-py3-none-any.whl"
@@ -91,12 +115,11 @@ jobs:
           actual="$(ls -A dist | sort | tr '\n' ' ')"
           expected="$(printf '%s\n%s\n' "$expected_whl" "$expected_sdist" | sort | tr '\n' ' ')"
           if [ "$actual" != "$expected" ]; then
-            echo "::error::dist/ contents differ from the approved set."
+            echo "::error::dist/ contents differ from the expected set."
             echo "  expected: $expected"
             echo "  actual:   $actual"
             exit 1
           fi
-          echo "dist/ holds exactly: $actual"
 
       - name: Verify SHA256 against the approved digests
         run: |
@@ -110,13 +133,33 @@ jobs:
           } > "$manifest"
           cat "$manifest"
           # `-c` exits non-zero on any mismatch and `--strict` on any malformed
-          # line; `set -e` propagates it. This is the ONLY guard between a wrong
-          # artifact and a permanent, unrepeatable upload -- every other failure
-          # mode in this workflow leaves the index untouched.
+          # line; `set -e` propagates it. This is the guard between a wrong
+          # artifact and a permanent, unrepeatable upload -- and it is also
+          # the proof that the build reproduced the reviewed bytes.
           sha256sum -c --strict "$manifest"
           echo "Both artifacts match the approved digests."
 
-      - name: Publish to PyPI
+      - name: Attach the artifacts to the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="v${APPROVED_VERSION}"
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            gh release create "$tag" --verify-tag --title "$tag" --notes "See CHANGELOG.md for $tag."
+          fi
+          for f in dist/*; do
+            name="$(basename "$f")"
+            if gh release view "$tag" --json assets -q '.assets[].name' | grep -qx "$name"; then
+              echo "::error::asset $name is already attached to $tag; refusing to clobber"
+              exit 1
+            fi
+          done
+          gh release upload "$tag" dist/*
+          gh release view "$tag" --json assets -q '.assets[] | "\(.name)  \(.digest)"'
+
+      - name: Publish to PyPI with provenance
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist
@@ -124,9 +167,6 @@ jobs:
           # silent skip that would read exactly like a successful first upload.
           skip-existing: false
           print-hash: true
-          # These artifacts were built on the maintainer's machine under
-          # RELEASING.md and attached to the GitHub release -- they were NOT built
-          # by this workflow. Emitting a PEP 740 attestation here would assert a
-          # build provenance that did not happen. Leave it off until the build
-          # itself moves into CI.
-          attestations: false
+          # True because it is true: the files in dist/ were built by THIS
+          # workflow from THIS tag, and matched the reviewed digests.
+          attestations: true

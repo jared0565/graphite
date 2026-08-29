@@ -5,12 +5,20 @@ resolve the cause, and repeat the complete affected gate.
 
 ## Current release model
 
-Graphite releases are manual. The repository has no checked-in publication workflow.
-The first annotated tag, `v0.2.0`, was created on 2026-08-07; it was created outside
-the sequence in "Tag and publish" below, so it carries no release evidence and must not
-be cited as a released artifact. This guide does not authorize publication. A release
-requires explicit maintainer authority, an approved destination, and credentials
-configured separately in a secure release environment.
+Graphite releases are prepared by a maintainer and PUBLISHED BY CI FROM THE APPROVED
+TAG. `.github/workflows/publish.yml` (workflow_dispatch only) checks out
+`refs/tags/vVERSION`, asserts the tag points at the approved commit, builds the wheel
+and sdist with the tool versions pinned in `release-build-constraints.txt`, refuses to
+continue unless both digests equal the ones a maintainer reviewed and pinned in the
+workflow, attaches the artifacts to the GitHub Release, and publishes to PyPI by Trusted
+Publishing with PEP 740 attestations. The attestation is true because the workflow built
+the bytes; the digest guard is what makes "the bytes are the reviewed ones" a measured
+fact rather than an assumption. This guide does not authorize publication: the dispatch
+is a deliberate act by a maintainer, and nothing in this repository can trigger it.
+
+The first annotated tag, `v0.2.0` (2026-08-07), predates every gate below and must not
+be cited as a released artifact. Releases 0.3.0 through 0.5.3 published artifacts the
+maintainer had built locally; from 1.0.0 the published bytes are CI's.
 
 Note what a release is FOR here, because the answer is not only publication. Every
 consumer on this machine imports Graphite from one editable install pointed at the
@@ -125,12 +133,18 @@ test, CLI, graph-validation, unsafe-path, nondeterminism, or artifact failure.
 
 ## Build and inspect artifacts
 
-Graphite uses the Hatchling backend declared in `pyproject.toml`. Before starting, the
-isolated environment must already contain maintainer-approved, pinned or otherwise
-recorded versions of the Python build frontend and Hatchling. Validate those versions
-against repository policy and record them as release evidence. An approved,
-hash-verified internal wheelhouse may be used to prepare the environment before the
-release; never allow a release build to download unreviewed tooling.
+Graphite uses the Hatchling backend declared in `pyproject.toml`. The build frontend and
+Hatchling versions are pinned in `release-build-constraints.txt`, and BOTH builds -- the
+maintainer's local one below and CI's -- install from that file, so a digest computed
+here is comparable with one computed on a runner:
+
+```text
+python -m pip install -c release-build-constraints.txt build hatchling
+```
+
+Bumping a pin is a reviewed change to that file; the publish digest guard then proves
+the new tools still reproduce the reviewed bytes. Never allow a release build to
+download unreviewed tooling.
 
 Record the installed tool versions without changing the environment:
 
@@ -166,8 +180,33 @@ wheel's `METADATA` fields `Name`, `Version`, and every `Requires-Dist`, plus
 source and build files. Both archives must exclude credentials, caches, VCS files,
 local configuration, scratch output, and absolute developer paths.
 
-Compute and record a SHA256 hash for each exact artifact. Paths are quoted shell
-arguments and are never embedded in Python source:
+The digests that get PINNED in `publish.yml` are CI's: the `artifact` job of the CI run
+on the release commit builds twice with the same pins, proves the two builds
+byte-identical, prints `dist.sha256`, and keeps `dist/` as a workflow artifact for 90
+days. Dispatch that workflow a second time on the same commit and confirm the second run
+prints the same digests -- two runs agreeing is what "CI reproduces CI" means, and the
+publish job's digest guard then proves it a third time before any upload.
+
+The local build is the SECOND source, compared by CONTENT rather than by digest.
+Download the CI artifact and run:
+
+```text
+python scripts/compare_dist.py "ARTIFACT_DIR" "CI_DIST_DIR"
+```
+
+It exits 0 only when every wheel member (name, CRC, size, mode, timestamp) and the
+decompressed sdist are identical; a content difference is a stop condition. Archive
+digests are NOT expected to match across operating systems, and the reasons are not
+content: the zip central directory records `create_system` (0 on Windows, 3 on Unix)
+for every member, and the deflate stream depends on the platform's zlib. Measured at
+`cd0f528`: a Windows build (CPython bundling zlib-ng 1.3.1) and an ubuntu-latest build
+(zlib 1.3.2) had 111 wheel members of different compressed size, identical CRCs, and a
+byte-identical decompressed sdist. Before that, the working copy also carried CRLF in
+files hatchling packages -- a real content difference -- which `.gitattributes` and a
+normalised checkout removed; `compare_dist.py` is what tells the two cases apart.
+
+Compute and record a SHA256 hash for each local artifact as well, for the evidence record.
+Paths are quoted shell arguments and are never embedded in Python source:
 
 ```text
 python -c "import hashlib, pathlib, sys; p = pathlib.Path(sys.argv[1]); print(hashlib.sha256(p.read_bytes()).hexdigest(), p)" "WHEEL_PATH"
@@ -281,11 +320,27 @@ command-line arguments, shell history, repository files, or logs.
 Publication runs from `.github/workflows/publish.yml` by Trusted Publishing (OIDC),
 `workflow_dispatch` only. There is no API token in this repository, in any secret, or on
 any maintainer machine — the credential is minted per run and expires in seconds, which
-satisfies the paragraph above by having no long-lived secret to mishandle. The workflow
-publishes the artifacts already attached to the GitHub Release and verifies both SHA256s
-against literals pinned in the reviewed workflow; it never builds. Releasing a new version
-therefore requires editing the approved version and both digests in that file and
-committing the change, so digests pass through review rather than a dispatch form.
+satisfies the paragraph above by having no long-lived secret to mishandle.
+
+From 1.0.0 the workflow BUILDS: it checks out `refs/tags/vVERSION`, asserts
+`git rev-parse HEAD` equals `APPROVED_COMMIT`, installs the pinned tools, builds, runs
+`scripts/verify_artifact.py`, and stops unless both digests equal `WHEEL_SHA256` and
+`SDIST_SHA256`. Only then does it attach the two files to the GitHub Release for the tag
+(creating the release if absent, refusing to overwrite an existing asset) and publish
+with `attestations: true`. Releasing a new version therefore means, in this order:
+
+1. Commit the version bump (`release: prepare vVERSION`) and push `main`; wait for the
+   CI run on that commit and read `dist.sha256` from its `artifact` job.
+2. Build locally with the same pins (above) and confirm both digests agree.
+3. Edit `APPROVED_VERSION`, `APPROVED_COMMIT` (the full SHA of the prepare commit),
+   `WHEEL_SHA256` and `SDIST_SHA256` in `publish.yml`; commit
+   (`release: approve vVERSION for publication`) and push. Digests pass through review,
+   never through a dispatch form.
+4. Tag the PREPARE commit (`git tag -a vVERSION -m "Release vVERSION" PREPARE_SHA`)
+   and push the tag. The workflow file GitHub runs on dispatch is the one on the default
+   branch, which now carries the approval; the code it builds is the tag's.
+5. Dispatch `publish.yml` with `version=VERSION`. A tag at the wrong commit, a digest
+   mismatch, or an already-attached asset stops the run before any upload.
 
 After publishing, verify from the INDEX rather than from this checkout:
 
@@ -327,6 +382,11 @@ built wheel: `graphite.__file__` resolves under `site-packages` and no editable
 reaches nobody until a release is cut, so the store is the only record of what
 consumers are actually running, and `index.md`'s "Currently deployed" section is
 the only place that distinguishes it from what is on `main`.
+
+From 1.0.0 the retained artifact is DOWNLOADED from the GitHub Release after publication
+and digest-checked against `EVIDENCE.md` before it is stored -- the store holds what was
+published, not a local sibling of it. The maintainer's local build stays in the evidence
+record as the second digest source, nothing more.
 
 Rolling back, in an environment that already has the runtime dependencies:
 

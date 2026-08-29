@@ -53,7 +53,7 @@ DISTRIBUTION = "graphite-code"
 IMPORT_PACKAGE = "graphite"
 
 #: Arms `verify` attempts. Printed in the summary so "4 of 5 ran" is legible.
-TOTAL_ARMS = 5
+TOTAL_ARMS = 6
 
 #: A sha256 hexdigest, in either case. `pip`'s own digests are lowercase and so
 #: is `hashlib`, but PowerShell's `Get-FileHash` prints uppercase, so a correct
@@ -125,6 +125,7 @@ def verify(
     work: Path,
     *,
     run: Runner = _run,
+    expect_provenance: bool | None = None,
 ) -> Outcome:
     """Run every arm against `python`, an interpreter with no path to this repo.
 
@@ -206,13 +207,55 @@ def verify(
     cli = run([str(python), "-P", "-m", IMPORT_PACKAGE, "--version"], work)
     report("installed CLI runs", cli.returncode == 0, _first_line(cli))
 
+    # ARM 6 -- the index attests WHO built the served bytes (PEP 740).
+    # From 1.0.0 publish.yml builds in CI from the approved tag and uploads
+    # with attestations, so every served file must carry provenance. Older
+    # releases were built on a maintainer's machine and honestly have none,
+    # so below 1.0 the arm is a visible skip unless asked for explicitly.
+    # Fetched through the injected interpreter, like every other arm, so the
+    # suite can exercise the parsing without a network round trip.
+    provenance_arm = "index reports PEP 740 provenance for the served files"
+    expected_provenance = expect_provenance if expect_provenance is not None else _major(version) >= 1
+    if not expected_provenance:
+        skip(provenance_arm, f"not expected for {version} (pre-1.0 artifacts were built off CI)")
+    else:
+        script = (
+            "import json, urllib.request;"
+            f"d = json.load(urllib.request.urlopen('https://pypi.org/pypi/{DISTRIBUTION}/{version}/json', timeout=30));"
+            "print(json.dumps({u['filename']: bool(u.get('provenance')) for u in d.get('urls', [])}))"
+        )
+        fetched = run([str(python), "-c", script], work)
+        files: dict[str, bool] = {}
+        if fetched.returncode == 0:
+            try:
+                files = {str(k): bool(v) for k, v in json.loads(fetched.stdout.strip() or "{}").items()}
+            except (json.JSONDecodeError, AttributeError):
+                files = {}
+        if fetched.returncode != 0 or not files:
+            report(provenance_arm, False,
+                   f"could not read the index JSON for {version}: {_last_line(fetched) or 'no output'}")
+        else:
+            missing = sorted(name for name, present in files.items() if not present)
+            report(provenance_arm, not missing,
+                   "provenance on " + ", ".join(sorted(files)) if not missing else "no provenance for " + ", ".join(missing))
+
     return outcome
+
+
+def _major(version: str) -> int:
+    """The leading integer of a version, or 0 when it has none."""
+    head = version.strip().split(".", 1)[0]
+    return int(head) if head.isdigit() else 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version")
     parser.add_argument("--wheel-sha256", default=None)
+    parser.add_argument(
+        "--expect-provenance", action=argparse.BooleanOptionalAction, default=None,
+        help="require PEP 740 provenance on the served files (default: required from 1.0.0)",
+    )
     args = parser.parse_args()
 
     # A neutral working directory. Running from the checkout would let a relative
@@ -228,7 +271,7 @@ def main() -> int:
         if not python.exists():
             return 1
 
-        outcome = verify(args.version, args.wheel_sha256, python, work)
+        outcome = verify(args.version, args.wheel_sha256, python, work, expect_provenance=args.expect_provenance)
 
     print()
     print(f"arms: {len(outcome.passed)} passed, {len(outcome.failed)} failed, "
