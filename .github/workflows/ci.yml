@@ -256,8 +256,13 @@ jobs:
         # tools_ran assertions fail on a scanner that silently never fired.
         # Measured on run 33237751838: every BLOCK-tier tool OK, only
         # claude-cli/codex-cli/openrouter/ollama-cloud MISSING.
+        # GitHub runs `shell: bash` as `bash -eo pipefail`, so a non-zero
+        # doctor would abort the step before the report is even printed;
+        # the status is captured explicitly instead.
         run: |
-          aramid doctor --fix > doctor.txt 2>&1; echo "EXIT=$?" >> doctor.txt
+          status=0
+          aramid doctor --fix > doctor.txt 2>&1 || status=$?
+          echo "doctor exit status: $status"
           cat doctor.txt
           if grep -qE '^\s+MISSING\s+(gitleaks|semgrep|ruff|pip-audit|tests|interpreter)\b' doctor.txt; then
             echo "::error::a BLOCK-tier tool is missing on the runner"; exit 1
@@ -265,22 +270,26 @@ jobs:
       - name: Pre-commit gate (gitleaks, ruff security rules, shadow)
         shell: bash
         run: |
-          aramid check --gate pre-commit --all --strict --json > precommit.json; echo "EXIT=$?" > precommit.exit
-          cat precommit.exit
+          status=0
+          aramid check --gate pre-commit --all --strict --json > precommit.json 2> precommit.err || status=$?
+          echo "pre-commit gate exit status: $status"
+          cat precommit.err
           python - <<'PY'
           import json
           d = json.load(open("precommit.json", encoding="utf-8"))
           ran = set(d.get("tools_ran", []))
           need = {"gitleaks", "ruff", "shadow"}
           assert need <= ran, f"pre-commit gate did not run {sorted(need - ran)}; ran={sorted(ran)}"
-          print("pre-commit tools_ran:", sorted(ran))
+          print("pre-commit tools_ran:", sorted(ran), "| degraded:", d.get("degraded"), "| findings:", len(d.get("findings", [])))
           PY
-          grep -q '^EXIT=0$' precommit.exit
+          [ "$status" -eq 0 ]
       - name: Pre-push gate (gitleaks, semgrep, typecheck, dependency audit, tests)
         shell: bash
         run: |
-          aramid check --gate pre-push --all --strict --json > prepush.json; echo "EXIT=$?" > prepush.exit
-          cat prepush.exit
+          status=0
+          aramid check --gate pre-push --all --strict --json > prepush.json 2> prepush.err || status=$?
+          echo "pre-push gate exit status: $status"
+          cat prepush.err
           python - <<'PY'
           import json
           d = json.load(open("prepush.json", encoding="utf-8"))
@@ -289,9 +298,9 @@ jobs:
           assert need <= ran, f"pre-push gate did not run {sorted(need - ran)}; ran={sorted(ran)}"
           tests_slot = {"pytest", "python.exe", "tests"}
           assert ran & tests_slot, f"the tests slot did not run; ran={sorted(ran)}"
-          print("pre-push tools_ran:", sorted(ran))
+          print("pre-push tools_ran:", sorted(ran), "| degraded:", d.get("degraded"), "| findings:", len(d.get("findings", [])))
           PY
-          grep -q '^EXIT=0$' prepush.exit
+          [ "$status" -eq 0 ]
       - uses: actions/upload-artifact@v4
         if: always()
         with:
