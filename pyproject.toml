@@ -36,6 +36,10 @@ readme = "README.md"
 # and the artifact is not redistributable, and nothing anywhere warns you.
 license = "MIT"
 license-files = ["LICENSE"]
+# The identity every commit already carries. A distribution with no author
+# is one more thing a reader has to check before trusting a tool that reads
+# their code and spawns subprocesses.
+authors = [{ name = "jared0565", email = "jared0565@gmail.com" }]
 # MEASURED, not inherited. Full suite, 2816 passed / 44 skipped on every cell,
 # all at 2e5e0a2 on Windows:
 #

@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # Action majors track the runner's Node runtime (see the comments beside
+  # `uses:` in ci.yml); a weekly proposal is how a deprecation becomes a PR
+  # instead of a run annotation nobody reads.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  # pyproject.toml declares floors, not pins, so most of these will be
+  # dev-tool bumps (ruff, mypy, pytest) and the aramid pin in ci.yml's
+  # security job.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"

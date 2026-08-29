@@ -1964,3 +1964,23 @@ def test_the_release_procedure_names_the_artifacts_the_build_actually_produces()
         f"RELEASING.md does not name the sdist this project builds "
         f"({expected}-VERSION.tar.gz)"
     )
+
+
+def test_governance_surfaces_exist_and_point_at_each_other() -> None:
+    """SECURITY.md, CODEOWNERS, issue templates, dependabot and an author: the
+    surfaces a stranger checks before trusting a tool that reads their code."""
+    root = Path(__file__).resolve().parents[1]
+    security = (root / "SECURITY.md").read_text(encoding="utf-8")
+    assert "Private vulnerability reporting" in security
+    assert "1.x" in security
+    assert (root / ".github" / "CODEOWNERS").read_text(encoding="utf-8").strip().startswith("* @")
+    templates = root / ".github" / "ISSUE_TEMPLATE"
+    assert (templates / "bug_report.yml").is_file()
+    assert (templates / "feature_request.yml").is_file()
+    assert "SECURITY.md" in (templates / "config.yml").read_text(encoding="utf-8")
+    dependabot = (root / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+    assert '"github-actions"' in dependabot and '"pip"' in dependabot
+    import tomllib
+
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert project["authors"] and project["authors"][0]["name"], project.get("authors")

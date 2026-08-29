@@ -1,0 +1,38 @@
+name: Bug report
+description: Something graphite does is wrong
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: graphite --version
+      description: Paste the full line (version and engine fingerprint).
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [Windows, Linux, macOS]
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Smallest reproduction
+      description: The command you ran and the repository shape it ran against.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+    validations:
+      required: true
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Not a security report
+      options:
+        - label: This is not an exploitable defect (those go through SECURITY.md, never a public issue).
+          required: true

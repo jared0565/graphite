@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/jared0565/graphite/security/advisories/new
+    about: Report privately — see SECURITY.md. Never in a public issue.
