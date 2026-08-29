@@ -225,40 +225,8 @@ select = ["E4", "E7", "E9", "F"]
 # gate as a blocking "pytest exited 2" while a local run read green.
 pythonpath = ["."]
 
-[tool.mypy]
-# The type gate (PRD WS-D). `python -m mypy` with no arguments checks exactly
-# this; the CI lint job runs it and `src/graphite/py.typed` ships because it
-# is clean. Platform-conditional code narrows on `sys.platform` -- mypy
-# understands that and does not understand `os.name` -- so the gate reads the
-# same on a Windows dev box and the ubuntu lint runner.
-files = ["src/graphite"]
-python_version = "3.11"
-check_untyped_defs = true
-warn_unused_ignores = true
-warn_redundant_casts = true
-no_implicit_optional = true
-show_error_codes = true
-pretty = false
-
-[[tool.mypy.overrides]]
-# No stubs are published for these. `ignore_missing_imports` is scoped to the
-# module list rather than set globally so a typo in an import elsewhere still
-# fails the gate.
-module = [
-    "networkx",
-    "networkx.*",
-    "community",
-    "community.*",
-    "tree_sitter",
-    # mypy module patterns take '*' only as a dotted component, so the five
-    # grammar packages are listed by name rather than as `tree_sitter_*`.
-    "tree_sitter_javascript",
-    "tree_sitter_typescript",
-    "tree_sitter_python",
-    "tree_sitter_go",
-    "tree_sitter_rust",
-    "louvain",
-    "mcp",
-    "mcp.*",
-]
-ignore_missing_imports = true
+# The type gate (PRD WS-D) is configured in setup.cfg, NOT here -- see the
+# comment at the top of that file: aramid 0.6.0's typecheck runner arms on a
+# [tool.mypy] section and then feeds non-Python files to mypy (channel round
+# 140; fixed in 0.6.1). `python -m mypy` reads setup.cfg with the same
+# semantics; move the section back here once the pinned aramid is 0.6.1+.
