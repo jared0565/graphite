@@ -365,6 +365,29 @@ jobs:
             coverage.json
             coverage.md
 
+  # CATASTROPHE DETECTOR, not a performance SLA. Builds a 3000-file synthetic
+  # repository and records wall time, peak RSS, node/edge counts and graph size
+  # as an artifact. It fails only past a 600 s wall (a 3000-file build takes
+  # ~30 s here) or past max_graph_bytes -- the regressions that would make a
+  # release unusable, not the ones a quiet runner could mistake for noise.
+  # docs/benchmarks.md records the runs that back `supported_repo_files`.
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e .
+      - name: Build a 3000-file synthetic repository
+        run: python benchmarks/build_benchmark.py --files 3000 --out benchmark-metrics.json --wall-budget-s 600
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-metrics
+          path: benchmark-metrics.json
+
   # The ARTIFACT, which nothing else here tests.
   #
   # Every other job installs `-e .` and imports `src/graphite` directly, so the

@@ -1984,3 +1984,27 @@ def test_governance_surfaces_exist_and_point_at_each_other() -> None:
 
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     assert project["authors"] and project["authors"][0]["name"], project.get("authors")
+
+
+def test_benchmarks_table_has_no_placeholders_and_backs_the_declared_size() -> None:
+    """`capabilities` declares supported_repo_files on the strength of a row in
+    docs/benchmarks.md; a row with an angle-bracket placeholder is not a
+    measurement."""
+    import json
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    text = (root / "docs" / "benchmarks.md").read_text(encoding="utf-8")
+    rows = [line for line in text.splitlines() if line.startswith("| 20")]
+    assert rows, "no dated rows"
+    assert not any("<" in row for row in rows), rows
+    declared = json.loads(
+        subprocess.run([sys.executable, "-P", "-m", "graphite", "capabilities", "--json"], capture_output=True, text=True, check=True, cwd=root).stdout
+    )["limits"]
+    assert declared["supported_repo_files"] == 7000
+    assert "docs/benchmarks.md" in declared["supported_repo_files_basis"]
+    # The declaration is derived from measured rows, and the page must say
+    # which ones: the densest real repository and the synthetic corpus.
+    assert "Django" in text and "7 400" in text and "18 000" in text
+    assert any("django/django" in row for row in rows), "no real-repository row"

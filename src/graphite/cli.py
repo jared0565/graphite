@@ -116,6 +116,21 @@ _DAEMON_STATUS_PROJECT_CAP = 20
 _VALIDATE_ERROR_CAP = 10
 _WATCH_IMPACTED_CAP = 20
 _WATCH_TESTS_CAP = 30
+# The repository size `capabilities` declares as supported, and what backs
+# it. The binding limit is MAX_GRAPH_BYTES, not build time. Graph bytes per
+# file depend on code density: the synthetic corpus in benchmarks/ yields
+# ~7.5 KB per file and reaches the cap near 18 000 files; Django 5.2, the
+# densest real repository measured, yields ~18 KB per file and reaches it
+# near 7 400. The declaration follows the real repository, with margin.
+# docs/benchmarks.md holds the measurements; change both together.
+SUPPORTED_REPO_FILES = 7000
+SUPPORTED_REPO_FILES_BASIS = (
+    "Django 5.2 (2 930 sources) builds to a 53 MB graph.json in 82 s, ~18 KB per "
+    "file, so the 128 MiB max_graph_bytes cap is reached near 7 400 files of that "
+    "density; the synthetic corpus reaches it near 18 000. docs/benchmarks.md "
+    "(2026-08-29)"
+)
+
 _CANONICAL_COMMANDS = frozenset(
     {
         "scan",
@@ -1310,7 +1325,11 @@ def cmd_capabilities(args: argparse.Namespace) -> int:
         },
         "node_kinds": ["class", "file", "function", "unknown"],
         "edge_relations": ["calls", "contains", "imports", "inherits", "references", "type_references"],
-        "limits": {"max_graph_bytes": MAX_GRAPH_BYTES},
+        "limits": {
+            "max_graph_bytes": MAX_GRAPH_BYTES,
+            "supported_repo_files": SUPPORTED_REPO_FILES,
+            "supported_repo_files_basis": SUPPORTED_REPO_FILES_BASIS,
+        },
     }
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
