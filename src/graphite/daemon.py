@@ -475,10 +475,17 @@ class _ProviderObservationWorker:
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
+            state_counts = self._status["state_counts"]
+            reason_counts = self._status["reason_counts"]
+            # Both are dicts by construction -- `to_status` and the fallback
+            # literal in `_run` are the only writers -- and `_status` is typed
+            # loosely only because it is a status document.
+            if not isinstance(state_counts, dict) or not isinstance(reason_counts, dict):
+                raise TypeError("provider_observation_status_invalid")
             return {
                 **self._status,
-                "state_counts": dict(self._status["state_counts"]),
-                "reason_counts": dict(self._status["reason_counts"]),
+                "state_counts": dict(state_counts),
+                "reason_counts": dict(reason_counts),
             }
 
     def _run(self) -> None:

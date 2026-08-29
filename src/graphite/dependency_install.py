@@ -12,6 +12,7 @@ import math
 import os
 import re
 import stat
+import sys
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -288,11 +289,11 @@ def _path_has_symlink(path: Path) -> bool:
 
 
 def _trusted_posix_owner(owner: int) -> bool:
-    try:
-        effective_uid = os.geteuid()
-    except AttributeError:
+    # `os.geteuid` is POSIX-only; `sys.platform` is the form mypy narrows on,
+    # and on Windows the answer is what the missing attribute used to give.
+    if sys.platform == "win32":
         return False
-    return owner in {0, effective_uid}
+    return owner in {0, os.geteuid()}
 
 
 def _capture_posix_component(path: Path) -> TrustedPathComponent | None:
@@ -556,7 +557,7 @@ def _trusted_file(path: Path, root: Path, *, executable: bool) -> TrustedFile | 
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    stable_fields = (
+    stable_fields: tuple[str, ...] = (
         "st_dev",
         "st_ino",
         "st_size",
@@ -748,7 +749,9 @@ def command_for(
 
 
 def _trusted_windows_system_environment() -> dict[str, str]:
-    if os.name != "nt":
+    # `ctypes.windll` is Windows-only; `sys.platform` is the form mypy narrows
+    # on, and it coincides with `os.name == "nt"`.
+    if sys.platform != "win32":
         return {}
     try:
         import ctypes
@@ -1337,21 +1340,21 @@ def _normalized_lockfile_text(lockfile_bytes: bytes) -> str | None:
         ):
             return None
         return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
-    stripped = _normalize_text_lockfile_escapes(stripped)
-    if stripped is None:
+    normalized = _normalize_text_lockfile_escapes(stripped)
+    if normalized is None:
         return None
-    lines = stripped.splitlines()
+    lines = normalized.splitlines()
     if any(len(line) > _LOCKFILE_LINE_LIMIT for line in lines):
         return None
     if lines[0].startswith("lockfileVersion:"):
         if not re.fullmatch(r"lockfileVersion:\s*['\"]?\d+(?:\.\d+)?['\"]?\s*", lines[0]):
             return None
-        return stripped if _validate_mapping_lockfile(lines, berry=False) else None
+        return normalized if _validate_mapping_lockfile(lines, berry=False) else None
     if lines[0].strip() == "# yarn lockfile v1":
-        return stripped if _validate_yarn_classic(lines) else None
+        return normalized if _validate_yarn_classic(lines) else None
     first_content_lines = [line.strip() for line in lines[:10] if line.strip() and not line.lstrip().startswith("#")]
     if first_content_lines and first_content_lines[0] == "__metadata:":
-        return stripped if _validate_mapping_lockfile(lines, berry=True) else None
+        return normalized if _validate_mapping_lockfile(lines, berry=True) else None
     return None
 
 

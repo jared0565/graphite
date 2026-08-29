@@ -14,20 +14,24 @@ from pathlib import Path
 
 def spawn_detached(cmd: list[str], cwd: Path) -> int:
     """Start `cmd` detached from this process and return its pid."""
-    kwargs: dict[str, object] = {}
+    # One `Popen` call per platform rather than a kwargs dict: the isolation
+    # flag is the only difference, and spelled out it is what mypy narrows on.
     if sys.platform == "win32":
-        kwargs["creationflags"] = (
-            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
     else:
-        kwargs["start_new_session"] = True
-
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(cwd),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        **kwargs,
-    )
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
     return proc.pid

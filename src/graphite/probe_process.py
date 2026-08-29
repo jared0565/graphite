@@ -13,7 +13,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, cast
 
 OUTPUT_LIMIT_BYTES = 32 * 1024
 INPUT_LIMIT_BYTES = 1024 * 1024
@@ -195,6 +195,51 @@ def _validated_environment(environment: Mapping[str, str] | None) -> dict[str, s
     return validated
 
 
+class _WaitIdResult(Protocol):
+    si_status: int
+    si_code: int
+
+
+class _PosixOs(Protocol):
+    """The POSIX-only `os` names this module uses, looked up when they are called.
+
+    They do not exist on Windows, and the type gate runs there as well as on
+    ubuntu. Narrowing on `sys.platform` would satisfy mypy, but this transport
+    dispatches on `os.name`, and the suite reaches its POSIX branches from a
+    Windows dev box by patching `os.name` together with the calls those
+    branches make -- `os.killpg`, `os.waitid` -- which is what lets a darwin
+    `EPERM` be pinned without a darwin runner (graphite#46). A static narrowing
+    would put those branches out of reach under that patching, and a
+    `type: ignore` is refused on the platform where the name exists
+    (`warn_unused_ignores`). So `_posix_os()` returns the `os` module itself
+    under a type that names this surface, and each lookup still happens at the
+    call, exactly as before.
+    """
+
+    P_PID: int
+    WEXITED: int
+    WNOHANG: int
+    WNOWAIT: int
+    CLD_EXITED: int
+
+    def waitid(self, idtype: int, ident: int, options: int, /) -> _WaitIdResult | None: ...
+    def killpg(self, process_group_id: int, signal_number: int, /) -> None: ...
+
+
+class _PosixSignals(Protocol):
+    """`signal.SIGKILL`, resolved the same way and for the same reason as `_PosixOs`."""
+
+    SIGKILL: int
+
+
+def _posix_os() -> _PosixOs:
+    return cast(_PosixOs, os)
+
+
+def _posix_signals() -> _PosixSignals:
+    return cast(_PosixSignals, signal)
+
+
 class _Process(Protocol):
     pid: int
     stdin: Any
@@ -245,10 +290,11 @@ class _PosixProcess:
             signal_number = status & 0x7F
             self.returncode = -signal_number if signal_number else (status >> 8) & 0xFF
         else:
-            result = os.waitid(os.P_PID, self.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            posix = _posix_os()
+            result = posix.waitid(posix.P_PID, self.pid, posix.WEXITED | posix.WNOHANG | posix.WNOWAIT)
             if result is None:
                 return None
-            self.returncode = result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
+            self.returncode = result.si_status if result.si_code == posix.CLD_EXITED else -result.si_status
         return self.returncode
 
     def poll(self) -> int | None:
@@ -267,7 +313,7 @@ class _PosixProcess:
 
     def kill(self) -> bool:
         try:
-            os.kill(self.pid, signal.SIGKILL)
+            os.kill(self.pid, _posix_signals().SIGKILL)
             return True
         except ProcessLookupError:
             return True
@@ -279,7 +325,7 @@ class _PosixProcess:
             return True
         while True:
             try:
-                waited_pid, status = os.waitpid(self.pid, os.WNOHANG)
+                waited_pid, status = os.waitpid(self.pid, _posix_os().WNOHANG)
             except ChildProcessError:
                 return False
             if waited_pid == self.pid:
@@ -376,6 +422,7 @@ def run_bounded_process(
         or max_input_bytes > 4 * 1024 * 1024
     ):
         raise ProbeProcessError("invalid_timeout")
+    input_data: bytes | None
     if isinstance(stdin, str):
         try:
             input_data = stdin.encode("utf-8")
@@ -429,7 +476,8 @@ def run_bounded_process(
                 if remaining > 0:
                     outputs[name].extend(chunk[:remaining])
                 if len(outputs[name]) > max_output_bytes:
-                    overflow.set()
+                    if overflow is not None:
+                        overflow.set()
                     break
         except (OSError, ValueError):
             if cleanup_started is not None and not cleanup_started.is_set() and io_failed is not None:
@@ -728,7 +776,9 @@ def _cleanup_process_transport(
 
 
 def _cancel_synchronous_io(thread: threading.Thread) -> None:
-    if os.name != "nt" or thread.native_id is None:
+    # Windows-only (`CancelSynchronousIo` lives in kernel32); `sys.platform` is
+    # the form mypy narrows on, and it coincides with `os.name == "nt"`.
+    if sys.platform != "win32" or thread.native_id is None:
         return
     try:
         import ctypes
@@ -757,9 +807,18 @@ def _gracefully_signal_process_tree(process: _Process) -> bool:
         if os.name == "nt":
             if getattr(process, "poll", lambda: process.returncode)() is not None:
                 return False
-            process.send_signal(signal.CTRL_BREAK_EVENT)
+            # `CTRL_BREAK_EVENT` exists only on Windows, which `os.name` has
+            # just established; `sys.platform` is the form mypy narrows on. A
+            # process object without `send_signal` cannot be signalled
+            # gracefully -- the `AttributeError` below used to say exactly that.
+            if sys.platform != "win32":
+                return False
+            send_signal = getattr(process, "send_signal", None)
+            if send_signal is None:
+                return False
+            send_signal(signal.CTRL_BREAK_EVENT)
         else:
-            os.killpg(process.pid, signal.SIGTERM)
+            _posix_os().killpg(process.pid, signal.SIGTERM)
         return True
     except (AttributeError, OSError, ValueError):
         return False
@@ -818,7 +877,7 @@ def _force_kill_process_tree(process: _Process, deadline: float) -> bool:
     cleanup_ok = True
     if os.name != "nt":
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            _posix_os().killpg(process.pid, _posix_signals().SIGKILL)
         except ProcessLookupError:
             return True
         except PermissionError as exc:
@@ -844,7 +903,7 @@ def _force_kill_process_tree(process: _Process, deadline: float) -> bool:
 
 def _posix_process_group_exists(process_group_id: int) -> bool:
     try:
-        os.killpg(process_group_id, 0)
+        _posix_os().killpg(process_group_id, 0)
         return True
     except ProcessLookupError:
         return False

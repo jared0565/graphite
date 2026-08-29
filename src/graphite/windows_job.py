@@ -5,6 +5,7 @@ import ctypes
 import io
 import os
 import signal
+import sys
 from ctypes import wintypes
 from pathlib import Path
 from typing import BinaryIO, Mapping
@@ -75,7 +76,11 @@ class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
     )
 
 
-def _kernel32() -> ctypes.WinDLL:
+def _kernel32() -> ctypes.CDLL:
+    # `ctypes.WinDLL` is Windows-only, like everything this module drives; the
+    # `sys.platform` form is the one mypy narrows on.
+    if sys.platform != "win32":
+        raise RuntimeError("kernel32 is only available on Windows")
     api = ctypes.WinDLL("kernel32", use_last_error=True)
     api.CreateJobObjectW.argtypes = (ctypes.POINTER(SECURITY_ATTRIBUTES), wintypes.LPCWSTR)
     api.CreateJobObjectW.restype = wintypes.HANDLE
@@ -115,7 +120,7 @@ def _kernel32() -> ctypes.WinDLL:
 
 
 class JobProcess:
-    def __init__(self, api: ctypes.WinDLL, process_handle: int, job_handle: int, pid: int,
+    def __init__(self, api: ctypes.CDLL, process_handle: int, job_handle: int, pid: int,
                  stdin: BinaryIO | None, stdout: BinaryIO, stderr: BinaryIO) -> None:
         self._api = api
         self._process_handle = process_handle
@@ -141,9 +146,11 @@ class JobProcess:
 
         milliseconds = 0xFFFFFFFF if timeout is None else max(0, min(0xFFFFFFFE, int(timeout * 1000 + 0.999)))
         result = self._api.WaitForSingleObject(self._process_handle, milliseconds)
-        if result == WAIT_TIMEOUT:
+        if result == WAIT_TIMEOUT and timeout is not None:
             raise subprocess.TimeoutExpired([], timeout)
         if result != WAIT_OBJECT_0:
+            # Includes WAIT_TIMEOUT from an INFINITE wait, which the API does
+            # not return: that is a failed wait, not a timeout.
             raise OSError("process wait failed")
         value = self.poll()
         if value is None:
@@ -151,7 +158,9 @@ class JobProcess:
         return value
 
     def send_signal(self, signal_number: int) -> None:
-        if signal_number != signal.CTRL_BREAK_EVENT:
+        # `CTRL_BREAK_EVENT` exists only on Windows; `sys.platform` is the form
+        # mypy narrows on, and anywhere else no signal is supported.
+        if sys.platform != "win32" or signal_number != signal.CTRL_BREAK_EVENT:
             raise ValueError("unsupported signal")
         os.kill(self.pid, signal_number)
 
@@ -178,6 +187,10 @@ class JobProcess:
 
 def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_stdin: bool) -> JobProcess:
     """Launch suspended, assign to a preconfigured Job, then resume."""
+    # Windows-only by construction (`msvcrt`, `O_BINARY`, the Job API); the
+    # `sys.platform` form is the one mypy narrows on.
+    if sys.platform != "win32":
+        raise RuntimeError("Job Object launch is only available on Windows")
     import msvcrt
     import subprocess
 
@@ -188,7 +201,7 @@ def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_s
     stdin_read = stdin_write = stdout_read = stdout_write = stderr_read = stderr_write = 0
     streams: list[BinaryIO] = []
     attribute_initialized = False
-    attribute_buffer = None
+    attribute_buffer: ctypes.Array[ctypes.c_char] | None = None
     try:
         job = api.CreateJobObjectW(None, None)
         if not job:
@@ -204,12 +217,17 @@ def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_s
                 read_handle, write_handle = wintypes.HANDLE(), wintypes.HANDLE()
                 if not api.CreatePipe(ctypes.byref(read_handle), ctypes.byref(write_handle), ctypes.byref(security), 0):
                     raise OSError("pipe create failed")
+                read_value, write_value = read_handle.value, write_handle.value
+                # A NULL handle reads back as None; a CreatePipe that succeeded
+                # never returns one.
+                if read_value is None or write_value is None:
+                    raise OSError("pipe create failed")
                 if pipe_index == 0:
-                    stdin_read, stdin_write = read_handle.value, write_handle.value
+                    stdin_read, stdin_write = read_value, write_value
                 elif pipe_index == 1:
-                    stdout_read, stdout_write = read_handle.value, write_handle.value
+                    stdout_read, stdout_write = read_value, write_value
                 else:
-                    stderr_read, stderr_write = read_handle.value, write_handle.value
+                    stderr_read, stderr_write = read_value, write_value
             for parent_handle in (stdin_write, stdout_read, stderr_read):
                 if not api.SetHandleInformation(parent_handle, HANDLE_FLAG_INHERIT, 0):
                     raise OSError("pipe configure failed")
@@ -364,5 +382,5 @@ def launch(argv: list[str], *, cwd: Path, environment: Mapping[str, str], with_s
                 api.CloseHandle(handle)
         raise
     finally:
-        if attribute_initialized:
+        if attribute_initialized and attribute_buffer is not None:
             api.DeleteProcThreadAttributeList(ctypes.cast(attribute_buffer, wintypes.LPVOID))
