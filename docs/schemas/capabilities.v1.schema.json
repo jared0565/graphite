@@ -99,7 +99,12 @@
     "limits": {
       "type": "object",
       "required": ["max_graph_bytes"],
-      "properties": {"max_graph_bytes": {"type": "integer"}}
+      "additionalProperties": true,
+      "properties": {
+        "max_graph_bytes": {"type": "integer"},
+        "supported_repo_files": {"type": "integer"},
+        "supported_repo_files_basis": {"type": "string"}
+      }
     },
     "answer_contract": {
       "type": "object",
