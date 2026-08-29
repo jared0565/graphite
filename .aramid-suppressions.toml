@@ -216,3 +216,20 @@ rule = "S608"
 path = "tests/test_routing_storage.py"
 reason = "A test iterating a fixed, in-test list of table names to compare snapshots. No external input reaches the statement."
 
+
+# 2026-08-29: ONE entry that is not S608, and it is a scanner defect rather than
+# an adjudicated finding. aramid's typecheck runner hands EVERY changed file to
+# mypy, not only Python: on a push whose only changed file was
+# .github/workflows/ci.yml, mypy parsed the workflow as Python and reported the
+# first tokenizer error in it (a date literal with a leading zero) as
+# `mypy:syntax`, BLOCK-tier. Earlier pushes that touched ci.yml alongside a
+# Markdown file passed only because mypy then bailed on "Duplicate module named
+# __main__" before parsing anything. Reported to aramid-agent over the channel;
+# this entry is the bridge until the runner filters by extension. The id hashes
+# the CONTENT of ci.yml's flagged line, so it holds until that line changes.
+[[suppress]]
+id = "9dcf365a76eeb9500f06d980b9cd02f61b876ca21401cb73da84628850a3d810"
+tool = "mypy"
+rule = "syntax"
+path = ".github/workflows/ci.yml"
+reason = "A GitHub Actions workflow is not Python. aramid's typecheck runner passed the changed .yml to mypy, which tokenized YAML as Python source. Scanner defect reported to aramid; the workflow itself is validated by yaml.safe_load before every commit."

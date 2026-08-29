@@ -201,6 +201,114 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  # THE SAME GATES THE LOCAL GIT HOOKS RUN, against the committed aramid.toml,
+  # unmodified, and blocking.
+  #
+  # windows-latest rather than ubuntu because `[tests].command` in aramid.toml
+  # names `../.venvs/graphite-dev/Scripts/python.exe` -- the real venv layout
+  # on Windows -- so creating that venv makes the committed configuration
+  # true here without patching a line of it. The suite therefore runs a
+  # thirteenth time inside this job; that is what makes "the local gate runs
+  # in CI" literally true rather than approximately.
+  #
+  # `--strict` is aramid's CI mode: a DEGRADED tool (one that could not run)
+  # fails the job instead of being skipped. The `tools_ran` assertions below
+  # are the second half of that: a run in which a scanner silently never
+  # fired must not read as clean.
+  security:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # gitleaks and the pre-push scope want history, not a single commit.
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Create the dev venv that aramid.toml points at
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv ../.venvs/graphite-dev
+          ../.venvs/graphite-dev/Scripts/python.exe -m pip install -e ".[dev,mcp]"
+      - name: Install aramid and the tools its typecheck slot resolves on PATH
+        # aramid 0.5.1 is what every 0.5.x gate ran under; dependabot proposes
+        # bumps. mypy is installed for THIS interpreter because aramid's
+        # typecheck slot runs it from PATH, not from the dev venv.
+        run: python -m pip install "aramid==0.5.1" "mypy>=1.14"
+      - name: CI-only keys the repository leaves unset
+        shell: bash
+        # aramid merges defaults <- ~/.aramid/config.toml <- <root>/aramid.toml.
+        # The repo file does not set [llm], so the user layer decides it here:
+        # the LLM reviewer has no provider on a runner and must not degrade
+        # the gate. Nothing in the repository is patched.
+        run: |
+          mkdir -p ~/.aramid
+          printf '[llm]\nenabled = false\n' > ~/.aramid/config.toml
+      - name: aramid doctor --fix (informational)
+        shell: bash
+        # doctor exits 1 when an OPTIONAL LLM provider is absent, which is
+        # every hosted runner. It is run for its report, not its verdict: the
+        # two `--strict` gates below fail on any DEGRADED tool, and the
+        # tools_ran assertions fail on a scanner that silently never fired.
+        # Measured on run 33237751838: every BLOCK-tier tool OK, only
+        # claude-cli/codex-cli/openrouter/ollama-cloud MISSING.
+        # GitHub runs `shell: bash` as `bash -eo pipefail`, so a non-zero
+        # doctor would abort the step before the report is even printed;
+        # the status is captured explicitly instead.
+        run: |
+          status=0
+          aramid doctor --fix > doctor.txt 2>&1 || status=$?
+          echo "doctor exit status: $status"
+          cat doctor.txt
+          if grep -qE '^\s+MISSING\s+(gitleaks|semgrep|ruff|pip-audit|tests|interpreter)\b' doctor.txt; then
+            echo "::error::a BLOCK-tier tool is missing on the runner"; exit 1
+          fi
+      - name: Pre-commit gate (gitleaks, ruff security rules, shadow)
+        shell: bash
+        run: |
+          status=0
+          aramid check --gate pre-commit --all --strict --json > precommit.json 2> precommit.err || status=$?
+          echo "pre-commit gate exit status: $status"
+          cat precommit.err
+          python - <<'PY'
+          import json
+          d = json.load(open("precommit.json", encoding="utf-8"))
+          ran = set(d.get("tools_ran", []))
+          need = {"gitleaks", "ruff", "shadow"}
+          assert need <= ran, f"pre-commit gate did not run {sorted(need - ran)}; ran={sorted(ran)}"
+          print("pre-commit tools_ran:", sorted(ran), "| degraded:", d.get("degraded"), "| findings:", len(d.get("findings", [])))
+          PY
+          [ "$status" -eq 0 ]
+      - name: Pre-push gate (gitleaks, semgrep, typecheck, dependency audit, tests)
+        shell: bash
+        run: |
+          status=0
+          aramid check --gate pre-push --all --strict --json > prepush.json 2> prepush.err || status=$?
+          echo "pre-push gate exit status: $status"
+          cat prepush.err
+          python - <<'PY'
+          import json
+          d = json.load(open("prepush.json", encoding="utf-8"))
+          ran = set(d.get("tools_ran", []))
+          need = {"gitleaks", "semgrep"}
+          assert need <= ran, f"pre-push gate did not run {sorted(need - ran)}; ran={sorted(ran)}"
+          tests_slot = {"pytest", "python.exe", "tests"}
+          assert ran & tests_slot, f"the tests slot did not run; ran={sorted(ran)}"
+          print("pre-push tools_ran:", sorted(ran), "| degraded:", d.get("degraded"), "| findings:", len(d.get("findings", [])))
+          PY
+          [ "$status" -eq 0 ]
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aramid-gate-reports
+          path: |
+            precommit.json
+            prepush.json
+
   # ONE number for the whole matrix, with a floor that can only rise.
   #
   # Each OS leg's data file is combined here; the result includes code that
@@ -237,13 +345,13 @@ jobs:
           python -m coverage json -o coverage.json
           python -m coverage report --format=markdown > coverage.md
           cat coverage.md >> "$GITHUB_STEP_SUMMARY"
-          python -m coverage report | tail -1
+          python -m coverage report | grep '^TOTAL'
       - name: Enforce the floor
         # A dispatch may override the floor for ONE run -- that is the
         # negative control: dispatch with a floor above the measurement and
         # this step must fail. Push and PR runs always use the committed value.
         env:
-          COVERAGE_FLOOR: ${{ inputs.coverage_floor || '82' }}
+          COVERAGE_FLOOR: ${{ inputs.coverage_floor || '83' }}
         run: |
           set -euo pipefail
           echo "floor: $COVERAGE_FLOOR"

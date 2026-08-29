@@ -1,0 +1,17 @@
+name: Feature request
+description: Something graphite should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem this solves
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: Include the command or output you expect. Compatibility promises are in docs/compatibility.md.
+    validations:
+      required: true

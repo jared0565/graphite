@@ -36,6 +36,10 @@ readme = "README.md"
 # and the artifact is not redistributable, and nothing anywhere warns you.
 license = "MIT"
 license-files = ["LICENSE"]
+# The identity every commit already carries. A distribution with no author
+# is one more thing a reader has to check before trusting a tool that reads
+# their code and spawns subprocesses.
+authors = [{ name = "jared0565", email = "jared0565@gmail.com" }]
 # MEASURED, not inherited. Full suite, 2816 passed / 44 skipped on every cell,
 # all at 2e5e0a2 on Windows:
 #
@@ -245,7 +249,13 @@ module = [
     "community",
     "community.*",
     "tree_sitter",
-    "tree_sitter_*",
+    # mypy module patterns take '*' only as a dotted component, so the five
+    # grammar packages are listed by name rather than as `tree_sitter_*`.
+    "tree_sitter_javascript",
+    "tree_sitter_typescript",
+    "tree_sitter_python",
+    "tree_sitter_go",
+    "tree_sitter_rust",
     "louvain",
     "mcp",
     "mcp.*",
