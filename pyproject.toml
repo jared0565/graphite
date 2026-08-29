@@ -77,11 +77,10 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
     "Typing :: Typed",
 ]
-# Deliberately NOT "Typing :: Typed". The source is annotated throughout, but
-# that classifier ships a promise to consumers that the type information is
-# usable, and nothing in the gate type-checks it -- there is no `py.typed`
-# marker and no mypy/pyright run. Add the marker and a checker together, or
-# neither.
+# `Typing :: Typed` is backed, not aspirational: `src/graphite/py.typed` ships
+# (scripts/verify_artifact.py refuses a wheel without it) and `python -m mypy`
+# gates in CI. The marker and the checker arrived together (PRD WS-D) -- the
+# classifier alone would be a promise nothing enforces.
 dependencies = [
     "networkx>=3.3",
     "python-louvain>=0.16",

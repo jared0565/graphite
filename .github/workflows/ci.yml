@@ -53,6 +53,10 @@ jobs:
         run: python -m pip install -e ".[dev,mcp]"
       - name: Ruff
         run: python -m ruff check .
+      - name: Mypy
+        # The type gate. `[tool.mypy]` in pyproject.toml scopes it to
+        # src/graphite; `py.typed` ships because this is clean.
+        run: python -m mypy
 
   # EVERY SUPPORTED CELL GATES. `pyproject.toml` claims `requires-python =
   # ">=3.11"` on Windows, Linux and macOS -- twelve cells -- and until
