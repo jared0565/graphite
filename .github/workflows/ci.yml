@@ -235,10 +235,11 @@ jobs:
           python -m venv ../.venvs/graphite-dev
           ../.venvs/graphite-dev/Scripts/python.exe -m pip install -e ".[dev,mcp]"
       - name: Install aramid and the tools its typecheck slot resolves on PATH
-        # aramid 0.6.0 is what this machine runs (channel round 140); dependabot proposes
-        # bumps. mypy is installed for THIS interpreter because aramid's
-        # typecheck slot runs it from PATH, not from the dev venv.
-        run: python -m pip install "aramid==0.6.0" "mypy>=1.14"
+        # aramid 0.6.1 is what this machine runs (channel round 144: the typecheck
+        # runner now hands mypy only .py/.pyi); dependabot proposes bumps. mypy is
+        # installed for THIS interpreter because aramid's typecheck slot runs it
+        # from PATH, not from the dev venv.
+        run: python -m pip install "aramid==0.6.1" "mypy>=1.14"
       - name: CI-only keys the repository leaves unset
         shell: bash
         # aramid merges defaults <- ~/.aramid/config.toml <- <root>/aramid.toml.

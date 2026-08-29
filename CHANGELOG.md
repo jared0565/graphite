@@ -27,6 +27,16 @@ JSON index (`Accept: application/vnd.pypi.simple.v1+json`), where PEP 740
 publishes a `provenance` URL per file; a test pins the endpoint so a
 regression to the legacy API fails. Re-run against 1.0.0: 6 of 6 arms.
 
+### Changed
+
+- mypy's configuration is back under `[tool.mypy]` in `pyproject.toml` and
+  `setup.cfg` is gone. It had moved there only because aramid 0.6.0's
+  typecheck runner armed on `[tool.mypy]` and then fed every changed file to
+  mypy; aramid 0.6.1 hands mypy only `.py`/`.pyi` (channel round 144), so
+  the CI pin is now `aramid==0.6.1` and the two `mypy:syntax` suppression
+  entries that bridged the defect are deleted rather than kept — a
+  workaround that outlives its root cause misdirects the next reader.
+
 ## [1.0.0] — 2026-08-29
 
 The production-grade release. Nothing here is a claim CI cannot turn red:
