@@ -48,6 +48,7 @@ def _clean_members() -> dict[str, bytes]:
     return {
         "graphite/__init__.py": b"__version__ = '0.2.1'\n",
         "graphite/ts_resolver.mjs": b"// resolver\n",
+        "graphite/py.typed": b"",
         "graphite_code-0.2.1.dist-info/METADATA": b"Name: graphite-code\nVersion: 0.2.1\n",
     }
 
@@ -105,6 +106,18 @@ def test_a_missing_resolver_is_caught(tmp_path: Path) -> None:
     problems = verify_artifact.verify(tmp_path)
 
     assert any("ts_resolver.mjs" in p for p in problems), problems
+
+
+def test_a_missing_typed_marker_is_caught(tmp_path: Path) -> None:
+    """`py.typed` is what makes `Typing :: Typed` true for a consumer's type
+    checker; like the resolver it is data, so nothing imports it and nothing
+    but this check would notice it dropped out of the wheel."""
+    members = {k: v for k, v in _clean_members().items() if not k.endswith("py.typed")}
+    _write_archives(tmp_path, wheel_members=members)
+
+    problems = verify_artifact.verify(tmp_path)
+
+    assert any("py.typed" in p for p in problems), problems
 
 
 @pytest.mark.parametrize("count", [0, 2])
