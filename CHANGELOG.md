@@ -13,6 +13,90 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
+## [1.0.0] — 2026-08-29
+
+The production-grade release. Nothing here is a claim CI cannot turn red:
+each item names the gate or test that enforces it. The declaration criteria
+and their evidence are in `docs/superpowers/specs/2026-08-29-production-grade-design.md`.
+
+### Fixed
+
+**The cycle report could not finish on a repository with dense import
+cycles** (#64). `analyze()` enumerated every simple cycle of the project
+graph before sorting and keeping twenty; on Django 5.2 (2 930 source files,
+`tests/` and `django/` importing each other) that is exponential — 13 GB and
+unfinished after thirty minutes, while each half alone reported cycles in
+seconds. The search is now bounded: cycles are enumerated inside strongly
+connected components one length level at a time up to length 8, under a
+10 000-cycle budget, and stop once a completed level holds the twenty
+shortest — exact whenever it stops that way, and deterministic across
+processes even when the budget bites. `analysis.cycle_search` records
+`length_bound`, `budget`, `examined`, `budget_exhausted`,
+`complete_through_length`, `cyclic_components` and `largest_component`, so a
+truncated answer says so. Django 5.2 now builds in 82 s (45 620 nodes,
+109 373 edges, 53 MB). Found by the real-repository benchmark; the synthetic
+corpus alone would never have shown it.
+
+**A lifecycle event claiming "no prior observation" over an UNAVAILABLE row
+raised `AttributeError`** instead of `lifecycle_transition_stale`
+(`routing/lifecycle_storage.py`); found while making the type gate clean.
+
+### Added
+
+- **Every supported cell gates merges.** The CI matrix is windows/ubuntu/macos
+  × CPython 3.11–3.14, all twelve cells blocking; the advisory `portability`
+  job is gone. Ubuntu and macOS 3.13 ran for the first time and pass.
+- **A type gate.** `python -m mypy` over `src/graphite` runs in the lint
+  job; 142 findings were fixed with zero `type: ignore` comments added, and
+  the gate is clean under `--platform` win32, linux and darwin.
+  `graphite/py.typed` ships (the artifact verifier refuses a wheel without
+  it) and the distribution carries `Typing :: Typed`.
+- **A coverage floor.** Branch coverage is collected on the 3.12 leg of each
+  OS, combined (83.04 % on the first measurement), and enforced at
+  `COVERAGE_FLOOR = 83`; a `workflow_dispatch` input overrides the floor for
+  one run as the negative control (floor 84 turns the job red).
+- **The security gates run in CI, unmodified.** A `security` job creates the
+  dev venv `aramid.toml` names and runs `aramid check --gate pre-commit|pre-push
+  --all --strict` against the committed configuration, asserting the tools
+  that ran (gitleaks, ruff, shadow; gitleaks, mypy, the suite, semgrep,
+  shadow) and refusing any degraded tool. A planted repo-root `graphite.py`
+  fails it at the pre-commit gate — and, under `python -m pytest`, every test
+  leg with it, which is the hazard the `-P` launch shape exists for.
+- `SECURITY.md` (GitHub private vulnerability reporting), `CODEOWNERS`, issue
+  templates, dependabot for actions and pip, `authors` metadata.
+- `daemon-install-linux` (systemd user unit), `daemon-install-macos`
+  (launchd agent), `daemon-uninstall-*` and `daemon-service-status`; all
+  three supervisors build their launch argv from one place, so `-P` is
+  present by construction. `daemon-health` reports the platform's supervisor.
+- `benchmarks/`: a deterministic synthetic corpus and a build benchmark; a CI
+  `benchmark` job records a 3 000-file build as an artifact and fails only
+  past a catastrophic budget. `capabilities` declares
+  `supported_repo_files: 7000` with its basis; `docs/benchmarks.md` holds the
+  measurements, including Django 5.2.
+- Reference documentation that cannot drift: `docs/reference/cli.md`
+  (generated from the parser; a test fails when stale),
+  `docs/reference/configuration.md` (every `Config` field and every
+  `GRAPHITE_*` variable the code reads, both directions tested),
+  `docs/reference/exit-codes.md` (every subcommand has a row),
+  `docs/compatibility.md` (what 1.x promises, the deprecation policy, the
+  support matrix).
+- Releases are built in CI from the approved tag with pinned tools
+  (`release-build-constraints.txt`), refused unless both digests equal the
+  reviewed ones, attached to the GitHub Release, and published with PEP 740
+  attestations that are true because this workflow built the bytes.
+
+### Changed
+
+- `Development Status :: 5 - Production/Stable`. From 1.0.0 the surfaces in
+  `docs/compatibility.md` are stable; a breaking change to any of them is a
+  major release.
+- The CI security job pins aramid 0.6.0 (the version the maintainer's
+  machine runs). mypy's configuration lives in `setup.cfg` for now: aramid
+  0.6.0's typecheck runner arms on `[tool.mypy]` and hands non-Python files
+  to mypy (accepted in channel round 140, fixed in aramid 0.6.1); both
+  files say when to move it back. Two reasoned entries in
+  `.aramid-suppressions.toml` from the same defect retire themselves.
+
 ## [0.5.3] — 2026-08-28
 
 ### Fixed

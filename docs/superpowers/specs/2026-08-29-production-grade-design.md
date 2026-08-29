@@ -65,7 +65,7 @@ blocker or already tracked elsewhere):
 | D8 | Governance surfaces exist. | `SECURITY.md`, `.github/CODEOWNERS`, `.github/ISSUE_TEMPLATE/`, `.github/dependabot.yml`, `authors` in `pyproject.toml`. |
 | D9 | Scale is measured and declared. | `capabilities` reports `supported_repo_files`; a CI benchmark builds a synthetic repo and records wall time, peak RSS, nodes and edges as an artifact, failing only on a catastrophic budget; `docs/benchmarks.md` records one real-repo measurement. |
 | D10 | Release artifacts are built in CI with provenance. | `publish.yml` checks out the approved tag, builds with pinned tools, refuses unless both digests equal the approved ones, attaches the artifacts to the GitHub Release and publishes with `attestations: true`. Two independent CI builds of the same commit are byte-identical (recorded). |
-| D11 | 1.0.0 is released, verified from the index, and deployed. | `scripts/verify_published_release.py 1.0.0` 5/5 arms; store `index.md` "Currently deployed" reads 1.0.0; channel round posted. Publication itself is the maintainer's dispatch. |
+| D11 | 1.0.0 is released, verified from the index, and deployed. | `scripts/verify_published_release.py 1.0.0` 6/6 arms (the sixth is PEP 740 provenance, added in WS-E); store `index.md` "Currently deployed" reads 1.0.0; channel round posted. Publication itself is the maintainer's dispatch. |
 
 ## 5. Work streams
 
@@ -355,3 +355,53 @@ Applies to every stream, from the repository's working rules:
   platform where they must run that they did run.
 - Figures in this document are snapshots dated 2026-08-29; re-measure before
   quoting them later.
+
+## 10. Execution record (2026-08-29)
+
+What the streams found while making the criteria true. Each item changed a
+design decision above or is evidence a later reader will want.
+
+- **WS-A** — the nine formerly advisory legs plus the two never-run 3.13
+  cells all passed on the first gating run (dispatch 33231751551, main
+  33233419549). The cost argument in `ci.yml` had expired: standard runners
+  bill zero on a public repository, measured from the timing API.
+- **WS-D** — 142 mypy findings in 34 files fixed with zero `type: ignore`;
+  one real defect (`lifecycle_storage.py`: `AttributeError` on a
+  no-prior-observation event over an UNAVAILABLE row). Platform-only code
+  narrows through typed call-time views (`_win32_ctypes.py`, `_PosixOs`)
+  rather than `sys.platform` guards, because tests reach POSIX branches on
+  Windows by patching `os.name`. Clean on win32, linux and darwin.
+- **WS-C** — combined coverage 83.04 % (run 33235961969); floor 83;
+  negative control at 84 failed (run 33236479723). Windows and Linux data
+  files combine without separator duplicates under `relative_files`.
+- **WS-B** — the security job needed three iterations that were all
+  runner facts, not aramid's: a `pwsh` default shell collapsing exit 2 to
+  1, `bash -e` aborting before diagnostics, and a backspace byte a heredoc
+  put into the workflow. Proven green (33240107635); the shadow plant failed
+  the security job and, under `python -m pytest`, every test leg
+  (33240529198). Two aramid defects reported (rounds 139/141): the
+  typecheck runner hands non-Python files to mypy (accepted, 0.6.1) — bridged
+  by moving mypy's configuration to `setup.cfg` — and a `doctor` exit the
+  runner had misreported.
+- **WS-H → #64** — the real-repository row found what the synthetic corpus
+  never could: `analyze()` enumerated every simple cycle of the graph;
+  Django 5.2 (2 930 sources) took 13 GB and did not finish in 30 min. Bounded
+  level-by-level search under a budget with a `cycle_search` block in the
+  analysis; Django builds in 66.9 s at 520 MB. `supported_repo_files` is
+  declared at 7 000 from Django's density (~18 KB of graph per file reaches
+  the 128 MiB cap near 7 400), not the synthetic corpus's 18 000.
+- **WS-F** — proven on the platforms themselves: `plutil -lint` has no skip
+  path on the macOS legs; `systemd-analyze --user verify` passes under WSL
+  Ubuntu (systemd 255) and on ubuntu-latest.
+- **WS-G** — the generated CLI page first rendered `F:\Projects` (the value
+  of `GRAPHITE_PROJECTS_ROOT` here) as a default and failed every CI leg; a
+  committed page names the rule, never an environment value, and a test
+  renders it with and without the variable.
+- **WS-E** — cross-OS archive digests are not a valid check even after the
+  working copy was normalized: the same commit's Windows and Linux builds
+  are content-identical while the zip `create_system` byte and the deflate
+  stream (zlib-ng 1.3.1 vs zlib 1.3.2) differ in every member. The approval
+  digests are therefore CI's, agreed across two runs; the maintainer's
+  build is a content check (`scripts/compare_dist.py`). The `publish.yml`
+  negative control (dispatching 0.5.3, whose approved digests are a
+  maintainer build) stops at the digest guard before any upload.
