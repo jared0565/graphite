@@ -2528,8 +2528,13 @@ def _version_report() -> str:
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None) -> int:
-    _force_utf8_when_redirected()
+def build_parser() -> argparse.ArgumentParser:
+    """The complete argparse tree, with no side effects.
+
+    `main()` parses with it; `scripts/gen_cli_reference.py` renders
+    docs/reference/cli.md from it, and `tests/test_cli_reference.py`
+    fails when the two drift apart. Keep every subcommand registered here.
+    """
     parser = argparse.ArgumentParser(prog="graphite", description="Local-first code knowledge graph.")
     parser.add_argument(
         "--version",
@@ -3222,6 +3227,14 @@ def main(argv: list[str] | None = None) -> int:
     p_service_status.add_argument("--json", action="store_true", help="Emit status as JSON")
     p_service_status.set_defaults(func=cmd_daemon_service_status)
 
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    _force_utf8_when_redirected()
+    parser = build_parser()
+    sub = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+    p_doctor = sub.choices["doctor"]
     args = parser.parse_args(argv)
     if getattr(args, "version", False):
         # Returns BEFORE the activation call further down, on purpose. This is

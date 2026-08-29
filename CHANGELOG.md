@@ -1,7 +1,8 @@
 # Changelog
 
 Notable changes to graphite. Format follows [Keep a Changelog]; versioning is
-semver, pre-1.0 (minor versions may break things).
+semantic. From 1.0.0 the surfaces listed in `docs/compatibility.md` are
+stable: a breaking change to any of them is a major release.
 
 **A version number here is a coarse release label, not a fix marker.** Several
 behavioural fixes have shipped with no version change at all — the `-P`
