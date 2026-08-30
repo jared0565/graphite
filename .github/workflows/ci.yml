@@ -236,12 +236,14 @@ jobs:
           python -m venv ../.venvs/graphite-dev
           ../.venvs/graphite-dev/Scripts/python.exe -m pip install -e ".[dev,mcp]"
       - name: Install aramid and the tools its typecheck slot resolves on PATH
-        # aramid 0.7.0 is what this machine runs (channel round 148; 0.6.1 scoped
+        # aramid 0.7.1 is what this machine runs (channel round 152; 0.6.1 scoped
         # the typecheck runner to .py/.pyi, 0.7.0 added `ledger resolve
-        # --out-of-scope`, `superseded`, `--gate all`); dependabot proposes bumps.
+        # --out-of-scope`, `superseded`, `--gate all`, 0.7.1 honours
+        # [tool.mypy] files/exclude in the typecheck slot and reports
+        # `fresh_ledger_baseline`/`grandfathered`); dependabot proposes bumps.
         # mypy is installed for THIS interpreter because aramid's typecheck slot
         # runs it from PATH, not from the dev venv.
-        run: python -m pip install "aramid==0.7.0" "mypy>=1.14"
+        run: python -m pip install "aramid==0.7.1" "mypy>=1.14"
       - name: CI-only keys the repository leaves unset
         shell: bash
         # aramid merges defaults <- ~/.aramid/config.toml <- <root>/aramid.toml.
@@ -286,7 +288,9 @@ jobs:
           # Verdict from the report, not the exit status (see the pre-push step).
           blocking = [f for f in d.get("findings", []) if f.get("verdict") == "block"]
           print("pre-commit tools_ran:", sorted(ran), "| degraded:", d.get("degraded"),
-                "| findings:", len(d.get("findings", [])), "| block-tier:", len(blocking))
+                "| findings:", len(d.get("findings", [])), "| block-tier:", len(blocking),
+                "| fresh_ledger_baseline:", d.get("fresh_ledger_baseline"),
+                "| grandfathered:", len(d.get("grandfathered") or []))
           assert not blocking, "block-tier findings:\n" + "\n".join(
               f"  {f.get('tool')}:{f.get('rule')} {f.get('file')}:{f.get('line')} {str(f.get('message'))[:120]}"
               for f in blocking[:25]
@@ -327,9 +331,9 @@ jobs:
           # baseline writes one and downgrades findings the ratchet alone
           # escalated to rc 0 (intrinsic blocks such as secrets, semgrep
           # BLOCK rules or a failed suite keep rc 1). Every CI checkout is
-          # that first run. From aramid 0.7.1 the report carries
-          # `fresh_ledger_baseline` and `grandfathered: [ids]`; once the pin
-          # moves there, print them here too.
+          # that first run. From aramid 0.7.1 the report says so on every
+          # run (`fresh_ledger_baseline`, `grandfathered: [ids]`; false / []
+          # on an ordinary one); both gate steps print them.
           # Any block-tier finding from a non-mypy scanner, or from mypy
           # inside the project's own type-gate scope (pyproject [tool.mypy]
           # files = src/graphite), fails this step. mypy findings on tests/,
@@ -344,7 +348,9 @@ jobs:
           ]
           print("pre-push tools_ran:", sorted(ran), "| degraded:", d.get("degraded"),
                 "| findings:", len(d.get("findings", [])), "| block-tier:", len(blocking),
-                "| of which mypy outside the type-gate scope:", len(blocking) - len(in_scope))
+                "| of which mypy outside the type-gate scope:", len(blocking) - len(in_scope),
+                "| fresh_ledger_baseline:", d.get("fresh_ledger_baseline"),
+                "| grandfathered:", len(d.get("grandfathered") or []))
           assert not in_scope, "block-tier findings in scope:\n" + "\n".join(
               f"  {f.get('tool')}:{f.get('rule')} {f.get('file')}:{f.get('line')} {str(f.get('message'))[:120]}"
               for f in in_scope[:25]

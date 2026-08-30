@@ -57,8 +57,9 @@ benchmark, all confirmed and closed:**
   the mechanism from its code (channel round 151): its **fresh-ledger
   rule** — the first pre-push run on a ledger with no baseline writes one
   and downgrades findings the ratchet alone escalated to exit 0, so every
-  CI checkout is "the first run" — and 0.7.1 will say so in the report
-  (`fresh_ledger_baseline`, `grandfathered`). Both CI gate steps now
+  CI checkout is "the first run" — and from 0.7.1 the report says so
+  (`fresh_ledger_baseline`, `grandfathered`; both gate steps print them).
+  Both CI gate steps now
   read the verdict from the report itself: any block-tier finding from a
   non-mypy scanner, or from mypy inside the project's type-gate scope
   (`src/graphite`), fails the step regardless of the exit status; mypy
@@ -72,7 +73,12 @@ benchmark, all confirmed and closed:**
 
 ### Changed
 
-- CI pins `aramid==0.7.0`, the tool this machine runs (channel round 148).
+- CI pins `aramid==0.7.1`, the tool this machine runs (channel round 152;
+  0.7.0 was pinned briefly at round 148). 0.7.1's typecheck slot honours
+  `[tool.mypy] files`, so the 683 mypy rows that a whole-tree measurement
+  under 0.7.0 had written into the maintainer's ledger for `tests/` (675)
+  and `scripts/` (8) are retired with `ledger resolve --out-of-scope`, each
+  carrying the reason.
   The two `mypy:syntax` ledger rows that 0.6.1 left unresolvable were NOT
   retired with `ledger resolve --out-of-scope` as first written here: it
   refused them (`is not open (status=fixed)`), because aramid's gate had
