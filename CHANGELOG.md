@@ -81,6 +81,15 @@ benchmark, all confirmed and closed:**
 
 ### Documentation
 
+- **The generated CLI reference now renders nested subcommands.**
+  `scripts/gen_cli_reference.py` walked only the top level of the parser,
+  so the twenty-four commands that live one level down — under `route`,
+  `lifecycle`, `channel`, `incidents` and `overlay` — and every option they
+  own (`route reconcile --attempt-id`, for one) were absent from
+  `docs/reference/cli.md`, and the lockstep test could not see them drift.
+  Each nested command now has its own section under its group, and
+  `tests/test_cli_reference.py` requires every nested command and every
+  option it declares to appear there.
 - New [user guide](docs/user-guide.md) and [knowledge base](docs/knowledge-base.md).
 - README: installation is `pip install graphite-code` (it had still said
   `git clone` + `pip install -e .`, wrong since the 0.3.0 wheel), the `-P`

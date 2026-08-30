@@ -31,6 +31,92 @@ def test_cli_reference_names_every_subcommand() -> None:
         assert f"### `graphite {name}`" in text, f"subcommand {name} has no section"
 
 
+def _nested_groups() -> dict[str, dict[str, object]]:
+    """{group name: {nested name: nested parser}} for every top-level
+    subcommand that is itself a group (route, lifecycle, channel, incidents,
+    overlay), aliases collapsed onto their first name."""
+    import argparse
+
+    parser = build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    groups: dict[str, dict[str, object]] = {}
+    seen_top: set[int] = set()
+    for name, child in sub.choices.items():
+        if id(child) in seen_top:
+            continue
+        seen_top.add(id(child))
+        nested = next((a for a in child._actions if isinstance(a, argparse._SubParsersAction)), None)
+        if nested is None:
+            continue
+        seen_nested: set[int] = set()
+        for nested_name, nested_child in nested.choices.items():
+            if id(nested_child) in seen_nested:
+                continue
+            seen_nested.add(id(nested_child))
+            groups.setdefault(name, {})[nested_name] = nested_child
+    return groups
+
+
+def test_cli_reference_renders_nested_subcommands() -> None:
+    """A group's real commands live one level down (`graphite route
+    reconcile`, `graphite incidents ack`). The first cut of this page walked
+    only the top level, so twenty-four commands and every option they own --
+    `route reconcile --attempt-id` among them -- were absent, and the
+    lockstep test could not see them drift. Every nested command gets its
+    own section under its group, with its options."""
+    import argparse
+
+    text = DOC.read_text(encoding="utf-8")
+    groups = _nested_groups()
+    assert {"route", "lifecycle", "incidents", "overlay"} <= set(groups), sorted(groups)
+    for group, nested in groups.items():
+        for name, child in nested.items():
+            heading = f"#### `graphite {group} {name}`"
+            assert heading in text, f"{heading} has no section"
+            section = text.split(heading, 1)[1].split("\n### ", 1)[0].split("\n#### ", 1)[0]
+            for action in child._actions:  # type: ignore[attr-defined]
+                if isinstance(action, argparse._SubParsersAction) or action.help == argparse.SUPPRESS:
+                    continue
+                for opt in action.option_strings:
+                    assert f"`{opt}`" in section, f"{group} {name}: option {opt} missing from its section"
+    assert "`--attempt-id`" in text
+
+
+def test_cli_reference_renders_argument_choices() -> None:
+    """`graphite channel` dispatches on a positional with `choices`, not a
+    subparser, so recursion cannot reach `report`/`list`/`show`/`register`;
+    every argument that restricts its values must list them, or the page
+    documents an argument whose accepted values are unknowable from it."""
+    import argparse
+
+    text = DOC.read_text(encoding="utf-8")
+    parser = build_parser()
+
+    def walk(node: argparse.ArgumentParser, prefix: str) -> None:
+        for action in node._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                seen: set[int] = set()
+                for name, child in action.choices.items():
+                    if id(child) in seen:
+                        continue
+                    seen.add(id(child))
+                    walk(child, f"{prefix}{name} ")
+            elif action.choices and action.help != argparse.SUPPRESS:
+                if prefix:
+                    heading = f"`graphite {prefix.rstrip()}`"
+                    assert heading in text, f"{heading} has no section"
+                    section = text.split(heading, 1)[1].split("\n### ", 1)[0].split("\n#### ", 1)[0]
+                else:
+                    section = text.split("## Global options", 1)[1].split("\n## ", 1)[0]
+                for choice in action.choices:
+                    assert f"`{choice}`" in section, f"graphite {prefix}{action.dest}: choice {choice!r} not listed"
+
+    walk(parser, "")
+    channel = text.split("### `graphite channel`", 1)[1].split("\n### ", 1)[0]
+    for choice in ("report", "list", "show", "register"):
+        assert f"`{choice}`" in channel
+
+
 def test_cli_reference_carries_no_machine_path(monkeypatch) -> None:  # noqa: ANN001 - pytest fixture
     """The page is committed, so a default that came from the environment
     would publish one machine's layout as if it were the tool's. Measured:
