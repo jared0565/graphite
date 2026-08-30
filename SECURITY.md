@@ -33,7 +33,14 @@ graphite` without `-P`, because that is the shape a repo-local shadow needs.
 ## What is checked on every push
 
 The same scanner configuration runs in the local git hooks and in the CI
-`security` job: gitleaks, semgrep, ruff's security rules, the repo-root
-shadow check, and pip-audit, against the committed `aramid.toml` and
-`.aramid-suppressions.toml`. Suppressions are reviewed in the repository,
-never applied ad hoc.
+`security` job, against the committed `aramid.toml` and
+`.aramid-suppressions.toml`: gitleaks, semgrep, ruff's security rules, the
+repo-root shadow check, mypy, and the full test suite through the
+development interpreter. The CI job asserts from the gate's own JSON report
+that every one of those scanners actually ran and that the report holds no
+block-tier finding — the verdict is read from the report, never from the
+gate's exit status alone — so a scanner that silently never fired, or a
+gate that exits 0 over blocking findings, cannot read as clean. There is no dependency-vulnerability
+audit in the gate today; dependabot's security updates are the standing
+control for that. Suppressions are reviewed in the repository, never
+applied ad hoc.

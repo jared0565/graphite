@@ -27,6 +27,40 @@ JSON index (`Accept: application/vnd.pypi.simple.v1+json`), where PEP 740
 publishes a `provenance` URL per file; a test pins the endpoint so a
 regression to the legacy API fails. Re-run against 1.0.0: 6 of 6 arms.
 
+**Three findings from aramid's `llm-review` tier on the CI workflow and the
+benchmark, all confirmed and closed:**
+
+- The `coverage_floor` dispatch input could *lower* the floor for one run,
+  so a dispatched run could report green against a weaker gate than the
+  committed one. The enforcing step now refuses any requested value that is
+  not an integer at or above the committed `COVERAGE_FLOOR`; a dispatch can
+  only raise it (the negative control is unchanged). Proven with a fake
+  coverage across six arms: empty, 84 and 83 pass; 80, `abc` and -5 fail
+  before coverage is read.
+- The `security` job's self-check asserted only that gitleaks and semgrep
+  ran, while the step's name claimed typecheck and a dependency audit. The
+  labels were measured from the job's own `prepush.json` artifact
+  (`gitleaks, mypy, python.exe, semgrep, shadow`): the assertion now covers
+  every configured scanner, and the step name, `SECURITY.md` and
+  `CONTRIBUTING.md` no longer claim a dependency audit — no gate run on
+  either machine has ever emitted one, although `aramid doctor` lists
+  pip-audit as present (reported to aramid). Measuring this exposed two
+  worse things: under aramid 0.6.0 the CI typecheck slot had **never run**
+  in `--all` mode (no `mypy` in `tools_ran`, nothing degraded) and the old
+  assertion called that clean; under 0.6.1 it runs over every `.py`, and
+  the job passed with exit 0 while its own report carried 786 block-tier
+  findings that the same report fails with locally. Both CI gate steps now
+  read the verdict from the report itself: any block-tier finding from a
+  non-mypy scanner, or from mypy inside the project's type-gate scope
+  (`src/graphite`), fails the step regardless of the exit status; mypy
+  findings on the deliberately untyped `tests/`, `scripts/` and
+  `benchmarks/` trees are counted and printed.
+- `benchmarks/build_benchmark.py` prepended the repository root to
+  `sys.path` to import its sibling — the shape the `-P` launch contract
+  forbids. It loads `synthetic_repo.py` by location now, CI runs it under
+  `-P`, and two tests pin the shape (no `sys.path` access in the module; the
+  script starts under `-P`).
+
 ### Changed
 
 - mypy's configuration is back under `[tool.mypy]` in `pyproject.toml` and

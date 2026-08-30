@@ -28,12 +28,13 @@ on:
   # cost-driven restriction; do not restore one from prose.
   workflow_dispatch:
     inputs:
-      # Overrides COVERAGE_FLOOR for one run. Its purpose is the negative
+      # Raises COVERAGE_FLOOR for one run. Its purpose is the negative
       # control of the coverage gate: dispatch with a value above the
       # measurement and the `coverage` job must go red. Empty means "use the
-      # committed floor", which is what every push and PR run does.
+      # committed floor", which is what every push and PR run does. A value
+      # BELOW the committed floor is refused by the enforcing step.
       coverage_floor:
-        description: "COVERAGE_FLOOR for this run only (negative control: set above the measurement)"
+        description: "COVERAGE_FLOOR for this run only; must be >= the committed floor (negative control: set above the measurement)"
         type: string
         default: ""
 
@@ -281,10 +282,17 @@ jobs:
           ran = set(d.get("tools_ran", []))
           need = {"gitleaks", "ruff", "shadow"}
           assert need <= ran, f"pre-commit gate did not run {sorted(need - ran)}; ran={sorted(ran)}"
-          print("pre-commit tools_ran:", sorted(ran), "| degraded:", d.get("degraded"), "| findings:", len(d.get("findings", [])))
+          # Verdict from the report, not the exit status (see the pre-push step).
+          blocking = [f for f in d.get("findings", []) if f.get("verdict") == "block"]
+          print("pre-commit tools_ran:", sorted(ran), "| degraded:", d.get("degraded"),
+                "| findings:", len(d.get("findings", [])), "| block-tier:", len(blocking))
+          assert not blocking, "block-tier findings:\n" + "\n".join(
+              f"  {f.get('tool')}:{f.get('rule')} {f.get('file')}:{f.get('line')} {str(f.get('message'))[:120]}"
+              for f in blocking[:25]
+          )
           PY
           [ "$status" -eq 0 ]
-      - name: Pre-push gate (gitleaks, semgrep, typecheck, dependency audit, tests)
+      - name: Pre-push gate (gitleaks, semgrep, shadow, typecheck, tests)
         shell: bash
         run: |
           status=0
@@ -295,11 +303,39 @@ jobs:
           import json
           d = json.load(open("prepush.json", encoding="utf-8"))
           ran = set(d.get("tools_ran", []))
-          need = {"gitleaks", "semgrep"}
+          # Every scanner the gate is configured to run, by the label aramid
+          # actually emits (measured from this job's own prepush.json artifact,
+          # run 33280345301: gitleaks, mypy, python.exe, semgrep, shadow). A
+          # scanner missing here is a scanner that silently never fired; the
+          # tests slot is labelled by its command, hence the separate check.
+          need = {"gitleaks", "semgrep", "shadow", "mypy"}
           assert need <= ran, f"pre-push gate did not run {sorted(need - ran)}; ran={sorted(ran)}"
           tests_slot = {"pytest", "python.exe", "tests"}
           assert ran & tests_slot, f"the tests slot did not run; ran={sorted(ran)}"
-          print("pre-push tools_ran:", sorted(ran), "| degraded:", d.get("degraded"), "| findings:", len(d.get("findings", [])))
+          # The verdict is read from the REPORT, never from the exit status
+          # alone. Measured 2026-08-30: this step passed (exit 0) on runs
+          # 33265993032 and 33280345301 while its own prepush.json carried 786
+          # block-tier findings (aramid 0.6.1's typecheck slot over every .py
+          # under --all, warn escalated to block by the ratchet); the same
+          # report on the maintainer's machine exits 1. Reported to aramid.
+          # Until settled, any block-tier finding from a non-mypy scanner, or
+          # from mypy inside the project's own type-gate scope (pyproject
+          # [tool.mypy] files = src/graphite), fails this step. mypy findings
+          # on tests/, scripts/ and benchmarks/ -- which that scope leaves
+          # untyped on purpose -- are counted and printed, not hidden.
+          typed = ("src/graphite/",)
+          blocking = [f for f in d.get("findings", []) if f.get("verdict") == "block"]
+          in_scope = [
+              f for f in blocking
+              if f.get("tool") != "mypy" or str(f.get("file", "")).replace("\\", "/").startswith(typed)
+          ]
+          print("pre-push tools_ran:", sorted(ran), "| degraded:", d.get("degraded"),
+                "| findings:", len(d.get("findings", [])), "| block-tier:", len(blocking),
+                "| of which mypy outside the type-gate scope:", len(blocking) - len(in_scope))
+          assert not in_scope, "block-tier findings in scope:\n" + "\n".join(
+              f"  {f.get('tool')}:{f.get('rule')} {f.get('file')}:{f.get('line')} {str(f.get('message'))[:120]}"
+              for f in in_scope[:25]
+          )
           PY
           [ "$status" -eq 0 ]
       - uses: actions/upload-artifact@v4
@@ -348,15 +384,27 @@ jobs:
           cat coverage.md >> "$GITHUB_STEP_SUMMARY"
           python -m coverage report | grep '^TOTAL'
       - name: Enforce the floor
-        # A dispatch may override the floor for ONE run -- that is the
-        # negative control: dispatch with a floor above the measurement and
-        # this step must fail. Push and PR runs always use the committed value.
+        # A dispatch may RAISE the floor for ONE run -- that is the negative
+        # control: dispatch with a floor above the measurement and this step
+        # must fail. It can never lower it: a requested value below the
+        # committed COVERAGE_FLOOR fails this step before coverage is read, so
+        # a dispatched run cannot report green against a weaker gate than the
+        # one every push and PR run enforces.
         env:
-          COVERAGE_FLOOR: ${{ inputs.coverage_floor || '83' }}
+          COVERAGE_FLOOR: "83"
+          REQUESTED_FLOOR: ${{ inputs.coverage_floor }}
         run: |
           set -euo pipefail
-          echo "floor: $COVERAGE_FLOOR"
-          python -m coverage report --fail-under="$COVERAGE_FLOOR" > floor.txt 2>&1; echo "EXIT=$?" >> floor.txt
+          floor="$COVERAGE_FLOOR"
+          if [ -n "$REQUESTED_FLOOR" ]; then
+            if ! [[ "$REQUESTED_FLOOR" =~ ^[0-9]+$ ]] || [ "$REQUESTED_FLOOR" -lt "$COVERAGE_FLOOR" ]; then
+              echo "::error::coverage_floor='$REQUESTED_FLOOR' is not an integer >= the committed floor $COVERAGE_FLOOR; a dispatch may only raise the floor"
+              exit 1
+            fi
+            floor="$REQUESTED_FLOOR"
+          fi
+          echo "floor: $floor (committed: $COVERAGE_FLOOR)"
+          python -m coverage report --fail-under="$floor" > floor.txt 2>&1; echo "EXIT=$?" >> floor.txt
           tail -2 floor.txt
           grep -q '^EXIT=0$' floor.txt
       - uses: actions/upload-artifact@v4
@@ -383,7 +431,10 @@ jobs:
       - name: Install
         run: python -m pip install -e .
       - name: Build a 3000-file synthetic repository
-        run: python benchmarks/build_benchmark.py --files 3000 --out benchmark-metrics.json --wall-budget-s 600
+        # -P: neither the checkout nor the script directory is prepended to
+        # sys.path, so nothing in repository content can stand in for the
+        # installed package the benchmark measures.
+        run: python -P benchmarks/build_benchmark.py --files 3000 --out benchmark-metrics.json --wall-budget-s 600
       - uses: actions/upload-artifact@v4
         with:
           name: benchmark-metrics

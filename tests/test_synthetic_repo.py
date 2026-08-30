@@ -49,6 +49,41 @@ def test_benchmark_builds_a_small_repo_and_records_metrics(tmp_path: Path) -> No
     assert set(metrics["counts"]) == {"py", "ts", "js", "go", "rs"}
 
 
+def test_benchmark_script_never_touches_sys_path() -> None:
+    """The script used to prepend the repository root to sys.path so it could
+    import its sibling as `benchmarks.synthetic_repo` -- the exact shape the
+    launch contract forbids, because a repo-local `graphite.py` would then
+    stand in for the installed package. It loads the sibling by location now;
+    any `sys.path` access in the module is a regression."""
+    import ast
+
+    source = (Path(__file__).resolve().parents[1] / "benchmarks" / "build_benchmark.py").read_text(encoding="utf-8")
+    offenders = [
+        node.lineno
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute)
+        and node.attr == "path"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "sys"
+    ]
+    assert offenders == [], f"build_benchmark.py touches sys.path at lines {offenders}"
+
+
+def test_benchmark_script_runs_under_isolated_path_mode() -> None:
+    """Under -P neither the cwd nor the script directory is on sys.path, so a
+    script that still needed either to find its sibling would fail here."""
+    import subprocess
+    import sys
+
+    script = Path(__file__).resolve().parents[1] / "benchmarks" / "build_benchmark.py"
+    proc = subprocess.run(
+        [sys.executable, "-P", str(script), "--help"],
+        capture_output=True, text=True, check=False, cwd=script.parent.parent, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr[-800:]
+    assert "--wall-budget-s" in proc.stdout
+
+
 def test_benchmark_budget_exceeded_is_exit_two(tmp_path: Path) -> None:
     """The catastrophe detector must be able to fire: a budget no build can
     meet turns the exit status into 2 while the metrics are still recorded."""

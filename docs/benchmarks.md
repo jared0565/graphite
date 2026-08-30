@@ -1,7 +1,7 @@
 # Build benchmarks
 
 Recorded, not promised: each row is one run on the machine named, with the
-engine at the commit named. Re-run `python benchmarks/build_benchmark.py
+engine at the commit named. Re-run `python -P benchmarks/build_benchmark.py
 --files N` (synthetic) or time `graphite build` on your own repository to
 measure yours. The CI `benchmark` job records a 3 000-file synthetic build
 on every push as an artifact; it fails only on a catastrophic budget.

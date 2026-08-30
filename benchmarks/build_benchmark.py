@@ -14,16 +14,37 @@ is non-zero only when the build blows past the budget or the graph exceeds
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import platform
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from benchmarks.synthetic_repo import generate  # noqa: E402
+
+def _load_generate() -> Callable[..., dict[str, int]]:
+    """Import the sibling generator by file location, not by path search.
+
+    Prepending the repository root to ``sys.path`` would put a repo-local
+    ``graphite.py`` ahead of the installed package for this interpreter --
+    the exact shape the launch contract forbids (``-P`` exists to close it).
+    Loading ``synthetic_repo.py`` by its location touches ``sys.path`` not at
+    all, and CI runs this script under ``-P`` so the script directory is not
+    prepended either.
+    """
+    location = Path(__file__).resolve().with_name("synthetic_repo.py")
+    spec = importlib.util.spec_from_file_location("graphite_benchmark_synthetic_repo", location)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {location}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.generate
+
+
+generate = _load_generate()
 
 MAX_GRAPH_BYTES = 128 * 1024 * 1024
 EXIT_BUILD_FAILED = 1
