@@ -322,12 +322,20 @@ jobs:
           # 33286250634 (aramid 0.7.0, empty ledger): still 786 block-tier and
           # rc 0, so the exit depends on ledger presence, not the version -- a
           # checkout without .aramid/ (gitignored) cannot be gated by rc at
-          # all. Reported to aramid (channel rounds 149-150).
-          # Until settled, any block-tier finding from a non-mypy scanner, or
-          # from mypy inside the project's own type-gate scope (pyproject
-          # [tool.mypy] files = src/graphite), fails this step. mypy findings
-          # on tests/, scripts/ and benchmarks/ -- which that scope leaves
-          # untyped on purpose -- are counted and printed, not hidden.
+          # all. aramid confirmed the mechanism (channel round 151): its
+          # fresh-ledger rule -- the first pre-push run on a ledger with no
+          # baseline writes one and downgrades findings the ratchet alone
+          # escalated to rc 0 (intrinsic blocks such as secrets, semgrep
+          # BLOCK rules or a failed suite keep rc 1). Every CI checkout is
+          # that first run. From aramid 0.7.1 the report carries
+          # `fresh_ledger_baseline` and `grandfathered: [ids]`; once the pin
+          # moves there, print them here too.
+          # Any block-tier finding from a non-mypy scanner, or from mypy
+          # inside the project's own type-gate scope (pyproject [tool.mypy]
+          # files = src/graphite), fails this step. mypy findings on tests/,
+          # scripts/ and benchmarks/ -- which that scope leaves untyped on
+          # purpose, and which aramid's typecheck slot honours from 0.7.1 --
+          # are counted and printed, not hidden.
           typed = ("src/graphite/",)
           blocking = [f for f in d.get("findings", []) if f.get("verdict") == "block"]
           in_scope = [

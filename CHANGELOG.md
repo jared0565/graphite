@@ -53,8 +53,12 @@ benchmark, all confirmed and closed:**
   (exit 1). Discriminated on the first run under the 0.7.0 pin (33286250634):
   still 786 block-tier findings and exit 0 with CI's empty ledger, so
   aramid's exit depends on ledger presence — `.aramid/` is gitignored, so
-  a fresh checkout cannot be gated by exit status at all (reported to
-  aramid). Both CI gate steps now
+  a fresh checkout cannot be gated by exit status at all. aramid confirmed
+  the mechanism from its code (channel round 151): its **fresh-ledger
+  rule** — the first pre-push run on a ledger with no baseline writes one
+  and downgrades findings the ratchet alone escalated to exit 0, so every
+  CI checkout is "the first run" — and 0.7.1 will say so in the report
+  (`fresh_ledger_baseline`, `grandfathered`). Both CI gate steps now
   read the verdict from the report itself: any block-tier finding from a
   non-mypy scanner, or from mypy inside the project's type-gate scope
   (`src/graphite`), fails the step regardless of the exit status; mypy
@@ -68,9 +72,14 @@ benchmark, all confirmed and closed:**
 
 ### Changed
 
-- CI pins `aramid==0.7.0`, the tool this machine runs (channel round 148);
-  the two `mypy:syntax` ledger rows that 0.6.1 left unresolvable are retired
-  with 0.7.0's `ledger resolve --out-of-scope`.
+- CI pins `aramid==0.7.0`, the tool this machine runs (channel round 148).
+  The two `mypy:syntax` ledger rows that 0.6.1 left unresolvable were NOT
+  retired with `ledger resolve --out-of-scope` as first written here: it
+  refused them (`is not open (status=fixed)`), because aramid's gate had
+  already marked them `fixed` on a push that ran mypy over other files
+  without opening `ci.yml` — a defect in aramid 0.6.1's examined-set
+  stamping, fixed on aramid's `main` (`e65f296`) for 0.7.1. The rows stay
+  `fixed`, the log being append-only; channel round 151 is their record.
 - mypy's configuration is back under `[tool.mypy]` in `pyproject.toml` and
   `setup.cfg` is gone. It had moved there only because aramid 0.6.0's
   typecheck runner armed on `[tool.mypy]` and then fed every changed file to
