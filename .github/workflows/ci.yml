@@ -193,7 +193,7 @@ jobs:
         run: python -m pytest -q -rs --timeout=120 --timeout-method=thread --cov --cov-branch --cov-report=
       - name: Upload coverage data
         if: matrix.python == '3.12'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.os }}
           path: .coverage.${{ matrix.os }}
@@ -338,7 +338,7 @@ jobs:
           )
           PY
           [ "$status" -eq 0 ]
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: aramid-gate-reports
@@ -407,7 +407,7 @@ jobs:
           python -m coverage report --fail-under="$floor" > floor.txt 2>&1; echo "EXIT=$?" >> floor.txt
           tail -2 floor.txt
           grep -q '^EXIT=0$' floor.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: |
@@ -435,7 +435,7 @@ jobs:
         # sys.path, so nothing in repository content can stand in for the
         # installed package the benchmark measures.
         run: python -P benchmarks/build_benchmark.py --files 3000 --out benchmark-metrics.json --wall-budget-s 600
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: benchmark-metrics
           path: benchmark-metrics.json
@@ -481,7 +481,7 @@ jobs:
           echo "both builds byte-identical"
           (cd dist && sha256sum ./* | sed 's#\./##') | tee dist.sha256
       - name: Keep the artifacts and their digests
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-${{ github.sha }}
           path: |
