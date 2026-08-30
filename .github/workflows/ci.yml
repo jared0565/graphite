@@ -318,10 +318,11 @@ jobs:
           # 33265993032 and 33280345301 while its own prepush.json carried 786
           # block-tier findings (aramid 0.6.1's typecheck slot over every .py
           # under --all, warn escalated to block by the ratchet); the same
-          # report on the maintainer's machine exits 1 -- measured under 0.7.0
-          # with a populated ledger, where CI ran 0.6.1 with none (.aramid/ is
-          # gitignored), so version and ledger are both candidates. Reported
-          # to aramid; the first run under the 0.7.0 pin discriminates.
+          # report on the maintainer's machine exits 1. Discriminated on run
+          # 33286250634 (aramid 0.7.0, empty ledger): still 786 block-tier and
+          # rc 0, so the exit depends on ledger presence, not the version -- a
+          # checkout without .aramid/ (gitignored) cannot be gated by rc at
+          # all. Reported to aramid (channel rounds 149-150).
           # Until settled, any block-tier finding from a non-mypy scanner, or
           # from mypy inside the project's own type-gate scope (pyproject
           # [tool.mypy] files = src/graphite), fails this step. mypy findings

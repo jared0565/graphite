@@ -50,9 +50,11 @@ benchmark, all confirmed and closed:**
   assertion called that clean; under 0.6.1 it runs over every `.py`, and
   the job passed with exit 0 while its own report carried 786 block-tier
   findings that the same report fails with on the maintainer's machine
-  (exit 1 — measured under aramid 0.7.0 with a populated ledger, where CI
-  ran 0.6.1 with none, so the version and the missing ledger are both
-  candidates; the CI pin is now 0.7.0, the live tool). Both CI gate steps now
+  (exit 1). Discriminated on the first run under the 0.7.0 pin (33286250634):
+  still 786 block-tier findings and exit 0 with CI's empty ledger, so
+  aramid's exit depends on ledger presence — `.aramid/` is gitignored, so
+  a fresh checkout cannot be gated by exit status at all (reported to
+  aramid). Both CI gate steps now
   read the verdict from the report itself: any block-tier finding from a
   non-mypy scanner, or from mypy inside the project's type-gate scope
   (`src/graphite`), fails the step regardless of the exit status; mypy
