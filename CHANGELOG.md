@@ -90,6 +90,15 @@ benchmark, all confirmed and closed:**
   Each nested command now has its own section under its group, and
   `tests/test_cli_reference.py` requires every nested command and every
   option it declares to appear there.
+- **Every CLI argument now declares help text.** Rendering the nested
+  commands exposed sixty-two arguments with none — every nested `--json`,
+  the `lifecycle policy prepare` and `verification prepare` inputs,
+  `route accept|reject|cleanup|review --task-id`, `record-outcome`'s
+  flags, `reconcile --attempt-id`, `policy --promote/--rollback`, the
+  `incidents ack|resolve` positionals and options — so both `--help` and
+  the reference were silent about them. Each now says what it takes and
+  what it binds to; a test walks the whole parser and fails on any
+  argument without help, so none can be added back.
 - New [user guide](docs/user-guide.md) and [knowledge base](docs/knowledge-base.md).
 - README: installation is `pip install graphite-code` (it had still said
   `git clone` + `pip install -e .`, wrong since the 0.3.0 wheel), the `-P`

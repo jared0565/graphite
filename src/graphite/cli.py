@@ -2570,8 +2570,8 @@ def build_parser() -> argparse.ArgumentParser:
         "list", help="List bounded current lifecycle observations"
     )
     p_lifecycle_list.add_argument("path", help="Repository path")
-    p_lifecycle_list.add_argument("--limit", type=int, default=50)
-    p_lifecycle_list.add_argument("--json", action="store_true")
+    p_lifecycle_list.add_argument("--limit", type=int, default=50, help="Maximum observations to return")
+    p_lifecycle_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_lifecycle_list.set_defaults(func=cmd_lifecycle_list)
 
     for name, handler in (
@@ -2582,10 +2582,13 @@ def build_parser() -> argparse.ArgumentParser:
             name, help=f"Read lifecycle {name}"
         )
         lifecycle_read.add_argument("path", help="Repository path")
-        lifecycle_read.add_argument("--boundary-digest", required=True)
+        lifecycle_read.add_argument(
+            "--boundary-digest", required=True,
+            help="Provider boundary digest identifying the lifecycle record",
+        )
         if name == "history":
-            lifecycle_read.add_argument("--limit", type=int, default=50)
-        lifecycle_read.add_argument("--json", action="store_true")
+            lifecycle_read.add_argument("--limit", type=int, default=50, help="Maximum history events to return")
+        lifecycle_read.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
         lifecycle_read.set_defaults(func=handler)
 
     p_lifecycle_policy = lifecycle_sub.add_parser(
@@ -2598,30 +2601,45 @@ def build_parser() -> argparse.ArgumentParser:
         "inspect", help="Inspect persisted policy binding"
     )
     p_lifecycle_policy_inspect.add_argument("path", help="Repository path")
-    p_lifecycle_policy_inspect.add_argument("--boundary-digest", required=True)
-    p_lifecycle_policy_inspect.add_argument("--json", action="store_true")
+    p_lifecycle_policy_inspect.add_argument(
+        "--boundary-digest", required=True,
+        help="Provider boundary digest whose persisted policy binding to inspect",
+    )
+    p_lifecycle_policy_inspect.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_lifecycle_policy_inspect.set_defaults(func=cmd_lifecycle_policy_inspect)
 
     p_lifecycle_policy_prepare = lifecycle_policy_sub.add_parser(
         "prepare", help="Prepare a policy promotion candidate without activating it"
     )
     p_lifecycle_policy_prepare.add_argument("path", help="Repository path")
-    p_lifecycle_policy_prepare.add_argument("--boundary-digest", required=True)
     p_lifecycle_policy_prepare.add_argument(
-        "--lifecycle-identity-digest", required=True
+        "--boundary-digest", required=True,
+        help="Provider boundary digest the candidate binds to; its lifecycle must currently be INCOMPATIBLE",
     )
     p_lifecycle_policy_prepare.add_argument(
-        "--proposed-policy-version", required=True
-    )
-    p_lifecycle_policy_prepare.add_argument("--minimum-version", required=True)
-    p_lifecycle_policy_prepare.add_argument(
-        "--maximum-version-exclusive", required=True
+        "--lifecycle-identity-digest", required=True,
+        help="Current lifecycle identity digest; the candidate is refused if the identity has changed",
     )
     p_lifecycle_policy_prepare.add_argument(
-        "--required-capability", action="append", required=True
+        "--proposed-policy-version", required=True, help="Policy version the candidate proposes"
     )
-    p_lifecycle_policy_prepare.add_argument("--prepared-at", type=int, required=True)
-    p_lifecycle_policy_prepare.add_argument("--json", action="store_true")
+    p_lifecycle_policy_prepare.add_argument(
+        "--minimum-version", required=True,
+        help="Lowest provider version the proposed policy accepts (inclusive)",
+    )
+    p_lifecycle_policy_prepare.add_argument(
+        "--maximum-version-exclusive", required=True,
+        help="First provider version the proposed policy rejects (exclusive upper bound)",
+    )
+    p_lifecycle_policy_prepare.add_argument(
+        "--required-capability", action="append", required=True,
+        help="Capability the provider must report; repeat the option for each",
+    )
+    p_lifecycle_policy_prepare.add_argument(
+        "--prepared-at", type=int, required=True,
+        help="Preparation time in Unix seconds; not earlier than the current observation",
+    )
+    p_lifecycle_policy_prepare.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_lifecycle_policy_prepare.set_defaults(func=cmd_lifecycle_policy_prepare)
 
     p_lifecycle_verification = lifecycle_sub.add_parser(
@@ -2634,37 +2652,54 @@ def build_parser() -> argparse.ArgumentParser:
         "prepare", help="Prepare a manifest without invoking a provider"
     )
     p_lifecycle_verification_prepare.add_argument("path", help="Repository path")
-    p_lifecycle_verification_prepare.add_argument("--boundary-digest", required=True)
     p_lifecycle_verification_prepare.add_argument(
-        "--lifecycle-identity-digest", required=True
-    )
-    p_lifecycle_verification_prepare.add_argument("--requested-model", required=True)
-    p_lifecycle_verification_prepare.add_argument(
-        "--expected-effective-model", required=True
+        "--boundary-digest", required=True, help="Provider boundary digest the manifest binds to"
     )
     p_lifecycle_verification_prepare.add_argument(
-        "--effort", choices=[value.value for value in Effort], required=True
+        "--lifecycle-identity-digest", required=True,
+        help="Current lifecycle identity digest the manifest is prepared against",
     )
-    for option in (
-        "max-input-tokens", "max-output-tokens", "timeout-seconds", "expires-at"
+    p_lifecycle_verification_prepare.add_argument(
+        "--requested-model", required=True, help="Model identifier the verification requests"
+    )
+    p_lifecycle_verification_prepare.add_argument(
+        "--expected-effective-model", required=True,
+        help="Model the provider is expected to resolve the request to",
+    )
+    p_lifecycle_verification_prepare.add_argument(
+        "--effort", choices=[value.value for value in Effort], required=True,
+        help="Reasoning effort the manifest fixes",
+    )
+    for option, meaning in (
+        ("max-input-tokens", "Input token ceiling for the verification call"),
+        ("max-output-tokens", "Output token ceiling for the verification call"),
+        ("timeout-seconds", "Deadline for the verification call, in seconds"),
+        ("expires-at", "Manifest expiry in Unix seconds"),
     ):
         p_lifecycle_verification_prepare.add_argument(
-            f"--{option}", type=int, required=True
+            f"--{option}", type=int, required=True, help=meaning
         )
     p_lifecycle_verification_prepare.add_argument(
-        "--fixture-repository-commit", required=True
-    )
-    p_lifecycle_verification_prepare.add_argument("--graph-fingerprint", required=True)
-    p_lifecycle_verification_prepare.add_argument(
-        "--prompt-contract-hash", required=True
+        "--fixture-repository-commit", required=True,
+        help="Commit of the fixture repository the verification runs against",
     )
     p_lifecycle_verification_prepare.add_argument(
-        "--response-contract-hash", required=True
+        "--graph-fingerprint", required=True,
+        help="Fingerprint of the canonical graph the verification binds to",
     )
     p_lifecycle_verification_prepare.add_argument(
-        "--max-cost-microunits", type=int, default=None
+        "--prompt-contract-hash", required=True,
+        help="Hash of the prompt contract the verification must use",
     )
-    p_lifecycle_verification_prepare.add_argument("--json", action="store_true")
+    p_lifecycle_verification_prepare.add_argument(
+        "--response-contract-hash", required=True,
+        help="Hash of the response contract the reply must satisfy",
+    )
+    p_lifecycle_verification_prepare.add_argument(
+        "--max-cost-microunits", type=int, default=None,
+        help="Cost ceiling for the call in provider micro-units (default: none)",
+    )
+    p_lifecycle_verification_prepare.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_lifecycle_verification_prepare.set_defaults(
         func=cmd_lifecycle_verification_prepare
     )
@@ -2698,7 +2733,9 @@ def build_parser() -> argparse.ArgumentParser:
             action, help=f"Explicitly {action} one prepared routing task"
         )
         action_parser.add_argument("path", help="Repository path")
-        action_parser.add_argument("--task-id", required=True)
+        action_parser.add_argument(
+            "--task-id", required=True, help=f"Identifier of the prepared routing task to {action}"
+        )
         action_parser.add_argument(
             "--yes",
             action="store_true",
@@ -2713,7 +2750,9 @@ def build_parser() -> argparse.ArgumentParser:
         "review", help="Run a separately approved read-only other-provider review"
     )
     p_route_review.add_argument("path", help="Repository path")
-    p_route_review.add_argument("--task-id", required=True)
+    p_route_review.add_argument(
+        "--task-id", required=True, help="Identifier of the prepared routing task to review"
+    )
     p_route_review.add_argument(
         "--yes",
         action="store_true",
@@ -2726,19 +2765,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_route_outcome = route_sub.add_parser("record-outcome", help="Append supported outcome evidence")
     p_route_outcome.add_argument("path", help="Repository path")
-    p_route_outcome.add_argument("--execution-id", required=True)
+    p_route_outcome.add_argument(
+        "--execution-id", required=True, help="Identifier of the execution the outcome belongs to"
+    )
     p_route_outcome.add_argument(
         "--provenance", required=True,
         choices=["machine_verified", "ci_imported", "human", "pairwise", "reversion", "ambiguous"],
+        help="How the outcome was established",
     )
-    p_route_outcome.add_argument("--accepted", action="store_true")
-    p_route_outcome.add_argument("--evidence-file", default=None)
-    p_route_outcome.add_argument("--json", action="store_true")
+    p_route_outcome.add_argument(
+        "--accepted", action="store_true",
+        help="Record the outcome as accepted; omitted, it is recorded as not accepted",
+    )
+    p_route_outcome.add_argument(
+        "--evidence-file", default=None,
+        help="Evidence file to import; required for machine_verified and ci_imported provenance",
+    )
+    p_route_outcome.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_route_outcome.set_defaults(func=cmd_route_record_outcome)
 
     p_route_status = route_sub.add_parser("status", help="Read local routing readiness")
     p_route_status.add_argument("path", help="Repository path")
-    p_route_status.add_argument("--json", action="store_true")
+    p_route_status.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_route_status.set_defaults(func=cmd_route_status)
 
     p_route_recoverable = route_sub.add_parser(
@@ -2752,22 +2800,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_route_recoverable.add_argument(
         "--after", default=None, help="Validated attempt ID cursor from next_cursor"
     )
-    p_route_recoverable.add_argument("--json", action="store_true")
+    p_route_recoverable.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_route_recoverable.set_defaults(func=cmd_route_recoverable)
 
     p_route_reconcile = route_sub.add_parser(
         "reconcile", help="Finalize one staged receipt without another provider call"
     )
     p_route_reconcile.add_argument("path", help="Repository path")
-    p_route_reconcile.add_argument("--attempt-id", required=True)
-    p_route_reconcile.add_argument("--json", action="store_true")
+    p_route_reconcile.add_argument(
+        "--attempt-id", required=True,
+        help="Attempt id of the staged execution to finalize, as listed by route recoverable",
+    )
+    p_route_reconcile.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_route_reconcile.set_defaults(func=cmd_route_reconcile)
 
     p_route_policy = route_sub.add_parser("policy", help="Inspect or explicitly manage recommendation policy")
     p_route_policy.add_argument("path", help="Repository path")
-    p_route_policy.add_argument("--promote", default=None)
-    p_route_policy.add_argument("--rollback", default=None)
-    p_route_policy.add_argument("--json", action="store_true")
+    p_route_policy.add_argument(
+        "--promote", default=None,
+        help="Policy version to promote; asks for single-use approval; exclusive with --rollback",
+    )
+    p_route_policy.add_argument(
+        "--rollback", default=None,
+        help="Policy version to roll back to; asks for single-use approval; exclusive with --promote",
+    )
+    p_route_policy.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_route_policy.set_defaults(func=cmd_route_policy)
 
     p_overlay = sub.add_parser(
@@ -2871,20 +2928,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_incidents = sub.add_parser("incidents", help="List and triage recorded incidents")
     incidents_sub = p_incidents.add_subparsers(dest="incidents_cmd", required=True)
     p_inc_list = incidents_sub.add_parser("list", help="Folded incident views (open+acked by default)")
-    p_inc_list.add_argument("path", nargs="?", default=".")
-    p_inc_list.add_argument("--json", action="store_true")
+    p_inc_list.add_argument("path", nargs="?", default=".", help="Repository path")
+    p_inc_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_inc_list.add_argument("--all", action="store_true", help="Include resolved incidents")
     p_inc_list.add_argument("--global", dest="global_ledger", action="store_true", help="Read the daemon-global ledger")
-    p_inc_list.add_argument("--daemon-base", default=None)
+    p_inc_list.add_argument(
+        "--daemon-base", default=None,
+        help="Daemon base folder holding the global ledger, with --global (default: $GRAPHITE_PROJECTS_ROOT, else the current directory)",
+    )
     p_inc_list.add_argument("--state-dir", default=None, help="Daemon state directory (default: <base>/.graphite-daemon)")
     p_inc_list.set_defaults(func=cmd_incidents_list)
     for name, handler in (("ack", cmd_incidents_ack), ("resolve", cmd_incidents_resolve)):
         p_life = incidents_sub.add_parser(name, help=f"{name} an incident by fingerprint")
-        p_life.add_argument("fingerprint")
-        p_life.add_argument("path", nargs="?", default=".")
-        p_life.add_argument("-m", "--message", default=None)
-        p_life.add_argument("--global", dest="global_ledger", action="store_true")
-        p_life.add_argument("--daemon-base", default=None)
+        p_life.add_argument("fingerprint", help=f"Incident fingerprint to {name}, as listed by incidents list")
+        p_life.add_argument("path", nargs="?", default=".", help="Repository path")
+        p_life.add_argument("-m", "--message", default=None, help=f"Note recorded with the {name}")
+        p_life.add_argument(
+            "--global", dest="global_ledger", action="store_true",
+            help="Act on the daemon-global ledger instead of the repository ledger",
+        )
+        p_life.add_argument(
+            "--daemon-base", default=None,
+            help="Daemon base folder holding the global ledger, with --global (default: $GRAPHITE_PROJECTS_ROOT, else the current directory)",
+        )
         p_life.add_argument("--state-dir", default=None, help="Daemon state directory (default: <base>/.graphite-daemon)")
         p_life.set_defaults(func=handler)
 
@@ -3012,7 +3078,7 @@ def build_parser() -> argparse.ArgumentParser:
         "activate",
         help="Mark a repository as open in a coding agent so the daemon supervises it",
     )
-    p_activate.add_argument("path", nargs="?", default=".")
+    p_activate.add_argument("path", nargs="?", default=".", help="Repository path")
     p_activate.add_argument("--agent", default="editor", help="Agent or editor name recorded in the marker")
     p_activate.set_defaults(func=cmd_activate)
 

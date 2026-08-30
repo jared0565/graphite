@@ -117,6 +117,36 @@ def test_cli_reference_renders_argument_choices() -> None:
         assert f"`{choice}`" in channel
 
 
+def test_every_argument_declares_help() -> None:
+    """The reference renders `action.help`; an argument without one is a
+    row with an empty Meaning cell, and `--help` is silent about it too.
+    Rendering the nested subcommands exposed sixty-two such arguments
+    (`route reconcile --attempt-id`, every nested `--json`, the lifecycle
+    `prepare` inputs). None may be added back: every action the parser
+    exposes carries help text."""
+    import argparse
+
+    parser = build_parser()
+    missing: list[str] = []
+
+    def walk(node: argparse.ArgumentParser, prefix: str) -> None:
+        for action in node._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                seen: set[int] = set()
+                for name, child in action.choices.items():
+                    if id(child) in seen:
+                        continue
+                    seen.add(id(child))
+                    walk(child, f"{prefix}{name} ")
+            elif action.help is argparse.SUPPRESS:
+                continue
+            elif not (action.help or "").strip():
+                missing.append(f"graphite {prefix}{action.option_strings[0] if action.option_strings else action.dest}")
+
+    walk(parser, "")
+    assert missing == [], "arguments without help text:\n  " + "\n  ".join(missing)
+
+
 def test_cli_reference_carries_no_machine_path(monkeypatch) -> None:  # noqa: ANN001 - pytest fixture
     """The page is committed, so a default that came from the environment
     would publish one machine's layout as if it were the tool's. Measured:

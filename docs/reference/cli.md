@@ -49,8 +49,8 @@ List bounded current lifecycle observations
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--limit` |  (default: `50`) |
-| `--json` |  |
+| `--limit` | Maximum observations to return (default: `50`) |
+| `--json` | Emit machine-readable JSON |
 
 #### `graphite lifecycle status`
 
@@ -60,8 +60,8 @@ Read lifecycle status
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--boundary-digest` |  |
-| `--json` |  |
+| `--boundary-digest` | Provider boundary digest identifying the lifecycle record |
+| `--json` | Emit machine-readable JSON |
 
 #### `graphite lifecycle history`
 
@@ -71,9 +71,9 @@ Read lifecycle history
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--boundary-digest` |  |
-| `--limit` |  (default: `50`) |
-| `--json` |  |
+| `--boundary-digest` | Provider boundary digest identifying the lifecycle record |
+| `--limit` | Maximum history events to return (default: `50`) |
+| `--json` | Emit machine-readable JSON |
 
 #### `graphite lifecycle policy`
 
@@ -93,8 +93,8 @@ Inspect persisted policy binding
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--boundary-digest` |  |
-| `--json` |  |
+| `--boundary-digest` | Provider boundary digest whose persisted policy binding to inspect |
+| `--json` | Emit machine-readable JSON |
 
 ##### `graphite lifecycle policy prepare`
 
@@ -104,14 +104,14 @@ Prepare a policy promotion candidate without activating it
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--boundary-digest` |  |
-| `--lifecycle-identity-digest` |  |
-| `--proposed-policy-version` |  |
-| `--minimum-version` |  |
-| `--maximum-version-exclusive` |  |
-| `--required-capability` |  |
-| `--prepared-at` |  |
-| `--json` |  |
+| `--boundary-digest` | Provider boundary digest the candidate binds to; its lifecycle must currently be INCOMPATIBLE |
+| `--lifecycle-identity-digest` | Current lifecycle identity digest; the candidate is refused if the identity has changed |
+| `--proposed-policy-version` | Policy version the candidate proposes |
+| `--minimum-version` | Lowest provider version the proposed policy accepts (inclusive) |
+| `--maximum-version-exclusive` | First provider version the proposed policy rejects (exclusive upper bound) |
+| `--required-capability` | Capability the provider must report; repeat the option for each |
+| `--prepared-at` | Preparation time in Unix seconds; not earlier than the current observation |
+| `--json` | Emit machine-readable JSON |
 
 #### `graphite lifecycle verification`
 
@@ -131,21 +131,21 @@ Prepare a manifest without invoking a provider
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--boundary-digest` |  |
-| `--lifecycle-identity-digest` |  |
-| `--requested-model` |  |
-| `--expected-effective-model` |  |
-| `--effort` |  (one of: `default`, `low`, `medium`, `high`, `xhigh`, `max`) |
-| `--max-input-tokens` |  |
-| `--max-output-tokens` |  |
-| `--timeout-seconds` |  |
-| `--expires-at` |  |
-| `--fixture-repository-commit` |  |
-| `--graph-fingerprint` |  |
-| `--prompt-contract-hash` |  |
-| `--response-contract-hash` |  |
-| `--max-cost-microunits` |  |
-| `--json` |  |
+| `--boundary-digest` | Provider boundary digest the manifest binds to |
+| `--lifecycle-identity-digest` | Current lifecycle identity digest the manifest is prepared against |
+| `--requested-model` | Model identifier the verification requests |
+| `--expected-effective-model` | Model the provider is expected to resolve the request to |
+| `--effort` | Reasoning effort the manifest fixes (one of: `default`, `low`, `medium`, `high`, `xhigh`, `max`) |
+| `--max-input-tokens` | Input token ceiling for the verification call |
+| `--max-output-tokens` | Output token ceiling for the verification call |
+| `--timeout-seconds` | Deadline for the verification call, in seconds |
+| `--expires-at` | Manifest expiry in Unix seconds |
+| `--fixture-repository-commit` | Commit of the fixture repository the verification runs against |
+| `--graph-fingerprint` | Fingerprint of the canonical graph the verification binds to |
+| `--prompt-contract-hash` | Hash of the prompt contract the verification must use |
+| `--response-contract-hash` | Hash of the response contract the reply must satisfy |
+| `--max-cost-microunits` | Cost ceiling for the call in provider micro-units (default: none) |
+| `--json` | Emit machine-readable JSON |
 
 ### `graphite route`
 
@@ -190,7 +190,7 @@ Explicitly accept one prepared routing task
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--task-id` |  |
+| `--task-id` | Identifier of the prepared routing task to accept |
 | `--yes` | Never grants consent; interactive approval is still required |
 | `--json` | Non-interactive output; action is disabled |
 
@@ -202,7 +202,7 @@ Explicitly reject one prepared routing task
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--task-id` |  |
+| `--task-id` | Identifier of the prepared routing task to reject |
 | `--yes` | Never grants consent; interactive approval is still required |
 | `--json` | Non-interactive output; action is disabled |
 
@@ -214,7 +214,7 @@ Explicitly cleanup one prepared routing task
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--task-id` |  |
+| `--task-id` | Identifier of the prepared routing task to cleanup |
 | `--yes` | Never grants consent; interactive approval is still required |
 | `--json` | Non-interactive output; action is disabled |
 
@@ -226,7 +226,7 @@ Run a separately approved read-only other-provider review
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--task-id` |  |
+| `--task-id` | Identifier of the prepared routing task to review |
 | `--yes` | Never grants consent; interactive approval is still required |
 | `--json` | Non-interactive output; review is disabled |
 
@@ -238,11 +238,11 @@ Append supported outcome evidence
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--execution-id` |  |
-| `--provenance` |  (one of: `machine_verified`, `ci_imported`, `human`, `pairwise`, `reversion`, `ambiguous`) |
-| `--accepted` |  |
-| `--evidence-file` |  |
-| `--json` |  |
+| `--execution-id` | Identifier of the execution the outcome belongs to |
+| `--provenance` | How the outcome was established (one of: `machine_verified`, `ci_imported`, `human`, `pairwise`, `reversion`, `ambiguous`) |
+| `--accepted` | Record the outcome as accepted; omitted, it is recorded as not accepted |
+| `--evidence-file` | Evidence file to import; required for machine_verified and ci_imported provenance |
+| `--json` | Emit machine-readable JSON |
 
 #### `graphite route status`
 
@@ -252,7 +252,7 @@ Read local routing readiness
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--json` |  |
+| `--json` | Emit machine-readable JSON |
 
 #### `graphite route recoverable`
 
@@ -264,7 +264,7 @@ List staged execution attempts eligible for reconciliation
 | `path` | Repository path |
 | `--limit` | Page size from 1 to 100 (default: 50) (default: `50`) |
 | `--after` | Validated attempt ID cursor from next_cursor |
-| `--json` |  |
+| `--json` | Emit machine-readable JSON |
 
 #### `graphite route reconcile`
 
@@ -274,8 +274,8 @@ Finalize one staged receipt without another provider call
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--attempt-id` |  |
-| `--json` |  |
+| `--attempt-id` | Attempt id of the staged execution to finalize, as listed by route recoverable |
+| `--json` | Emit machine-readable JSON |
 
 #### `graphite route policy`
 
@@ -285,9 +285,9 @@ Inspect or explicitly manage recommendation policy
 |---|---|
 | `-h`, `--help` | show this help message and exit |
 | `path` | Repository path |
-| `--promote` |  |
-| `--rollback` |  |
-| `--json` |  |
+| `--promote` | Policy version to promote; asks for single-use approval; exclusive with --rollback |
+| `--rollback` | Policy version to roll back to; asks for single-use approval; exclusive with --promote |
+| `--json` | Emit machine-readable JSON |
 
 ### `graphite overlay`
 
@@ -391,11 +391,11 @@ Folded incident views (open+acked by default)
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `path` |  (default: `.`) |
-| `--json` |  |
+| `path` | Repository path (default: `.`) |
+| `--json` | Emit machine-readable JSON |
 | `--all` | Include resolved incidents |
 | `--global` | Read the daemon-global ledger |
-| `--daemon-base` |  |
+| `--daemon-base` | Daemon base folder holding the global ledger, with --global (default: $GRAPHITE_PROJECTS_ROOT, else the current directory) |
 | `--state-dir` | Daemon state directory (default: <base>/.graphite-daemon) |
 
 #### `graphite incidents ack`
@@ -405,11 +405,11 @@ ack an incident by fingerprint
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `fingerprint` |  |
-| `path` |  (default: `.`) |
-| `-m`, `--message` |  |
-| `--global` |  |
-| `--daemon-base` |  |
+| `fingerprint` | Incident fingerprint to ack, as listed by incidents list |
+| `path` | Repository path (default: `.`) |
+| `-m`, `--message` | Note recorded with the ack |
+| `--global` | Act on the daemon-global ledger instead of the repository ledger |
+| `--daemon-base` | Daemon base folder holding the global ledger, with --global (default: $GRAPHITE_PROJECTS_ROOT, else the current directory) |
 | `--state-dir` | Daemon state directory (default: <base>/.graphite-daemon) |
 
 #### `graphite incidents resolve`
@@ -419,11 +419,11 @@ resolve an incident by fingerprint
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `fingerprint` |  |
-| `path` |  (default: `.`) |
-| `-m`, `--message` |  |
-| `--global` |  |
-| `--daemon-base` |  |
+| `fingerprint` | Incident fingerprint to resolve, as listed by incidents list |
+| `path` | Repository path (default: `.`) |
+| `-m`, `--message` | Note recorded with the resolve |
+| `--global` | Act on the daemon-global ledger instead of the repository ledger |
+| `--daemon-base` | Daemon base folder holding the global ledger, with --global (default: $GRAPHITE_PROJECTS_ROOT, else the current directory) |
 | `--state-dir` | Daemon state directory (default: <base>/.graphite-daemon) |
 
 ### `graphite init`
@@ -549,7 +549,7 @@ Mark a repository as open in a coding agent so the daemon supervises it
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `path` |  (default: `.`) |
+| `path` | Repository path (default: `.`) |
 | `--agent` | Agent or editor name recorded in the marker (default: `editor`) |
 
 ### `graphite agent-hook`
