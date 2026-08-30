@@ -49,7 +49,10 @@ benchmark, all confirmed and closed:**
   in `--all` mode (no `mypy` in `tools_ran`, nothing degraded) and the old
   assertion called that clean; under 0.6.1 it runs over every `.py`, and
   the job passed with exit 0 while its own report carried 786 block-tier
-  findings that the same report fails with locally. Both CI gate steps now
+  findings that the same report fails with on the maintainer's machine
+  (exit 1 — measured under aramid 0.7.0 with a populated ledger, where CI
+  ran 0.6.1 with none, so the version and the missing ledger are both
+  candidates; the CI pin is now 0.7.0, the live tool). Both CI gate steps now
   read the verdict from the report itself: any block-tier finding from a
   non-mypy scanner, or from mypy inside the project's type-gate scope
   (`src/graphite`), fails the step regardless of the exit status; mypy
@@ -63,6 +66,9 @@ benchmark, all confirmed and closed:**
 
 ### Changed
 
+- CI pins `aramid==0.7.0`, the tool this machine runs (channel round 148);
+  the two `mypy:syntax` ledger rows that 0.6.1 left unresolvable are retired
+  with 0.7.0's `ledger resolve --out-of-scope`.
 - mypy's configuration is back under `[tool.mypy]` in `pyproject.toml` and
   `setup.cfg` is gone. It had moved there only because aramid 0.6.0's
   typecheck runner armed on `[tool.mypy]` and then fed every changed file to

@@ -236,11 +236,12 @@ jobs:
           python -m venv ../.venvs/graphite-dev
           ../.venvs/graphite-dev/Scripts/python.exe -m pip install -e ".[dev,mcp]"
       - name: Install aramid and the tools its typecheck slot resolves on PATH
-        # aramid 0.6.1 is what this machine runs (channel round 144: the typecheck
-        # runner now hands mypy only .py/.pyi); dependabot proposes bumps. mypy is
-        # installed for THIS interpreter because aramid's typecheck slot runs it
-        # from PATH, not from the dev venv.
-        run: python -m pip install "aramid==0.6.1" "mypy>=1.14"
+        # aramid 0.7.0 is what this machine runs (channel round 148; 0.6.1 scoped
+        # the typecheck runner to .py/.pyi, 0.7.0 added `ledger resolve
+        # --out-of-scope`, `superseded`, `--gate all`); dependabot proposes bumps.
+        # mypy is installed for THIS interpreter because aramid's typecheck slot
+        # runs it from PATH, not from the dev venv.
+        run: python -m pip install "aramid==0.7.0" "mypy>=1.14"
       - name: CI-only keys the repository leaves unset
         shell: bash
         # aramid merges defaults <- ~/.aramid/config.toml <- <root>/aramid.toml.
@@ -317,7 +318,10 @@ jobs:
           # 33265993032 and 33280345301 while its own prepush.json carried 786
           # block-tier findings (aramid 0.6.1's typecheck slot over every .py
           # under --all, warn escalated to block by the ratchet); the same
-          # report on the maintainer's machine exits 1. Reported to aramid.
+          # report on the maintainer's machine exits 1 -- measured under 0.7.0
+          # with a populated ledger, where CI ran 0.6.1 with none (.aramid/ is
+          # gitignored), so version and ledger are both candidates. Reported
+          # to aramid; the first run under the 0.7.0 pin discriminates.
           # Until settled, any block-tier finding from a non-mypy scanner, or
           # from mypy inside the project's own type-gate scope (pyproject
           # [tool.mypy] files = src/graphite), fails this step. mypy findings

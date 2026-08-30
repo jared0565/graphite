@@ -76,7 +76,8 @@ def test_benchmark_script_runs_under_isolated_path_mode() -> None:
     import sys
 
     script = Path(__file__).resolve().parents[1] / "benchmarks" / "build_benchmark.py"
-    proc = subprocess.run(
+    # S603: argv is a fixed list -- this interpreter, a flag, a path this test computed.
+    proc = subprocess.run(  # noqa: S603
         [sys.executable, "-P", str(script), "--help"],
         capture_output=True, text=True, check=False, cwd=script.parent.parent, timeout=60,
     )
