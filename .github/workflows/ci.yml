@@ -236,14 +236,16 @@ jobs:
           python -m venv ../.venvs/graphite-dev
           ../.venvs/graphite-dev/Scripts/python.exe -m pip install -e ".[dev,mcp]"
       - name: Install aramid and the tools its typecheck slot resolves on PATH
-        # aramid 0.7.1 is what this machine runs (channel round 152; 0.6.1 scoped
+        # aramid 0.7.2 is what this machine runs (channel round 157; 0.6.1 scoped
         # the typecheck runner to .py/.pyi, 0.7.0 added `ledger resolve
         # --out-of-scope`, `superseded`, `--gate all`, 0.7.1 honours
         # [tool.mypy] files/exclude in the typecheck slot and reports
-        # `fresh_ledger_baseline`/`grandfathered`); dependabot proposes bumps.
+        # `fresh_ledger_baseline`/`grandfathered`, 0.7.2 keeps registry keys
+        # out of `expected` and stamps `run_id`/`recorded` in the report);
+        # dependabot proposes bumps.
         # mypy is installed for THIS interpreter because aramid's typecheck slot
         # runs it from PATH, not from the dev venv.
-        run: python -m pip install "aramid==0.7.1" "mypy>=1.14"
+        run: python -m pip install "aramid==0.7.2" "mypy>=1.14"
       - name: CI-only keys the repository leaves unset
         shell: bash
         # aramid merges defaults <- ~/.aramid/config.toml <- <root>/aramid.toml.

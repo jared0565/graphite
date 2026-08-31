@@ -73,8 +73,14 @@ benchmark, all confirmed and closed:**
 
 ### Changed
 
-- CI pins `aramid==0.7.1`, the tool this machine runs (channel round 152;
-  0.7.0 was pinned briefly at round 148). 0.7.1's typecheck slot honours
+- CI pins `aramid==0.7.2`, the tool this machine runs (channel round 157;
+  0.7.0 and 0.7.1 were pinned briefly at rounds 148 and 152). 0.7.2 fixes
+  the tests-slot skip-streak false alarm this repository reported — the
+  registry key `tests` rode into `run_started.expected` beside the slot's
+  label, so `status` counted every pre-push run as a skipped suite (channel
+  rounds 155–157) — and stamps `run_id`/`recorded` in the check report, so
+  a `--no-record` measurement is distinguishable from a recorded one.
+  0.7.1's typecheck slot honours
   `[tool.mypy] files`, so the 683 mypy rows that a whole-tree measurement
   under 0.7.0 had written into the maintainer's ledger for `tests/` (675)
   and `scripts/` (8) are retired with `ledger resolve --out-of-scope`, each
