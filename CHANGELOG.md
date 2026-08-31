@@ -37,6 +37,16 @@ benchmark, all confirmed and closed:**
   only raise it (the negative control is unchanged). Proven with a fake
   coverage across six arms: empty, 84 and 83 pass; 80, `abc` and -5 fail
   before coverage is read.
+- `test_core_probe_cleanup_timeout_uses_single_global_slot_and_recovers`
+  raced its 0.5 s probe budget against runner load (#65): more than 0.4 s of
+  scheduling before the workspace lease is acquired yields a pure `timeout`,
+  after it a `cleanup_timeout` carrying `masked_*` keys — two CI failures in
+  three runs on one day, both shapes reproduced with a paced fake clock. The
+  test now freezes its injected `_clock` like the sibling probe tests (the
+  subject is the classification of a hung cleanup, not phase pacing; the
+  cleanup join still runs on real time), and the frozen-clock test still
+  kills both guarding mutants: a hung cleanup reported as `None`, and a
+  probe slot that never releases.
 - The `security` job's self-check asserted only that gitleaks and semgrep
   ran, while the step's name claimed typecheck and a dependency audit. The
   labels were measured from the job's own `prepush.json` artifact

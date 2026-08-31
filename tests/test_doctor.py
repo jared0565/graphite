@@ -3168,11 +3168,22 @@ def test_core_probe_cleanup_timeout_uses_single_global_slot_and_recovers(tmp_pat
         response_index += 1
         return result
 
+    # A frozen clock, like the sibling probe tests above: the subject here is
+    # the classification of a HUNG CLEANUP, not whether the pre-cleanup phases
+    # fit their 0.4 s wall-clock share of timeout_seconds=0.5. Against the
+    # real clock this assertion raced runner load and lost twice on CI (#65):
+    # >0.4 s of scheduling before the lease is acquired yields a pure
+    # `timeout`; after the lease, `cleanup_timeout` arrives with masked_*
+    # keys riding along. Both shapes fail the equality below. Frozen, the
+    # phase deadline can never trip, while the cleanup join still runs on
+    # real time (join budget = deadline - frozen = timeout_seconds).
+    frozen = time.monotonic()
     first = probes.probe_core_pipeline(
         tmp_path,
         timeout_seconds=0.5,
         _runner=run,
         _workspace_factory=factory,
+        _clock=lambda: frozen,
     )
     try:
         second = probes.probe_core_pipeline(
@@ -3180,6 +3191,7 @@ def test_core_probe_cleanup_timeout_uses_single_global_slot_and_recovers(tmp_pat
             timeout_seconds=0.5,
             _runner=run,
             _workspace_factory=factory,
+            _clock=lambda: frozen,
         )
         assert first.details == {"error_type": "cleanup", "code": "cleanup_timeout"}
         assert second.details == {"error_type": "cleanup", "code": "cleanup_busy"}
