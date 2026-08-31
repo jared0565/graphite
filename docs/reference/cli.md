@@ -476,7 +476,7 @@ Make a project Graphite-ready and optionally build its graph
 
 ### `graphite audit-replacement`
 
-Audit whether Graphite is ready to replace Graphify in a project
+Audit whether Graphite is ready to replace legacy graph tooling in a project
 
 | Option | Meaning |
 |---|---|

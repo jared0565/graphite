@@ -2997,7 +2997,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_bootstrap.add_argument("--yes", action="store_true", help="Run non-interactively and never offer dependency installation")
     p_bootstrap.set_defaults(func=cmd_bootstrap)
 
-    p_audit_replacement = sub.add_parser("audit-replacement", help="Audit whether Graphite is ready to replace Graphify in a project")
+    p_audit_replacement = sub.add_parser("audit-replacement", help="Audit whether Graphite is ready to replace legacy graph tooling in a project")
     p_audit_replacement.add_argument("path", help="Project path")
     p_audit_replacement.add_argument("--daemon-base", default=None, help="Daemon base folder for daemon and health checks")
     p_audit_replacement.add_argument("--fail-on-blocker", action="store_true", help="Return non-zero when replacement blockers are found")

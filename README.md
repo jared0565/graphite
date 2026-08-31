@@ -1,6 +1,6 @@
 # Graphite
 
-Local-first, deterministic knowledge graph extraction for codebases. A safer, faster, cheaper replacement for `graphify`.
+Local-first, deterministic knowledge graph extraction for codebases — zero-LLM, daemon-maintained, agent-agnostic.
 
 **Status: 1.0.0, production/stable.** Published on PyPI as
 [`graphite-code`](https://pypi.org/project/graphite-code/) with PEP 740
@@ -236,13 +236,13 @@ graphite bootstrap C:/Projects/MyApp
 # Check daemon health
 graphite daemon-health C:/Projects
 
-# Audit whether Graphite can replace Graphify for a project
+# Audit whether Graphite can replace legacy graph tooling in a project
 graphite audit-replacement C:/Projects/MyApp
 ```
 
-## Graphify replacement audit
+## Legacy replacement audit
 
-Use the replacement audit before removing legacy Graphify files or ignore entries:
+Use the replacement audit before removing a legacy graph tool's files or ignore entries:
 
 ```bash
 graphite audit-replacement C:/Projects/MyApp
@@ -250,7 +250,7 @@ graphite audit-replacement . --json
 graphite audit-replacement . --fail-on-blocker
 ```
 
-The audit checks Graphite bootstrap state, graph freshness and validity, daemon visibility, daemon health, physical Graphify remnants, and Graphify text/config references. It reports recommendations but never deletes files automatically.
+The audit checks Graphite bootstrap state, graph freshness and validity, daemon visibility, daemon health, physical legacy-tool remnants, and legacy text/config references. It reports recommendations but never deletes files automatically.
 
 ## Daemon health
 

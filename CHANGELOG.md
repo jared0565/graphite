@@ -15,6 +15,22 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Changed
+
+**Vendor-neutral wording throughout the replacement audit and docs.** The
+README opening, the `audit-replacement` help and reference text,
+`skill/SKILL.md` and the audit's own messages no longer name the legacy
+graph tool, and the README's opening comparative against it — an unmeasured
+claim dating to the initial commit (`fd58583`) — is removed rather than
+defended. In the audit's report, which is not a `schema_version`-stable
+surface, the `graphify` block is renamed `legacy` and the warning codes
+`graphify_paths_exist`, `graphify_text_references` and
+`graphify_gitignore_entries` become `legacy_paths_exist`,
+`legacy_text_references` and `legacy_gitignore_entries`. Detection is
+unchanged: the on-disk path patterns and the text-scan needle still match
+the legacy tool's literal artifact names — the one place the name must
+remain for the audit to find anything.
+
 ### Fixed
 
 **The post-publication verifier's provenance arm asked an endpoint that

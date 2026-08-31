@@ -1,4 +1,4 @@
-"""Tests for Graphify-to-Graphite replacement audit."""
+"""Tests for the legacy-to-Graphite replacement audit."""
 from __future__ import annotations
 
 import json
@@ -61,7 +61,7 @@ def test_audit_replacement_clean_project_is_ready(tmp_path: Path, monkeypatch, c
     assert report["warnings"] == []
 
 
-def test_audit_replacement_reports_graphify_remnants_as_warnings(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_audit_replacement_reports_legacy_remnants_as_warnings(tmp_path: Path, monkeypatch, capsys) -> None:
     _write(tmp_path / "src" / "app.ts", "export const app = 1;\n")
     _write(tmp_path / "graphify" / "legacy.txt", "old\n")
     _write(tmp_path / ".gitignore", "graphify-out/\ngraphify/\nscripts/graphify_*.py\n")
@@ -76,8 +76,8 @@ def test_audit_replacement_reports_graphify_remnants_as_warnings(tmp_path: Path,
 
     assert report["ok"] is True
     assert report["replacement_ready"] is False
-    assert "graphify_paths_exist" in warning_codes
-    assert "graphify_gitignore_entries" in warning_codes
+    assert "legacy_paths_exist" in warning_codes
+    assert "legacy_gitignore_entries" in warning_codes
 
 
 def test_audit_replacement_reports_graphite_blockers(tmp_path: Path) -> None:
@@ -102,7 +102,7 @@ def test_audit_replacement_cli_json_and_fail_on_blocker(tmp_path: Path, monkeypa
         "warnings": [],
         "recommendations": [],
         "graphite": {},
-        "graphify": {},
+        "legacy": {},
     })
 
     result = main(["audit-replacement", str(tmp_path), "--json", "--fail-on-blocker"])
@@ -133,7 +133,7 @@ def _report_with_health(status: str, *, ok: bool) -> dict:
             "daemon": {"project_listed": True},
             "health": {"checked": True, "ok": ok, "status": status},
         },
-        "graphify": {"existing_paths": [], "text_references": [], "gitignore_entries": []},
+        "legacy": {"existing_paths": [], "text_references": [], "gitignore_entries": []},
     }
 
 

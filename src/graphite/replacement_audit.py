@@ -1,4 +1,4 @@
-"""Audit whether Graphite is ready to replace legacy Graphify usage in a project."""
+"""Audit whether Graphite is ready to replace legacy graph tooling in a project."""
 from __future__ import annotations
 
 import json
@@ -11,7 +11,10 @@ from .daemon_health import HealthOptions, evaluate_daemon_health
 from .ingest import collect_files
 from .validation import validate_graph_bundle
 
-GRAPHIFY_PATH_PATTERNS: tuple[str, ...] = (
+# The literal on-disk names the legacy graph tool leaves behind. Detection
+# needs the exact artifact spellings; this tuple and the text-scan needle in
+# `_find_legacy_text_references` are the only places they may appear.
+LEGACY_PATH_PATTERNS: tuple[str, ...] = (
     "graphify",
     "graphify-out",
     "graphify-out/**",
@@ -21,7 +24,7 @@ GRAPHIFY_PATH_PATTERNS: tuple[str, ...] = (
     "**/*graphify*",
 )
 
-GRAPHIFY_TEXT_FILES: tuple[str, ...] = (
+LEGACY_TEXT_FILES: tuple[str, ...] = (
     ".gitignore",
     "AGENTS.md",
     "README.md",
@@ -44,7 +47,7 @@ def audit_replacement(
     cfg: Config | None = None,
     health_checker: HealthChecker | None = None,
 ) -> dict[str, Any]:
-    """Return a machine-readable Graphify-to-Graphite replacement audit."""
+    """Return a machine-readable legacy-to-Graphite replacement audit."""
     root = project_root.resolve()
     if not root.exists():
         raise FileNotFoundError(root)
@@ -56,7 +59,7 @@ def audit_replacement(
     bootstrap = _bootstrap_status(root)
     daemon = daemon_visibility(root, daemon_base=daemon_base)
     health = _health_status(daemon, daemon_base, health_checker)
-    graphify = _graphify_status(root)
+    legacy = _legacy_status(root)
 
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -77,37 +80,37 @@ def audit_replacement(
     if health.get("checked") and not health.get("ok"):
         blockers.append({"code": "daemon_health_not_ok", "message": "Graphite daemon health check is not ok", "health": health})
 
-    if graphify["existing_paths"]:
+    if legacy["existing_paths"]:
         warnings.append({
-            "code": "graphify_paths_exist",
-            "message": "Graphify files or directories still exist in the project",
-            "paths": graphify["existing_paths"],
+            "code": "legacy_paths_exist",
+            "message": "Legacy graph-tool files or directories still exist in the project",
+            "paths": legacy["existing_paths"],
         })
-    if graphify["text_references"]:
+    if legacy["text_references"]:
         warnings.append({
-            "code": "graphify_text_references",
-            "message": "Graphify references remain in project text/config files",
-            "references": graphify["text_references"],
+            "code": "legacy_text_references",
+            "message": "Legacy graph-tool references remain in project text/config files",
+            "references": legacy["text_references"],
         })
-    if graphify["gitignore_entries"]:
+    if legacy["gitignore_entries"]:
         warnings.append({
-            "code": "graphify_gitignore_entries",
-            "message": "Legacy Graphify ignore entries remain",
-            "entries": graphify["gitignore_entries"],
+            "code": "legacy_gitignore_entries",
+            "message": "Legacy graph-tool ignore entries remain",
+            "entries": legacy["gitignore_entries"],
         })
 
     if blockers:
-        recommendations.append("Resolve blockers before removing Graphify remnants.")
-    if graphify["existing_paths"]:
-        recommendations.append("Inspect existing Graphify files/directories and migrate any still-useful scripts or reports before deletion.")
-    elif graphify["gitignore_entries"]:
-        recommendations.append("Graphify ignore entries appear to be legacy-only; remove them after confirming no external workflow still writes Graphify outputs.")
+        recommendations.append("Resolve blockers before removing legacy remnants.")
+    if legacy["existing_paths"]:
+        recommendations.append("Inspect existing legacy files/directories and migrate any still-useful scripts or reports before deletion.")
+    elif legacy["gitignore_entries"]:
+        recommendations.append("The legacy ignore entries appear unused; remove them after confirming no external workflow still writes those outputs.")
     if not warnings and not blockers:
-        recommendations.append("Graphite appears ready to fully replace Graphify for this project.")
+        recommendations.append("Graphite appears ready to fully replace the legacy graph tooling for this project.")
 
     return {
         "ok": not blockers,
-        "replacement_ready": not blockers and not graphify["existing_paths"],
+        "replacement_ready": not blockers and not legacy["existing_paths"],
         "project_root": str(root),
         "blockers": blockers,
         "warnings": warnings,
@@ -118,7 +121,7 @@ def audit_replacement(
             "daemon": daemon,
             "health": health,
         },
-        "graphify": graphify,
+        "legacy": legacy,
     }
 
 
@@ -170,11 +173,11 @@ def format_replacement_audit(report: dict[str, Any]) -> str:
     if health.get("checked"):
         status = health.get("status")
         lines.append(f"  - daemon health: {status} ({_health_advice(status)})")
-    graphify = report["graphify"]
-    lines.append("Graphify remnants:")
-    lines.append(f"  - existing paths: {len(graphify['existing_paths'])}")
-    lines.append(f"  - text references: {len(graphify['text_references'])}")
-    lines.append(f"  - gitignore entries: {len(graphify['gitignore_entries'])}")
+    legacy = report["legacy"]
+    lines.append("Legacy remnants:")
+    lines.append(f"  - existing paths: {len(legacy['existing_paths'])}")
+    lines.append(f"  - text references: {len(legacy['text_references'])}")
+    lines.append(f"  - gitignore entries: {len(legacy['gitignore_entries'])}")
     if report["recommendations"]:
         lines.append("Recommendations:")
         for item in report["recommendations"]:
@@ -250,9 +253,9 @@ def _health_status(daemon: dict[str, Any], daemon_base: Path | None, health_chec
     return {"checked": True, **health}
 
 
-def _graphify_status(root: Path) -> dict[str, Any]:
-    existing_paths = _find_graphify_paths(root)
-    text_refs = _find_graphify_text_references(root)
+def _legacy_status(root: Path) -> dict[str, Any]:
+    existing_paths = _find_legacy_paths(root)
+    text_refs = _find_legacy_text_references(root)
     gitignore_entries = [ref for ref in text_refs if ref["file"] == ".gitignore"]
     return {
         "existing_paths": existing_paths,
@@ -261,9 +264,9 @@ def _graphify_status(root: Path) -> dict[str, Any]:
     }
 
 
-def _find_graphify_paths(root: Path) -> list[str]:
+def _find_legacy_paths(root: Path) -> list[str]:
     matches: set[str] = set()
-    for pattern in GRAPHIFY_PATH_PATTERNS:
+    for pattern in LEGACY_PATH_PATTERNS:
         for path in root.glob(pattern):
             if path == root:
                 continue
@@ -274,9 +277,9 @@ def _find_graphify_paths(root: Path) -> list[str]:
     return sorted(matches)
 
 
-def _find_graphify_text_references(root: Path) -> list[dict[str, Any]]:
+def _find_legacy_text_references(root: Path) -> list[dict[str, Any]]:
     refs: list[dict[str, Any]] = []
-    for rel in GRAPHIFY_TEXT_FILES:
+    for rel in LEGACY_TEXT_FILES:
         path = root / rel
         if not path.exists() or not path.is_file():
             continue
@@ -285,6 +288,8 @@ def _find_graphify_text_references(root: Path) -> list[dict[str, Any]]:
         except OSError:
             continue
         for index, line in enumerate(lines, start=1):
+            # The legacy tool's literal name, matched in project text; see the
+            # comment on LEGACY_PATH_PATTERNS.
             if "graphify" in line.lower():
                 refs.append({"file": rel, "line": index, "text": line.strip()})
     return refs

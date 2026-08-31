@@ -199,7 +199,7 @@ Use this to check status freshness, process presence, startup launcher installat
 
 ## /graphite audit-replacement [path]
 
-Audit whether Graphite is ready to replace legacy Graphify usage in a project.
+Audit whether Graphite is ready to replace legacy graph tooling in a project.
 
 ```bash
 graphite audit-replacement .
@@ -207,7 +207,7 @@ graphite audit-replacement . --json
 graphite audit-replacement . --fail-on-blocker
 ```
 
-Use this before removing Graphify files, scripts, ignore entries, or docs. The audit reports Graphite readiness, graph freshness/validity, daemon visibility/health, physical Graphify remnants, and legacy text references. It does not delete anything.
+Use this before removing a legacy graph tool's files, scripts, ignore entries, or docs. The audit reports Graphite readiness, graph freshness/validity, daemon visibility/health, physical legacy remnants, and legacy text references. It does not delete anything.
 
 ## Claude Code MCP tools
 

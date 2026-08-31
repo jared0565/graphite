@@ -85,7 +85,7 @@ def build_graph(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> nx.
 
 
 def graph_to_json(g: nx.DiGraph) -> dict[str, Any]:
-    """Convert networkx graph to graphify-compatible JSON."""
+    """Convert networkx graph to the graph.json node/edge JSON layout."""
     return {
         "nodes": [
             {"id": n, **{k: v for k, v in data.items() if k != "id"}}

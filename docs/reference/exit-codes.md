@@ -45,7 +45,7 @@ never on the exit code.
 |---|---|---|
 | `init`, `bootstrap` | onboarding files written; activation outcomes `installed`, `already_available`, `not_applicable`, `declined` and `guidance_only` all count as success | an explicitly approved activation ended `validation_failed`, `installation_failed` or `verification_failed` (the onboarding files are kept) |
 | `hooks` | trampolines installed / status read | installation failed |
-| `audit-replacement` | ready to replace Graphify | not ready |
+| `audit-replacement` | ready to replace legacy graph tooling | not ready |
 | `activate` | activation recorded | — |
 | `agent-hook` | **always** — a hook endpoint never blocks the agent | — |
 
