@@ -170,6 +170,8 @@ territory. Don't mistake a clean `aramid check` for full security coverage.
 
 ## Commands
 
+MCP-capable agents reach the same loop as tools, via the `.mcp.json` entry `aramid init` registers (`python -P -m aramid.mcp`): `aramid_check`, `aramid_status`, `aramid_ledger_filter`, `aramid_resolvers`, `aramid_override`, `aramid_mark_not_a_secret`, and `aramid_mark_rotated`.
+
 - `aramid check [--gate pre-commit|pre-push] [--staged|--range|--all]` -- run the gate manually.
 - `aramid status` -- open findings, new-since-baseline, unrotated historical secrets, unreachable candidates (see `ledger mark-rotated` / `mark-not-a-secret` / `mark-unreachable` below).
 - `aramid doctor [--fix]` -- verify/repair the toolchain and the installed hook's interpreter.

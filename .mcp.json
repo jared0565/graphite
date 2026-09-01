@@ -7,6 +7,14 @@
         "-m",
         "graphite.mcp"
       ]
+    },
+    "aramid": {
+      "command": "python",
+      "args": [
+        "-P",
+        "-m",
+        "aramid.mcp"
+      ]
     }
   }
 }

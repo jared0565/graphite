@@ -7,3 +7,17 @@ Graphite-first is required in this repo. Follow `GRAPHITE.md` before making non-
 
 **Stay inside this repository.** Do not read, write, or run commands in any other repo, including its graph. Findings about another repo go to its agent as a recommendation through the shared `.agent-channel/` (see its `PROTOCOL.md`); that agent decides and acts. A tool doing its designed job is a separate question from an agent's boundary. See `GRAPHITE.md` section "Repository Isolation".
 <!-- graphite:managed-end -->
+
+<!-- aramid:begin -- managed by `aramid init`; hand-edits inside the fence are overwritten -->
+## Aramid (security & quality gate)
+
+This repo is gated by aramid. Read `ARAMID.md` before your first commit.
+
+- Before committing: run `aramid check --staged`. Read findings with
+  `aramid ledger filter --status open`.
+- NEVER pass `--no-verify` (or `-n`) to `git commit`, or `--no-verify` to
+  `git push` -- it disables secret scanning along with everything else.
+  Armed repos reject the call outright.
+- To suppress a WARN finding, use `aramid override <id> --reason "..."`
+  (ledger-logged); never edit findings away by hand.
+<!-- aramid:end -->
