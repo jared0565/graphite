@@ -319,10 +319,12 @@ jobs:
           ran = set(d.get("tools_ran", []))
           # Every scanner the gate is configured to run, by the label aramid
           # actually emits (measured from this job's own prepush.json artifact,
-          # run 33280345301: gitleaks, mypy, python.exe, semgrep, shadow). A
-          # scanner missing here is a scanner that silently never fired; the
-          # tests slot is labelled by its command, hence the separate check.
-          need = {"gitleaks", "semgrep", "shadow", "mypy"}
+          # run 33280345301: gitleaks, mypy, python.exe, semgrep, shadow; run
+          # 33807490089 under aramid 0.10.0 added pip-audit, which audits the
+          # pyproject [project] closure in project-path mode). A scanner
+          # missing here is a scanner that silently never fired; the tests
+          # slot is labelled by its command, hence the separate check.
+          need = {"gitleaks", "semgrep", "shadow", "mypy", "pip-audit"}
           assert need <= ran, f"pre-push gate did not run {sorted(need - ran)}; ran={sorted(ran)}"
           tests_slot = {"pytest", "python.exe", "tests"}
           assert ran & tests_slot, f"the tests slot did not run; ran={sorted(ran)}"
