@@ -236,16 +236,19 @@ jobs:
           python -m venv ../.venvs/graphite-dev
           ../.venvs/graphite-dev/Scripts/python.exe -m pip install -e ".[dev,mcp]"
       - name: Install aramid and the tools its typecheck slot resolves on PATH
-        # aramid 0.8.0 is what this machine runs (channel round 159; 0.7.1
+        # aramid 0.9.0 is what this machine runs (channel round 162; 0.7.1
         # honours [tool.mypy] files/exclude in the typecheck slot and reports
         # `fresh_ledger_baseline`/`grandfathered`, 0.7.2 keeps registry keys
         # out of `expected` and stamps `run_id`/`recorded` in the report,
         # 0.8.0 adds the four agent-enforcement surfaces -- managed doc block,
         # session/pre-tool-use hooks, MCP server -- all additive, advisory
-        # until `arm --agent`); dependabot proposes bumps.
+        # until `arm --agent`, 0.8.1 normalises `ledger filter` status names
+        # and gates releases on `verify-ci`, 0.9.0 adds fleet health rows,
+        # the `fleet:` status line and `aramid fleet` / `aramid notices` --
+        # additive, no tracked surface); dependabot proposes bumps.
         # mypy is installed for THIS interpreter because aramid's typecheck slot
         # runs it from PATH, not from the dev venv.
-        run: python -m pip install "aramid==0.8.0" "mypy>=1.14"
+        run: python -m pip install "aramid==0.9.0" "mypy>=1.14"
       - name: CI-only keys the repository leaves unset
         shell: bash
         # aramid merges defaults <- ~/.aramid/config.toml <- <root>/aramid.toml.
