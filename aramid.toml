@@ -181,8 +181,19 @@ wall_budget_s = 3600
 # every `main` here is a CLI/hook/server entry point, every `_run` starts a
 # subprocess or a server, every `_git` shells out to git. Pure helpers keep
 # their fuzz coverage. Widen this list only for a name that spawns.
+#
+# This list REPLACES aramid's packaged default (channel round 181: the config
+# merge recurses into tables, not into lists), so the defaults from
+# aramid/data/defaults.toml are carried here verbatim ahead of this repo's
+# three names. Drop one of them only on purpose.
 [fuzz]
-skip_name_patterns = ["main", "_run", "_git"]
+skip_name_patterns = [
+  # aramid's packaged defaults (0.11.0), verbatim
+  "*deploy*", "*delete*", "*remove*", "*drop*", "*push*", "*send*",
+  "*upload*", "*kill*", "*wipe*", "*publish*", "*destroy*", "*truncate*",
+  # this repo: entry points and process spawners
+  "main", "_run", "_git",
+]
 
 # Arms the `shadow` runner (aramid 0.4.0, channel round 120): it reports a
 # repo-root file that hijacks `python -m <name>`. It SHIPS DISARMED because
