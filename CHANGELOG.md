@@ -33,6 +33,25 @@ remain for the audit to find anything.
 
 ### Fixed
 
+**The extraction cache grew without bound inside a partition (#66).** #23
+reclaims whole partitions a build can never read again and left the one it
+uses alone. Entries are keyed on the file's content hash, so every edit that
+triggers a rebuild wrote a new entry and orphaned the previous one, and
+nothing ever removed an orphan: a consumer checkout rebuilt by the daemon on
+every change reached 15,406 entries / 419 MB in a single partition, 11,592 of
+them from four days, against 1,780 / 62 MB for graphite's own tree on the
+same engine. Same rule as #23, one level down -- reachability, not age or
+size: a `Cache` now records every key it read (and found) or wrote, and after
+a build has extracted the tree and built its graph, `prune_unreachable_entries`
+deletes every other entry in the partition, reporting
+`[graphite] reclaimed N unreachable cache entries (X MB)` when it removed any.
+Older content checked out later re-extracts once (performance, never
+correctness). Safe without the build lock: `read` already treats a vanished
+file as a miss, so a concurrent reader re-extracts rather than fails. A build
+that touched nothing prunes nothing, only the exact `<2 hex>/<64 hex>.json`
+shape the cache writes is eligible, and a per-entry failure (a Windows handle
+race) is swallowed.
+
 **The deferred stdin close never fired on Linux or macOS.** `run_bounded_process`
 reads the child's pipes with a fixed-size read, and its two transports hand
 that reader different objects: on Windows a raw `io.FileIO`, whose `read(n)`

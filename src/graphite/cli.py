@@ -333,6 +333,17 @@ def _build(
     graph_data = graph_to_json(g)
     analysis = analyze(g)
 
+    # #66: reclaim the entries in the partition this build did not touch --
+    # after extraction, so the touched set is whole, and after the graph, so a
+    # build that raised prunes nothing. Reported for the same reason the
+    # partition reclaim is: a consumer checkout reached 419 MB in silence.
+    removed, reclaimed = cache.prune_unreachable_entries()
+    if removed:
+        print(
+            f"[graphite] reclaimed {removed} unreachable cache entr{'y' if removed == 1 else 'ies'} "
+            f"({reclaimed / 1_048_576:.1f} MB)"
+        )
+
     return graph_data, clusters, analysis
 
 
