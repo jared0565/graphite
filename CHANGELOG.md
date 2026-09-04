@@ -33,6 +33,22 @@ remain for the audit to find anything.
 
 ### Fixed
 
+**The deferred stdin close never fired on Linux or macOS.** `run_bounded_process`
+reads the child's pipes with a fixed-size read, and its two transports hand
+that reader different objects: on Windows a raw `io.FileIO`, whose `read(n)`
+returns whatever the child has written, and on POSIX a default `Popen` pipe,
+a `BufferedReader` whose `read(n)` keeps reading until it has n bytes or EOF.
+Off Windows the reader therefore saw nothing until the child exited, the
+`stdin_close_when` predicate never saw its marker, and every deferred close
+was the budget fallback -- so the #29 fix was inert there and the doctor's MCP
+deep probe spent its whole budget on every POSIX run. The reader now uses
+`read1` on buffered pipes; the Windows path is unchanged. The tests that
+pinned the deferral could not fail (one matched a marker that text-mode
+stdout writes as CRLF on Windows, the other's lower bound was satisfied by
+the child's own sleep) and now kill a never-defer mutant; the interval test
+that blocked the pre-push gate measures from the close instead of from
+launch, against the child's own life rather than a 0.25s constant.
+
 **The post-publication verifier's provenance arm asked an endpoint that
 never carries provenance.** `scripts/verify_published_release.py` read
 `urls[].provenance` from PyPI's legacy `/pypi/<project>/<version>/json`
