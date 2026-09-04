@@ -127,8 +127,43 @@ command = ["../.venvs/graphite-dev/Scripts/python.exe", "-m", "pytest"]
 #   * a narrower [mutation].test_command, which is a scoping decision about
 #     which suite may certify a mutant, not a number to raise.
 #
-# Left open deliberately. The point of aramid's fix is that the operator is now
-# TOLD which knob applies; guessing one here would waste that.
+# DECIDED 2026-09-04 (operator asked for a decision; measured, channel round 174
+# asks aramid for the three contract answers that could still overturn it):
+#
+# Neither option as priced. Two facts from this repo's ledger rule them out.
+# (a) Every mutant aramid ever tested here (2026-07-31..08-02, `pytest -q`,
+#     mutant_timeout_s 120) TIMED OUT and was recorded as a survivor --
+#     `mutation-score` still shows two rate-0.0 targets from those runs. The
+#     whole suite is 847 s serial on this box (per-file: the channel tests
+#     ~300 s, test_doctor 121 s, typescript_activation 56 s), so raising
+#     wall_budget_s alone buys 19 timeout-survivors per drain: silent and
+#     wrong, the shape this file already refuses.
+# (b) Since 2026-08-12 13:58Z the baseline has failed in 2-7 s on all 43
+#     attempts across 12 heads -- a command that cannot start, not a 700 s
+#     suite failing -- and the consumer records neither exit code nor stderr.
+#     The switch coincides with [tests].command becoming a REPO-RELATIVE
+#     interpreter path (0.3.0), which the gate resolves from its cwd.
+#
+# So: the certifying suite stays the WHOLE suite (no mutant survives by
+# scoping), run through scripts/mutation_tests.py, which finds the dev venv
+# from its own location (robust to cwd and to worktree copies), runs the
+# tests named after the changed modules first with -x so a kill costs
+# seconds, and logs cwd/root/in-place/HEAD/changed/exit codes to
+# ../.venvs/graphite-mutation-tests.log so the next stand-down explains
+# itself. Timeouts are sized to the suite, not to a hope: a survivor costs
+# one full run (~15 min), the wall cap bounds an item at one hour and the
+# consumer records the truncation honestly (`truncated: true`, tested > 0),
+# which is the loud, bounded shape -- not the 690 s no-op above. Per-mutant
+# selection through `graphite impact` is the follow-up once round 174 says
+# how the tree is mutated; it is a script change, not a config change.
+#
+# Head is `python` from PATH on purpose: the launcher imports nothing from
+# graphite, and the interpreter that tests the tree is the venv it resolves.
+[mutation]
+test_command = ["python", "-P", "scripts/mutation_tests.py"]
+baseline_timeout_s = 1500
+mutant_timeout_s = 1500
+wall_budget_s = 3600
 
 # Arms the `shadow` runner (aramid 0.4.0, channel round 120): it reports a
 # repo-root file that hijacks `python -m <name>`. It SHIPS DISARMED because
