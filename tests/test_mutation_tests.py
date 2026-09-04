@@ -19,6 +19,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -348,3 +349,17 @@ def test_run_reports_an_unstartable_interpreter_as_127(
     assert "cannot start" in err
     assert str(missing) in err
     assert "-m" not in err.split("cannot start", 1)[1].split(":", 1)[0]
+
+
+def test_run_returns_the_child_exit_code_and_starts_it_in_the_given_cwd(
+    tmp_path: Path, launcher: ModuleType
+) -> None:
+    # Every main() test above replaces `_run` with a recorder, so this is the
+    # only place the real one is exercised; a mutant inside it would otherwise
+    # survive the whole suite. The exit code IS the gate's verdict (aramid reads
+    # nothing else), and the cwd decides which tree pytest collects, so both
+    # must come back exactly as the child produced them.
+    marker = "started-here.txt"
+    script = f"import pathlib, sys; pathlib.Path({marker!r}).write_text('x'); sys.exit(3)"
+    assert launcher._run([sys.executable, "-c", script], tmp_path) == 3
+    assert (tmp_path / marker).read_text() == "x"
