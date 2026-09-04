@@ -122,6 +122,27 @@ runner at `[timeouts].pre_push` regardless -- so raise both if you need a
 longer run. `enabled = false` removes the gate entirely. Subsetting narrows
 what the push gate covers, so keep the full suite running in CI.
 
+**Fuzz driver timing out on, or executing, a function it should not
+touch?** The drain-time fuzz consumer calls every changed top-level
+function with generated arguments. A launcher, a `main`, or anything that
+hands its arguments to `subprocess` will run whatever it is given -- and a
+function that runs your whole suite times the driver out. Skip such names
+in `aramid.toml`:
+
+```toml
+[fuzz]
+skip_name_patterns = [
+  "*deploy*", "*delete*", "*remove*", "*drop*", "*push*", "*send*",
+  "*upload*", "*kill*", "*wipe*", "*publish*", "*destroy*", "*truncate*",
+  "main", "_run",                            # this repo's additions
+]
+```
+
+Patterns are `fnmatch` globs on the bare function name, case-insensitive.
+The first twelve are aramid's packaged defaults; a `[fuzz]` list in
+`aramid.toml` REPLACES that list rather than extending it, so keep the
+ones you still want.
+
 **Suite not recognized?** Detection is literal: a real `test_*.py`,
 `*_test.py`, or `conftest.py` file, or a `package.json` `scripts.test`
 entry -- nothing more. A custom pytest `python_files` pattern,

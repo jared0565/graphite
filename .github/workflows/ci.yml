@@ -234,7 +234,7 @@ jobs:
           python -m venv ../.venvs/graphite-dev
           ../.venvs/graphite-dev/Scripts/python.exe -m pip install -e ".[dev,mcp]"
       - name: Install aramid and the tools its typecheck slot resolves on PATH
-        # aramid 0.10.0 is what this machine runs (channel round 167; 0.7.1
+        # aramid 0.12.0 is what this machine runs (channel round 191; 0.7.1
         # honours [tool.mypy] files/exclude in the typecheck slot and reports
         # `fresh_ledger_baseline`/`grandfathered`, 0.7.2 keeps registry keys
         # out of `expected` and stamps `run_id`/`recorded` in the report,
@@ -250,11 +250,17 @@ jobs:
         # tracked surface), 0.11.0 adds the fleet row-freshness window
         # (`[readiness].max_row_age_days`, default 7, `0` disables; a stale
         # latest row reads `insufficient-data` and resets the streak) -- fleet
-        # policy in ~/.aramid/fleet.toml, no tracked surface; dependabot
-        # proposes bumps.
+        # policy in ~/.aramid/fleet.toml, no tracked surface), 0.12.0 scans a
+        # staged copy of the TRACKED files under --all/--staged, accepts a
+        # degraded tool under --strict only via --accept-degraded, ages
+        # deferred drain items, runs the fuzz driver on the worktree's own
+        # src/, and claims a stage-1 kill of a pending_retest survivor (the
+        # shape behind graphite's resolvers_ok red) -- its pre-push shim
+        # exports ARAMID_HOOK, a machine-local surface `aramid init` rewrote
+        # here on 2026-09-04; dependabot proposes bumps.
         # mypy is installed for THIS interpreter because aramid's typecheck slot
         # runs it from PATH, not from the dev venv.
-        run: python -m pip install "aramid==0.11.0" "mypy>=1.14"
+        run: python -m pip install "aramid==0.12.0" "mypy>=1.14"
       - name: CI-only keys the repository leaves unset
         shell: bash
         # aramid merges defaults <- ~/.aramid/config.toml <- <root>/aramid.toml.
