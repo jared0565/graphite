@@ -247,10 +247,14 @@ jobs:
         # requirements*.txt and pyproject carries a [project] table (about
         # 40 s at pre-push, WARN tier only) and floors semgrep at >=1.137
         # (1.136.0 imports pkg_resources, absent on py3.13) -- additive, no
-        # tracked surface); dependabot proposes bumps.
+        # tracked surface), 0.11.0 adds the fleet row-freshness window
+        # (`[readiness].max_row_age_days`, default 7, `0` disables; a stale
+        # latest row reads `insufficient-data` and resets the streak) -- fleet
+        # policy in ~/.aramid/fleet.toml, no tracked surface; dependabot
+        # proposes bumps.
         # mypy is installed for THIS interpreter because aramid's typecheck slot
         # runs it from PATH, not from the dev venv.
-        run: python -m pip install "aramid==0.10.0" "mypy>=1.14"
+        run: python -m pip install "aramid==0.11.0" "mypy>=1.14"
       - name: CI-only keys the repository leaves unset
         shell: bash
         # aramid merges defaults <- ~/.aramid/config.toml <- <root>/aramid.toml.
