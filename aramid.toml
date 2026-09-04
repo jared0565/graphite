@@ -165,6 +165,25 @@ baseline_timeout_s = 1500
 mutant_timeout_s = 1500
 wall_budget_s = 3600
 
+# The fuzz consumer drives top-level functions on the changed lines of an
+# item with generated arguments. On the first live drain of this repo's
+# mutation item (2026-09-04, ledger row 5111) it drove
+# scripts/mutation_tests.py:main -- which ran pytest twice with fuzzed argv,
+# blocked, and forfeited the batch ("a target that blocks forfeits the batch;
+# exclude it with [fuzz].skip_name_patterns"). Functions whose job is to start
+# a process teach a fuzzer nothing, and the ones that pass their arguments to
+# subprocess would EXECUTE fuzz strings.
+#
+# Semantics, read from the installed wheel (consumers/fuzz.py): fnmatch globs
+# against a top-level function's bare NAME, case-insensitive, applied to every
+# changed file in the range -- there is no per-file scoping. So these three
+# names are excluded repo-wide, and the graph says that is the right set:
+# every `main` here is a CLI/hook/server entry point, every `_run` starts a
+# subprocess or a server, every `_git` shells out to git. Pure helpers keep
+# their fuzz coverage. Widen this list only for a name that spawns.
+[fuzz]
+skip_name_patterns = ["main", "_run", "_git"]
+
 # Arms the `shadow` runner (aramid 0.4.0, channel round 120): it reports a
 # repo-root file that hijacks `python -m <name>`. It SHIPS DISARMED because
 # `graphite` is a real distribution name and a repo may legitimately vendor one
