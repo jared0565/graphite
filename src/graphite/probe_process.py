@@ -467,9 +467,24 @@ def run_bounded_process(
     cleanup_ok = True
 
     def read_pipe(name: str, pipe: Any) -> None:
+        # The polling loop below evaluates `stdin_close_when` against what
+        # this thread has appended so far, so every read must return as
+        # soon as the child has written ANYTHING. The Windows transport
+        # hands over raw `io.FileIO` handles, whose `read(n)` does exactly
+        # that; the POSIX transport is a default `Popen`, whose pipes are
+        # `BufferedReader`s, and `BufferedReader.read(n)` keeps issuing raw
+        # reads until it has n bytes or EOF. On Linux and macOS this thread
+        # therefore saw nothing until the child exited, the predicate never
+        # fired, and every deferred close was the budget fallback -- the
+        # deferral that fixed #29 was inert off Windows from the day it
+        # shipped, and its test could not tell (CI run 33835028822, 8/8
+        # POSIX legs, once the test could). `read1` is one raw read on a
+        # buffered pipe and does not exist on `FileIO`, so Windows keeps
+        # the path it always had.
+        read = getattr(pipe, "read1", None) or pipe.read
         try:
             while True:
-                chunk = pipe.read(4096)
+                chunk = read(4096)
                 if not chunk:
                     break
                 remaining = max_output_bytes + 1 - len(outputs[name])
