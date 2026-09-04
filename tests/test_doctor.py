@@ -1164,27 +1164,44 @@ def test_deep_bounded_runner_defers_stdin_close_until_the_transcript_is_ready(
     tears the write side down, so a reply already in flight is never emitted --
     `initialize` answered, `tools/list` dropped, exit 0 (graphite issue #29).
 
-    The child reports how long after startup it observed EOF. Deferred, that
-    cannot be earlier than the marker the predicate waits for.
+    The child blocks on stdin from its first instruction and emits the marker
+    from a thread 0.8s later, so `eof_after` is when EOF actually reached it:
+    closed immediately that reads ~0.0, deferred it cannot precede the marker.
+
+    Two vacuities were removed on 2026-09-04, both found by mutation, and the
+    shape above is what closes them. (1) The child wrote its markers through
+    text-mode stdout, which on Windows emits `go\\r\\n`, so the `b"go\\n"`
+    predicate never fired there: the budget fallback closed stdin ~27s in and
+    `>= 0.7` passed without the deferral running (27.07s per run, measured in
+    isolation). The upper bound below is what makes that fail: a forced close
+    lands ~3s before the deadline, so anything under half the budget proves
+    the predicate closed it. (2) The child then slept 0.8s BEFORE reading
+    stdin, so `eof_after` was >= 0.8 whether the close was deferred or not; a
+    runner mutated to never defer survived. Reading first and marking from a
+    thread makes the lower bound a real one. Load moves `eof_after` up, away
+    from 0.7; the upper bound is a hang guard with ~14s of margin.
     """
     from graphite.probe_process import run_bounded_process
 
+    timeout_seconds = 30
     child = (
-        "import sys, time\n"
+        "import sys, threading, time\n"
         "start = time.monotonic()\n"
-        "sys.stdout.write('first\\n'); sys.stdout.flush()\n"
-        "time.sleep(0.8)\n"
-        "sys.stdout.write('go\\n'); sys.stdout.flush()\n"
+        "sys.stdout.buffer.write(b'first\\n'); sys.stdout.buffer.flush()\n"
+        "def marker():\n"
+        "    time.sleep(0.8)\n"
+        "    sys.stdout.buffer.write(b'go\\n'); sys.stdout.buffer.flush()\n"
+        "threading.Thread(target=marker, daemon=True).start()\n"
         "sys.stdin.buffer.read()\n"
-        "sys.stdout.write('eof_after=%.2f\\n' % (time.monotonic() - start))\n"
-        "sys.stdout.flush()\n"
+        "sys.stdout.buffer.write(b'eof_after=%.2f\\n' % (time.monotonic() - start))\n"
+        "sys.stdout.buffer.flush()\n"
     )
 
     result = run_bounded_process(
         [sys.executable, "-c", child],
         cwd=tmp_path,
         stdin=b"payload\n",
-        timeout_seconds=30,
+        timeout_seconds=timeout_seconds,
         stdin_close_when=lambda out: b"go\n" in out,
     )
 
@@ -1193,6 +1210,8 @@ def test_deep_bounded_runner_defers_stdin_close_until_the_transcript_is_ready(
     observed = float(text.split("eof_after=")[1].split("\n")[0])
     # Closed immediately this reads ~0.0; deferred it cannot precede the marker.
     assert observed >= 0.7, text
+    # ...and it was the predicate, not the budget fallback, that closed it.
+    assert observed < timeout_seconds / 2, text
 
 
 def test_deep_bounded_runner_force_closes_stdin_when_the_predicate_never_fires(
