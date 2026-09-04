@@ -139,21 +139,19 @@ jobs:
       # to Node 24 and will eventually refuse. The bump surfaces as a run
       # annotation long before it becomes a failure -- read them.
       - uses: actions/checkout@v7
-      # Held at v6. v6 is Node 24, so it clears the Node 20 deprecation this
-      # bump exists for; v7 is simply not yet demonstrated safe here.
+      # Moved to v7 on 2026-09-04 (dependabot #62). v6 was already Node 24, so
+      # this bump is not about the runtime: v7 is the ESM migration, drops the
+      # `pip-install` input (never used here; `cache: pip` stays) and retries
+      # the version-manifest fetch instead of passing a failure silently.
       #
-      # This pin was originally justified by "v7 breaks the probe_mcp
-      # real-server tests". THAT CLAIM IS REFUTED -- the full suite has since
-      # passed under v7 (run 30453660307, 2480 passed). The original bisect
-      # (v7 failing 2/2, v5/v6 passing) looked conclusive but is consistent
-      # with an intermittent fault: the two failures hit DIFFERENT tests, and
-      # at a ~30% flake rate that pattern arises by chance.
-      #
-      # So the real defect was flaky probe_mcp real-server tests, tracked in
-      # #29 (fixed), independent of action versions. v6 is kept only because it
-      # is measured-green here and nothing yet justifies moving; it is NOT a
-      # workaround for a v7 incompatibility, because no such incompatibility
-      # has been shown. Do not infer one from this pin.
+      # History, kept so nobody re-infers an incompatibility: this pin was held
+      # at v6 on the claim "v7 breaks the probe_mcp real-server tests". THAT
+      # CLAIM WAS REFUTED -- the full suite passed under v7 (run 30453660307,
+      # 2480 passed); the bisect that looked conclusive (v7 failing 2/2, v5/v6
+      # passing) was two DIFFERENT tests flaking at ~30%, tracked and fixed as
+      # #29, independent of action versions. PR #62's own run then passed all
+      # twelve test legs plus coverage under v7 -- the demonstration the old
+      # comment asked for before moving.
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
