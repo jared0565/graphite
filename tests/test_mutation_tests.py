@@ -341,4 +341,10 @@ def test_run_reports_an_unstartable_interpreter_as_127(
 ) -> None:
     missing = tmp_path / "no-such-python"
     assert launcher._run([str(missing), "-m", "pytest"], tmp_path) == 127
-    assert "cannot start" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    # The message must name the interpreter that could not start -- that is
+    # the whole diagnostic. aramid's mutation gate found the first version
+    # of this test satisfied by a message naming argv[1] instead (row 5180).
+    assert "cannot start" in err
+    assert str(missing) in err
+    assert "-m" not in err.split("cannot start", 1)[1].split(":", 1)[0]
