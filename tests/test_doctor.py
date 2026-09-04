@@ -5177,18 +5177,53 @@ def test_deep_bounded_runner_reports_a_prompt_exit_after_stdin_close(
 ) -> None:
     """The positive case alone would pass against a hardcoded large value.
 
-    A child that exits as soon as it sees EOF must report a small interval, or
-    the field cannot discriminate the #29 shape from a slow shutdown.
+    A child that exits as soon as it sees EOF must report an interval that
+    excludes its life BEFORE the close, or the field cannot discriminate the
+    #29 shape from a slow shutdown: a runner that stamped from launch, or that
+    reported a constant, would satisfy the sibling above just as well.
+
+    The bound is relative, not a constant. Until 2026-09-04 this asserted
+    `< 0.25` on an immediately-closed child. An immediate close lands ~10ms
+    after launch, before the child interpreter has started, so the interval
+    was the child's whole startup plus teardown, and load moves that TOWARD
+    the bound: the pre-push gate measured 0.517s, and under 24 CPU burners on
+    12 cores the old shape failed 12/12 (median 1.49s). Here the child holds
+    `hold` seconds before emitting the marker the deferred close waits for, so
+    a correct interval is teardown alone while `duration - hold` is launch +
+    startup + teardown. The slack between them is launch + startup, which
+    load can only grow (same 24-burner run: 0/12, slack >= 1.2s). A stamp
+    taken from launch reads as `duration` itself and fails; a constant fails
+    once it exceeds that slack. Load direction stated per assertion, per
+    graphite#50.
     """
     from graphite.probe_process import run_bounded_process
 
+    hold = 0.6
+    child = (
+        "import sys, time\n"
+        f"time.sleep({hold})\n"
+        # Bytes, not text: text-mode stdout writes CRLF on Windows, and a
+        # `b'go\\n'` predicate would then never match.
+        "sys.stdout.buffer.write(b'go\\n'); sys.stdout.buffer.flush()\n"
+        "sys.stdin.buffer.read()\n"
+    )
+    timeout_seconds = 20
+
     result = run_bounded_process(
-        [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+        [sys.executable, "-c", child],
         cwd=tmp_path,
         stdin=b"payload\n",
-        timeout_seconds=20,
+        timeout_seconds=timeout_seconds,
         check=False,
+        stdin_close_when=lambda out: b"go\n" in out,
     )
 
-    assert result.returncode == 0
-    assert result.stdin_close_to_exit_seconds < 0.25
+    assert result.returncode == 0, result.stderr
+    assert b"go\n" in result.stdout, result.stdout
+    # The predicate closed stdin, not the budget: a forced close lands ~3s
+    # before the deadline, far beyond half the budget. Hang guard, not a
+    # precision bound.
+    assert result.duration_seconds < timeout_seconds / 2, result
+    # Measured at all (-1.0 is "not measured"), and measured from the close.
+    assert result.stdin_close_to_exit_seconds >= 0.0, result
+    assert result.stdin_close_to_exit_seconds < result.duration_seconds - hold, result
