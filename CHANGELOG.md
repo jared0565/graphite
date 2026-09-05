@@ -13,7 +13,12 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
-## [Unreleased]
+## [1.0.1] — 2026-09-05
+
+A patch release. Measured against the deployed 1.0.0 engine on this repository,
+the tree produces the same graph: 7260 of 7260 node ids survive, 20700 of 20700
+edge triples unchanged, every relation count equal, `analysis.cycles` identical.
+Only the engine fingerprint moves, because graphite's own bytes did.
 
 ### Changed
 

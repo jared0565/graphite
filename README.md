@@ -2,7 +2,7 @@
 
 Local-first, deterministic knowledge graph extraction for codebases — zero-LLM, daemon-maintained, agent-agnostic.
 
-**Status: 1.0.0, production/stable.** Published on PyPI as
+**Status: 1.0.1, production/stable.** Published on PyPI as
 [`graphite-code`](https://pypi.org/project/graphite-code/) with PEP 740
 attestations; supported on Windows, Linux and macOS with Python 3.11–3.14
 (every cell gates CI). What 1.x promises — CLI, JSON outputs, `graph.json`,
