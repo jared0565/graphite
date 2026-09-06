@@ -23,6 +23,7 @@ from graphite.routing.context_builder import (
 )
 from graphite.routing.contracts import Effort
 from graphite.routing.effort import EffortMappingError
+from graphite.routing import ollama_executor
 from graphite.routing.ollama_executor import (
     MAX_HEADER_BYTES,
     MAX_HEADERS,
@@ -174,14 +175,24 @@ def test_json_decodes_utf8_json() -> None:
     assert _json('{"a": "é"}'.encode("utf-8")) == {"a": "é"}
 
 
-@pytest.mark.parametrize(
-    "raw",
-    [b"\xff\xfe", b"{not json", b"[" * 100_000 + b"]" * 100_000],
-    ids=["not-utf8", "not-json", "nested-past-the-recursion-limit"],
-)
+@pytest.mark.parametrize("raw", [b"\xff\xfe", b"{not json"], ids=["not-utf8", "not-json"])
 def test_json_maps_undecodable_input_to_provider_protocol(raw: bytes) -> None:
     with pytest.raises(ExecutorError, match="provider_protocol"):
         _json(raw)
+
+
+def test_json_maps_a_recursion_error_to_provider_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Raised directly rather than provoked with deep nesting: how many nested
+    # brackets overflow the decoder depends on the platform's C stack (100,000
+    # overflow Windows' 1 MB stack and parse cleanly on Linux/macOS under 3.14,
+    # which measures the real stack), so a literal would test the runner, not
+    # the mapping.
+    def overflow(text: str) -> object:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(ollama_executor.json, "loads", overflow)
+    with pytest.raises(ExecutorError, match="provider_protocol"):
+        _json(b"[]")
 
 
 # --- _usage ---------------------------------------------------------------------------------
