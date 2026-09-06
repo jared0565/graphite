@@ -134,7 +134,7 @@ in `aramid.toml`:
 skip_name_patterns = [
   "*deploy*", "*delete*", "*remove*", "*drop*", "*push*", "*send*",
   "*upload*", "*kill*", "*wipe*", "*publish*", "*destroy*", "*truncate*",
-  "main", "_run",                            # this repo's additions
+  "main", "_run",                            # example additions -- name yours
 ]
 ```
 
