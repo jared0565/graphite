@@ -1191,12 +1191,38 @@ def _extra_condition_holds(condition: str, active_extras: frozenset[str]) -> boo
     return present if match.group(1) == "==" else not present
 
 
+def _enclosed_by_parentheses(text: str) -> bool:
+    """Whether the first "(" of `text` is closed by its last character.
+
+    `(A) or (B)` starts with "(" and ends with ")" yet is NOT enclosed by them;
+    stripping both would leave `A) or (B`. The marker grammar admits a
+    parenthesis inside a quoted value, so the count skips quoted spans.
+    """
+    if not (text.startswith("(") and text.endswith(")")):
+        return False
+    depth = 0
+    quote: str | None = None
+    for index, character in enumerate(text):
+        if quote is not None:
+            if character == quote:
+                quote = None
+        elif character in "'\"":
+            quote = character
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                return index == len(text) - 1
+    return False
+
+
 def _condition_holds(condition: str, active_extras: frozenset[str]) -> bool:
     # A sub-condition can arrive parenthesised, e.g. the `(sys_platform ==
     # "win32")` half of `(sys_platform == "win32") and extra == "crypto"`.
     # Unwrap balanced pairs; anything still holding a boolean operator is a
     # nested expression this parser deliberately does not support.
-    while condition.startswith("(") and condition.endswith(")"):
+    while _enclosed_by_parentheses(condition):
         condition = condition[1:-1].strip()
         if re.search(r"\s+(and|or)\s+", condition):
             raise ValueError
@@ -1222,7 +1248,7 @@ def _requirement_applies(
     if not separator:
         return True
     marker = raw_marker.strip()
-    while marker.startswith("(") and marker.endswith(")"):
+    while _enclosed_by_parentheses(marker):
         marker = marker[1:-1].strip()
     # PEP 508 precedence: `and` binds tighter than `or`. Nested parenthesised
     # sub-expressions stay unsupported and fail closed via ValueError.

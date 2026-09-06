@@ -145,13 +145,19 @@ def test_git_helper_returns_stdout_on_success_and_empty_on_any_failure(
     assert launcher._git(tmp_path / "does-not-exist", "status") == ""
 
 
-def test_changed_sources_lists_only_python_files_under_src(
+def test_changed_sources_lists_only_python_files_under_src_and_scripts(
     launcher: ModuleType, repo_and_worktree: tuple[Path, Path]
 ) -> None:
+    # `scripts/` is in scope because the launcher lives there and aramid
+    # mutates it: the gate's first live drain (2026-09-04) confirmed a launcher
+    # mutant with the FULL suite (465 s) because this diff looked at src/ only.
     repo, _ = repo_and_worktree
     (repo / "src").mkdir()
+    (repo / "scripts").mkdir()
     (repo / "src" / "mod.py").write_text("x = 1\n", encoding="utf-8")
     (repo / "src" / "notes.txt").write_text("not python\n", encoding="utf-8")
+    (repo / "scripts" / "tool.py").write_text("z = 1\n", encoding="utf-8")
+    (repo / "scripts" / "run.sh").write_text("echo\n", encoding="utf-8")
     (repo / "elsewhere.py").write_text("y = 2\n", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "two")
@@ -159,8 +165,19 @@ def test_changed_sources_lists_only_python_files_under_src(
 
     (repo / "src" / "mod.py").write_text("x = 2\n", encoding="utf-8")
     (repo / "src" / "notes.txt").write_text("changed too\n", encoding="utf-8")
+    (repo / "scripts" / "tool.py").write_text("z = 2\n", encoding="utf-8")
+    (repo / "scripts" / "run.sh").write_text("echo changed\n", encoding="utf-8")
     (repo / "elsewhere.py").write_text("y = 3\n", encoding="utf-8")
-    assert launcher._changed_sources(repo) == ["src/mod.py"]
+    assert launcher._changed_sources(repo) == ["scripts/tool.py", "src/mod.py"]
+
+
+def test_targeted_tests_maps_a_changed_script_to_its_named_test_file(
+    tmp_path: Path, launcher: ModuleType
+) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_tool.py").write_text("", encoding="utf-8")
+    assert launcher._targeted_tests(tmp_path, ["scripts/tool.py"]) == ["tests/test_tool.py"]
 
 
 # --- main(): staging, exit codes, the log line --------------------------------

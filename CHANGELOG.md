@@ -13,6 +13,47 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
+## [Unreleased]
+
+### Fixed
+
+**A PEP 508 marker of the shape `(A) or (B)` was mis-parsed by the doctor's
+MCP distribution walk.** The marker evaluator unwrapped outer parentheses by
+checking only that the text started with `(` and ended with `)`, so
+`(extra == "a") or (python_version == "3.14")` was stripped to
+`extra == "a") or (python_version == "3.14"`. An `extra` marker of that shape
+then failed closed to "does not apply"; a plain marker of that shape raised
+and aborted the whole distribution walk, which is `probe_mcp`'s manifest
+source. Outer parentheses are now unwrapped only when the first `(` is closed
+by the last character, counting depth outside quoted values. Found by the
+new `tests/test_doctor_probes.py`; no installed distribution on the reference
+machine carried the shape, which is why the walk had never failed.
+
+### Changed
+
+**`scripts/mutation_tests.py` targets `scripts/` changes too.** The
+certifying launcher for aramid's mutation gate diffed `src/` only, so a
+mutant in the launcher itself skipped the targeted stage and its confirm ran
+the whole suite (465 s on the gate's first live drain, 2026-09-04, where the
+targeted stage kills in seconds). A changed `scripts/<stem>.py` now targets
+`tests/test_<stem>.py` and `tests/test_<stem>_*.py` like a changed source
+module.
+
+**Twelve modules gained a `tests/test_<stem>.py`.** aramid's mutation stage 1
+runs `tests/test_<module>.py` when it exists and otherwise `pytest -k
+<module>`; a run that selects nothing is booked a stage-1 survivor and every
+such mutant goes to a full-suite confirm, of which an item gets three. Nine
+modules had a `-k` fallback that collected zero tests (`doctor_probes`,
+`dependency_install`, `probe_process`, `ts_bridge`, `_win32_ctypes`,
+`process_contracts`, `routing/ollama_executor`, `routing/context_builder`,
+`routing/route_pool_execution`) and three collected one (`mcp_server`,
+`llm_probe`, `cluster`). Each now has a stage-1 file that pins its pure
+helpers directly; every file was proven able to fail by a hand mutant of its
+module. Three quirks were pinned as-is rather than changed: a cluster's
+kind label is `f"{kind}s"` verbatim (`classs`), a blank path in a TypeScript
+bridge edge normalises to `.` instead of being dropped, and an empty MCP
+`node_id` fuzzy-matches the first node.
+
 ## [1.0.1] — 2026-09-05
 
 A patch release. Measured against the deployed 1.0.0 engine on this repository,

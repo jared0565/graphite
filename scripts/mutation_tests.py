@@ -21,8 +21,8 @@ Why a launcher rather than a bare pytest command:
   is mutated in place, HEAD, the changed sources, the targeted test files,
   each stage's exit code and the duration. The next stand-down explains
   itself from this side.
-- **Cheap kills.** A changed `src/graphite/<stem>.py` targets
-  `tests/test_<stem>.py` and `tests/test_<stem>_*.py`. Those run first with
+- **Cheap kills.** A changed `src/graphite/<stem>.py` or `scripts/<stem>.py`
+  targets `tests/test_<stem>.py` and `tests/test_<stem>_*.py`. Those run first with
   `-x`; if they pass, the rest of the suite runs with the targeted files
   excluded. pytest re-sorts a file named twice into directory order, which is
   why this is two invocations rather than one.
@@ -83,7 +83,7 @@ def _dev_python(*roots: Path) -> Path | None:
 
 
 def _changed_sources(root: Path) -> list[str]:
-    names = _git(root, "diff", "--name-only", "HEAD", "--", "src")
+    names = _git(root, "diff", "--name-only", "HEAD", "--", "src", "scripts")
     return [n for n in names.splitlines() if n.endswith(".py")]
 
 
