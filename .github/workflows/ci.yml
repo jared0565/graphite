@@ -234,7 +234,7 @@ jobs:
           python -m venv ../.venvs/graphite-dev
           ../.venvs/graphite-dev/Scripts/python.exe -m pip install -e ".[dev,mcp]"
       - name: Install aramid and the tools its typecheck slot resolves on PATH
-        # aramid 0.14.0 is what this machine runs (channel round 197; 0.7.1
+        # aramid 0.16.0 is what this machine runs (channel round 204; 0.7.1
         # honours [tool.mypy] files/exclude in the typecheck slot and reports
         # `fresh_ledger_baseline`/`grandfathered`, 0.7.2 keeps registry keys
         # out of `expected` and stamps `run_id`/`recorded` in the report,
@@ -261,11 +261,19 @@ jobs:
         # refused every annotated-tag push, round 193) and streams the gate's
         # test progress, 0.14.0 ticks that line every 5 s and fixes the drain's
         # stage-1 selector for a module whose stem names a tests/ directory
-        # (no such stem here; every graphite mutation row reads timeouts 0) --
-        # neither adds a tracked surface; dependabot proposes bumps.
+        # (no such stem here; every graphite mutation row reads timeouts 0),
+        # 0.15.0 selects tests/test_<stem>.py directly at stage 1 (the bare
+        # `-k <stem>` collection is gone), re-tests survivors a changed test
+        # names FIRST on their own `retest_cap` budget, and reports
+        # `unselected_s1` (channel round 202), 0.16.0 resolves a recorded
+        # survivor whose line left its file at every revision the push
+        # certifies (`line_departed`), regenerates a survivor from the whole
+        # file so a moved line still re-tests, and stops a worktree subprocess
+        # writing bytecode (round 204) -- none adds a tracked surface, no
+        # `aramid init` re-run for any of them; dependabot proposes bumps.
         # mypy is installed for THIS interpreter because aramid's typecheck slot
         # runs it from PATH, not from the dev venv.
-        run: python -m pip install "aramid==0.14.0" "mypy>=1.14"
+        run: python -m pip install "aramid==0.16.0" "mypy>=1.14"
       - name: CI-only keys the repository leaves unset
         shell: bash
         # aramid merges defaults <- ~/.aramid/config.toml <- <root>/aramid.toml.

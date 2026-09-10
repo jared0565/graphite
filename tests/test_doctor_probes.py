@@ -27,6 +27,7 @@ from graphite.doctor_probes import (
     _condition_holds,
     _count,
     _degraded_probe,
+    _enclosed_by_parentheses,
     _json_object,
     _json_object_without_duplicate_keys,
     _llm_failure,
@@ -236,6 +237,23 @@ def test_requirement_applies_unwraps_only_a_matched_enclosing_pair_of_parenthese
     # A parenthesis inside a quoted value is data, not structure.
     assert _condition_holds('(sys_platform == "never)")', frozenset()) is False
     assert _requirement_applies('x; (sys_platform == "never)") or (sys_platform == "(never")') is False
+
+
+def test_enclosed_by_parentheses_requires_both_ends_and_a_matching_first_pair() -> None:
+    # Both ends are required TOGETHER. The 2026-09-06 drain's one survivor
+    # turned the guard's `and` into `or`: `x(y)` then passed the guard and
+    # counted as enclosed because its first "(" closes on the last character,
+    # so `_requirement_applies` stripped the first and last characters of a
+    # marker like `A or (B)` and raised on the mangled remainder. Only the
+    # `x(y)` shape and the caller-level line below separate the two guards;
+    # `(x)y` and the plain cases read the same under either.
+    assert _enclosed_by_parentheses("(x)") is True
+    assert _enclosed_by_parentheses("x(y)") is False
+    assert _enclosed_by_parentheses("(x)y") is False
+    assert _enclosed_by_parentheses("(a) or (b)") is False
+    assert _enclosed_by_parentheses("x") is False
+    assert _enclosed_by_parentheses("") is False
+    assert _requirement_applies(f'x; python_version == "0.0" or (python_version == "{_PY}")')
 
 
 def test_requirement_applies_rejects_an_unevaluable_extra_marker_but_raises_otherwise() -> None:
