@@ -8,8 +8,9 @@ updates:
     schedule:
       interval: "weekly"
   # pyproject.toml declares floors, not pins, so most of these will be
-  # dev-tool bumps (ruff, mypy, pytest) and the aramid pin in ci.yml's
-  # security job.
+  # dev-tool bumps (ruff, mypy, pytest). This does NOT cover the aramid pin
+  # in ci.yml's security job: that is a `run:` string, not a manifest, and
+  # no aramid PR has ever been opened here -- bump it by hand.
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
