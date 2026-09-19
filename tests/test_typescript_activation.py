@@ -100,6 +100,43 @@ def _detect(root: Path, *, available: bool = False, cfg: Config | None = None) -
     )
 
 
+# Read at import, before the guard below replaces the module attribute.
+_PRODUCTION_SCAN_BUDGET_S = typescript_activation._EVIDENCE_SCAN_SECONDS
+
+
+@pytest.fixture(autouse=True)
+def _scan_budget_cannot_preempt(monkeypatch):
+    """Keep the evidence scan's REAL wall-clock budget out of every test here.
+
+    `_scan_typescript_evidence` reads the global `time.monotonic`, not
+    `ActivationDependencies.monotonic`, so no injected clock can stop a stall
+    longer than the budget from turning ANY outcome into GUIDANCE_ONLY /
+    `evidence_scan_limited`. Measured 2026-09-19: one such stall failed the
+    pre-push gate on a YAML-only commit, and forcing the budget to 0 flips 159
+    tests in this module (0 elsewhere). A test about the budget sets it itself.
+    """
+    monkeypatch.setattr(typescript_activation, "_EVIDENCE_SCAN_SECONDS", 3600.0)
+
+
+def test_stall_longer_than_the_scan_budget_cannot_preempt_a_test(tmp_path, monkeypatch):
+    # A REAL stall rather than a patched clock: `typescript_activation.time` is
+    # the stdlib module, so a fake there is process-wide (#45). Load can only
+    # lengthen a sleep, so it cannot turn this green without the guard.
+    root = tmp_path / "repo"
+    root.mkdir()
+    configured_exclusions = typescript_activation._configured_exclusions
+
+    def stalled(*args, **kwargs):
+        time.sleep(_PRODUCTION_SCAN_BUDGET_S + 0.1)
+        return configured_exclusions(*args, **kwargs)
+
+    monkeypatch.setattr(typescript_activation, "_configured_exclusions", stalled)
+
+    detection = _detect(root)
+
+    assert detection.result.reason == "no_typescript_evidence"
+
+
 def test_activate_without_typescript_evidence_is_not_applicable_without_process(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
@@ -4381,6 +4418,7 @@ def test_evidence_scan_deadline_is_fixed_guidance(tmp_path, monkeypatch):
     root.mkdir()
     (root / "ordinary.js").write_text("", encoding="utf-8")
     ticks = iter((10.0, 20.0))
+    monkeypatch.setattr(typescript_activation, "_EVIDENCE_SCAN_SECONDS", _PRODUCTION_SCAN_BUDGET_S)
     monkeypatch.setattr(typescript_activation.time, "monotonic", lambda: next(ticks))
 
     detection = _detect(root)
