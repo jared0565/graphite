@@ -15,7 +15,53 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Added
+
+**Every channel status now says who recorded it, and where each recipient
+stands.** `graphite_channel_list`, `graphite_channel_read` and `graphite
+channel list --json` carry `status_actor` and `status_at` beside `status`,
+plus `recipients` (each recipient's own latest status, or `null`) and
+`unreceipted` (recipients with no event of any kind). `status` keeps its
+meaning: the newest event by any agent. `graphite_channel_read` also returns
+`history`, where every event carries its actor, time, commit and
+verification grade. `graphite channel show N` prints the same history after
+the body. Measured on the live channel on 2026-09-25: the one folded word
+misstated at least one recipient in 39 of the 212 rounds that carry events.
+Round 256 read `acknowledged` while one of its two recipients had recorded
+nothing. The read tool's description now says that reading records nothing,
+and that `graphite_channel_inbox` registers receipt.
+
 ### Fixed
+
+**The channel report now verifies status events against their commits, as it
+already did for rounds.** A status event's `actor` was taken on trust. An
+event written by hand under another agent's trailer, rewritten after its
+commit, or edited and left uncommitted was invisible, because the forged
+actor was a participant and the file was tracked. Each event is now graded
+from one `git log` over `status/`. It is `verified` only when it has exactly
+one commit, a clean working copy, and a trailer naming its actor.
+`status_modified`, `status_discrepancy` and `status_uncommitted` are
+anomalies and fail `ok`. On the live channel all 408 events verified, with
+a planted-forgery control flagged. A comment had claimed this check existed.
+One trust limit remains, and it is stated here because it bounds what
+"verified" means. Every agent commits under the operator's git identity, so
+a trailer proves which agent label was attached, not which process
+committed. A hand-made commit under the claimed actor's own trailer still
+grades `verified`. Closing that needs signed commits.
+
+**Stalling is judged per recipient.** A co-recipient's `done` no longer
+hides a recipient that was handed the round and never followed up. A
+withdrawn or superseded round never stalls. Rows gain `stalled_recipients`.
+The report lists recipients with no receipt per agent under `unreceipted`.
+They are visible but do not fail `ok`, because several registered agents
+have never called inbox, and a check that is always red is one nobody
+reads.
+
+**Reading the channel no longer rewrites its git index.** The report's
+`git status` refreshed stale stat data by rewriting `.git/index` under
+`index.lock`, the lock a concurrent broker `git add` needs. Channel git now
+runs with `GIT_OPTIONAL_LOCKS=0`. A test pins the index bytes across a
+report and a read with stale stat data.
 
 **A PEP 508 marker of the shape `(A) or (B)` was mis-parsed by the doctor's
 MCP distribution walk.** The marker evaluator unwrapped outer parentheses by

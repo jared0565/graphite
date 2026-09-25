@@ -537,7 +537,7 @@ Print the path of the shared agent channel (the one repo-isolation exception)
 | Option | Meaning |
 |---|---|
 | `-h`, `--help` | show this help message and exit |
-| `action` | report: audited view of the whole channel; list: rounds; show: one round's body; register: bind a repo to an agent identity (one of: `report`, `list`, `show`, `register`) |
+| `action` | report: audited view of the whole channel; list: rounds; show: one round's body, then its status history (who, when, commit); register: bind a repo to an agent identity (one of: `report`, `list`, `show`, `register`) |
 | `target` | Round number for `show`, or repository path for `register` |
 | `agent` | Agent id for `register` |
 | `--json` | Emit machine-readable JSON |

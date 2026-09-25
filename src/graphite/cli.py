@@ -1272,6 +1272,10 @@ def _cmd_channel_action(args: argparse.Namespace, action: str) -> int:
                         "to": e.to,
                         "posted": e.posted,
                         "legacy": e.legacy,
+                        **channel_mod.status_view(
+                            e,
+                            channel_mod.status_events(root, e.number) if e.number is not None else [],
+                        ),
                     }
                     for e in entries
                 ],
@@ -1310,10 +1314,27 @@ def _cmd_channel_action(args: argparse.Namespace, action: str) -> int:
             return 2
         try:
             entry = channel_mod.read_round(root, number)
+            history = channel_mod.status_history(root, number)
         except channel_mod.ChannelError as exc:
             print(f"[graphite] {exc}", file=sys.stderr)
             return 1
         print(entry.body)
+        # Who set what, when, under which commit -- the question a human
+        # brings to `show`, answered from the event log rather than the fold.
+        print("--- status history ---")
+        for event in history:
+            print(
+                f"#{event['seq']} {event['status']} by {event['actor']} at {event['at']}"
+                f"{' (broker)' if event['broker'] else ''}"
+                f"  commit {(event['commit'] or '-')[:7]} {event['verification'].upper()}"
+                + (f"  \"{event['reason']}\"" if event["reason"] else "")
+            )
+        if not history:
+            print("(no events)")
+        receipted = {event["actor"] for event in history}
+        for agent in entry.to:
+            if agent not in receipted:
+                print(f"{agent}: no receipt recorded")
         return 0
 
     print(f"[graphite] unknown channel action: {action}", file=sys.stderr)
@@ -3072,7 +3093,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "report: audited view of the whole channel; list: rounds; "
-            "show: one round's body; register: bind a repo to an agent identity"
+            "show: one round's body, then its status history (who, when, commit); "
+            "register: bind a repo to an agent identity"
         ),
     )
     p_channel.add_argument(

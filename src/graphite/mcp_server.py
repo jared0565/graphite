@@ -198,7 +198,7 @@ class GraphiteMCPServer:
         )
 
     def channel_list_tool(self) -> dict[str, Any]:
-        from .channel import current_status, list_rounds
+        from .channel import list_rounds, status_events, status_view
 
         def _run(root):
             entries = list_rounds(root)
@@ -212,10 +212,9 @@ class GraphiteMCPServer:
                         "to": entry.to,
                         "posted": entry.posted,
                         "legacy": entry.legacy,
-                        "status": (
-                            (current_status(root, entry.number) or {}).get("status")
-                            if entry.number is not None
-                            else None
+                        **status_view(
+                            entry,
+                            status_events(root, entry.number) if entry.number is not None else [],
                         ),
                     }
                     for entry in entries
@@ -225,7 +224,7 @@ class GraphiteMCPServer:
         return self._channel_call(_run)
 
     def channel_read_tool(self, *, number: int) -> dict[str, Any]:
-        from .channel import current_status, read_round
+        from .channel import read_round, status_events, status_history, status_view
 
         def _run(root):
             entry = read_round(root, number)
@@ -239,7 +238,8 @@ class GraphiteMCPServer:
                 "body": entry.body,
                 # `read_round` matched on `entry.number == number`, so the
                 # requested int IS the entry's number, minus the Optional.
-                "status": (current_status(root, number) or {}).get("status"),
+                **status_view(entry, status_events(root, number)),
+                "history": status_history(root, number),
             }
 
         return self._channel_call(_run)
@@ -310,12 +310,20 @@ def channel_tool_definitions() -> list[Tool]:
         ),
         _tool(
             name="graphite_channel_list",
-            description="List every round in the channel with its author and current status.",
+            description=(
+                "List every round with its author and current status. `status` is the newest "
+                "event by ANY agent: `status_actor` says whose, `recipients` gives each "
+                "recipient's own latest status, and `unreceipted` lists recipients with none."
+            ),
             input_schema={"type": "object", "properties": {}},
         ),
         _tool(
             name="graphite_channel_read",
-            description="Read one round by number.",
+            description=(
+                "Read one round by number, with each recipient's status and the full event "
+                "history (actor, time, commit, verification). Reading records nothing: call "
+                "graphite_channel_inbox to register receipt of rounds addressed to you."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {"number": {"type": "integer"}},

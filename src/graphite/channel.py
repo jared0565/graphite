@@ -699,6 +699,12 @@ def _git(root: Path, *args: str, check: bool = True) -> str:
     `errors="replace"` because git also echoes paths, and a byte sequence that
     is not valid UTF-8 must not be able to take the audit surface down. It also
     makes the decode total, which is what keeps `result.stdout` a `str`.
+
+    `GIT_OPTIONAL_LOCKS=0`: reads run git here too (the report, `read`'s
+    history), beside other agents' brokers writing. A plain `git status`
+    refreshes stale stat data by REWRITING the index under `index.lock`, and a
+    writer's `git add` that meets that lock fails. Only optional locks are
+    skipped; `add` and `commit` still take the ones they need.
     """
     try:
         result = subprocess.run(  # noqa: S603
@@ -710,6 +716,7 @@ def _git(root: Path, *args: str, check: bool = True) -> str:
             check=False,
             stdin=subprocess.DEVNULL,
             timeout=_GIT_TIMEOUT_SECONDS,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
         )
     except subprocess.TimeoutExpired:
         raise ChannelError(
@@ -993,6 +1000,59 @@ def current_status(root: Path, number: int) -> dict | None:
     return events[-1] if events else None
 
 
+def status_view(entry: Round, events: list[dict]) -> dict:
+    """What a reader needs beside the folded status: who set it, and where EACH
+    recipient stands.
+
+    The fold alone is one word across every actor. On a shared round it spoke
+    for recipients who had recorded nothing -- round 256 read `acknowledged`
+    while one of its two recipients had no event at all.
+    """
+    current = events[-1] if events else None
+    latest: dict[str, dict] = {}
+    for event in events:
+        actor = event.get("actor")
+        if isinstance(actor, str):
+            latest[actor] = event
+    return {
+        "status": current.get("status") if current else None,
+        "status_actor": current.get("actor") if current else None,
+        "status_at": current.get("at") if current else None,
+        "recipients": {
+            agent: (
+                {key: latest[agent].get(key) for key in ("status", "at", "seq")}
+                if agent in latest
+                else None
+            )
+            for agent in entry.to
+        },
+        # No event of any kind: the broker never handed it over (no inbox call)
+        # and the recipient never asserted anything either.
+        "unreceipted": [agent for agent in entry.to if agent not in latest],
+    }
+
+
+def status_history(root: Path, number: int) -> list[dict]:
+    """Every event for one round, oldest first, each graded against its commit."""
+    events = status_events(root, number)
+    if not events:
+        return []
+    prefix = f"{STATUS_DIRNAME}/{number:03d}"
+    tracked = _tracked(root, prefix)
+    dirty = _dirty(root, prefix)
+    commits = _event_commits(root, prefix)
+    history = []
+    for event in events:
+        rel = f"{prefix}/{event['file']}"
+        verification, created = _verify_event(rel, event.get("actor"), tracked, dirty, commits)
+        item = {key: event.get(key) for key in ("seq", "status", "actor", "broker", "at", "reason")}
+        if event.get("malformed"):
+            item["malformed"] = True
+        item.update(file=event["file"], commit=created, verification=verification)
+        history.append(item)
+    return history
+
+
 def _write_status_event(
     root: Path,
     number: int,
@@ -1023,8 +1083,8 @@ def _write_status_event(
             "reason": reason,
         }
         target.write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        # Committed under the actor's trailer so the report can compare the two
-        # and catch an event whose recorded actor is not who committed it.
+        # Committed under the actor's trailer so `_verify_event` can compare the
+        # two and catch an event whose recorded actor is not who committed it.
         event["commit"] = _commit(
             root,
             [f"{STATUS_DIRNAME}/{number:03d}/{name}"],
@@ -1116,8 +1176,9 @@ FAILING_VERIFICATIONS = frozenset({"uncommitted", "modified", "discrepancy"})
 _TRAILER = re.compile(r"^Co-Authored-By:\s*(\S+-agent)\s*<", re.MULTILINE)
 
 
-def _tracked(root: Path) -> set[str]:
-    return {line.strip() for line in _git(root, "ls-files").splitlines() if line.strip()}
+def _tracked(root: Path, *pathspec: str) -> set[str]:
+    out = _git(root, "ls-files", "--", *pathspec)
+    return {line.strip() for line in out.splitlines() if line.strip()}
 
 
 def _commits_for(root: Path, rel: str) -> list[str]:
@@ -1130,14 +1191,60 @@ def _commit_agent(root: Path, sha: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _dirty(root: Path) -> set[str]:
+def _dirty(root: Path, *pathspec: str) -> set[str]:
     """Tracked files with uncommitted working-tree changes.
 
     Without this, editing a tracked round and simply not committing would grade
     `verified`: the file is tracked and still has exactly one commit.
     """
-    out = _git(root, "status", "--porcelain", "--untracked-files=no")
+    out = _git(root, "status", "--porcelain", "--untracked-files=no", "--", *pathspec)
     return {line[3:].strip().strip('"') for line in out.splitlines() if line.strip()}
+
+
+def _event_commits(root: Path, pathspec: str) -> dict[str, list[tuple[str, str | None]]]:
+    """Every commit touching each file under `pathspec`, newest first, paired
+    with the agent its trailer names.
+
+    ONE `git log` for the whole tree: grading 400 status events one file at a
+    time would be 800 git calls on every report.
+    """
+    out = _git(root, "log", "--format=%x1e%H%x1f%B%x1f", "--name-only", "--", pathspec)
+    commits: dict[str, list[tuple[str, str | None]]] = {}
+    for chunk in out.split("\x1e"):
+        if not chunk.strip():
+            continue
+        sha, body, files = chunk.split("\x1f", 2)
+        match = _TRAILER.search(body)
+        agent = match.group(1) if match else None
+        for line in files.splitlines():
+            if line.strip():
+                commits.setdefault(line.strip(), []).append((sha.strip(), agent))
+    return commits
+
+
+def _verify_event(
+    rel: str,
+    actor: object,
+    tracked: set[str],
+    dirty: set[str],
+    commits: dict[str, list[tuple[str, str | None]]],
+) -> tuple[str, str | None]:
+    """Grade one status event the way `_verify` grades a round: `(grade, sha)`.
+
+    Recipient membership alone cannot catch a forged status -- the forged actor
+    usually IS a recipient. The event's own commit can: an event is written once,
+    by the broker, under its actor's trailer, so a second commit is an edit and a
+    different trailer is someone else speaking for that actor.
+    """
+    history = commits.get(rel, [])
+    if rel not in tracked or not history:
+        return "uncommitted", None
+    created_sha, created_agent = history[-1]
+    if rel in dirty or len(history) > 1:
+        return "modified", created_sha
+    if created_agent != actor:
+        return "discrepancy", created_sha
+    return "verified", created_sha
 
 
 def _verify(root: Path, rel: str, tracked: set[str], dirty: set[str]) -> str:
@@ -1192,21 +1299,32 @@ def build_report(
     now = now or datetime.now(timezone.utc)
     tracked = _tracked(root)
     dirty = _dirty(root)
+    event_commits = _event_commits(root, STATUS_DIRNAME)
     entries = list_rounds(root)
     numbers = {e.number for e in entries if e.number is not None}
 
     rows: list[dict] = []
     anomalies: list[dict] = []
+    unreceipted: dict[str, list[int]] = {}
     for entry in entries:
         rel = entry.path.relative_to(root).as_posix()
         verification = _verify(root, rel, tracked, dirty)
         events = status_events(root, entry.number) if entry.number is not None else []
         current = events[-1] if events else None
+        view = status_view(entry, events)
 
-        stalled = False
-        if current and current.get("status") in {"delivered", "acknowledged"}:
-            at = _parse_at(current.get("at"))
-            stalled = at is not None and (now - at) > timedelta(days=stale_days)
+        # Per recipient: another recipient's `done` must not hide one that was
+        # handed the round and never followed up. An author's withdrawal ends it.
+        stalled_recipients: list[str] = []
+        if not current or current.get("status") not in {"withdrawn", "superseded"}:
+            for agent, state in view["recipients"].items():
+                if state and state["status"] in {"delivered", "acknowledged"}:
+                    at = _parse_at(state["at"])
+                    if at is not None and (now - at) > timedelta(days=stale_days):
+                        stalled_recipients.append(agent)
+        for agent in view["unreceipted"]:
+            if entry.number is not None:
+                unreceipted.setdefault(agent, []).append(entry.number)
 
         participants = {entry.author, *entry.to} - {None}
         for event in events:
@@ -1220,8 +1338,9 @@ def build_report(
                     {"round": number, "kind": "status_actor_not_participant", "detail": actor}
                 )
             event_rel = f"{STATUS_DIRNAME}/{number:03d}/{event['file']}"
-            if event_rel not in tracked:
-                anomalies.append({"round": number, "kind": "status_uncommitted", "detail": event["file"]})
+            grade, _sha = _verify_event(event_rel, actor, tracked, dirty, event_commits)
+            if grade != "verified":
+                anomalies.append({"round": number, "kind": f"status_{grade}", "detail": event["file"]})
         seen = [e.get("status") for e in events]
         if "done" in seen and "delivered" not in seen[: seen.index("done")]:
             anomalies.append({"round": entry.number, "kind": "done_without_delivery", "detail": None})
@@ -1240,11 +1359,10 @@ def build_report(
                 "posted": entry.posted,
                 "supersedes": entry.supersedes,
                 "verification": verification,
-                "status": current.get("status") if current else None,
-                "status_actor": current.get("actor") if current else None,
-                "status_at": current.get("at") if current else None,
+                **view,
                 "reason": current.get("reason") if current else None,
-                "stalled": stalled,
+                "stalled": bool(stalled_recipients),
+                "stalled_recipients": stalled_recipients,
             }
         )
 
@@ -1266,6 +1384,10 @@ def build_report(
         "stalled": [r for r in rows if r["stalled"]],
         "anomalies": anomalies,
         "by_agent": by_agent,
+        # Visible, NOT failing: registered agents that never call inbox would
+        # otherwise hold the report permanently red, and a check that is always
+        # red is one nobody reads.
+        "unreceipted": dict(sorted(unreceipted.items())),
         # Who may write at all. Without this the operator can see what was said
         # but not who is able to say anything -- and an agent that was onboarded
         # but never registered is silently mute rather than visibly absent.
@@ -1294,8 +1416,18 @@ def render_report(data: dict) -> str:
             f"{label:<10} {row['author'] or '(legacy)':<16} -> {recipients:<16} "
             f"{status:<13} {row['verification'].upper():<12} {row['title']}"
         )
+        if row["status"] is not None:
+            lines.append(f"{'':<10}   set by {row['status_actor']} at {row['status_at']}")
+        states = row.get("recipients") or {}
+        # One line per recipient wherever the folded word misleads: it names a
+        # status some recipient never recorded.
+        if any((state or {}).get("status") != row["status"] for state in states.values()):
+            for agent, state in states.items():
+                own = f"{state['status'].upper():<13} {state['at']}" if state else "NO RECEIPT"
+                lines.append(f"{'':<10}   {agent:<28} {own}")
         if row["stalled"]:
-            lines.append(f"{'':<10}   ^ STALLED — {status.lower()} since {row['status_at']}, no follow-up")
+            who = ", ".join(row["stalled_recipients"])
+            lines.append(f"{'':<10}   ^ STALLED — {who}: delivered or acknowledged, no follow-up")
         if row["reason"]:
             lines.append(f"{'':<10}   \"{row['reason']}\"")
 
@@ -1305,6 +1437,12 @@ def render_report(data: dict) -> str:
         lines.append(f"  {agent:<16} {path}")
     if not registry:
         lines.append("  (none — no agent can post; graphite channel register <repo> <name>-agent)")
+
+    unreceipted = data.get("unreceipted") or {}
+    if unreceipted:
+        lines += ["", "No receipt recorded — addressed, but no event of any kind (never called inbox):"]
+        for agent, rounds in unreceipted.items():
+            lines.append(f"  {agent:<28} {len(rounds):>3} round(s): {', '.join(map(str, rounds))}")
 
     legacy = data["counts"]["legacy"]
     if legacy:
