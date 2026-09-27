@@ -164,6 +164,20 @@ test_command = ["python", "-P", "scripts/mutation_tests.py"]
 baseline_timeout_s = 1500
 mutant_timeout_s = 1500
 wall_budget_s = 3600
+# TEMPORARY, 2026-09-27, channel round 272: aramid 0.18.0's scheduled drain is
+# killed at a 1 h task limit (its `schedule install`, ExecutionTimeLimit PT1H),
+# and a killed drain records nothing and restarts the item from scratch 4 h
+# later. On a drain this repo's item needs about 17.5 min of baseline, 14 min
+# per stage-1 run over the nine tests/test_channel_*.py files, and a
+# confirmation is one more full suite. The packaged defaults (20 mutants, 3
+# confirmations, 3 re-tests) cannot finish, so every drain since 09-25 22Z
+# was killed. One mutant, one confirmation and no re-tests is about 50 min:
+# it fits the hour and records a result. Remove these three lines once
+# aramid's fix (0.19.1: a longer task limit plus its own drain deadline) is
+# installed AND `aramid schedule install` has been re-run.
+max_mutants = 1
+confirm_cap = 1
+retest_open_survivors = false
 
 # The fuzz consumer drives top-level functions on the changed lines of an
 # item with generated arguments. On the first live drain of this repo's

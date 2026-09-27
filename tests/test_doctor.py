@@ -3483,13 +3483,21 @@ def test_llm_parent_timeout_is_wall_clock_bounded_and_leaves_no_orphan(tmp_path:
 
 
 def test_llm_real_isolated_worker_rejects_unsupported_provider_without_network() -> None:
+    """The budget bounds the WHOLE worker, interpreter start included, so the
+    verdict is a race between that start and the clock. Idle, the worker needs
+    ~0.5 s to reach `configuration`. It had 2 s, and a loaded aramid drain on
+    2026-09-26 22Z read `timeout`. Measured here: under 36 CPU burners on 12
+    cores, 2 s read `timeout` 7 times in 10 and 60 s read `configuration` 10
+    in 10. The largest budget the probe accepts keeps the race out of a test
+    about the category. A worker that reached for the network instead still
+    fails it, on `connection` or at worst a 60 s `timeout`."""
     import graphite.doctor_probes as probes
 
     check = probes.probe_llm(
         Config(
             llm_mode="cloud",
             llm_provider="unsupported-provider",
-            llm_timeout_seconds=2,
+            llm_timeout_seconds=probes._LLM_TIMEOUT_MAX_SECONDS,
         )
     )
 
