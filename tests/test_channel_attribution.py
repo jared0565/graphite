@@ -118,6 +118,7 @@ def test_report_flags_a_status_event_whose_actor_disagrees_with_its_commit(wired
     report = channel.build_report(root)
 
     assert any(a["round"] == n and a["kind"] == "status_discrepancy" for a in report["anomalies"])
+    assert _row(report, n)["status_verification"] == "discrepancy"
     assert report["ok"] is False
 
 
@@ -204,6 +205,34 @@ def test_the_human_report_shows_each_recipient_where_the_folded_status_misleads(
 
     assert f"round {n}" in text
     assert any("demo-agent" in line and "NO RECEIPT" in line for line in text.splitlines())
+
+
+def test_the_human_report_does_not_state_an_unverified_attribution_as_fact(wired) -> None:
+    """aramid llm-review 53368eee: `set by X` named the file's claimed actor,
+    checked or not."""
+    root, graphite, _aramid, _demo = wired
+    n = channel.post_round(root, graphite, title="T", body="b", to=["aramid-agent"])["round"]
+    _forge_ack(root, n, claimed="aramid-agent", committed_as="graphite-agent")
+
+    lines = channel.render_report(channel.build_report(root)).splitlines()
+    set_by = [line for line in lines if "set by aramid-agent" in line]
+
+    assert set_by and all("UNVERIFIED" in line and "DISCREPANCY" in line for line in set_by)
+
+
+def test_the_per_recipient_lines_mark_an_unverified_recipient_status(wired) -> None:
+    root, graphite, aramid, _demo = wired
+    n = channel.post_round(
+        root, graphite, title="T", body="b", to=["aramid-agent", "demo-agent"]
+    )["round"]
+    channel.inbox(root, aramid)
+    _forge_ack(root, n, claimed="demo-agent", committed_as="graphite-agent")
+
+    lines = channel.render_report(channel.build_report(root)).splitlines()
+    # The recipient's OWN line: the round header also names demo-agent and ACKNOWLEDGED.
+    demo = [line for line in lines if line.split()[:2] == ["demo-agent", "ACKNOWLEDGED"]]
+
+    assert demo and all("UNVERIFIED: DISCREPANCY" in line for line in demo)
 
 
 def test_reading_the_channel_never_rewrites_its_git_index(wired) -> None:

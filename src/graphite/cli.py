@@ -1263,6 +1263,7 @@ def _cmd_channel_action(args: argparse.Namespace, action: str) -> int:
     if action == "list":
         entries = channel_mod.list_rounds(root)
         if args.json:
+            grader = channel_mod.EventGrader.load(root)
             print(json.dumps(
                 [
                     {
@@ -1275,6 +1276,7 @@ def _cmd_channel_action(args: argparse.Namespace, action: str) -> int:
                         **channel_mod.status_view(
                             e,
                             channel_mod.status_events(root, e.number) if e.number is not None else [],
+                            grader,
                         ),
                     }
                     for e in entries

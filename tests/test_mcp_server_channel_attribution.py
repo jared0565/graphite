@@ -122,6 +122,64 @@ def test_list_carries_the_actor_and_per_recipient_status_for_every_round(wired) 
     assert row["unreceipted"] == ["demo-agent"]
 
 
+def _forged_ack(root: Path, graphite: Path) -> int:
+    """An ack file claiming aramid-agent, committed under graphite-agent's trailer."""
+    n = channel.post_round(root, graphite, title="T", body="b", to=["aramid-agent"])["round"]
+    directory = root / "status" / f"{n:03d}"
+    directory.mkdir(parents=True)
+    event = {"round": n, "seq": 1, "status": "acknowledged", "actor": "aramid-agent",
+             "broker": False, "at": "2026-09-25T00:00:00Z", "reason": None}
+    (directory / "0001-acknowledged.json").write_text(json.dumps(event), encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", f"forged\n\n{channel.trailer('graphite-agent')}\n")
+    return n
+
+
+def test_list_says_whether_the_attribution_it_shows_checks_out(wired) -> None:
+    """aramid llm-review 53368eee: the top-level `status_actor` was the raw
+    actor of the newest event, so a forged event read as another agent's ack
+    everywhere but the history."""
+    root, graphite, aramid = wired
+    # Honest first: its inbox call would otherwise deliver the forged round too,
+    # and that genuine `delivered` would become the forged round's newest event.
+    honest = _shared_round(root, graphite, aramid)
+    forged = _forged_ack(root, graphite)
+
+    rounds = {r["round"]: r for r in GraphiteMCPServer(project_root=graphite).channel_list_tool()["rounds"]}
+
+    assert rounds[forged]["status_actor"] == "aramid-agent"
+    assert rounds[forged]["status_verification"] == "discrepancy"
+    assert rounds[forged]["recipients"]["aramid-agent"]["verification"] == "discrepancy"
+    assert rounds[honest]["status_verification"] == "verified"
+    assert rounds[honest]["recipients"]["aramid-agent"]["verification"] == "verified"
+
+
+def test_read_says_whether_the_attribution_it_shows_checks_out(wired) -> None:
+    root, graphite, _aramid = wired
+    n = _forged_ack(root, graphite)
+
+    result = GraphiteMCPServer(project_root=graphite).channel_read_tool(number=n)
+
+    assert result["status_verification"] == "discrepancy"
+    assert result["recipients"]["aramid-agent"]["verification"] == "discrepancy"
+
+
+def test_list_on_a_channel_with_no_commits_lists_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Grading against history must not turn a fresh channel into an error."""
+    monkeypatch.setenv("GRAPHITE_PROJECTS_ROOT", str(tmp_path))
+    root = tmp_path / ".agent-channel"
+    (root / "rounds").mkdir(parents=True)
+    _git(tmp_path, "init", "-q", str(root))
+    (root / "PROTOCOL.md").write_text("# Protocol\n", encoding="utf-8")
+    (tmp_path / "graphite").mkdir()
+
+    result = GraphiteMCPServer(project_root=tmp_path / "graphite").channel_list_tool()
+
+    assert result["ok"] is True and result["rounds"] == []
+
+
 def test_the_read_tool_tells_agents_that_reading_records_no_receipt() -> None:
     """graphite's own sessions read rounds for weeks without ever calling inbox,
     leaving 16 rounds with no graphite event. The tool an agent reaches for must

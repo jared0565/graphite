@@ -57,7 +57,22 @@ def test_cli_list_json_carries_status_with_its_attribution(shared_round, capsys)
 
     assert row["status"] == "acknowledged"
     assert row["status_actor"] == "aramid-agent"
+    assert row["status_verification"] == "verified"
     assert row["unreceipted"] == ["demo-agent"]
+
+
+def test_cli_list_json_on_a_channel_with_no_commits_lists_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Grading against history must not turn a fresh channel into an error."""
+    monkeypatch.setenv("GRAPHITE_PROJECTS_ROOT", str(tmp_path))
+    root = tmp_path / ".agent-channel"
+    (root / "rounds").mkdir(parents=True)
+    _git(tmp_path, "init", "-q", str(root))
+    (root / "PROTOCOL.md").write_text("# Protocol\n", encoding="utf-8")
+
+    assert main(["channel", "list", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
 
 
 def test_cli_show_prints_the_status_history_after_the_body(shared_round, capsys) -> None:

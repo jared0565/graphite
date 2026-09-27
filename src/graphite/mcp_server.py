@@ -198,10 +198,11 @@ class GraphiteMCPServer:
         )
 
     def channel_list_tool(self) -> dict[str, Any]:
-        from .channel import list_rounds, status_events, status_view
+        from .channel import EventGrader, list_rounds, status_events, status_view
 
         def _run(root):
             entries = list_rounds(root)
+            grader = EventGrader.load(root)
             return {
                 "ok": True,
                 "rounds": [
@@ -215,6 +216,7 @@ class GraphiteMCPServer:
                         **status_view(
                             entry,
                             status_events(root, entry.number) if entry.number is not None else [],
+                            grader,
                         ),
                     }
                     for entry in entries
@@ -224,10 +226,18 @@ class GraphiteMCPServer:
         return self._channel_call(_run)
 
     def channel_read_tool(self, *, number: int) -> dict[str, Any]:
-        from .channel import read_round, status_events, status_history, status_view
+        from .channel import (
+            STATUS_DIRNAME,
+            EventGrader,
+            read_round,
+            status_events,
+            status_history,
+            status_view,
+        )
 
         def _run(root):
             entry = read_round(root, number)
+            grader = EventGrader.load(root, f"{STATUS_DIRNAME}/{number:03d}")
             return {
                 "ok": True,
                 "round": entry.number,
@@ -238,8 +248,8 @@ class GraphiteMCPServer:
                 "body": entry.body,
                 # `read_round` matched on `entry.number == number`, so the
                 # requested int IS the entry's number, minus the Optional.
-                **status_view(entry, status_events(root, number)),
-                "history": status_history(root, number),
+                **status_view(entry, status_events(root, number), grader),
+                "history": status_history(root, number, grader),
             }
 
         return self._channel_call(_run)
@@ -313,7 +323,9 @@ def channel_tool_definitions() -> list[Tool]:
             description=(
                 "List every round with its author and current status. `status` is the newest "
                 "event by ANY agent: `status_actor` says whose, `recipients` gives each "
-                "recipient's own latest status, and `unreceipted` lists recipients with none."
+                "recipient's own latest status, and `unreceipted` lists recipients with none. "
+                "An actor is what the event file claims; `status_verification` and each "
+                "recipient's `verification` say whether its commit agrees (`verified`)."
             ),
             input_schema={"type": "object", "properties": {}},
         ),

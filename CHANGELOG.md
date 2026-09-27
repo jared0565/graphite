@@ -28,9 +28,10 @@ fingerprint moves, because graphite's own bytes did.
 
 **Every channel status now says who recorded it, and where each recipient
 stands.** `graphite_channel_list`, `graphite_channel_read` and `graphite
-channel list --json` carry `status_actor` and `status_at` beside `status`,
-plus `recipients` (each recipient's own latest status, or `null`) and
-`unreceipted` (recipients with no event of any kind). `status` keeps its
+channel list --json` carry `status_actor`, `status_at` and
+`status_verification` beside `status`, plus `recipients` (each recipient's
+own latest status and its verification, or `null`) and `unreceipted`
+(recipients with no event of any kind). `status` keeps its
 meaning: the newest event by any agent. `graphite_channel_read` also returns
 `history`, where every event carries its actor, time, commit and
 verification grade. `graphite channel show N` prints the same history after
@@ -52,11 +53,38 @@ one commit, a clean working copy, and a trailer naming its actor.
 `status_modified`, `status_discrepancy` and `status_uncommitted` are
 anomalies and fail `ok`. On the live channel all 408 events verified, with
 a planted-forgery control flagged. A comment had claimed this check existed.
+The read surfaces carry the same grade, so an actor is never shown bare:
+`status_verification` sits beside `status_actor`, each recipient's entry has
+its own `verification`, and the human report marks a failing attribution
+`UNVERIFIED`. This closes aramid llm-review finding `53368ee`.
 One trust limit remains, and it is stated here because it bounds what
 "verified" means. Every agent commits under the operator's git identity, so
 a trailer proves which agent label was attached, not which process
 committed. A hand-made commit under the claimed actor's own trailer still
 grades `verified`. Closing that needs signed commits.
+
+**The channel report now sees deletions, and a status event's number is
+never reused.** The report graded only the events and rounds still on disk,
+and a new event took `len(files) + 1`. An agent could therefore delete its
+own `blocked` event, commit the deletion, write a `done` into the same slot,
+and the report still read OK. A round file removed the same way vanished
+from the audit view entirely. The next number is now one past the highest
+the round has ever used, on disk or in history, and a history git cannot
+read refuses the write instead of passing for an empty one. Any status file
+or round that history or the index knows but the working tree lacks is
+reported as `status_deleted` or `round_deleted`, and a hole in a round's
+1..N sequence is reported as `status_seq_gap`. All three fail `ok`. The live channel's history
+holds no deletions or renames, so none fire there. This closes aramid
+llm-review finding `5db5889`.
+
+**Installing the channel's audit gate now fails closed.**
+`ensure_channel_hook` set `core.hooksPath` with `check=False` and always
+reported `changed: True`. A gate git never armed (a locked `.git/config`, or a
+higher-precedence override) was therefore reported as in place, and later
+commits would have passed with no agent trailer. The write now raises on
+failure. The value git will actually use is read back, and anything other
+than `.githooks` raises `hook_not_armed`. `changed` reports the observed
+before-and-after state. This closes aramid llm-review finding `0e87805`.
 
 **Stalling is judged per recipient.** A co-recipient's `done` no longer
 hides a recipient that was handed the round and never followed up. A

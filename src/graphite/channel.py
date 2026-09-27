@@ -64,10 +64,11 @@ _LOCK_TIMEOUT_SECONDS = 30.0
 # would strand every other agent behind a holder that is already doomed.
 #
 # Note this holds per CALL, not per critical section. `register_agent` runs
-# `ensure_channel_hook`'s config call plus a three-call `_commit`, so a
-# perfectly healthy holder can legitimately sit for ~80s -- well over the 30s a
-# waiter is willing to wait. A `lock_timeout` is therefore not by itself
-# evidence of a wedge.
+# `ensure_channel_hook`'s three config calls (read, set, verify) plus a
+# three-call `_commit`, so a perfectly healthy holder can legitimately sit for
+# ~120s -- well over the 30s a waiter is willing to wait. (A status write is
+# four: the sequence read plus `_commit`.) A `lock_timeout` is therefore not by
+# itself evidence of a wedge.
 _GIT_TIMEOUT_SECONDS = 20.0
 
 #: How long before an unreleased lock is assumed abandoned.
@@ -79,7 +80,7 @@ _GIT_TIMEOUT_SECONDS = 20.0
 #: checking. The `pid` and `host` in the record are DIAGNOSTIC ONLY -- they tell
 #: an operator who to go look at; they are never probed.
 #:
-#: 300s is ~3.7x the ~80s worst-case LEGITIMATE hold derived above. The margin
+#: 300s is 2.5x the ~120s worst-case LEGITIMATE hold derived above. The margin
 #: is lopsided on purpose: breaking a live lock puts two writers in the critical
 #: section, which is the exact failure this lock exists to prevent, and a torn
 #: status directory is worse than a wedge that clears itself five minutes later.
@@ -438,14 +439,29 @@ exit 1
 
 
 def ensure_channel_hook(root: Path) -> dict:
-    """Install/refresh the audit gate and point `core.hooksPath` at it."""
+    """Install/refresh the audit gate and point `core.hooksPath` at it.
+
+    Fails CLOSED. The config call used to run with `check=False` and the result
+    always read `changed: True`, so a gate git never armed (a locked
+    `.git/config`, a higher-precedence override) was reported as in place --
+    and every later commit would have gone through with no trailer. `changed`
+    now describes what was observed before and after, not what was attempted.
+    """
     hooks = root / ".githooks"
     hooks.mkdir(parents=True, exist_ok=True)
     path = hooks / "commit-msg"
+    before = path.read_text(encoding="utf-8") if path.exists() else None
+    armed_before = _git(root, "config", "--get", "core.hooksPath", check=False).strip()
     path.write_text(COMMIT_MSG_HOOK, encoding="utf-8", newline="\n")
     path.chmod(0o755)
-    _git(root, "config", "core.hooksPath", ".githooks", check=False)
-    return {"path": str(path), "changed": True}
+    _git(root, "config", "core.hooksPath", ".githooks")
+    armed = _git(root, "config", "--get", "core.hooksPath", check=False).strip()
+    if armed != ".githooks":
+        raise ChannelError(
+            "hook_not_armed",
+            f"core.hooksPath reads {armed!r}, not '.githooks': the channel's audit gate is not armed",
+        )
+    return {"path": str(path), "changed": before != COMMIT_MSG_HOOK or armed_before != ".githooks"}
 
 
 def _committed_agents(root: Path) -> set[str]:
@@ -728,6 +744,21 @@ def _git(root: Path, *args: str, check: bool = True) -> str:
     return result.stdout
 
 
+def _log(root: Path, *args: str) -> str:
+    """`git log` over the channel, where a channel with no commits yet HAS a
+    history: an empty one.
+
+    git exits 128 on `log` before the first commit, and that read as a failure
+    -- `channel list` errored on a fresh channel once list and read graded
+    events against history. Every OTHER failure still raises: the next status
+    number is read from history, and a failed read taken for an empty one
+    hands a deleted event's number out again.
+    """
+    if not _git(root, "rev-parse", "--verify", "--quiet", "HEAD", check=False).strip():
+        return ""
+    return _git(root, "log", *args)
+
+
 def _commit(root: Path, paths: list[str], subject: str, agent: str) -> str:
     message = f"{subject}\n\n{trailer(agent)}\n"
     _git(root, "add", "--", *paths)
@@ -1000,13 +1031,16 @@ def current_status(root: Path, number: int) -> dict | None:
     return events[-1] if events else None
 
 
-def status_view(entry: Round, events: list[dict]) -> dict:
+def status_view(entry: Round, events: list[dict], grader: EventGrader) -> dict:
     """What a reader needs beside the folded status: who set it, and where EACH
-    recipient stands.
+    recipient stands -- each with whether that attribution checks out.
 
     The fold alone is one word across every actor. On a shared round it spoke
     for recipients who had recorded nothing -- round 256 read `acknowledged`
-    while one of its two recipients had no event at all.
+    while one of its two recipients had no event at all. And an actor is only
+    what the event file CLAIMS: a forged file names a real recipient, so the
+    name travels with its grade against the file's own commit (aramid
+    llm-review 53368eee), never bare.
     """
     current = events[-1] if events else None
     latest: dict[str, dict] = {}
@@ -1014,13 +1048,21 @@ def status_view(entry: Round, events: list[dict]) -> dict:
         actor = event.get("actor")
         if isinstance(actor, str):
             latest[actor] = event
+
+    def grade(event: dict) -> str | None:
+        return grader.grade(entry.number, event)[0] if entry.number is not None else None
+
     return {
         "status": current.get("status") if current else None,
         "status_actor": current.get("actor") if current else None,
         "status_at": current.get("at") if current else None,
+        "status_verification": grade(current) if current else None,
         "recipients": {
             agent: (
-                {key: latest[agent].get(key) for key in ("status", "at", "seq")}
+                {
+                    **{key: latest[agent].get(key) for key in ("status", "at", "seq")},
+                    "verification": grade(latest[agent]),
+                }
                 if agent in latest
                 else None
             )
@@ -1032,25 +1074,41 @@ def status_view(entry: Round, events: list[dict]) -> dict:
     }
 
 
-def status_history(root: Path, number: int) -> list[dict]:
+def status_history(root: Path, number: int, grader: EventGrader | None = None) -> list[dict]:
     """Every event for one round, oldest first, each graded against its commit."""
     events = status_events(root, number)
     if not events:
         return []
-    prefix = f"{STATUS_DIRNAME}/{number:03d}"
-    tracked = _tracked(root, prefix)
-    dirty = _dirty(root, prefix)
-    commits = _event_commits(root, prefix)
+    grader = grader or EventGrader.load(root, f"{STATUS_DIRNAME}/{number:03d}")
     history = []
     for event in events:
-        rel = f"{prefix}/{event['file']}"
-        verification, created = _verify_event(rel, event.get("actor"), tracked, dirty, commits)
+        verification, created = grader.grade(number, event)
         item = {key: event.get(key) for key in ("seq", "status", "actor", "broker", "at", "reason")}
         if event.get("malformed"):
             item["malformed"] = True
         item.update(file=event["file"], commit=created, verification=verification)
         history.append(item)
     return history
+
+
+def _seq_of(name: str) -> int | None:
+    """The sequence number a status file's name carries (`0003-done.json` -> 3)."""
+    head = name[:4]
+    return int(head) if head.isdigit() else None
+
+
+def _next_seq(root: Path, number: int) -> int:
+    """One past the highest number this round has EVER used, on disk or in history.
+
+    It used to be `len(files) + 1`, which hands a deleted event's number to the
+    next writer: delete your own `blocked`, write `done` into its slot, and the
+    log reads as though `blocked` never happened.
+    """
+    prefix = f"{STATUS_DIRNAME}/{number:03d}"
+    names = [path.name for path in (root / prefix).glob("*.json")]
+    history = _log(root, "--format=", "--name-only", "--", prefix)
+    names += [Path(line.strip()).name for line in history.splitlines() if line.strip()]
+    return max((seq for seq in map(_seq_of, names) if seq is not None), default=0) + 1
 
 
 def _write_status_event(
@@ -1065,7 +1123,7 @@ def _write_status_event(
     with _Lock(root) as lock:
         directory = _status_dir(root, number)
         directory.mkdir(parents=True, exist_ok=True)
-        seq = len(list(directory.glob("*.json"))) + 1
+        seq = _next_seq(root, number)
         name = f"{seq:04d}-{status}.json"
         target = directory / name
         if target.exists():
@@ -1182,7 +1240,7 @@ def _tracked(root: Path, *pathspec: str) -> set[str]:
 
 
 def _commits_for(root: Path, rel: str) -> list[str]:
-    out = _git(root, "log", "--format=%H", "--", rel)
+    out = _log(root, "--format=%H", "--", rel)
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
@@ -1208,7 +1266,7 @@ def _event_commits(root: Path, pathspec: str) -> dict[str, list[tuple[str, str |
     ONE `git log` for the whole tree: grading 400 status events one file at a
     time would be 800 git calls on every report.
     """
-    out = _git(root, "log", "--format=%x1e%H%x1f%B%x1f", "--name-only", "--", pathspec)
+    out = _log(root, "--format=%x1e%H%x1f%B%x1f", "--name-only", "--", pathspec)
     commits: dict[str, list[tuple[str, str | None]]] = {}
     for chunk in out.split("\x1e"):
         if not chunk.strip():
@@ -1247,6 +1305,25 @@ def _verify_event(
     return "verified", created_sha
 
 
+@dataclass(frozen=True)
+class EventGrader:
+    """Grades status events against their own commits, from ONE `ls-files`,
+    `status` and `log` over a pathspec: grading round by round from `channel
+    list` would be three git calls per round."""
+
+    tracked: set[str]
+    dirty: set[str]
+    commits: dict[str, list[tuple[str, str | None]]]
+
+    @classmethod
+    def load(cls, root: Path, pathspec: str = STATUS_DIRNAME) -> EventGrader:
+        return cls(_tracked(root, pathspec), _dirty(root, pathspec), _event_commits(root, pathspec))
+
+    def grade(self, number: int, event: dict) -> tuple[str, str | None]:
+        rel = f"{STATUS_DIRNAME}/{number:03d}/{event['file']}"
+        return _verify_event(rel, event.get("actor"), self.tracked, self.dirty, self.commits)
+
+
 def _verify(root: Path, rel: str, tracked: set[str], dirty: set[str]) -> str:
     """Grade one file against its ORIGINAL committed content, not its current text.
 
@@ -1281,6 +1358,16 @@ def _verify(root: Path, rel: str, tracked: set[str], dirty: set[str]) -> str:
     return "verified"
 
 
+def _deleted(root: Path, ever: set[str]) -> list[str]:
+    """Paths history or the index knows that the working tree no longer has.
+
+    Grading only what is present is blind to the cheapest tampering of all:
+    removal. A committed deletion leaves the file in history; an uncommitted one
+    leaves it in the index. Either way the audit view must show it.
+    """
+    return sorted(rel for rel in ever if not (root / rel).exists())
+
+
 def _parse_at(value: str | None) -> datetime | None:
     try:
         return datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
@@ -1300,18 +1387,33 @@ def build_report(
     tracked = _tracked(root)
     dirty = _dirty(root)
     event_commits = _event_commits(root, STATUS_DIRNAME)
+    grader = EventGrader(tracked, dirty, event_commits)
     entries = list_rounds(root)
     numbers = {e.number for e in entries if e.number is not None}
 
     rows: list[dict] = []
     anomalies: list[dict] = []
     unreceipted: dict[str, list[int]] = {}
+
+    status_prefix = f"{STATUS_DIRNAME}/"
+    for rel in _deleted(root, set(event_commits) | {p for p in tracked if p.startswith(status_prefix)}):
+        parts = rel.split("/")
+        number = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else None
+        anomalies.append({"round": number, "kind": "status_deleted", "detail": parts[-1]})
+    round_history = _log(root, "--format=", "--name-only", "--", ROUNDS_DIRNAME)
+    ever_rounds = {line.strip() for line in round_history.splitlines() if line.strip()}
+    ever_rounds |= {p for p in tracked if p.startswith(f"{ROUNDS_DIRNAME}/")}
+    for rel in _deleted(root, ever_rounds):
+        match = _ROUND_IN_NAME.search(rel)
+        anomalies.append(
+            {"round": int(match.group(1)) if match else None, "kind": "round_deleted", "detail": rel}
+        )
     for entry in entries:
         rel = entry.path.relative_to(root).as_posix()
         verification = _verify(root, rel, tracked, dirty)
         events = status_events(root, entry.number) if entry.number is not None else []
         current = events[-1] if events else None
-        view = status_view(entry, events)
+        view = status_view(entry, events, grader)
 
         # Per recipient: another recipient's `done` must not hide one that was
         # handed the round and never followed up. An author's withdrawal ends it.
@@ -1329,6 +1431,8 @@ def build_report(
         participants = {entry.author, *entry.to} - {None}
         for event in events:
             number = entry.number
+            if number is None:  # never taken: events are only read for numbered rounds
+                continue
             if event.get("malformed"):
                 anomalies.append({"round": number, "kind": "malformed_status", "detail": event.get("file")})
                 continue
@@ -1337,10 +1441,16 @@ def build_report(
                 anomalies.append(
                     {"round": number, "kind": "status_actor_not_participant", "detail": actor}
                 )
-            event_rel = f"{STATUS_DIRNAME}/{number:03d}/{event['file']}"
-            grade, _sha = _verify_event(event_rel, actor, tracked, dirty, event_commits)
+            grade, _sha = grader.grade(number, event)
             if grade != "verified":
                 anomalies.append({"round": number, "kind": f"status_{grade}", "detail": event["file"]})
+        # Numbers are handed out 1..N and never reused, so a hole is an event
+        # that existed and is gone -- or one written by hand, skipping ahead.
+        seqs = sorted(seq for seq in (_seq_of(e["file"]) for e in events) if seq is not None)
+        if seqs != list(range(1, len(seqs) + 1)):
+            anomalies.append(
+                {"round": entry.number, "kind": "status_seq_gap", "detail": ",".join(map(str, seqs))}
+            )
         seen = [e.get("status") for e in events]
         if "done" in seen and "delivered" not in seen[: seen.index("done")]:
             anomalies.append({"round": entry.number, "kind": "done_without_delivery", "detail": None})
@@ -1417,13 +1527,18 @@ def render_report(data: dict) -> str:
             f"{status:<13} {row['verification'].upper():<12} {row['title']}"
         )
         if row["status"] is not None:
-            lines.append(f"{'':<10}   set by {row['status_actor']} at {row['status_at']}")
+            # The actor is what the event file claims; say so when its commit disagrees.
+            checked = row.get("status_verification")
+            flag = "" if checked == "verified" else f"  UNVERIFIED: {str(checked).upper()}"
+            lines.append(f"{'':<10}   set by {row['status_actor']} at {row['status_at']}{flag}")
         states = row.get("recipients") or {}
         # One line per recipient wherever the folded word misleads: it names a
         # status some recipient never recorded.
         if any((state or {}).get("status") != row["status"] for state in states.values()):
             for agent, state in states.items():
                 own = f"{state['status'].upper():<13} {state['at']}" if state else "NO RECEIPT"
+                if state and state.get("verification") != "verified":
+                    own += f"  UNVERIFIED: {str(state.get('verification')).upper()}"
                 lines.append(f"{'':<10}   {agent:<28} {own}")
         if row["stalled"]:
             who = ", ".join(row["stalled_recipients"])
