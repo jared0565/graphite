@@ -15,14 +15,16 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
-## [1.1.0] — 2026-09-25
+## [1.1.0] — 2026-09-27
 
 A minor release. The agent channel's read surfaces gain fields, which is an
-addition under `docs/compatibility.md`. The graph itself does not change: on
-this repository, measured against the deployed 1.0.1 engine, 7621 of 7621
-node ids survive, 21653 of 21653 edge triples are unchanged, every relation
-count is equal, and `analysis.cycles` is identical. Only the engine
-fingerprint moves, because graphite's own bytes did.
+addition under `docs/compatibility.md`. The channel's audit trail also
+closes three holes: status events taken on trust, deletions nobody saw, and
+an audit gate that could fail open. The graph itself does not change. On
+this repository, measured against the deployed 1.0.1 engine, 7659 of
+7659 node ids survive, 21788 of 21788 edge triples are unchanged, every
+relation count is equal, and `analysis.cycles` is identical. Only the
+engine fingerprint moves, because graphite's own bytes did.
 
 ### Added
 
