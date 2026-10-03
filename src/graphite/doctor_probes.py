@@ -53,6 +53,14 @@ _LLM_CATEGORIES = frozenset(
 )
 _LLM_OUTPUT_LIMIT_BYTES = 4096
 _LLM_TIMEOUT_MAX_SECONDS = 60.0
+#: Added to the provider timeout to make the WORKER's process budget. The two
+#: used to be one number, so the worker's interpreter start was spent from the
+#: provider's time, and a loaded machine read `timeout` for a provider that was
+#: merely misconfigured (2 s read `timeout` 7 in 10 under 36 CPU burners). The
+#: worker enforces the provider timeout itself and reports `timeout` when the
+#: provider is slow, so this only bounds a worker that never answers. Generous
+#: on purpose: it costs nothing unless the worker hangs.
+_LLM_WORKER_START_ALLOWANCE_SECONDS = 30.0
 _REQUIRED_MCP_TOOLS = frozenset(
     {"graphite_query", "graphite_summary", "graphite_community", "graphite_refresh"}
 )
@@ -2100,7 +2108,7 @@ def probe_llm(
             [str(python), "-I", "-S", "-B", str(worker)],
             cwd=python.parent,
             stdin=stdin,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=timeout_seconds + _LLM_WORKER_START_ALLOWANCE_SECONDS,
             max_output_bytes=_LLM_OUTPUT_LIMIT_BYTES,
             check=False,
         )

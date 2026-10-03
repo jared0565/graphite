@@ -205,6 +205,50 @@ def test_hook_installation_fails_closed_when_an_override_outranks_it(
     assert raised.value.code == "hook_not_armed"
 
 
+def test_hook_installation_asks_for_exactly_0o755(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The ARGUMENT, pinned on every platform. aramid's mutation drain found
+    # `0o755 -> 0o756` (a world-writable audit hook on POSIX) surviving, and on
+    # Windows `os.chmod` honours only the write bit, so no on-disk check there
+    # can see it. The argument is what the mutant changes, so this kills it on
+    # Windows too (channel round 276, the same shape as aramid's own
+    # `tests/unit/test_doctor_probes.py`).
+    root, _aramid, _graphite = _setup(tmp_path)
+    hook = root / ".githooks" / "commit-msg"
+    real_chmod = Path.chmod
+    requested: list[int] = []
+
+    def recording_chmod(self: Path, mode: int, *args: object, **kwargs: object) -> None:
+        if self == hook:
+            requested.append(mode)
+        real_chmod(self, mode, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "chmod", recording_chmod)
+
+    channel.ensure_channel_hook(root)
+
+    assert requested == [0o755]
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows os.chmod honours only the write bit, so group/world bits are "
+    "unobservable on disk there; the argument pin above covers Windows",
+)
+def test_installed_hook_is_executable_and_not_group_or_world_writable(tmp_path: Path) -> None:
+    # The security property itself, on disk. Written as the property rather
+    # than an exact mode: a deliberate tightening to 0o750 or 0o700 is not a
+    # regression, and the exact value is already pinned by the argument test.
+    root, _aramid, _graphite = _setup(tmp_path)
+
+    channel.ensure_channel_hook(root)
+
+    mode = stat.S_IMODE((root / ".githooks" / "commit-msg").stat().st_mode)
+    assert mode & 0o022 == 0
+    assert mode & 0o100
+
+
 def test_hook_installation_reports_what_git_actually_has(tmp_path: Path) -> None:
     root, _aramid, _graphite = _setup(tmp_path)
 

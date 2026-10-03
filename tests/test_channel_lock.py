@@ -66,7 +66,6 @@ def test_an_abandoned_lock_is_broken_once_it_passes_the_ttl(tmp_path: Path) -> N
     with channel._Lock(tmp_path, clock=lambda: now) as lock:
         assert lock.recovered is not None, "an abandoned lock must be recoverable"
         assert lock.recovered["pid"] == 999_999
-        assert lock.recovered["host"] == "dead-host"
 
 
 def test_a_live_lock_is_never_broken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,3 +211,58 @@ def test_an_ordinary_post_reports_no_recovery(tmp_path: Path) -> None:
     result = channel.post_round(root, repo, title="Hello", body="Body")
 
     assert "lock_recovered" not in result, "a quiet key on every response is noise"
+
+
+def test_inbox_hands_a_recovered_lock_to_its_caller(tmp_path: Path) -> None:
+    # aramid llm-review 1810f9e. `inbox` is the one caller that threw the
+    # recovery away, and it is the busiest path: every agent calls it at session
+    # start, so a break during delivery is the likeliest break of all.
+    aramid, graphite = tmp_path / "aramid", tmp_path / "graphite"
+    aramid.mkdir()
+    graphite.mkdir()
+    root = _make_channel(tmp_path, {str(aramid): "aramid-agent", str(graphite): "graphite-agent"})
+    channel.post_round(root, graphite, title="For aramid", body="b", to=["aramid-agent"])
+    _plant_lock(root, started_at=0.0)
+    recovered: list[dict] = []
+
+    rounds = channel.inbox(root, aramid, on_recovered=recovered.append)
+
+    assert [entry.title for entry in rounds] == ["For aramid"]
+    assert [item["pid"] for item in recovered] == [999_999]
+
+
+def test_a_failed_residue_scan_reads_as_unknown_not_as_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # aramid llm-review 9751aab. An empty list said "the dead holder left
+    # nothing" when the truth was "we could not look" -- and a wedged git, the
+    # likeliest cause of an abandoned lock, is also what makes the scan fail.
+    root = _make_channel(tmp_path)
+    now = 10_000.0
+    _plant_lock(root, started_at=now - channel._LOCK_STALE_SECONDS - 1.0)
+    real_git = channel._git
+
+    def git_that_times_out_on_status(where: Path, *args: str, check: bool = True) -> str:
+        if args and args[0] == "status":
+            raise channel.ChannelError("git_timeout", "git status exceeded the bound")
+        return real_git(where, *args, check=check)
+
+    monkeypatch.setattr(channel, "_git", git_that_times_out_on_status)
+
+    with channel._Lock(root, clock=lambda: now) as lock:
+        assert lock.recovered is not None
+        assert lock.recovered["residue"] is None
+
+
+def test_a_recovery_report_carries_no_host_name(tmp_path: Path) -> None:
+    # aramid llm-review 9a23b84. The host is not part of the lock's identity
+    # (pid + started_at) or of staleness (the clock), so returning it to every
+    # caller told them something no decision here needs.
+    root = _make_channel(tmp_path)
+    now = 10_000.0
+    _plant_lock(root, started_at=now - channel._LOCK_STALE_SECONDS - 1.0)
+
+    with channel._Lock(root, clock=lambda: now) as lock:
+        assert lock.recovered is not None
+        assert "host" not in lock.recovered
+        assert "dead-host" not in json.dumps(lock.recovered)

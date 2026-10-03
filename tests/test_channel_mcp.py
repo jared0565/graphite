@@ -142,3 +142,29 @@ def test_the_channel_tools_are_advertised(wired) -> None:
         "graphite_channel_status",
         "graphite_channel_list",
     }
+
+
+def test_inbox_tool_reports_a_lock_it_had_to_break(wired) -> None:
+    root, aramid, graphite = wired
+    GraphiteMCPServer(project_root=graphite).channel_post_tool(
+        title="For aramid", body="b", to=["aramid-agent"]
+    )
+    (root / ".channel.lock").write_text(
+        '{"pid": 999999, "started_at": 0.0, "host": "dead-host"}', encoding="utf-8"
+    )
+
+    inbox = GraphiteMCPServer(project_root=aramid).channel_inbox_tool()
+
+    assert [item["title"] for item in inbox["rounds"]] == ["For aramid"]
+    assert [item["pid"] for item in inbox["lock_recovered"]] == [999999]
+
+
+def test_inbox_tool_says_nothing_about_locks_when_none_was_broken(wired) -> None:
+    root, aramid, graphite = wired
+    GraphiteMCPServer(project_root=graphite).channel_post_tool(
+        title="For aramid", body="b", to=["aramid-agent"]
+    )
+
+    inbox = GraphiteMCPServer(project_root=aramid).channel_inbox_tool()
+
+    assert "lock_recovered" not in inbox, "a quiet key on every response is noise"

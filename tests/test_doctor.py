@@ -3388,10 +3388,11 @@ def test_llm_parent_uses_isolated_bounded_worker_and_canonicalizes_provider(tmp_
     assert argv[-1].endswith("llm_probe.py")
     assert sentinel not in " ".join(argv)
     assert captured["cwd"] == Path(argv[0]).resolve().parent
-    assert captured["timeout_seconds"] == 2.5
+    assert captured["timeout_seconds"] == 2.5 + probes._LLM_WORKER_START_ALLOWANCE_SECONDS
     assert captured["max_output_bytes"] == 4096
     assert captured["check"] is False
     worker_input = json.loads(captured["stdin"])
+    assert worker_input["timeout_seconds"] == 2.5
     assert worker_input["system"] == "You are a connectivity probe. Reply with READY only."
     assert worker_input["user"] == "Synthetic Graphite connectivity test. No repository data is included."
     assert check.status == "ready"
@@ -3506,14 +3507,14 @@ def test_llm_parent_timeout_is_wall_clock_bounded_and_leaves_no_orphan(tmp_path:
 
 
 def test_llm_real_isolated_worker_rejects_unsupported_provider_without_network() -> None:
-    """The budget bounds the WHOLE worker, interpreter start included, so the
-    verdict is a race between that start and the clock. Idle, the worker needs
-    ~0.5 s to reach `configuration`. It had 2 s, and a loaded aramid drain on
-    2026-09-26 22Z read `timeout`. Measured here: under 36 CPU burners on 12
-    cores, 2 s read `timeout` 7 times in 10 and 60 s read `configuration` 10
-    in 10. The largest budget the probe accepts keeps the race out of a test
-    about the category. A worker that reached for the network instead still
-    fails it, on `connection` or at worst a 60 s `timeout`."""
+    """The category, at the largest provider timeout the probe accepts. Until
+    the worker's start was budgeted apart from the provider (see
+    `_LLM_WORKER_START_ALLOWANCE_SECONDS`), this test gave the probe 2 s, and a
+    loaded aramid drain on 2026-09-26 22Z read `timeout`: under 36 CPU burners
+    on 12 cores, 2 s read `timeout` 7 times in 10. The start is now covered by
+    the allowance, and the test below pins that with a 0.1 s provider budget.
+    A worker that reached for the network instead still fails this one, on
+    `connection` or at worst a `timeout`."""
     import graphite.doctor_probes as probes
 
     check = probes.probe_llm(
@@ -3522,6 +3523,43 @@ def test_llm_real_isolated_worker_rejects_unsupported_provider_without_network()
             llm_provider="unsupported-provider",
             llm_timeout_seconds=probes._LLM_TIMEOUT_MAX_SECONDS,
         )
+    )
+
+    assert check.status == "degraded"
+    assert check.details == {"category": "configuration"}
+
+
+@pytest.mark.parametrize("provider_timeout", [0.1, 2.5, 60.0])
+def test_llm_worker_start_is_budgeted_apart_from_the_provider_timeout(provider_timeout: float) -> None:
+    """The provider gets the configured timeout and enforces it itself; the
+    process budget adds an allowance for the worker's interpreter to start. One
+    shared number made a loaded machine report `timeout` for a misconfigured
+    provider. The 0.1 arm sits below any interpreter's start time."""
+    import graphite.doctor_probes as probes
+
+    captured: dict[str, object] = {}
+
+    def run(argv: list[str], **kwargs: object) -> probes.ProbeProcessResult:
+        captured.update(kwargs)
+        return probes.ProbeProcessResult(0, b'{"status":"ready","response_present":true}', b"", 0.01)
+
+    probes.probe_llm(
+        Config(llm_mode="cloud", llm_provider="ollama", llm_timeout_seconds=provider_timeout),
+        _runner=run,
+    )
+
+    assert json.loads(captured["stdin"])["timeout_seconds"] == provider_timeout  # type: ignore[arg-type]
+    assert captured["timeout_seconds"] == provider_timeout + probes._LLM_WORKER_START_ALLOWANCE_SECONDS
+
+
+def test_llm_real_worker_reaches_its_verdict_even_when_the_provider_budget_is_shorter_than_its_start() -> None:
+    """Deterministic, not load-dependent: 0.1 s is less than any interpreter
+    needs to start, so a budget that included the start always read `timeout`
+    here, idle machine or not."""
+    import graphite.doctor_probes as probes
+
+    check = probes.probe_llm(
+        Config(llm_mode="cloud", llm_provider="unsupported-provider", llm_timeout_seconds=0.1)
     )
 
     assert check.status == "degraded"

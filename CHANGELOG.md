@@ -73,6 +73,40 @@ Artifacts already installed keep the old command until they are regenerated:
 - the Startup `.vbs` (`graphite daemon-install-startup-windows`);
 - the channel's commit-msg hook (rewritten by `graphite channel register`).
 
+### Fixed
+
+**`doctor --deep`'s LLM probe no longer spends the provider's timeout on
+starting its worker.** One number was both the provider timeout and the worker
+process's whole budget. The interpreter's start was therefore paid from the
+provider's time, and a loaded machine reported `timeout` for a provider that
+was only misconfigured: 2 s read `timeout` 7 times in 10 under 36 CPU burners.
+
+The worker already enforces the provider timeout itself. Its process budget is
+now that timeout plus `_LLM_WORKER_START_ALLOWANCE_SECONDS` (30 s), which only
+bounds a worker that never answers. A 0.1 s provider timeout, below any
+interpreter's start, now reaches `configuration`.
+
+**The channel reports an abandoned lock on every path that can break one.**
+These come from aramid llm-review findings:
+- **`1810f9e`:** `inbox()`, the path every agent takes at session start, was
+  the one writer that dropped the recovery. `graphite_channel_inbox` now
+  carries `lock_recovered` when a delivery had to break a lock, and stays
+  silent otherwise.
+- **`9751aab`:** a residue scan that failed read as `[]`, the same as a clean
+  one. It now reads `null`, meaning "we could not look". A wedged git, the
+  likeliest cause of an abandoned lock, is also what makes the scan fail.
+- **`9a23b84`:** the recovery report no longer returns the dead holder's host
+  name. Nothing decides on it: identity is pid + start time, and staleness is
+  the clock.
+
+**The channel's commit-msg hook is installed with exactly `0o755`, pinned on
+every platform.** aramid's mutation drain found `0o755 -> 0o756`, a
+world-writable audit hook on POSIX, surviving (`e37afd86`). On Windows,
+`os.chmod` honours only the write bit, so no on-disk check there could see it.
+A test now pins the argument, which kills the mutant on Windows too. A
+POSIX-only test checks the on-disk property: executable, and not group- or
+world-writable.
+
 ## [1.1.0] — 2026-09-27
 
 A minor release. The agent channel's read surfaces gain fields, which is an

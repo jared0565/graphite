@@ -822,8 +822,9 @@ def _commit(root: Path, paths: list[str], subject: str, agent: str) -> str:
     return _git(root, "rev-parse", "--short", "HEAD").strip()
 
 
-def _uncommitted_residue(root: Path) -> list[str]:
-    """Channel files an abandoned holder left behind uncommitted.
+def _uncommitted_residue(root: Path) -> list[str] | None:
+    """Channel files an abandoned holder left behind uncommitted, or None when
+    the scan itself failed.
 
     Automatic recovery makes this MORE important, not less. `status_events`
     reads from DISK, so an orphaned `status/NNN/*.json` written by a holder that
@@ -832,7 +833,10 @@ def _uncommitted_residue(root: Path) -> list[str]:
     look; once the lock clears itself, nobody is looking unless we say so.
 
     Best-effort by construction: this runs while we hold nothing, and a failure
-    to scan must never block a recovery that is otherwise safe.
+    to scan must never block a recovery that is otherwise safe. But it must not
+    read as a clean scan either (aramid llm-review 9751aab): `[]` says "the dead
+    holder left nothing", `None` says "we could not look". A wedged git -- the
+    likeliest cause of an abandoned lock -- is also what makes this fail.
     """
     try:
         # `--untracked-files=all`: bare `--porcelain` collapses a wholly
@@ -840,7 +844,7 @@ def _uncommitted_residue(root: Path) -> list[str]:
         # operator needs in order to go and look at it.
         porcelain = _git(root, "status", "--porcelain", "--untracked-files=all", check=False)
     except ChannelError:
-        return []
+        return None
     residue = set()
     for line in porcelain.splitlines():
         path = line[3:].strip().strip('"')
@@ -949,9 +953,12 @@ class _Lock:
         started = (first or {}).get("started_at")
         if isinstance(started, (int, float)) and not isinstance(started, bool):
             held_for = round(self._clock() - float(started), 1)
+        # No `host`: it is in the record for the operator reading the lock file,
+        # but nothing here decides on it -- identity is (pid, started_at) and
+        # staleness is the clock -- so it does not go to every caller (aramid
+        # llm-review 9a23b84).
         self.recovered = {
             "pid": (first or {}).get("pid"),
-            "host": (first or {}).get("host"),
             "held_seconds": held_for,
             "residue": _uncommitted_residue(self.root),
         }
@@ -1250,13 +1257,23 @@ def record_status(
 # --- inbox: notification and handover ---------------------------------------
 
 
-def inbox(root: Path, project_root: Path) -> list[Round]:
+def inbox(
+    root: Path,
+    project_root: Path,
+    *,
+    on_recovered: Callable[[dict], None] | None = None,
+) -> list[Round]:
     """Hand over rounds addressed to the caller that it has not been given yet.
 
     The `delivered` event is written HERE, by the broker, as the message goes
     out. The agent cannot assert it and cannot decline it, so an agent that
     ignores its inbox leaves a visible `delivered` with no follow-up rather than
     an absence indistinguishable from never having been told.
+
+    `on_recovered` receives each abandoned lock a delivery had to break. Every
+    other writer returns that to its caller; this one returns rounds, and used
+    to drop it -- on the busiest path, since every agent calls this at session
+    start (aramid llm-review 1810f9e).
     """
     root = require_channel(root)
     agent = derive_identity(root, project_root)
@@ -1273,7 +1290,9 @@ def inbox(root: Path, project_root: Path) -> list[Round]:
             pending.append((entry.number, entry))
 
     for number, _entry in pending:
-        _write_status_event(root, number, "delivered", agent, broker=True)
+        event = _write_status_event(root, number, "delivered", agent, broker=True)
+        if on_recovered is not None and "lock_recovered" in event:
+            on_recovered(event["lock_recovered"])
     return [entry for _number, entry in pending]
 
 

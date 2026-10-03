@@ -172,8 +172,10 @@ class GraphiteMCPServer:
     def channel_inbox_tool(self) -> dict[str, Any]:
         from .channel import inbox
 
-        return self._channel_call(
-            lambda root: {
+        def handover(root: Path) -> dict[str, Any]:
+            recovered: list[dict] = []
+            rounds = inbox(root, self.project_root, on_recovered=recovered.append)
+            result: dict[str, Any] = {
                 "ok": True,
                 "rounds": [
                     {
@@ -183,10 +185,16 @@ class GraphiteMCPServer:
                         "posted": entry.posted,
                         "body": entry.body,
                     }
-                    for entry in inbox(root, self.project_root)
+                    for entry in rounds
                 ],
             }
-        )
+            # Present only when a lock was broken, like `post` and `status`: a
+            # quiet key on every response is noise nobody reads.
+            if recovered:
+                result["lock_recovered"] = recovered
+            return result
+
+        return self._channel_call(handover)
 
     def channel_status_tool(
         self, *, number: int, status: str, reason: str | None = None
