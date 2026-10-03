@@ -15,6 +15,15 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-10-03
+
+A patch release. Security fixes ship in the next patch release of the current
+minor (`docs/compatibility.md`, `SECURITY.md`). The graph itself does not
+change: on this repository, measured against the deployed 1.1.0 engine,
+7797 of 7797 node ids survive, 22154 of 22154 edge triples are
+unchanged, every relation count is equal, and `analysis.cycles` is identical.
+Only the engine fingerprint moves, because graphite's own bytes did.
+
 ### Security
 
 **graphite no longer launches a program by bare name, so a program sitting in
