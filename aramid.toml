@@ -151,9 +151,10 @@ command = ["../.venvs/graphite-dev/Scripts/python.exe", "-m", "pytest"]
 # seconds, and logs cwd/root/in-place/HEAD/changed/exit codes to
 # ../.venvs/graphite-mutation-tests.log so the next stand-down explains
 # itself. Timeouts are sized to the suite, not to a hope: a survivor costs
-# one full run (~15 min), the wall cap bounds an item at one hour and the
-# consumer records the truncation honestly (`truncated: true`, tested > 0),
-# which is the loud, bounded shape -- not the 690 s no-op above. Per-mutant
+# one full run (~15 min), the wall cap bounds an item (sized to the drain's
+# deadline, see below) and the consumer records the truncation honestly
+# (`truncated: true`, tested > 0), which is the loud, bounded shape -- not
+# the 690 s no-op above. Per-mutant
 # selection through `graphite impact` is the follow-up once round 174 says
 # how the tree is mutated; it is a script change, not a config change.
 #
@@ -163,21 +164,60 @@ command = ["../.venvs/graphite-dev/Scripts/python.exe", "-m", "pytest"]
 test_command = ["python", "-P", "scripts/mutation_tests.py"]
 baseline_timeout_s = 1500
 mutant_timeout_s = 1500
-wall_budget_s = 3600
-# TEMPORARY, 2026-09-27, channel round 272: aramid 0.18.0's scheduled drain is
-# killed at a 1 h task limit (its `schedule install`, ExecutionTimeLimit PT1H),
-# and a killed drain records nothing and restarts the item from scratch 4 h
-# later. On a drain this repo's item needs about 17.5 min of baseline, 14 min
-# per stage-1 run over the nine tests/test_channel_*.py files, and a
-# confirmation is one more full suite. The packaged defaults (20 mutants, 3
-# confirmations, 3 re-tests) cannot finish, so every drain since 09-25 22Z
-# was killed. One mutant, one confirmation and no re-tests is about 50 min:
-# it fits the hour and records a result. Remove these three lines once
-# aramid's fix (0.19.1: a longer task limit plus its own drain deadline) is
-# installed AND `aramid schedule install` has been re-run.
-max_mutants = 1
-confirm_cap = 1
-retest_open_survivors = false
+# SIZED to the drain's hard deadline, 2026-10-03. This replaces the 2026-09-27
+# cap (max_mutants 1, confirm_cap 1, no re-tests; channel round 272) that
+# fitted aramid 0.18.0's one-hour task limit.
+#
+# The deadline. aramid 0.19.5 stops a drain [drain].hard_deadline_s after it
+# starts: the widest any candidate repo asks for, and this repo asks for the
+# default 5400 s. Measured 2026-10-03 with aramid's own drain_limits: the
+# installed task limit is PT3H55M, so the deadline is 5400 s. Under a PT1H
+# task the same code gives 3300 s, and these numbers would not fit.
+#
+# The window this consumer has inside it:
+#    5400  the deadline, from the drain's start
+#    -600  the latest this repo's item can start. The drain opens an item
+#          only while under [drain].wall_clock_budget_s, the MAX across
+#          candidates. 600 is the default, ASSUMED unwidened by other repos
+#          (observed starts: +4 s, +22 s)
+#    -240  llm-review before it (one call_timeout_s; measured at most 112 s)
+#    -300  fuzz after it (its wall_budget_s; measured about 3 s)
+#   = 4260 s
+#
+# wall_budget_s covers the whole consumer (baseline, re-tests, mutants), but
+# it is checked only BEFORE each mutant, so a run can overshoot it by one
+# mutant. The dearest mutant is a survivor:
+#   - its stage 1, up to about 840 s over the channel tests;
+#   - plus a full-suite confirmation. baseline_s has measured 602-1012 s
+#     over eleven drains. The 1012 s run (10-03 18Z) was the same suite at
+#     the same head that took 660 s four hours earlier: machine load, which
+#     a drain must still fit;
+#   - total about 1850 s. The most one has actually cost is 1266 s (09-27).
+# So wall_budget_s <= 4260 - 1852 = 2408, and 2200 leaves about 200 s.
+# Typically the baseline takes 650-1000 s and the rest goes to mutants: a
+# stage-1 kill costs seconds, a confirmed survivor about 1300 s, and the
+# first re-test here (e37afd86, 10-03 18Z) about 530 s.
+#
+# This is measured highs plus the drain's start rule, NOT a guarantee. A
+# mutant that drives both stage 1 and its confirmation to their 1500 s
+# timeouts can still reach the deadline. aramid then records this consumer
+# degraded ("stopped at the drain's hard deadline"), leaves the item queued,
+# and stands down after three such stops at one head (FN-16): loud, not
+# silent. Re-derive if any of these change:
+#   - the baseline grows;
+#   - the deadline or the drain budget changes;
+#   - a stage-1 run passes about 840 s.
+#
+# The wall clock is what binds, so the count caps go back to aramid's packaged
+# values. They are written out so the decision reads here. Re-tests are on:
+# that is what lets a fixed survivor reach `fixed`. e37afd86, pending since
+# b0e4e4e pinned the hook's mode, went `fixed` on the first drain after
+# re-tests were turned back on (10-03 18Z).
+wall_budget_s = 2200
+max_mutants = 20
+confirm_cap = 3
+retest_open_survivors = true
+retest_cap = 3
 
 # The fuzz consumer drives top-level functions on the changed lines of an
 # item with generated arguments. On the first live drain of this repo's
