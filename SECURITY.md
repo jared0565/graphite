@@ -35,12 +35,35 @@ graphite` without `-P`, because that is the shape a repo-local shadow needs.
 The same scanner configuration runs in the local git hooks and in the CI
 `security` job, against the committed `aramid.toml` and
 `.aramid-suppressions.toml`: gitleaks, semgrep, ruff's security rules, the
-repo-root shadow check, mypy, and the full test suite through the
-development interpreter. The CI job asserts from the gate's own JSON report
-that every one of those scanners actually ran and that the report holds no
-block-tier finding — the verdict is read from the report, never from the
-gate's exit status alone — so a scanner that silently never fired, or a
-gate that exits 0 over blocking findings, cannot read as clean. There is no dependency-vulnerability
-audit in the gate today; dependabot's security updates are the standing
-control for that. Suppressions are reviewed in the repository, never
-applied ad hoc.
+repo-root shadow check, mypy, a dependency-vulnerability audit (pip-audit),
+and the full test suite through the development interpreter. The CI job
+asserts from the gate's own JSON report that every one of those scanners
+actually ran and that the report holds no block-tier finding — the verdict
+is read from the report, never from the gate's exit status alone — so a
+scanner that silently never fired, or a gate that exits 0 over blocking
+findings, cannot read as clean. Suppressions are reviewed in the
+repository, never applied ad hoc.
+
+### Dependency vulnerabilities
+
+pip-audit runs at pre-push in project mode, checking the dependencies
+declared in `pyproject.toml` under `[project].dependencies` against known
+advisories. Its limits are part of the control:
+
+- **The optional extras are not audited.** Project mode reads only
+  `[project].dependencies`, so the `mcp` extra, which `graphite-mcp` needs,
+  and the `dev` tools are outside it.
+- **A new finding blocks; a recorded one warns.** pip-audit reports no
+  severity, so aramid grades every finding low, below its `critical` block
+  threshold. The pre-push ratchet then escalates any finding that is new to
+  the run to block. CI starts every run from an empty ledger, so there any
+  finding fails the `security` job. In the local hook, a finding already in
+  the ledger warns until it is fixed or overridden with a ledger-logged
+  reason.
+- **A local result can be a day old.** aramid caches the audit for 24 hours
+  while `pyproject.toml` is unchanged. CI runs without that cache.
+
+GitHub's Dependabot alerts and security updates are not enabled on this
+repository. `.github/dependabot.yml` schedules weekly version updates for
+pip and GitHub Actions; they propose newer versions, but they are not a
+vulnerability control.
