@@ -5,7 +5,6 @@ import importlib.util
 import json
 import math
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -25,6 +24,7 @@ from .hookinstall import DEFAULT_HOOKS_DIRNAME, hook_shim_present, hooks_dir
 from .init import gitignored_managed_paths, managed_doc_paths
 from .hookshim import TRIGGERS
 from .llm import canonical_provider_name
+from .programs import resolve_program
 from .validation import validate_graph_bundle
 
 DoctorStatus = Literal["ready", "optional", "degraded", "blocked"]
@@ -469,7 +469,10 @@ def check_daemon(root: Path, daemon_base: Path) -> DoctorCheck:
 
 def check_mcp() -> DoctorCheck:
     package = importlib.util.find_spec("mcp") is not None
-    command = shutil.which("graphite-mcp") is not None
+    # Not `shutil.which`: on Windows it answers from the current directory
+    # first, so a `graphite-mcp.exe` sitting in the repo read as installed
+    # (channel round 304).
+    command = resolve_program("graphite-mcp", extensions=(".exe", ".cmd", ".bat", ".com")) is not None
     details = {"python_package": package, "command": command}
     if package and command:
         return DoctorCheck("mcp", "MCP", "ready", "MCP integration is available.", details)
@@ -498,26 +501,7 @@ def check_typescript(root: Path, *, timeout_seconds: float = 5.0) -> DoctorCheck
 
 
 def _resolve_node_executable(root: Path, *, platform_name: str | None = None) -> Path | None:
-    selected_platform = os.name if platform_name is None else platform_name
-    name = "node.exe" if selected_platform == "nt" else "node"
-    resolved_root = root.resolve()
-    for raw_directory in os.environ.get("PATH", "").split(os.pathsep):
-        directory = Path(raw_directory)
-        if not raw_directory or not directory.is_absolute():
-            continue
-        try:
-            candidate = (directory / name).resolve(strict=True)
-            if not candidate.is_file():
-                continue
-            if selected_platform != "nt" and not os.access(candidate, os.X_OK):
-                continue
-            try:
-                candidate.relative_to(resolved_root)
-            except ValueError:
-                return candidate
-        except OSError:
-            continue
-    return None
+    return resolve_program("node", exclude=(root,), platform_name=platform_name)
 
 
 def _node_environment() -> dict[str, str]:

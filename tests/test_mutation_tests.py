@@ -380,3 +380,44 @@ def test_run_returns_the_child_exit_code_and_starts_it_in_the_given_cwd(
     script = f"import pathlib, sys; pathlib.Path({marker!r}).write_text('x'); sys.exit(3)"
     assert launcher._run([sys.executable, "-c", script], tmp_path) == 3
     assert (tmp_path / marker).read_text() == "x"
+
+
+# --- which git the launcher runs (channel round 304) ---------------------------
+
+
+def test_git_helper_launches_git_by_an_absolute_path_outside_the_tree(
+    launcher: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = tmp_path / "worktree"
+    trusted = tmp_path / "trusted bin"
+    tree.mkdir()
+    trusted.mkdir()
+    name = "git.exe" if os.name == "nt" else "git"
+    real = trusted / name
+    for candidate in (real, tree / name):
+        candidate.write_text("", encoding="utf-8")
+        candidate.chmod(0o755)
+    monkeypatch.chdir(tree)
+    monkeypatch.setenv("PATH", os.pathsep.join(("", ".", str(tree), str(trusted))))
+    seen: list[list[str]] = []
+
+    def record(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(launcher.subprocess, "run", record)
+
+    assert launcher._git(tree, "status") == "ok"
+    assert [Path(argv[0]) for argv in seen] == [real.resolve()]
+
+
+def test_git_helper_with_no_git_outside_the_tree_reads_as_a_failure(
+    launcher: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = tmp_path / "worktree"
+    tree.mkdir()
+    (tree / ("git.exe" if os.name == "nt" else "git")).write_text("", encoding="utf-8")
+    monkeypatch.chdir(tree)
+    monkeypatch.setenv("PATH", str(tree))
+
+    assert launcher._git(tree, "status") == ""

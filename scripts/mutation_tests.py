@@ -45,12 +45,48 @@ from pathlib import Path
 _PYTEST_NO_TESTS = 5
 
 
+def _git_executable(root: Path) -> Path | None:
+    """git from PATH by absolute path, never from the tree or the cwd.
+
+    The drain starts this script with the worktree root as its current
+    directory, outside any agent session, and Windows looked a bare `git` up
+    there before PATH (graphite channel round 304). The same rule as
+    `graphite.programs.resolve_program`, inlined because this launcher imports
+    nothing from graphite.
+    """
+    names = ("git.exe",) if os.name == "nt" else ("git",)
+    refused = []
+    for directory in (root, Path.cwd()):
+        try:
+            refused.append(directory.resolve())
+        except OSError:
+            continue
+    for raw in os.environ.get("PATH", "").split(os.pathsep):
+        if not raw or not Path(raw).is_absolute():
+            continue
+        for name in names:
+            candidate = Path(raw) / name
+            try:
+                resolved = candidate.resolve(strict=True)
+            except OSError:
+                continue
+            if not resolved.is_file() or (os.name != "nt" and not os.access(resolved, os.X_OK)):
+                continue
+            if any(resolved.is_relative_to(directory) for directory in refused):
+                continue
+            return resolved
+    return None
+
+
 def _git(root: Path, *args: str) -> str:
+    git = _git_executable(root)
+    if git is None:
+        return ""
     try:
-        # Argument list, no shell; `git` by name on purpose -- the same git the
-        # gate and the drain use, wherever this copy of the tree lives.
+        # Argument list, no shell; the git on PATH -- the same git the gate and
+        # the drain use, wherever this copy of the tree lives.
         result = subprocess.run(  # noqa: S603
-            ["git", *args],  # noqa: S607
+            [str(git), *args],
             cwd=root,
             capture_output=True,
             text=True,

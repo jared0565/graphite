@@ -10,6 +10,7 @@ node at all.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -137,6 +138,15 @@ def test_build_index_reports_no_typescript_files_without_starting_node(
     assert index == TypeScriptCompilerIndex(available=False, reason="no_typescript_files")
 
 
+@pytest.fixture
+def fake_node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Resolve `node` to a fixed absolute path, so a test that stubs
+    `subprocess.run` does not also depend on a real node being on PATH."""
+    node = tmp_path / "toolchain" / "node.exe"
+    monkeypatch.setattr(ts_bridge, "_node_executable", lambda root: node)
+    return node
+
+
 @pytest.mark.parametrize(
     ("raised", "reason"),
     [
@@ -146,7 +156,7 @@ def test_build_index_reports_no_typescript_files_without_starting_node(
     ],
 )
 def test_build_index_turns_a_launch_failure_into_a_reason(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raised: Exception, reason: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raised: Exception, reason: str, fake_node: Path
 ) -> None:
     def failing(*args: object, **kwargs: object) -> None:
         raise raised
@@ -157,7 +167,7 @@ def test_build_index_turns_a_launch_failure_into_a_reason(
 
 
 def test_build_index_reports_a_failing_node_with_its_stderr_bounded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_node: Path
 ) -> None:
     monkeypatch.setattr(
         ts_bridge.subprocess, "run", lambda *a, **k: _completed(stderr="  boom " + "x" * 600, returncode=2)
@@ -170,7 +180,7 @@ def test_build_index_reports_a_failing_node_with_its_stderr_bounded(
 
 
 def test_build_index_reports_unparseable_and_declined_replies(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_node: Path
 ) -> None:
     entries = [_Entry("src/a.ts", "typescript")]
     monkeypatch.setattr(ts_bridge.subprocess, "run", lambda *a, **k: _completed(stdout="{not json"))
@@ -192,7 +202,7 @@ def test_build_index_reports_unparseable_and_declined_replies(
 
 
 def test_build_index_sends_the_sorted_typescript_files_as_utf8_and_indexes_the_reply(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_node: Path
 ) -> None:
     calls: list[tuple[list[str], dict[str, Any]]] = []
     reply = {
@@ -222,7 +232,7 @@ def test_build_index_sends_the_sorted_typescript_files_as_utf8_and_indexes_the_r
     index = build_typescript_index(tmp_path / "répo", entries, cfg)
 
     (argv, kwargs), = calls
-    assert argv[0] == "node" and argv[1].endswith("ts_resolver.mjs")
+    assert argv[0] == str(fake_node) and argv[1].endswith("ts_resolver.mjs")
     assert json.loads(kwargs["input"]) == {
         "root": str(tmp_path / "répo"),
         "files": ["lib/j.js", "src/a.ts", "src/z.tsx"],
@@ -239,3 +249,51 @@ def test_build_index_sends_the_sorted_typescript_files_as_utf8_and_indexes_the_r
     assert index.resolve_import("src/a.ts", "./b") == _edge_from_raw(_raw_edge())
     assert [e.syntax for e in index.supplemental_edges("src/a.ts")] == ["export", "reference"]
     assert index.supplemental_edges("src/same.ts") == ()
+
+
+# --- which node is launched (channel round 304) -------------------------------
+
+
+def test_node_is_launched_by_an_absolute_path_outside_the_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    trusted = tmp_path / "trusted bin"
+    repo.mkdir()
+    trusted.mkdir()
+    real = trusted / ("node.exe" if os.name == "nt" else "node")
+    real.write_text("", encoding="utf-8")
+    real.chmod(0o755)
+    (repo / real.name).write_text("", encoding="utf-8")
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("PATH", os.pathsep.join(("", ".", str(repo), str(trusted))))
+    seen: list[list[str]] = []
+
+    def record(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return _completed(stdout=json.dumps({"ok": True, "edges": []}))
+
+    monkeypatch.setattr(ts_bridge.subprocess, "run", record)
+
+    build_typescript_index(repo, [_Entry("src/a.ts", "typescript")], Config())
+
+    assert [Path(argv[0]) for argv in seen] == [real.resolve()]
+
+
+def test_no_node_outside_the_repo_reads_as_node_not_available_without_launching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ("node.exe" if os.name == "nt" else "node")).write_text("", encoding="utf-8")
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("PATH", str(repo))
+    monkeypatch.setattr(ts_bridge.subprocess, "run", _must_not_launch)
+
+    index = build_typescript_index(repo, [_Entry("src/a.ts", "typescript")], Config())
+
+    assert index == TypeScriptCompilerIndex(available=False, reason="node_not_available")
+
+
+def _must_not_launch(*args: object, **kwargs: object) -> None:
+    raise AssertionError("node was launched")

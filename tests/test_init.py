@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from graphite import init as init_module
 from graphite.cli import main
 from graphite.init import MANAGED_BEGIN, init_project, resolve_platform_selection
 from graphite.typescript_activation import ActivationOutcome, ActivationResult
@@ -510,3 +513,32 @@ def test_rerunning_init_repairs_an_already_vulnerable_mcp_entry(tmp_path: Path) 
     # A foreign server is never touched -- destroying hand-written config is the
     # #13 mistake, and repairing our own entry must not become a licence to.
     assert servers["someone-else"] == {"command": "node", "args": ["server.js"]}
+
+
+# --- which git `init` launches (channel round 304) -----------------------------
+
+
+def test_init_repo_probe_launches_git_by_an_absolute_path_outside_the_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    trusted = tmp_path / "trusted bin"
+    repo.mkdir()
+    trusted.mkdir()
+    name = "git.exe" if os.name == "nt" else "git"
+    real = trusted / name
+    for candidate in (real, repo / name):
+        candidate.write_text("", encoding="utf-8")
+        candidate.chmod(0o755)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("PATH", os.pathsep.join(("", ".", str(repo), str(trusted))))
+    seen: list[list[str]] = []
+
+    def record(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="true\n", stderr="")
+
+    monkeypatch.setattr(init_module.subprocess, "run", record)
+
+    assert init_module._is_git_repo(repo) is True
+    assert [Path(argv[0]) for argv in seen] == [real.resolve()]

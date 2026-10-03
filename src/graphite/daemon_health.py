@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, TypeGuard
 
 from .daemon import DaemonStatusInvalidError, DaemonStatusTooLargeError, read_daemon_status
+from .programs import system_program
 from .routing.lifecycle import LifecycleReasonCode, ProviderLifecycleState
 from .windows_task import DEFAULT_TASK_NAME
 from .windows_startup import startup_status
@@ -285,7 +286,9 @@ def check_daemon_process(base: Path) -> dict[str, Any]:
     )
     try:
         result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", ps],
+            # By absolute path: a bare `powershell.exe` is looked up in the
+            # current directory before System32 (channel round 304).
+            [str(system_program("WindowsPowerShell", "v1.0", "powershell.exe")), "-NoProfile", "-Command", ps],
             capture_output=True,
             text=True,
             # `errors` but deliberately NO `encoding`: Windows PowerShell 5.1

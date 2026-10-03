@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .programs import system_program
+
 DEFAULT_TASK_NAME = "GraphiteDaemon-FProjects"
 #: What the `run` seams accept: `subprocess.run`, or a test double of its shape.
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -33,6 +35,12 @@ def _quote_arg(arg: str) -> str:
     if any(ch.isspace() for ch in arg) or any(ch in arg for ch in '"&()[]{}^=;!,`'):
         return '"' + arg.replace('"', '\\"') + '"'
     return arg
+
+
+def _schtasks() -> str:
+    """schtasks by absolute path: a bare name is looked up in the current
+    directory before System32 (channel round 304). See `graphite.programs`."""
+    return str(system_program("schtasks.exe"))
 
 
 def require_windows() -> None:
@@ -137,7 +145,7 @@ def create_daemon_task(
 ) -> dict[str, object]:
     require_windows()
     cmd = [
-        "schtasks.exe",
+        _schtasks(),
         "/Create",
         "/TN",
         task_name,
@@ -160,21 +168,21 @@ def create_daemon_task(
 
 def start_daemon_task(task_name: str, *, run: Runner = subprocess.run) -> dict[str, object]:
     require_windows()
-    cmd = ["schtasks.exe", "/Run", "/TN", task_name]
+    cmd = [_schtasks(), "/Run", "/TN", task_name]
     result = run(cmd, capture_output=True, text=True, check=False)
     return _result_payload(result, command=cmd)
 
 
 def delete_daemon_task(task_name: str, *, run: Runner = subprocess.run) -> dict[str, object]:
     require_windows()
-    cmd = ["schtasks.exe", "/Delete", "/TN", task_name, "/F"]
+    cmd = [_schtasks(), "/Delete", "/TN", task_name, "/F"]
     result = run(cmd, capture_output=True, text=True, check=False)
     return _result_payload(result, command=cmd)
 
 
 def query_daemon_task(task_name: str, *, run: Runner = subprocess.run) -> dict[str, object]:
     require_windows()
-    cmd = ["schtasks.exe", "/Query", "/TN", task_name, "/FO", "CSV", "/V"]
+    cmd = [_schtasks(), "/Query", "/TN", task_name, "/FO", "CSV", "/V"]
     result = run(cmd, capture_output=True, text=True, check=False)
     payload = _result_payload(result, command=cmd)
     if result.returncode != 0:

@@ -6,7 +6,6 @@ import json
 import math
 import os
 import secrets
-import shutil
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -17,6 +16,7 @@ from graphite.config import Config
 from graphite.freshness import check_graph_freshness
 from graphite.git import GitError, GitRunner
 from graphite.graph_io import GraphReadError, load_validated_graph_bundle
+from graphite.programs import resolve_program
 
 from .approval import ApprovalAuthority, ApprovalError
 from .classifier import classify_task
@@ -208,14 +208,19 @@ def _machine_state_dir() -> Path:
 
 
 def _default_executable(provider: ProviderId) -> Path:
+    """The provider CLI from PATH, never from the repository or the cwd.
+
+    Not `shutil.which`: on Windows it answered from the current directory
+    first, and it honours a PATH entry pointing into the repo (channel round
+    304). PATHEXT is kept, because a CLI installed by npm is only a `.cmd`
+    shim. See `graphite.programs`.
+    """
     name = "claude" if provider is ProviderId.CLAUDE_CODE else "codex"
-    selected = shutil.which(name)
-    if not selected:
+    extensions = [ext for ext in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if ext]
+    selected = resolve_program(name, extensions=extensions)
+    if selected is None:
         raise RoutingServiceError("cli_missing")
-    try:
-        return Path(selected).resolve(strict=True)
-    except OSError:
-        raise RoutingServiceError("cli_missing") from None
+    return selected
 
 
 def _default_credential_home(provider: ProviderId) -> Path:

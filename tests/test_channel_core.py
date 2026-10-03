@@ -8,8 +8,12 @@ unregistered repo is refused rather than defaulted.
 """
 from __future__ import annotations
 
+import ast
+import os
 import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -332,3 +336,141 @@ def test_git_refuses_rather_than_hanging_forever(
         channel._git(tmp_path, "add", "--", "status/045/0001-delivered.json")
 
     assert excinfo.value.code == "git_timeout"
+
+
+# --- which git the broker launches (channel round 304) ------------------------
+
+
+def test_channel_git_is_launched_by_an_absolute_path_outside_both_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_repo = tmp_path / "agent repo"
+    channel_root = tmp_path / "channel"
+    trusted = tmp_path / "trusted bin"
+    for directory in (agent_repo, channel_root, trusted):
+        directory.mkdir()
+    name = "git.exe" if os.name == "nt" else "git"
+    real = trusted / name
+    for candidate in (real, agent_repo / name, channel_root / name):
+        candidate.write_text("", encoding="utf-8")
+        candidate.chmod(0o755)
+    monkeypatch.chdir(agent_repo)
+    monkeypatch.setenv(
+        "PATH", os.pathsep.join(("", ".", str(agent_repo), str(channel_root), str(trusted)))
+    )
+    seen: list[list[str]] = []
+
+    def record(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(channel.subprocess, "run", record)
+
+    channel._git(channel_root, "status")
+
+    assert [Path(argv[0]) for argv in seen] == [real.resolve()]
+
+
+def test_channel_git_missing_outside_the_roots_is_a_channel_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel_root = tmp_path / "channel"
+    channel_root.mkdir()
+    (channel_root / ("git.exe" if os.name == "nt" else "git")).write_text("", encoding="utf-8")
+    monkeypatch.chdir(channel_root)
+    monkeypatch.setenv("PATH", str(channel_root))
+
+    with pytest.raises(channel.ChannelError) as caught:
+        channel._git(channel_root, "status")
+
+    assert caught.value.code == "git_unavailable"
+
+
+def _hook_function(name: str) -> Any:
+    """One function from the commit-msg hook's embedded Python, compiled alone.
+
+    The hook runs under `-I` and cannot import graphite, so its git lookup is
+    its own copy and has to be tested where it lives.
+    """
+    text = channel.COMMIT_MSG_HOOK
+    opener = "<<'PYEOF'\n"
+    start = text.index(opener) + len(opener)
+    program = ast.parse(text[start : text.index("\nPYEOF\n", start)])
+    function = next(
+        node for node in program.body if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    classes = [node for node in program.body if isinstance(node, ast.ClassDef)]
+    namespace: dict[str, Any] = {"os": os}
+    exec(compile(ast.Module([*classes, function], []), "<commit-msg hook>", "exec"), namespace)  # noqa: S102
+    return namespace[name]
+
+
+def _hook_program() -> str:
+    text = channel.COMMIT_MSG_HOOK
+    opener = "<<'PYEOF'\n"
+    start = text.index(opener) + len(opener)
+    return text[start : text.index("\nPYEOF\n", start) + 1]
+
+
+def test_commit_msg_hook_runs_git_by_absolute_path_outside_the_channel_and_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # git starts the hook in the channel's root; a bare `git` there was looked
+    # up in that directory before PATH on Windows.
+    channel_root = tmp_path / "channel"
+    trusted = tmp_path / "trusted bin"
+    channel_root.mkdir()
+    trusted.mkdir()
+    name = "git.exe" if os.name == "nt" else "git"
+    for candidate in (channel_root / name, trusted / name):
+        candidate.write_text("", encoding="utf-8")
+        candidate.chmod(0o755)
+    monkeypatch.chdir(channel_root)
+    monkeypatch.setenv("PATH", os.pathsep.join(("", ".", str(channel_root), str(trusted))))
+
+    found = _hook_function("_git_executable")(str(channel_root))
+
+    assert Path(found) == (trusted / name).resolve()
+
+
+def test_commit_msg_hook_with_no_git_outside_the_channel_raises_so_the_gate_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Returning nothing would let `_registry_at` read the registry as ABSENT,
+    # which is the bootstrap branch: the working tree would be trusted. The
+    # raise lands in the hook's own exit code instead (see the next test).
+    channel_root = tmp_path / "channel"
+    channel_root.mkdir()
+    (channel_root / ("git.exe" if os.name == "nt" else "git")).write_text("", encoding="utf-8")
+    monkeypatch.chdir(channel_root)
+    monkeypatch.setenv("PATH", str(channel_root))
+    find = _hook_function("_git_executable")
+
+    with pytest.raises(find.__globals__["GitUnavailable"]):
+        find(str(channel_root))
+
+    registry_at = channel.COMMIT_MSG_HOOK[channel.COMMIT_MSG_HOOK.index("def _registry_at") :]
+    assert "[_git_executable(root)," in registry_at.split("def _authorises_anyone")[0]
+
+
+def test_commit_msg_hook_with_no_git_exits_with_its_own_status(tmp_path: Path) -> None:
+    # Status 1 is "this commit names no agent". A missing git used to land
+    # there too, through the hook's catch-all, and send the committer to fix a
+    # trailer that was already correct. The shell maps 4 to its own banner.
+    channel_root = tmp_path / "channel"
+    channel_root.mkdir()
+    (channel_root / ("git.exe" if os.name == "nt" else "git")).write_text("", encoding="utf-8")
+    message = tmp_path / "MSG"
+    message.write_text("subject\n", encoding="utf-8")
+
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-I", "-", str(message), str(channel_root)],
+        input=_hook_program(),
+        cwd=channel_root,
+        env={**os.environ, "PATH": str(channel_root)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 4, result.stderr

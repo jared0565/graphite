@@ -6,6 +6,7 @@ import platform
 from dataclasses import dataclass
 from pathlib import Path
 
+from .programs import system_program
 from .windows_task import DEFAULT_TASK_NAME, daemon_task_command
 
 
@@ -133,7 +134,11 @@ Start-Process -FilePath {_ps_quote(str(executable))} -ArgumentList @({args_liter
 
 
 def _vbs_launcher(script_path: Path) -> str:
-    ps = f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script_path}"'
+    # By absolute path: this runs at every login, outside any agent session,
+    # and a bare `powershell.exe` is looked up in the current directory before
+    # System32 (channel round 304). Machine-local, so a machine path is right.
+    powershell = system_program("WindowsPowerShell", "v1.0", "powershell.exe")
+    ps = f'"{powershell}" -NoProfile -ExecutionPolicy Bypass -File "{script_path}"'
     escaped = ps.replace('"', '""')
     return f'Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "{escaped}", 0, False\n'
 

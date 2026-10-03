@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable, Any, TYPE_CHECKING
 
 from .config import Config
+from .programs import resolve_program
 
 if TYPE_CHECKING:
     from .ingest import FileEntry
@@ -59,11 +60,14 @@ def build_typescript_index(root: Path, entries: Iterable[FileEntry], cfg: Config
     if not rel_files:
         return TypeScriptCompilerIndex(available=False, reason="no_typescript_files")
 
+    node = _node_executable(root)
+    if node is None:
+        return TypeScriptCompilerIndex(available=False, reason="node_not_available")
     script = Path(__file__).with_name("ts_resolver.mjs")
     payload = json.dumps({"root": str(root), "files": rel_files, "symbolReferences": cfg.typescript_symbol_references}, ensure_ascii=False)
     try:
         completed = subprocess.run(
-            ["node", str(script)],
+            [str(node), str(script)],
             input=payload,
             text=True,
             # Node speaks UTF-8 in both directions, and the payload above is
@@ -116,6 +120,17 @@ def build_typescript_index(root: Path, entries: Iterable[FileEntry], cfg: Config
         import_map=import_map,
         edges_by_file={k: tuple(v) for k, v in edges_by_file.items()},
     )
+
+
+def _node_executable(root: Path) -> Path | None:
+    """The `node` to launch, by absolute path, from outside the repository.
+
+    A build runs with the repository root as its current directory, and Windows
+    looked a bare `node` up there before PATH: a `node.exe` committed to a
+    TypeScript repo's root ran on every build, which still exited 0 (channel
+    round 304). See `graphite.programs`.
+    """
+    return resolve_program("node", exclude=(root,))
 
 
 def _edge_from_raw(raw: dict[str, Any]) -> TypeScriptCompilerEdge | None:

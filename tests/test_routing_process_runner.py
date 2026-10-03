@@ -222,6 +222,26 @@ def test_cli_environment_is_allowlisted_and_strips_ambient_secrets(tmp_path: Pat
         assert forbidden not in environment
 
 
+def test_cli_environment_stops_cmd_searching_the_workspace(tmp_path: Path) -> None:
+    # Channel round 304. An npm-installed CLI is a `.cmd` shim, and with no
+    # `node.exe` beside it the shim runs bare `node` through cmd.exe -- which
+    # looks in the current directory, the task worktree, before PATH. The
+    # variable is what turns that search off, so a `node.exe` committed to the
+    # repo cannot run ahead of the CLI's own sandbox.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    environment = build_cli_environment(
+        provider=ProviderId.CODEX,
+        executable=Path(sys.executable),
+        workspace=workspace,
+        credential_home=None,
+        source={},
+    )
+
+    assert environment["NoDefaultCurrentDirectoryInExePath"] == "1"
+
+
 def test_credential_override_inside_workspace_is_rejected(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     credentials = workspace / "credentials"
@@ -269,6 +289,7 @@ def test_run_cli_process_uses_fixed_argv_exact_environment_and_bounded_stdin(
     assert observed["max_input_bytes"] == 1_024
     assert observed["max_output_bytes"] == 2_048
     assert isinstance(observed["environment"], dict)
+    assert observed["environment"]["NoDefaultCurrentDirectoryInExePath"] == "1"
     assert result.stdout == b'{"ok":true}'
     assert result.input_sha256 == hashlib.sha256(b"approved request").hexdigest()
     assert result.stdout_sha256 == hashlib.sha256(b'{"ok":true}').hexdigest()

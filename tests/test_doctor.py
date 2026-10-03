@@ -467,7 +467,7 @@ def test_graph_blocks_freshness_limits(monkeypatch: pytest.MonkeyPatch, tmp_path
 
 def test_mcp_typescript_and_llm_never_leak_raw_values(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("graphite.doctor.importlib.util.find_spec", lambda name: None)
-    monkeypatch.setattr("graphite.doctor.shutil.which", lambda name: None)
+    monkeypatch.setattr("graphite.doctor.resolve_program", lambda *args, **kwargs: None)
     assert check_mcp().status == "optional"
 
     monkeypatch.setattr("graphite.doctor._resolve_node_executable", lambda root: tmp_path.parent / "node.exe")
@@ -488,6 +488,29 @@ def test_mcp_typescript_and_llm_never_leak_raw_values(monkeypatch: pytest.Monkey
     assert sentinel not in encoded
     assert llm.details == {"mode": "none", "provider": "custom/unknown", "credential_present": True}
     assert "unused" in llm.summary.lower()
+
+
+def test_mcp_command_counts_only_a_graphite_mcp_outside_the_current_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `shutil.which` answered from the current directory first on Windows, so a
+    # `graphite-mcp.exe` sitting in the repo read as installed (round 304).
+    repo = tmp_path / "repo"
+    trusted = tmp_path / "trusted bin"
+    repo.mkdir()
+    trusted.mkdir()
+    name = "graphite-mcp.exe" if os.name == "nt" else "graphite-mcp"
+    for candidate in (repo / name, trusted / name):
+        candidate.write_text("", encoding="utf-8")
+        candidate.chmod(0o755)
+    monkeypatch.setattr("graphite.doctor.importlib.util.find_spec", lambda name: object())
+    monkeypatch.chdir(repo)
+
+    monkeypatch.setenv("PATH", os.pathsep.join(("", ".", str(repo))))
+    assert check_mcp().details["command"] is False
+
+    monkeypatch.setenv("PATH", os.pathsep.join((str(repo), str(trusted))))
+    assert check_mcp().details["command"] is True
 
 
 def test_enabled_valid_llm_config_is_optional_until_explicitly_probed() -> None:

@@ -26,6 +26,7 @@ from pathlib import Path
 
 from .config import default_projects_root
 from .hookshim import CHAINED_SUFFIX, MARKER_START, TRIGGERS, render_trigger_shim
+from .programs import require_program
 
 DEFAULT_HOOKS_DIRNAME = ".githooks"
 
@@ -40,8 +41,12 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     # locale codec, and git echoes repository paths and branch names that are
     # not required to be Latin-1. A failure decodes on subprocess's reader
     # thread, so it yields `stdout is None` rather than raising.
+    #
+    # By absolute path, from outside the repo (channel round 304): `init` runs
+    # from the root of the repo being onboarded, and Windows looked a bare `git`
+    # up there before PATH. A missing git still raises FileNotFoundError.
     return subprocess.run(
-        ["git", "-C", str(root), *args],
+        [str(require_program("git", exclude=(root,))), "-C", str(root), *args],
         capture_output=True,
         text=True,
         encoding="utf-8",

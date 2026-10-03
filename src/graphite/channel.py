@@ -34,6 +34,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
+from .programs import resolve_program
+
 CHANNEL_DIRNAME = ".agent-channel"
 REGISTRY_FILENAME = "agents.json"
 ROUNDS_DIRNAME = "rounds"
@@ -260,13 +262,45 @@ else
 fi
 
 "$PY" -I - "$MSG_FILE" "$ROOT" <<'PYEOF'
-import json, re, subprocess, sys
+import json, os, re, subprocess, sys
 
 # Distinguishable so the shell can name the ACTUAL reason. Sentinel objects
 # rather than strings: a registry whose contents happened to be `"absent"` would
 # otherwise be able to impersonate one.
 ABSENT = object()
 CORRUPT = object()
+
+
+class GitUnavailable(Exception):
+    """No usable git outside the channel. Its own exit status, so the shell can
+    name it: the catch-all's 1 means "names no agent", which is not the fault."""
+
+
+def _git_executable(root):
+    """git by absolute path, never from the channel or the current directory.
+
+    git starts this hook in the channel's root, and Windows looked a bare `git`
+    up in the current directory before PATH (channel round 304). Inlined from
+    `graphite.programs.resolve_program`: `-I` cannot import graphite. Raises
+    rather than returning nothing, so the gate fails CLOSED -- an unreadable
+    registry must never read as an absent one, which is the bootstrap branch.
+    """
+    names = ("git.exe",) if os.name == "nt" else ("git",)
+    refused = [os.path.normcase(os.path.realpath(path)) for path in (root, os.getcwd())]
+    for raw in os.environ.get("PATH", "").split(os.pathsep):
+        if not raw or not os.path.isabs(raw):
+            continue
+        for name in names:
+            candidate = os.path.realpath(os.path.join(raw, name))
+            if not os.path.isfile(candidate):
+                continue
+            if os.name != "nt" and not os.access(candidate, os.X_OK):
+                continue
+            folded = os.path.normcase(candidate)
+            if any(folded == path or folded.startswith(path.rstrip(os.sep) + os.sep) for path in refused):
+                continue
+            return candidate
+    raise GitUnavailable("git was not found on PATH outside the channel")
 
 
 def _registry_at(root, spec):
@@ -282,7 +316,7 @@ def _registry_at(root, spec):
     is what the next commit will inherit as authority.
     """
     result = subprocess.run(
-        ["git", "-C", root, "show", spec],
+        [_git_executable(root), "-C", root, "show", spec],
         capture_output=True,
         text=True,
         # Explicit, for the reason `_git` documents: `text=True` alone decodes
@@ -346,6 +380,8 @@ try:
         # Parses, authorises nobody, and is not the empty object a fresh channel
         # seeds. Nothing legitimate produces this, and the gate must not guess.
         sys.exit(3)
+except GitUnavailable:
+    sys.exit(4)
 except Exception:
     # `SystemExit` derives from BaseException, so the exits above pass through
     # this handler untouched -- their codes survive.
@@ -402,6 +438,18 @@ commit it with `git commit --no-verify`. That flag is named here and nowhere
 else in this gate: a rejected trailer has a real fix, whereas this branch has no
 other recovery.
 EOF
+    exit 1
+fi
+
+if [ "$STATUS" -eq 4 ]; then
+    # `echo`, not `cat`, for the reason the missing-interpreter branch gives: an
+    # environment that has lost git may have lost the rest of its toolchain.
+    echo "[agent-channel] BLOCKED: git was not found on PATH outside the channel." >&2
+    echo "" >&2
+    echo "The audit gate reads the registry from HEAD with git, and will not run a" >&2
+    echo "git that sits inside the channel or the current directory. It cannot" >&2
+    echo "verify this commit, so it is refused rather than waved through. This is" >&2
+    echo "NOT a problem with your commit message. Put git on PATH, then commit again." >&2
     exit 1
 fi
 
@@ -721,10 +769,18 @@ def _git(root: Path, *args: str, check: bool = True) -> str:
     refreshes stale stat data by REWRITING the index under `index.lock`, and a
     writer's `git add` that meets that lock fails. Only optional locks are
     skipped; `add` and `commit` still take the ones they need.
+
+    git is launched by ABSOLUTE path, from outside both the channel and the
+    directory this process stands in (channel round 304). The broker's current
+    directory is the agent's repository, and Windows looked a bare `git` up
+    there before PATH. See `graphite.programs`.
     """
+    git = resolve_program("git", exclude=(root,))
+    if git is None:
+        raise ChannelError("git_unavailable", "git was not found on PATH outside the repository")
     try:
         result = subprocess.run(  # noqa: S603
-            ["git", "-C", str(root), *args],  # noqa: S607
+            [str(git), "-C", str(root), *args],
             capture_output=True,
             text=True,
             encoding="utf-8",

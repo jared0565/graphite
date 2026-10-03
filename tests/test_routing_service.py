@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import closing
 import subprocess
@@ -467,3 +468,47 @@ def test_review_uses_other_provider_read_only_separate_worktree_approval_and_att
             "SELECT review_attempt_id,primary_attempt_id,primary_diff_hash FROM review_links"
         ).fetchone()
     assert link == (review.attempt_id, primary.attempt_id, primary_result.diff_hash)
+
+
+# --- which CLI routing launches (channel round 304) ----------------------------
+
+
+@pytest.mark.parametrize(
+    ("provider", "stem", "suffix"),
+    [(ProviderId.CLAUDE_CODE, "claude", ".exe"), (ProviderId.CODEX, "codex", ".cmd")],
+)
+def test_default_executable_never_takes_a_cli_from_the_repo_or_the_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: ProviderId, stem: str, suffix: str
+) -> None:
+    # `shutil.which` answered from the current directory first on Windows, and
+    # honoured a PATH entry pointing into the repo. codex is often only an npm
+    # `.cmd` shim, so Windows must still find one -- outside the repo.
+    repo = tmp_path / "repo"
+    trusted = tmp_path / "trusted bin"
+    repo.mkdir()
+    trusted.mkdir()
+    name = stem + suffix if os.name == "nt" else stem
+    for candidate in (repo / name, trusted / name):
+        candidate.write_text("", encoding="utf-8")
+        candidate.chmod(0o755)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("PATH", os.pathsep.join(("", ".", str(repo), str(trusted))))
+
+    assert service_module._default_executable(provider) == (trusted / name).resolve()
+
+
+def test_default_executable_with_only_a_repo_copy_is_cli_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    name = "claude.exe" if os.name == "nt" else "claude"
+    (repo / name).write_text("", encoding="utf-8")
+    (repo / name).chmod(0o755)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("PATH", str(repo))
+
+    with pytest.raises(RoutingServiceError) as caught:
+        service_module._default_executable(ProviderId.CLAUDE_CODE)
+
+    assert caught.value.code == "cli_missing"

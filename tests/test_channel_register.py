@@ -419,6 +419,32 @@ def test_a_missing_interpreter_says_so_instead_of_blaming_the_trailer(tmp_path: 
     assert "python" in output.lower()
 
 
+def test_a_missing_git_says_so_instead_of_blaming_the_trailer(tmp_path: Path) -> None:
+    """The same rule for git (channel round 304). The hook's Python looks git up
+    by absolute path and exits 4 when none is usable; the shell has to name
+    that, not fall through to "names no agent". The interpreter here is a stub
+    that reports 4, so this pins the SHELL's mapping -- that the Python side
+    produces 4 is pinned in `test_channel_core`."""
+    root = _channel_with_hook(tmp_path)
+    channel.register_agent(root, tmp_path / "a", "codex-agent")
+    bin_dir = _hook_bin(tmp_path, "git-missing", with_python3=False)
+    stub = bin_dir / "python3"
+    # Builtins only: the hook's PATH here has no `cat`.
+    stub.write_text(
+        "#!/bin/sh\nwhile IFS= read -r _; do :; done\nexit 4\n", encoding="utf-8", newline="\n"
+    )
+    stub.chmod(0o755)
+
+    result = _run_commit_msg_hook(
+        root, "subject\n\nCo-Authored-By: codex-agent <codex@agents.local>\n", bin_dir
+    )
+
+    output = result.stderr + result.stdout
+    assert result.returncode != 0, "a gate that cannot verify must not pass the commit"
+    assert "names no agent" not in output, output
+    assert "git was not found" in output, output
+
+
 def test_the_hook_rejects_an_agent_that_is_not_registered(tmp_path: Path) -> None:
     root = _channel_with_hook(tmp_path)
     channel.register_agent(root, tmp_path / "a", "aramid-agent")

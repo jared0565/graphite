@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1038,3 +1040,32 @@ def test_daemon_health_under_cap_has_no_marker():
     lines = _issue_lines("Errors", issues, cap=20)
 
     assert not any("more" in line for line in lines)
+
+
+# --- powershell is launched from System32 by absolute path (channel round 304) --
+
+
+def test_daemon_process_check_names_the_system_powershell_by_absolute_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A bare `powershell.exe` is looked up in the current directory before
+    # System32, and it lives one level down, in WindowsPowerShell1.0.
+    from graphite import daemon_health
+    from graphite.programs import system_program
+
+    monkeypatch.setattr(daemon_health.platform, "system", lambda: "Windows")
+    seen: list[list[str]] = []
+
+    def record(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(daemon_health.subprocess, "run", record)
+
+    result = daemon_health.check_daemon_process(tmp_path)
+
+    assert result["running"] is False
+    expected = system_program("WindowsPowerShell", "v1.0", "powershell.exe")
+    assert seen[0][0] == str(expected)
+    if sys.platform == "win32":
+        assert expected.is_file()

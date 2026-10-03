@@ -19,6 +19,7 @@ from .git import GitError, GitRunner
 from . import hookinstall
 from .hookinstall import DEFAULT_HOOKS_DIRNAME
 from .io import atomic_write_text
+from .programs import require_program
 
 # Bump whenever GRAPHITE_DOC, SHARED_POINTER, or CURSOR_POINTER changes;
 # test_template_change_requires_doc_version_bump pins the pairing. Files
@@ -320,8 +321,10 @@ def _is_git_repo(root: Path) -> bool:
     """Ground truth, not a `.git`-exists heuristic: `--is-inside-work-tree`
     also answers correctly for a repo `root` nested inside a larger one,
     matching how `hookinstall`'s own `git -C root ...` calls resolve."""
+    # By absolute path, from outside the repo (channel round 304); see
+    # `hookinstall._git`.
     result = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        [str(require_program("git", exclude=(root,))), "-C", str(root), "rev-parse", "--is-inside-work-tree"],
         capture_output=True, text=True,
         # See `channel._git`: `text=True` alone uses the locale codec, and a
         # decode failure returns None instead of raising -- which here would

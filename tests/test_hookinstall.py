@@ -8,11 +8,13 @@ un-refreshable across every repo graphite migrated.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from graphite import hookinstall
 from graphite.hookinstall import hooks_dir, install_hooks, uninstall_hooks
 from graphite.hookshim import MARKER_START, TRIGGERS
 
@@ -171,3 +173,33 @@ def test_uninstall_leaves_relocated_foreign_hooks_alone(tmp_path: Path) -> None:
     uninstall_hooks(root)
 
     assert (root / ".githooks" / "pre-push").read_bytes() == body.encode()
+
+
+# --- which git `init` launches (channel round 304) -----------------------------
+
+
+def test_hookinstall_git_is_launched_by_an_absolute_path_outside_the_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    trusted = tmp_path / "trusted bin"
+    repo.mkdir()
+    trusted.mkdir()
+    name = "git.exe" if os.name == "nt" else "git"
+    real = trusted / name
+    for candidate in (real, repo / name):
+        candidate.write_text("", encoding="utf-8")
+        candidate.chmod(0o755)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("PATH", os.pathsep.join(("", ".", str(repo), str(trusted))))
+    seen: list[list[str]] = []
+
+    def record(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(hookinstall.subprocess, "run", record)
+
+    hookinstall._git(repo, "config", "--get", "core.hooksPath")
+
+    assert [Path(argv[0]) for argv in seen] == [real.resolve()]

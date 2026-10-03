@@ -325,6 +325,12 @@ def build_cli_environment(
             "CI": "1",
             "PYTHONIOENCODING": "utf-8",
             "PYTHONUTF8": "1",
+            # An npm-installed CLI is a `.cmd` shim that, with no `node.exe`
+            # beside it, runs bare `node` through cmd.exe -- and cmd.exe looks
+            # in the current directory, the task worktree, before PATH (channel
+            # round 304). This turns that search off for the whole chain. It
+            # means nothing off Windows, and costs nothing there either.
+            "NoDefaultCurrentDirectoryInExePath": "1",
         }
     )
     if credential_home is not None:

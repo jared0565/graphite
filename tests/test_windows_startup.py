@@ -67,3 +67,24 @@ def test_daemon_startup_status_cli_reports_missing(monkeypatch: pytest.MonkeyPat
 
     assert result == 1
     assert "startup launcher not installed" in output
+
+
+def test_startup_vbs_names_the_system_powershell_by_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The `.vbs` runs at every login, outside any agent session, and a bare
+    # `powershell.exe` would be looked up in its current directory first
+    # (channel round 304).
+    from graphite.programs import system_program
+
+    monkeypatch.setattr("graphite.windows_startup.platform.system", lambda: "Windows")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    base = tmp_path / "Projects"
+    base.mkdir()
+
+    result = install_startup_launcher(base, name="GraphiteDaemon-Test")
+
+    launcher = result.launcher_path.read_text(encoding="utf-8")
+    powershell = system_program("WindowsPowerShell", "v1.0", "powershell.exe")
+    assert f'""{powershell}"" -NoProfile' in launcher
+    assert "WshShell.Run \"powershell.exe" not in launcher

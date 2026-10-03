@@ -15,6 +15,64 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Security
+
+**graphite no longer launches a program by bare name, so a program sitting in
+a repository root cannot run in place of the real one.** On Windows a bare
+name is looked up in the launching process's current directory before PATH.
+That covers a list-form `subprocess.run(["git", ...])`, cmd.exe and
+`shutil.which`, unless `NoDefaultCurrentDirectoryInExePath` is set. Claude
+Code sets that variable, but the daemon at login and a commit from a terminal
+do not.
+
+graphite's builds, hooks and channel broker run with a repository root as
+their current directory. A `node.exe` committed to a TypeScript repo's root
+ran on every build, and the build still exited 0. This was measured against
+the released 1.1.0 wheel; channel round 304 reported it.
+
+Every launch now goes through `graphite.programs.resolve_program`, which:
+
+- reads only absolute PATH entries;
+- refuses any candidate inside the current directory or the target repository;
+- on Windows, tries `.exe` as CreateProcess does, unless the caller asks for
+  more.
+
+Windows' own tools come from the system directory the OS reports. The
+sites changed are:
+
+- the TypeScript bridge's `node` (every build);
+- the channel broker's `git`;
+- the channel's commit-msg hook, which fails closed when no git is found;
+- the `git` calls in `init` and `hookinstall`;
+- `daemon-health`'s `powershell.exe`;
+- the four `schtasks.exe` calls;
+- the Startup launcher's `powershell.exe`;
+- routing's `claude`/`codex` lookup, which keeps `.cmd` shims, and the CLI's
+  environment (see below);
+- `doctor`'s `graphite-mcp` check;
+- the mutation-test launcher's `git`.
+
+Resolving the first program is not enough when that program is a `.cmd` shim.
+An npm-installed CLI with no `node.exe` beside it runs bare `node` through
+cmd.exe, which searches the task worktree first. A `node.exe` committed to the
+repo would then run before the CLI's own sandbox. Routing now sets
+`NoDefaultCurrentDirectoryInExePath=1` in every CLI's environment, which turns
+that search off for the whole chain. The commit-msg hook also has its own status
+when it cannot find git. It used to fall through to "this commit names no agent".
+
+Two older private copies of the same PATH walk, in `git` and `doctor`, now
+delegate to the shared resolver. A test walks every launch call in `src/`,
+`scripts/` and the hook's embedded program, and fails on a program named by a
+literal or on `shell=True`.
+
+A program on a PATH entry inside the current directory is refused too. So
+`doctor` reports `graphite-mcp` as missing when the only copy is in an activated
+in-repo virtualenv.
+
+Artifacts already installed keep the old command until they are regenerated:
+- the Startup `.vbs` (`graphite daemon-install-startup-windows`);
+- the channel's commit-msg hook (rewritten by `graphite channel register`).
+
 ## [1.1.0] — 2026-09-27
 
 A minor release. The agent channel's read surfaces gain fields, which is an

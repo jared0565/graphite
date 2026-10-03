@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from .programs import resolve_program
+
 
 DEFAULT_GIT_STDOUT_MAX_BYTES = 16 * 1024 * 1024
 _MINIMUM_GIT_VERSION = (2, 38, 0)
@@ -376,35 +378,12 @@ def _close_stdout(process: subprocess.Popen[bytes]) -> bool:
 def _resolve_git_executable(
     resolved_project_root: Path, *, platform_name: str | None = None
 ) -> Path:
-    selected_platform = os.name if platform_name is None else platform_name
-    executable_name = "git.exe" if selected_platform == "nt" else "git"
-
-    for raw_directory in os.environ.get("PATH", "").split(os.pathsep):
-        if not raw_directory:
-            continue
-        directory = Path(raw_directory)
-        if not directory.is_absolute():
-            continue
-        candidate = directory / executable_name
-        try:
-            if not candidate.is_file():
-                continue
-            resolved_candidate = candidate.resolve(strict=True)
-            if not resolved_candidate.is_file():
-                continue
-            if selected_platform != "nt" and not os.access(resolved_candidate, os.X_OK):
-                continue
-            try:
-                resolved_candidate.relative_to(resolved_project_root)
-            except ValueError:
-                pass
-            else:
-                continue
-        except OSError:
-            continue
-        return resolved_candidate
-
-    raise GitUnavailableError("Git executable was not found")
+    resolved = resolve_program(
+        "git", exclude=(resolved_project_root,), platform_name=platform_name
+    )
+    if resolved is None:
+        raise GitUnavailableError("Git executable was not found")
+    return resolved
 
 
 def _isolated_environment() -> dict[str, str]:
