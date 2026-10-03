@@ -498,6 +498,23 @@ def test_commit_msg_hook_judges_a_path_entry_both_as_written_and_as_resolved(
     assert Path(find(str(elsewhere))) == chosen.resolve(), "control: unrefused, the entry is taken"
     assert Path(find(str(channel_root))) == trusted.resolve()
 
+def test_commit_msg_hook_does_not_refuse_tools_beneath_its_current_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same rule as `graphite.programs`: the cwd itself is refused, not
+    # everything beneath it, or a cwd above git's install refuses git.
+    channel_root = tmp_path / "channel"
+    channel_root.mkdir()
+    name = "git.exe" if os.name == "nt" else "git"
+    trusted = tmp_path / "Program Files" / "Git" / "cmd" / name
+    trusted.parent.mkdir(parents=True)
+    trusted.write_text("", encoding="utf-8")
+    trusted.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(trusted.parent))
+
+    assert Path(_hook_function("_git_executable")(str(channel_root))) == trusted.resolve()
+
 def test_commit_msg_hook_with_no_git_outside_the_channel_raises_so_the_gate_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

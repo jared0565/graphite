@@ -55,12 +55,21 @@ def _git_executable(root: Path) -> Path | None:
     nothing from graphite.
     """
     names = ("git.exe",) if os.name == "nt" else ("git",)
-    refused = []
-    for directory in (root, Path.cwd()):
-        try:
-            refused.append(directory.resolve())
-        except OSError:
-            continue
+    # The tree's whole subtree is refused; the cwd only itself, which is what
+    # Windows searches. Refusing everything beneath the cwd refused every git
+    # on drive C for a run from C:\.
+    try:
+        tree: Path | None = root.resolve()
+    except OSError:
+        tree = None
+    try:
+        cwd: Path | None = Path.cwd().resolve()
+    except OSError:
+        cwd = None
+
+    def refused(directory: Path) -> bool:
+        return directory == cwd or (tree is not None and directory.is_relative_to(tree))
+
     for raw in os.environ.get("PATH", "").split(os.pathsep):
         if not raw or not Path(raw).is_absolute():
             continue
@@ -71,7 +80,7 @@ def _git_executable(root: Path) -> Path | None:
             spellings.append(Path(raw).resolve())
         except OSError:
             pass
-        if any(s.is_relative_to(directory) for s in spellings for directory in refused):
+        if any(refused(spelling) for spelling in spellings):
             continue
         for name in names:
             candidate = Path(raw) / name
@@ -81,7 +90,7 @@ def _git_executable(root: Path) -> Path | None:
                 continue
             if not resolved.is_file() or (os.name != "nt" and not os.access(resolved, os.X_OK)):
                 continue
-            if any(resolved.is_relative_to(directory) for directory in refused):
+            if refused(resolved.parent):
                 continue
             return resolved
     return None

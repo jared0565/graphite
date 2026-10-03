@@ -286,18 +286,22 @@ def _git_executable(root):
     registry must never read as an absent one, which is the bootstrap branch.
     """
     names = ("git.exe",) if os.name == "nt" else ("git",)
-    refused = [os.path.normcase(os.path.realpath(path)) for path in (root, os.getcwd())]
+    # The channel's whole subtree is refused; the cwd only itself, which is
+    # what Windows searches -- refusing everything beneath a cwd above git's
+    # install would refuse git.
+    channel = os.path.normcase(os.path.realpath(root))
+    cwd = os.path.normcase(os.path.realpath(os.getcwd()))
 
-    def inside(path):
-        folded = os.path.normcase(path)
-        return any(folded == r or folded.startswith(r.rstrip(os.sep) + os.sep) for r in refused)
+    def refused(directory):
+        folded = os.path.normcase(directory)
+        return folded == cwd or folded == channel or folded.startswith(channel.rstrip(os.sep) + os.sep)
 
     for raw in os.environ.get("PATH", "").split(os.pathsep):
         if not raw or not os.path.isabs(raw):
             continue
         # The directory itself, as written and as resolved: a symlink inside
         # the channel must not choose which outside git runs (1d8d8cf).
-        if inside(os.path.normpath(raw)) or inside(os.path.realpath(raw)):
+        if refused(os.path.normpath(raw)) or refused(os.path.realpath(raw)):
             continue
         for name in names:
             candidate = os.path.realpath(os.path.join(raw, name))
@@ -305,7 +309,7 @@ def _git_executable(root):
                 continue
             if os.name != "nt" and not os.access(candidate, os.X_OK):
                 continue
-            if inside(candidate):
+            if refused(os.path.dirname(candidate)):
                 continue
             return candidate
     raise GitUnavailable("git was not found on PATH outside the channel")

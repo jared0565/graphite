@@ -471,6 +471,21 @@ def test_git_helper_judges_a_path_entry_both_as_written_and_as_resolved(
     assert launcher._git_executable(elsewhere) == chosen.resolve(), "control: unrefused, the entry is taken"
     assert launcher._git_executable(tree) == real.resolve()
 
+def test_git_helper_does_not_refuse_tools_beneath_its_current_directory(
+    launcher: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = tmp_path / "worktree"
+    tree.mkdir()
+    name = "git.exe" if os.name == "nt" else "git"
+    real = tmp_path / "Program Files" / "Git" / "cmd" / name
+    real.parent.mkdir(parents=True)
+    real.write_text("", encoding="utf-8")
+    real.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(real.parent))
+
+    assert launcher._git_executable(tree) == real.resolve()
+
 def test_git_helper_with_no_git_outside_the_tree_reads_as_a_failure(
     launcher: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

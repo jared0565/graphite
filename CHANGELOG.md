@@ -33,10 +33,11 @@ the released 1.1.0 wheel; channel round 304 reported it.
 Every launch now goes through `graphite.programs.resolve_program`, which:
 
 - reads only absolute PATH entries;
-- skips a PATH directory inside the current directory or the target repository,
-  judged both as written and as resolved, so a committed symlink cannot choose
-  which outside binary runs (aramid llm-review `1d8d8cf`);
-- refuses any candidate that resolves inside either of them;
+- skips a PATH directory inside the target repository, or one that IS the
+  current directory, judged both as written and as resolved, so a committed
+  symlink cannot choose which outside binary runs (aramid llm-review
+  `1d8d8cf`);
+- refuses any candidate that resolves into one of those;
 - on Windows, tries `.exe` as CreateProcess does, unless the caller asks for
   more.
 
@@ -69,9 +70,12 @@ delegate to the shared resolver. A test walks every launch call in `src/`,
 `scripts/` and the hook's embedded program, and fails on a program named by a
 literal or on `shell=True`.
 
-A program on a PATH entry inside the current directory is refused too. So
-`doctor` reports `graphite-mcp` as missing when the only copy is in an activated
-in-repo virtualenv.
+The current directory is refused itself, not its subtree, because that is
+what Windows searches. Refusing everything beneath it would refuse every tool
+on drive C for a run started from `C:\`, and `~/.local/bin` or an
+nvm-installed `node` for a run started from `$HOME`. A pre-release build
+measured exactly that. The repository's own subtree is refused through the
+repository each caller passes.
 
 Artifacts already installed keep the old command until they are regenerated:
 - the Startup `.vbs` (`graphite daemon-install-startup-windows`);

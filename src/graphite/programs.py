@@ -24,9 +24,13 @@ the one place that turns a name into that path:
 
 - only absolute PATH entries are read, so an empty entry (POSIX's spelling of
   the current directory), ``.`` and any relative entry are skipped;
-- a PATH directory inside the current directory or inside any ``exclude`` root
-  is skipped whole, and a candidate that resolves into one is refused, however
-  PATH came to point at it;
+- a PATH directory that IS the current directory, or lies inside any
+  ``exclude`` root, is skipped whole, and a candidate that resolves into one is
+  refused, however PATH came to point at it. The current directory is refused
+  itself, not its subtree: that is what Windows searches, and refusing
+  everything beneath it refused every tool on drive C for a run from ``C:\\``
+  (and would refuse ``~/.local/bin`` for a run from ``$HOME``). Every caller
+  passes the repository it works on as ``exclude``;
 - on Windows a bare name tries ``.exe`` only, as CreateProcess would. A caller
   that launches a ``.cmd`` shim on purpose passes ``extensions``.
 
@@ -53,23 +57,23 @@ def resolve_program(
     """Return the absolute path of ``name`` from PATH, or None.
 
     ``exclude`` names roots whose contents must never be launched -- typically
-    the repository the caller is working on. The current directory is always
-    excluded as well.
+    the repository the caller is working on. The current directory itself is
+    always refused as well, but not what lies beneath it.
     """
     if not name or Path(name).name != name or "/" in name or "\\" in name:
         raise ValueError(f"expected a bare program name, got {name!r}")
     selected_platform = os.name if platform_name is None else platform_name
     candidates = _candidate_names(name, selected_platform, extensions)
-    refused = _refused_roots(exclude)
+    roots, cwd = _refused_roots(exclude)
     for raw_directory in os.environ.get("PATH", "").split(os.pathsep):
         if not raw_directory:
             continue
         directory = Path(raw_directory)
-        if not directory.is_absolute() or _directory_refused(directory, refused):
+        if not directory.is_absolute() or _directory_refused(directory, roots, cwd):
             continue
         for candidate_name in candidates:
             resolved = _usable(directory / candidate_name, selected_platform)
-            if resolved is None or any(_inside(resolved, root) for root in refused):
+            if resolved is None or _refused_location(resolved.parent, roots, cwd):
                 continue
             return resolved
     return None
@@ -127,7 +131,9 @@ def _candidate_names(
     return tuple(name + suffix for suffix in suffixes)
 
 
-def _refused_roots(exclude: Iterable[Path]) -> tuple[Path, ...]:
+def _refused_roots(exclude: Iterable[Path]) -> tuple[tuple[Path, ...], Path | None]:
+    """The ``exclude`` roots, whose whole subtrees are refused, and the current
+    directory, which is refused itself only."""
     roots: list[Path] = []
     for root in exclude:
         try:
@@ -135,13 +141,17 @@ def _refused_roots(exclude: Iterable[Path]) -> tuple[Path, ...]:
         except OSError:
             continue
     try:
-        roots.append(Path.cwd().resolve())
+        cwd: Path | None = Path.cwd().resolve()
     except OSError:
-        pass
-    return tuple(roots)
+        cwd = None
+    return tuple(roots), cwd
 
 
-def _directory_refused(directory: Path, refused: tuple[Path, ...]) -> bool:
+def _refused_location(directory: Path, roots: tuple[Path, ...], cwd: Path | None) -> bool:
+    return directory == cwd or any(_inside(directory, root) for root in roots)
+
+
+def _directory_refused(directory: Path, roots: tuple[Path, ...], cwd: Path | None) -> bool:
     """A PATH directory inside a refused root is skipped whole, judged as
     written AND as resolved.
 
@@ -155,7 +165,7 @@ def _directory_refused(directory: Path, refused: tuple[Path, ...]) -> bool:
         spellings.append(directory.resolve())
     except OSError:
         pass
-    return any(_inside(spelling, root) for spelling in spellings for root in refused)
+    return any(_refused_location(spelling, roots, cwd) for spelling in spellings)
 
 
 def _usable(candidate: Path, platform_name: str) -> Path | None:

@@ -30,8 +30,8 @@ def _plant(path: Path, body: str = "planted") -> Path:
 
 
 def _elsewhere(tmp_path: Path) -> Path:
-    """A current directory that holds nothing. The cwd's whole subtree is
-    excluded, so a trusted bin directory must not sit beneath it."""
+    """A current directory that holds nothing and sits apart from the
+    fixtures, so a test reads the rule it names and not the cwd's."""
     cwd = tmp_path / "elsewhere"
     cwd.mkdir(exist_ok=True)
     return cwd
@@ -115,15 +115,33 @@ def test_a_path_entry_spelled_inside_an_excluded_root_is_refused_wherever_it_lin
     assert programs.resolve_program("git", exclude=(repo,)) == trusted.resolve()
 
 
-def test_the_cwd_subtree_is_excluded_not_only_the_cwd_itself(
+def test_the_repository_subtree_is_refused_through_exclude(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Every launch site passes the repository it works on as `exclude`; that
+    # is what refuses an in-repo PATH entry such as `node_modules/.bin`.
     repo = tmp_path / "repo"
     _plant(repo / "node_modules" / ".bin" / "node.exe")
     monkeypatch.chdir(repo)
     monkeypatch.setenv("PATH", str(repo / "node_modules" / ".bin"))
 
-    assert programs.resolve_program("node", platform_name="nt") is None
+    assert programs.resolve_program("node", exclude=(repo,), platform_name="nt") is None
+
+
+def test_a_current_directory_above_the_tools_does_not_refuse_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Measured 2026-10-03 while preparing 1.1.1: refusing the cwd's whole
+    # SUBTREE meant a build run from C:\ refused every git on drive C
+    # ("unable to enumerate Git repository safely"), and a run from $HOME
+    # would refuse ~/.local/bin and an nvm-installed node. Windows searches
+    # the cwd itself, not beneath it, so only the cwd itself is refused.
+    name = "git.exe" if os.name == "nt" else "git"
+    trusted = _plant(tmp_path / "Program Files" / "Git" / "cmd" / name)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(trusted.parent))
+
+    assert programs.resolve_program("git") == trusted.resolve()
 
 
 def test_never_resolves_into_the_current_directory_or_the_excluded_root(
