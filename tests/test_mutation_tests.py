@@ -411,6 +411,66 @@ def test_git_helper_launches_git_by_an_absolute_path_outside_the_tree(
     assert [Path(argv[0]) for argv in seen] == [real.resolve()]
 
 
+def test_git_helper_skips_a_symlink_in_a_path_entry_inside_the_tree(
+    launcher: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # aramid llm-review 1d8d8cf, the same rule as `graphite.programs`: a PATH
+    # directory inside the tree is skipped whole, not judged by where a
+    # symlink in it points.
+    tree, elsewhere = tmp_path / "worktree", tmp_path / "elsewhere"
+    name = "git.exe" if os.name == "nt" else "git"
+    outside = tmp_path / "outside" / ("other" + Path(name).suffix)
+    real = tmp_path / "trusted bin" / name
+    for path in (outside, real):
+        path.parent.mkdir(parents=True)
+        path.write_text("", encoding="utf-8")
+        path.chmod(0o755)
+    (tree / "bin").mkdir(parents=True)
+    try:
+        (tree / "bin" / name).symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - privilege-dependent
+        pytest.skip(f"symlinks unavailable on this machine: {exc}")
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(tree / "bin"), str(real.parent))))
+
+    assert launcher._git_executable(elsewhere) == outside.resolve(), (
+        "control: with the tree not refused the symlink is taken"
+    )
+    assert launcher._git_executable(tree) == real.resolve()
+
+
+@pytest.mark.parametrize("shape", ["entry links into the tree", "entry inside links out"])
+def test_git_helper_judges_a_path_entry_both_as_written_and_as_resolved(
+    launcher: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    tree, elsewhere = tmp_path / "worktree", tmp_path / "elsewhere"
+    name = "git.exe" if os.name == "nt" else "git"
+    chosen = tmp_path / "outside dir" / name
+    real = tmp_path / "trusted bin" / name
+    for path in (chosen, real):
+        path.parent.mkdir(parents=True)
+        path.write_text("", encoding="utf-8")
+        path.chmod(0o755)
+    tree.mkdir()
+    try:
+        if shape == "entry links into the tree":
+            (tree / "bin").mkdir()
+            (tree / "bin" / name).symlink_to(chosen)
+            entry = tmp_path / "linked bin"
+            entry.symlink_to(tree / "bin", target_is_directory=True)
+        else:
+            entry = tree / "bin"
+            entry.symlink_to(chosen.parent, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - privilege-dependent
+        pytest.skip(f"symlinks unavailable on this machine: {exc}")
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(entry), str(real.parent))))
+
+    assert launcher._git_executable(elsewhere) == chosen.resolve(), "control: unrefused, the entry is taken"
+    assert launcher._git_executable(tree) == real.resolve()
+
 def test_git_helper_with_no_git_outside_the_tree_reads_as_a_failure(
     launcher: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

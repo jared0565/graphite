@@ -7,7 +7,7 @@ import math
 import os
 import secrets
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -207,17 +207,22 @@ def _machine_state_dir() -> Path:
     ) / "graphite" / "routing"
 
 
-def _default_executable(provider: ProviderId) -> Path:
-    """The provider CLI from PATH, never from the repository or the cwd.
+def _default_executable(provider: ProviderId, *, exclude: Iterable[Path] = ()) -> Path:
+    """The provider CLI from PATH, never from the cwd or an `exclude` root.
 
     Not `shutil.which`: on Windows it answered from the current directory
     first, and it honours a PATH entry pointing into the repo (channel round
     304). PATHEXT is kept, because a CLI installed by npm is only a `.cmd`
     shim. See `graphite.programs`.
+
+    The cwd alone is not enough (aramid llm-review 30e2473): routing need not
+    run from the repository it routes, and a PATH entry inside that repository
+    -- an activated in-repo venv, `node_modules/.bin` -- would be honoured.
+    `RoutingService._executable` passes the repository and the task worktree.
     """
     name = "claude" if provider is ProviderId.CLAUDE_CODE else "codex"
     extensions = [ext for ext in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if ext]
-    selected = resolve_program(name, extensions=extensions)
+    selected = resolve_program(name, exclude=exclude, extensions=extensions)
     if selected is None:
         raise RoutingServiceError("cli_missing")
     return selected
@@ -295,8 +300,10 @@ class RoutingService:
         self._snapshots: dict[str, CapabilitySnapshot] = {}
         self._review_primary: dict[str, tuple[str, str]] = {}
 
-    def _executable(self, provider: ProviderId) -> Path:
-        return self._executables.get(provider) or _default_executable(provider)
+    def _executable(self, provider: ProviderId, *also_exclude: Path) -> Path:
+        return self._executables.get(provider) or _default_executable(
+            provider, exclude=(self.root, *also_exclude)
+        )
 
     def _credential_home(self, provider: ProviderId) -> Path:
         return self._credential_homes.get(provider) or _default_credential_home(provider)
@@ -722,7 +729,7 @@ class RoutingService:
             )
             executor = self._executors[manifest.provider]
             result = executor(
-                executable=self._executable(manifest.provider),
+                executable=self._executable(manifest.provider, prepared.worktree.root),
                 workspace=prepared.worktree.root,
                 credential_home=self._credential_home(manifest.provider),
                 prompt=prepared.prompt.body,

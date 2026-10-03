@@ -24,8 +24,9 @@ the one place that turns a name into that path:
 
 - only absolute PATH entries are read, so an empty entry (POSIX's spelling of
   the current directory), ``.`` and any relative entry are skipped;
-- a candidate inside the current directory or inside any ``exclude`` root is
-  refused, however PATH came to point at it;
+- a PATH directory inside the current directory or inside any ``exclude`` root
+  is skipped whole, and a candidate that resolves into one is refused, however
+  PATH came to point at it;
 - on Windows a bare name tries ``.exe`` only, as CreateProcess would. A caller
   that launches a ``.cmd`` shim on purpose passes ``extensions``.
 
@@ -64,7 +65,7 @@ def resolve_program(
         if not raw_directory:
             continue
         directory = Path(raw_directory)
-        if not directory.is_absolute():
+        if not directory.is_absolute() or _directory_refused(directory, refused):
             continue
         for candidate_name in candidates:
             resolved = _usable(directory / candidate_name, selected_platform)
@@ -138,6 +139,23 @@ def _refused_roots(exclude: Iterable[Path]) -> tuple[Path, ...]:
     except OSError:
         pass
     return tuple(roots)
+
+
+def _directory_refused(directory: Path, refused: tuple[Path, ...]) -> bool:
+    """A PATH directory inside a refused root is skipped whole, judged as
+    written AND as resolved.
+
+    Judging only each candidate's resolved target let a symlink committed in an
+    in-repo PATH directory (POSIX git keeps committed symlinks) pass whenever it
+    pointed outside the repo -- the repository chose which outside binary ran
+    (aramid llm-review 1d8d8cf).
+    """
+    spellings = [Path(os.path.normpath(directory))]
+    try:
+        spellings.append(directory.resolve())
+    except OSError:
+        pass
+    return any(_inside(spelling, root) for spelling in spellings for root in refused)
 
 
 def _usable(candidate: Path, platform_name: str) -> Path | None:

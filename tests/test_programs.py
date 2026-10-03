@@ -37,6 +37,84 @@ def _elsewhere(tmp_path: Path) -> Path:
     return cwd
 
 
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - privilege-dependent
+        pytest.skip(f"symlinks unavailable on this machine: {exc}")
+
+
+def test_a_symlink_on_an_excluded_path_entry_cannot_pick_an_outside_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # aramid llm-review 1d8d8cf. Only the candidate's RESOLVED target was
+    # judged, so a symlink committed in an in-repo PATH directory (POSIX git
+    # keeps committed symlinks) passed whenever it pointed outside the repo --
+    # letting the repository choose which outside binary ran as `git`.
+    repo = tmp_path / "repo"
+    name = "git.exe" if os.name == "nt" else "git"
+    outside = _plant(tmp_path / "outside" / ("other" + Path(name).suffix))
+    trusted = _plant(tmp_path / "trusted bin" / name)
+    _symlink_or_skip(repo / "bin" / name, outside)
+    monkeypatch.chdir(_elsewhere(tmp_path))
+    monkeypatch.setenv("PATH", os.pathsep.join((str(repo / "bin"), str(trusted.parent))))
+
+    assert programs.resolve_program("git") == outside.resolve(), (
+        "control: with nothing excluded the symlink is taken"
+    )
+    assert programs.resolve_program("git", exclude=(repo,)) == trusted.resolve()
+
+
+def test_a_path_entry_that_links_into_an_excluded_root_is_judged_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The other spelling: the PATH entry itself sits OUTSIDE the repo but is a
+    # directory link INTO it, so only its resolved form is inside.
+    repo = tmp_path / "repo"
+    name = "git.exe" if os.name == "nt" else "git"
+    outside = _plant(tmp_path / "outside" / ("other" + Path(name).suffix))
+    trusted = _plant(tmp_path / "trusted bin" / name)
+    _symlink_or_skip(repo / "bin" / name, outside)
+    entry = tmp_path / "linked bin"
+    try:
+        entry.symlink_to(repo / "bin", target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - privilege-dependent
+        pytest.skip(f"directory symlinks unavailable on this machine: {exc}")
+    monkeypatch.chdir(_elsewhere(tmp_path))
+    monkeypatch.setenv("PATH", os.pathsep.join((str(entry), str(trusted.parent))))
+
+    assert programs.resolve_program("git") == outside.resolve(), (
+        "control: with nothing excluded the linked entry is taken"
+    )
+    assert programs.resolve_program("git", exclude=(repo,)) == trusted.resolve()
+
+
+def test_a_path_entry_spelled_inside_an_excluded_root_is_refused_wherever_it_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The mirror case: the entry is written INSIDE the repo but is a committed
+    # directory link to somewhere outside it, so only its written form is
+    # inside. Judging the resolved form alone would let the repo point PATH at
+    # any outside directory of its choosing.
+    repo = tmp_path / "repo"
+    name = "git.exe" if os.name == "nt" else "git"
+    chosen = _plant(tmp_path / "outside dir" / name)
+    trusted = _plant(tmp_path / "trusted bin" / name)
+    repo.mkdir()
+    try:
+        (repo / "bin").symlink_to(chosen.parent, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - privilege-dependent
+        pytest.skip(f"directory symlinks unavailable on this machine: {exc}")
+    monkeypatch.chdir(_elsewhere(tmp_path))
+    monkeypatch.setenv("PATH", os.pathsep.join((str(repo / "bin"), str(trusted.parent))))
+
+    assert programs.resolve_program("git") == chosen.resolve(), (
+        "control: with nothing excluded the linked directory is taken"
+    )
+    assert programs.resolve_program("git", exclude=(repo,)) == trusted.resolve()
+
+
 def test_the_cwd_subtree_is_excluded_not_only_the_cwd_itself(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -33,7 +33,10 @@ the released 1.1.0 wheel; channel round 304 reported it.
 Every launch now goes through `graphite.programs.resolve_program`, which:
 
 - reads only absolute PATH entries;
-- refuses any candidate inside the current directory or the target repository;
+- skips a PATH directory inside the current directory or the target repository,
+  judged both as written and as resolved, so a committed symlink cannot choose
+  which outside binary runs (aramid llm-review `1d8d8cf`);
+- refuses any candidate that resolves inside either of them;
 - on Windows, tries `.exe` as CreateProcess does, unless the caller asks for
   more.
 
@@ -47,8 +50,9 @@ sites changed are:
 - `daemon-health`'s `powershell.exe`;
 - the four `schtasks.exe` calls;
 - the Startup launcher's `powershell.exe`;
-- routing's `claude`/`codex` lookup, which keeps `.cmd` shims, and the CLI's
-  environment (see below);
+- routing's `claude`/`codex` lookup, which keeps `.cmd` shims, excludes the
+  repository and the task worktree whatever the current directory (aramid
+  llm-review `30e2473`), and sets the CLI's environment (see below);
 - `doctor`'s `graphite-mcp` check;
 - the mutation-test launcher's `git`.
 

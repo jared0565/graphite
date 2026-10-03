@@ -433,6 +433,71 @@ def test_commit_msg_hook_runs_git_by_absolute_path_outside_the_channel_and_cwd(
     assert Path(found) == (trusted / name).resolve()
 
 
+def test_commit_msg_hook_skips_a_symlink_in_a_path_entry_inside_the_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # aramid llm-review 1d8d8cf, in the hook's inlined copy: a PATH directory
+    # inside the channel is skipped whole, not judged by where a symlink in it
+    # points.
+    channel_root, elsewhere = tmp_path / "channel", tmp_path / "elsewhere"
+    name = "git.exe" if os.name == "nt" else "git"
+    outside = tmp_path / "outside" / ("other" + Path(name).suffix)
+    trusted = tmp_path / "trusted bin" / name
+    for path in (outside, trusted):
+        path.parent.mkdir(parents=True)
+        path.write_text("", encoding="utf-8")
+        path.chmod(0o755)
+    (channel_root / "bin").mkdir(parents=True)
+    try:
+        (channel_root / "bin" / name).symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - privilege-dependent
+        pytest.skip(f"symlinks unavailable on this machine: {exc}")
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(channel_root / "bin"), str(trusted.parent))))
+    find = _hook_function("_git_executable")
+
+    assert Path(find(str(elsewhere))) == outside.resolve(), (
+        "control: with the channel not refused the symlink is taken"
+    )
+    assert Path(find(str(channel_root))) == trusted.resolve()
+
+
+@pytest.mark.parametrize("shape", ["entry links into the channel", "entry inside links out"])
+def test_commit_msg_hook_judges_a_path_entry_both_as_written_and_as_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    # Both spellings of the directory, as in `graphite.programs`: an entry
+    # outside the channel that links into it, and an entry written inside the
+    # channel that links out to a directory of the repo's choosing.
+    channel_root, elsewhere = tmp_path / "channel", tmp_path / "elsewhere"
+    name = "git.exe" if os.name == "nt" else "git"
+    chosen = tmp_path / "outside dir" / name
+    trusted = tmp_path / "trusted bin" / name
+    for path in (chosen, trusted):
+        path.parent.mkdir(parents=True)
+        path.write_text("", encoding="utf-8")
+        path.chmod(0o755)
+    channel_root.mkdir()
+    try:
+        if shape == "entry links into the channel":
+            (channel_root / "bin").mkdir()
+            (channel_root / "bin" / name).symlink_to(chosen)
+            entry = tmp_path / "linked bin"
+            entry.symlink_to(channel_root / "bin", target_is_directory=True)
+        else:
+            entry = channel_root / "bin"
+            entry.symlink_to(chosen.parent, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - privilege-dependent
+        pytest.skip(f"symlinks unavailable on this machine: {exc}")
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(entry), str(trusted.parent))))
+    find = _hook_function("_git_executable")
+
+    assert Path(find(str(elsewhere))) == chosen.resolve(), "control: unrefused, the entry is taken"
+    assert Path(find(str(channel_root))) == trusted.resolve()
+
 def test_commit_msg_hook_with_no_git_outside_the_channel_raises_so_the_gate_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

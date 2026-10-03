@@ -64,6 +64,15 @@ def _git_executable(root: Path) -> Path | None:
     for raw in os.environ.get("PATH", "").split(os.pathsep):
         if not raw or not Path(raw).is_absolute():
             continue
+        # The directory itself, as written and as resolved: a symlink inside
+        # the tree must not choose which outside git runs (1d8d8cf).
+        spellings = [Path(os.path.normpath(raw))]
+        try:
+            spellings.append(Path(raw).resolve())
+        except OSError:
+            pass
+        if any(s.is_relative_to(directory) for s in spellings for directory in refused):
+            continue
         for name in names:
             candidate = Path(raw) / name
             try:

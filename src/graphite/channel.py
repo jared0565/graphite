@@ -287,8 +287,17 @@ def _git_executable(root):
     """
     names = ("git.exe",) if os.name == "nt" else ("git",)
     refused = [os.path.normcase(os.path.realpath(path)) for path in (root, os.getcwd())]
+
+    def inside(path):
+        folded = os.path.normcase(path)
+        return any(folded == r or folded.startswith(r.rstrip(os.sep) + os.sep) for r in refused)
+
     for raw in os.environ.get("PATH", "").split(os.pathsep):
         if not raw or not os.path.isabs(raw):
+            continue
+        # The directory itself, as written and as resolved: a symlink inside
+        # the channel must not choose which outside git runs (1d8d8cf).
+        if inside(os.path.normpath(raw)) or inside(os.path.realpath(raw)):
             continue
         for name in names:
             candidate = os.path.realpath(os.path.join(raw, name))
@@ -296,8 +305,7 @@ def _git_executable(root):
                 continue
             if os.name != "nt" and not os.access(candidate, os.X_OK):
                 continue
-            folded = os.path.normcase(candidate)
-            if any(folded == path or folded.startswith(path.rstrip(os.sep) + os.sep) for path in refused):
+            if inside(candidate):
                 continue
             return candidate
     raise GitUnavailable("git was not found on PATH outside the channel")

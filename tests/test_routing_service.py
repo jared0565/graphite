@@ -512,3 +512,69 @@ def test_default_executable_with_only_a_repo_copy_is_cli_missing(
         service_module._default_executable(ProviderId.CLAUDE_CODE)
 
     assert caught.value.code == "cli_missing"
+
+
+def _cli_in(directory: Path, stem: str = "codex") -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / (stem + ".cmd" if os.name == "nt" else stem)
+    path.write_text("", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_default_executable_refuses_an_excluded_root_when_the_cwd_is_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # aramid llm-review 30e2473. Refusing only the cwd covered the case where
+    # routing runs FROM the repo. Run from anywhere else, a PATH entry inside
+    # the repo -- an activated in-repo venv, `node_modules/.bin` -- was honoured.
+    repo, elsewhere = tmp_path / "repo", tmp_path / "elsewhere"
+    planted = _cli_in(repo / "node_modules" / ".bin")
+    trusted = _cli_in(tmp_path / "trusted bin")
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("PATH", os.pathsep.join((str(planted.parent), str(trusted.parent))))
+
+    assert service_module._default_executable(ProviderId.CODEX) == planted.resolve(), (
+        "control: with no exclusion the in-repo copy comes first on PATH"
+    )
+    assert service_module._default_executable(ProviderId.CODEX, exclude=(repo,)) == trusted.resolve()
+
+
+def test_the_service_always_excludes_its_repository_and_any_root_it_is_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, worktree, elsewhere = tmp_path / "repo", tmp_path / "worktree", tmp_path / "elsewhere"
+    in_repo = _cli_in(repo / ".venv" / "Scripts")
+    in_worktree = _cli_in(worktree / ".venv" / "Scripts")
+    trusted = _cli_in(tmp_path / "trusted bin")
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv(
+        "PATH", os.pathsep.join((str(in_repo.parent), str(in_worktree.parent), str(trusted.parent)))
+    )
+    service = SimpleNamespace(_executables={}, root=repo)
+
+    assert RoutingService._executable(service, ProviderId.CODEX, worktree) == trusted.resolve()  # type: ignore[arg-type]
+    assert RoutingService._executable(service, ProviderId.CODEX) == in_worktree.resolve(), (  # type: ignore[arg-type]
+        "control: the worktree is excluded only when it is passed"
+    )
+
+
+def test_run_approved_excludes_the_task_worktree_from_the_cli_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _root, _captured = _service(tmp_path, monkeypatch)
+    prepared = service.prepare(_recommend(service))
+    lookups: list[tuple[object, ...]] = []
+    real = service._executable
+
+    def spy(provider: ProviderId, *roots: Path) -> Path:
+        lookups.append(roots)
+        return real(provider, *roots)
+
+    monkeypatch.setattr(service, "_executable", spy)
+
+    service.run_approved(prepared, approval_granted=True)
+
+    assert (prepared.worktree.root,) in lookups, lookups
