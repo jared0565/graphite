@@ -164,20 +164,27 @@ suite. If either suite's own tool binary can't be found at all, the push
 blocks with an explicit `tests-tool-missing` finding instead of an
 unexplained failure.
 
-A **two-week WARN-only bake** is in effect for semgrep on this repo (see
-`aramid.toml`'s `bake_started` / `semgrep_block_armed`). While unarmed,
-semgrep BLOCK-tier findings report as WARN so the operator can demote noisy
-rules first. End the bake explicitly with `aramid arm` -- there is no
-auto-promotion.
+semgrep starts in a WARN-only **bake** when a repo is onboarded
+(`aramid.toml`'s `semgrep_block_armed = false`, with `bake_started`
+recording the day). While unarmed, semgrep BLOCK-tier findings report as
+WARN so the operator can demote noisy rules first. No clock ends the bake:
+only `aramid arm` does, and there is no auto-promotion. Whether it is still
+running here is in `aramid status`, which prints `bake in progress, day N`
+and the per-rule hit counts while it lasts and nothing once semgrep is
+armed.
 
 ## Always-on triage (Phase 2a)
 
 Every commit is scored at zero cost by a post-commit hook (security-surface
 paths, risky content, novelty, graphite blast radius). Commits scoring >= 40
-join a review queue drained on a schedule (`aramid drain`, Task Scheduler
-task `aramid-drain`). The regression attack pack (`.aramid-rules/regression.yml`,
-committed) replays rules compiled from resolved findings -- reintroducing a
-rotated secret or banned dependency blocks at pre-push. `aramid status` shows
+join a review queue drained on a schedule (`aramid drain`; `aramid schedule
+install` registers it -- a Task Scheduler task on Windows, a marked crontab
+line elsewhere). The regression attack pack replays rules compiled from
+resolved findings -- reintroducing a rotated secret or banned dependency
+blocks at pre-push (`pack_block_armed`, on by default). It lives in
+`.aramid-rules/regression.yml`, which `aramid pack compile` / `aramid pack
+add` write once there is a resolved finding to compile; commit it. Until
+then the file does not exist and there is nothing to replay. `aramid status` shows
 queue depth and drain history; `aramid pack list|add|compile` manages rules.
 
 ## Honesty note
