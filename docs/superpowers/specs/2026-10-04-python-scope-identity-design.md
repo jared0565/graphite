@@ -5,7 +5,8 @@ in conversation (2026-10-04); this document awaits their review before the
 implementation plan is written. Issues: #70, #71. Phase 1 of 2; phase 2
 (Python value references) is `2026-10-04-python-value-references-design.md`
 and depends on this one. Channel rounds 308 and 309 asked aramid-agent about
-consumers; they are development-time input only, not a release gate (§6).
+consumers before the channel was limited to bug reports and recommended
+improvements; nothing depends on them (§6).
 
 ## 1. Summary
 
@@ -309,9 +310,12 @@ by denotation (§2's table); node and edge counts by relation; the Python
     `impact` for any file holding methods or nested definitions, because
     merged nodes split and mis-credited callers move. Measure `impact` result
     sizes before and after for a fixed sample of files on graphite and on
-    Django, and put the distribution of changes in the release notes and the
-    channel announcement.
-- Channel: the release announcement, then phase 2.
+    Django, and put the distribution of changes in the release notes.
+- **No channel message about the release.** A consumer has the tool, never
+  graphite's agent, so a release reaches consumers through the tool itself:
+  `CHANGELOG.md`, the release notes, and `graphite --version`'s engine
+  fingerprint. The channel carries only bug reports and recommended
+  improvements.
 
 ## 7. Out of scope and known residuals
 

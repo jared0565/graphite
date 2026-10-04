@@ -4,9 +4,9 @@ Date: 2026-10-04. Status: revised after an audit (2026-10-04); awaits the
 maintainer's review. **Phase 2 of 2: depends on phase 1,
 `2026-10-04-python-scope-identity-design.md`** (one node per definition, and
 the lexical resolver this design binds through). Channel rounds: 55
-(aramid-agent), 303 (atlas-agent), 305 (graphite-agent's reply to 303); 308 and 309 asked
-aramid-agent about consumers, as development-time input only, not a release
-gate (§7).
+(aramid-agent), 303 (atlas-agent), 305 (graphite-agent's reply to 303); 308
+and 309 asked aramid-agent about consumers before the channel was limited to
+bug reports and recommended improvements, and nothing depends on them (§7).
 
 ## 1. Summary
 
@@ -230,9 +230,21 @@ and say nothing); **TypeScript untouched**.
   return or container element); it runs wherever that value is later invoked,
   which may not be the listed site". The count is `answer.value_references`,
   over the FULL edge list, not the `max_results` slice. **Plumbing**: the verb
-  passes the graph, node and direction into `build_answer_block`, and the
-  counting happens inside its `try`, so a failure drops the block (fail-open)
-  instead of raising. `callers` / `calls` only.
+  passes the graph, node and direction into `build_answer_block`. The count
+  runs in its OWN guard, after the grade and the registry caveats are built.
+  Putting it inside the block's existing `try` would make the whole block fail
+  open, so one bug in a new code path would strip the grade and every caveat
+  from every Python `callers` / `calls` answer. Missing disclosure would then
+  read as "no value references". So if counting raises:
+  - the block is returned with its grade and other caveats unchanged;
+  - `value_references` is `null`, meaning "not counted", which is distinct
+    from `0`;
+  - `python-value-reference` is still emitted. Over-disclosing is preferred to
+    a silent drop.
+
+  A test forces the count to raise and pins all four outcomes: block present,
+  grade unchanged, caveat present, count `null`. (aramid llm-review finding
+  `71c05d9b`, 2026-10-04.) `callers` / `calls` only.
 - **Registry `kind`.** `python-value-reference` is a DISCLOSURE (it describes
   rows that are correct), not a blind spot, so it gets `kind: "disclosure"` and
   `debt.py` skips disclosures; otherwise `graphite debt` would count it as open
@@ -342,9 +354,12 @@ gate, and CI.
   notes. Retiring `python-callback-registration` is within the contract: caveat
   codes are not a `docs/compatibility.md` surface, and a retired code is never
   re-used.
-- **External verification after DEPLOY**: ask atlas-agent to re-run its round
-  303 reproduction once its graph's engine fingerprint matches the release;
-  round 303 is marked `done` only when that is verified.
+- **Round 303's case is verified by graphite itself, after deploy.** The §3
+  fixture reproduces atlas's shape (`functools.partial(generate, ...)` handed
+  to `loop.run_in_executor`), and the oracle (§6) covers the same shape on two
+  real corpora. Round 303 is marked `done` on that evidence. No request goes to
+  atlas-agent: a consumer has the tool, never graphite's agent, and the channel
+  carries only bug reports and recommended improvements.
 
 ## 8. Out of scope and known residuals
 
