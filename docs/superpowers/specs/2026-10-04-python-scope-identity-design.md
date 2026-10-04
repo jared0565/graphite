@@ -4,8 +4,8 @@ Date: 2026-10-04. Status: the design direction was approved by the maintainer
 in conversation (2026-10-04); this document awaits their review before the
 implementation plan is written. Issues: #70, #71. Phase 1 of 2; phase 2
 (Python value references) is `2026-10-04-python-value-references-design.md`
-and depends on this one. Channel rounds: 308 and 309 (aramid-agent, stakeholder
-check, answer owed).
+and depends on this one. Channel rounds 308 and 309 asked aramid-agent about
+consumers; they are development-time input only, not a release gate (§6).
 
 ## 1. Summary
 
@@ -296,9 +296,21 @@ by denotation (§2's table); node and edge counts by relation; the Python
   `test_dispatch_evidence.py`, `test_method_dispatch_scope.py` and
   `test_python_resolver.py`; those naming methods or nested defs are updated
   deliberately, in the same commit as the code.
-- **Blocked on aramid-agent's answers to rounds 308 and 309** (does aramid
-  persist or key on node ids; are its round-58 controls pinned to counts)
-  before release -- not before implementation.
+- **Consumers are checked through their TOOL surfaces, never through an
+  agent.** In a real installation only the tools are present, so a release
+  cannot wait on an agent's answer. Two checks before release:
+  - **The contract.** Node ids are not a stable surface: they are stable only
+    within an engine version (`docs/knowledge-base.md`), and
+    `docs/compatibility.md` does not list them. Nothing in the contract changes.
+  - **The one known tool consumer, measured.** aramid's post-commit triage
+    (`aramid triage HEAD`, run by the managed `post-commit` hook) scores every
+    commit partly on "graphite blast radius" (`ARAMID.md`, "Always-on triage";
+    commits scoring 40 or more are queued for review). Phase 1 changes
+    `impact` for any file holding methods or nested definitions, because
+    merged nodes split and mis-credited callers move. Measure `impact` result
+    sizes before and after for a fixed sample of files on graphite and on
+    Django, and put the distribution of changes in the release notes and the
+    channel announcement.
 - Channel: the release announcement, then phase 2.
 
 ## 7. Out of scope and known residuals

@@ -4,8 +4,9 @@ Date: 2026-10-04. Status: revised after an audit (2026-10-04); awaits the
 maintainer's review. **Phase 2 of 2: depends on phase 1,
 `2026-10-04-python-scope-identity-design.md`** (one node per definition, and
 the lexical resolver this design binds through). Channel rounds: 55
-(aramid-agent), 303 (atlas-agent), 305 (graphite-agent's reply to 303), 308
-and 309 (aramid-agent, stakeholder check, answer owed).
+(aramid-agent), 303 (atlas-agent), 305 (graphite-agent's reply to 303); 308 and 309 asked
+aramid-agent about consumers, as development-time input only, not a release
+gate (§7).
 
 ## 1. Summary
 
@@ -334,7 +335,13 @@ gate, and CI.
   two caveat codes and retires one, and changes no node id. It is the first
   retirement of a code that shipped in a 1.x release; the notes say so.
   Rollback is the previous wheel.
-- Blocked on aramid-agent's answers to rounds 308/309 before release.
+- Consumers are checked through their tool surfaces, never through an agent
+  (as in phase 1 §6). New edges change `impact` (a function that passes X as a
+  value now appears in X's impact), which feeds aramid's blast-radius triage
+  score, so the same before/after `impact` measurement goes in the release
+  notes. Retiring `python-callback-registration` is within the contract: caveat
+  codes are not a `docs/compatibility.md` surface, and a retired code is never
+  re-used.
 - **External verification after DEPLOY**: ask atlas-agent to re-run its round
   303 reproduction once its graph's engine fingerprint matches the release;
   round 303 is marked `done` only when that is verified.
