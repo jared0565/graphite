@@ -63,7 +63,9 @@ advisories. Its limits are part of the control:
 - **A local result can be a day old.** aramid caches the audit for 24 hours
   while `pyproject.toml` is unchanged. CI runs without that cache.
 
-GitHub's Dependabot alerts and security updates are not enabled on this
-repository. `.github/dependabot.yml` schedules weekly version updates for
+GitHub's Dependabot alerts are enabled on this repository and report
+advisories against the dependencies GitHub's dependency graph detects.
+Dependabot security updates, which open fix pull requests on their own, are
+not enabled. `.github/dependabot.yml` schedules weekly version updates for
 pip and GitHub Actions; they propose newer versions, but they are not a
 vulnerability control.
