@@ -49,4 +49,7 @@ This repo is gated by aramid. Read `ARAMID.md` before your first commit.
   Armed repos reject the call outright.
 - To suppress a WARN finding, use `aramid override <id> --reason "..."`
   (ledger-logged); never edit findings away by hand.
+- aramid is a tool: use it only through its commands and MCP tools, never
+  by talking to aramid's agent. The shared agent channel takes only bug
+  reports and improvement suggestions for aramid. See `ARAMID.md`.
 <!-- aramid:end -->

@@ -209,6 +209,23 @@ MCP-capable agents reach the same loop as tools, via the `.mcp.json` entry `aram
 - `aramid arm --llm` -- end the LLM bake: confirmed-critical LLM findings block at pre-push.
 - `aramid uninstall` -- remove aramid's hooks/ARAMID.md/gitignore entries (ledger kept).
 
+## aramid is a tool, not an agent
+
+Use aramid only through its commands (above), its MCP tools and this file.
+An installation ships the tool, never its agent, so do not talk to aramid's
+agent: no questions, no requests, no replies, and no expectation of
+announcements from it.
+
+The shared agent channel carries exactly two kinds of message for aramid,
+addressed to `aramid-agent`:
+
+- a **bug report**: what you ran, what happened, and what you expected;
+- a **suggestion for improvement**.
+
+Nothing else goes there. Fixes and changes reach you in a release. After
+upgrading, re-run `aramid init` to refresh this file and the aramid block in
+`CLAUDE.md` / `AGENTS.md`.
+
 ## About the full-history secrets scan
 
 `aramid init` ran a one-time full-history gitleaks scan across this repo. Any

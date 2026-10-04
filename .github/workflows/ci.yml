@@ -234,8 +234,8 @@ jobs:
           python -m venv ../.venvs/graphite-dev
           ../.venvs/graphite-dev/Scripts/python.exe -m pip install -e ".[dev,mcp]"
       - name: Install aramid and the tools its typecheck slot resolves on PATH
-        # aramid 0.19.5 is what this machine runs (its installed files match
-        # the wheel whose sha256 PyPI publishes, a5c4cd71...93f7; 0.7.1
+        # aramid 0.20.0 is what this machine runs (its installed files match
+        # the wheel whose sha256 PyPI publishes, 6372e69b...3464; 0.7.1
         # honours [tool.mypy] files/exclude in the typecheck slot and reports
         # `fresh_ledger_baseline`/`grandfathered`, 0.7.2 keeps registry keys
         # out of `expected` and stamps `run_id`/`recorded` in the report,
@@ -293,17 +293,24 @@ jobs:
         # 0.19.3 marks a mutation run that reached no verdict unhealthy (291),
         # 0.19.4 treats a hung git in an ARMED tdd or red-proof producer as a
         # degraded tool (neither is armed here) and makes `status` count what
-        # refused a push (300), and 0.19.5 only excludes semgrep 1.179.0,
+        # refused a push (300), 0.19.5 only excludes semgrep 1.179.0,
         # which had no Windows wheel for its first 19 hours (not announced;
         # METADATA and the version string are the only differences from
-        # 0.19.4, measured from both wheels) -- apart from 0.19.0's ARAMID.md
-        # template, none touches a tracked file, and the one `aramid init`
-        # re-run they needed (2026-10-03) changed ARAMID.md alone. Bump this
+        # 0.19.4, measured from both wheels), and 0.20.0 states that aramid
+        # is a tool, not an agent to talk to, with the channel taking only
+        # bug reports and improvement suggestions (measured from both wheels:
+        # only `__init__`, `agent_files`, `commands/agent_hook` and the
+        # ARAMID.md template changed, with no dependency or gate code) --
+        # apart from the 0.19.0 and 0.20.0 ARAMID.md templates and 0.20.0's
+        # CLAUDE.md / AGENTS.md block, none touches a tracked file. The
+        # `aramid init` re-runs they needed changed ARAMID.md alone
+        # (2026-10-03) and ARAMID.md, CLAUDE.md and AGENTS.md (2026-10-04,
+        # additions only). Bump this
         # pin BY HAND: dependabot has never proposed it (zero aramid PRs
         # across 0.5.1 -> 0.17.9; the pin is a `run:` string, not a manifest).
         # mypy is installed for THIS interpreter because aramid's typecheck slot
         # runs it from PATH, not from the dev venv.
-        run: python -m pip install "aramid==0.19.5" "mypy>=1.14"
+        run: python -m pip install "aramid==0.20.0" "mypy>=1.14"
       - name: CI-only keys the repository leaves unset
         shell: bash
         # aramid merges defaults <- ~/.aramid/config.toml <- <root>/aramid.toml.
