@@ -1986,6 +1986,42 @@ def test_governance_surfaces_exist_and_point_at_each_other() -> None:
     assert project["authors"] and project["authors"][0]["name"], project.get("authors")
 
 
+def test_security_policy_names_every_scanner_ci_requires() -> None:
+    """SECURITY.md's scanner list went stale once: pip-audit joined the CI gate
+    (aramid 0.10.0, run 33807490089) and the policy kept saying no dependency
+    audit ran, until f1edda2. Every label the CI `security` job requires in a
+    gate's `tools_ran` must be named in the list that opens the policy's "What
+    is checked on every push" section -- not merely somewhere further down."""
+    import ast
+
+    ci = read_document(".github/workflows/ci.yml")
+    required: set[str] = set()
+    for gate in ("Pre-commit gate", "Pre-push gate"):
+        start = ci.index(f"- name: {gate}")
+        end = ci.find("- name:", start + 1)
+        step = ci[start : end if end != -1 else len(ci)]
+        need = re.search(r"^\s*need = (\{[^}]*\})", step, re.MULTILINE)
+        # A parser that finds nothing would make every policy pass.
+        assert need, f"the CI {gate} step no longer declares `need = {{...}}`"
+        labels = ast.literal_eval(need.group(1))
+        assert labels, f"the CI {gate} step requires no scanner"
+        required |= labels
+
+    policy = read_document("SECURITY.md")
+    section = policy.split("## What is checked on every push", 1)[1]
+    opening_list = re.split(r"^#{2,3} ", section, maxsplit=1, flags=re.MULTILINE)[0]
+    opening_list = opening_list.casefold()
+    missing = sorted(
+        label
+        for label in required
+        if not re.search(rf"(?<![\w-]){re.escape(label)}(?![\w-])", opening_list)
+    )
+    assert not missing, (
+        f"CI requires {missing} to run, but SECURITY.md's 'What is checked on "
+        "every push' list does not name them"
+    )
+
+
 def test_benchmarks_table_has_no_placeholders_and_backs_the_declared_size() -> None:
     """`capabilities` declares supported_repo_files on the strength of a row in
     docs/benchmarks.md; a row with an angle-bracket placeholder is not a

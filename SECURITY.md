@@ -64,7 +64,9 @@ advisories. Its limits are part of the control:
   while `pyproject.toml` is unchanged. CI runs without that cache.
 
 GitHub's Dependabot alerts are enabled on this repository and report
-advisories against the dependencies GitHub's dependency graph detects.
+advisories against the dependencies GitHub's dependency graph detects. That
+graph reads the optional extras too, so the alerts cover the `mcp` extra and
+the `dev` tools that pip-audit's project mode leaves out.
 Dependabot security updates, which open fix pull requests on their own, are
 not enabled. `.github/dependabot.yml` schedules weekly version updates for
 pip and GitHub Actions; they propose newer versions, but they are not a
