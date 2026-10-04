@@ -1,6 +1,9 @@
 # Exact build-tool pins shared by ci.yml (artifact job) and publish.yml.
 # Bump both by editing this file; the publish digest guard proves the result
-# still reproduces the reviewed bytes. These are the versions the maintainer's
-# build venv (F:/Projects/.venvs/graphite-build) held when 1.0.0 was cut.
-build==1.5.0
-hatchling==1.32.0
+# still reproduces the reviewed bytes. The maintainer's build venv
+# (F:/Projects/.venvs/graphite-build) must hold these same versions.
+# Bumped from build 1.5.0 / hatchling 1.32.0 on 2026-10-04: rebuilding v1.1.1
+# with these gave a byte-identical sdist and a wheel that differs only in
+# WHEEL's "Generator:" line and that file's RECORD hash.
+build==1.6.1
+hatchling==1.32.4
