@@ -15,6 +15,27 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Added
+
+**Two Python call-binding blind spots are now declared on every Python
+`callers` / `calls` answer**, the day they were confirmed (#70, #71):
+
+- `python-nested-name-shared-id`: nested functions and methods share one node
+  per file and short name, so a call to or from one may be attributed to
+  another definition of the same name;
+- `python-bare-call-ignores-scope`: a bare call through a parameter or other
+  local binding, or inside a method body, may be bound to a same-named module
+  function or sibling method.
+
+Both produce wrong callers at `decision_grade`. Measured on graphite's own
+code with the real extractor against CPython `symtable`: 118 of 12,082
+bare-name calls bound to the wrong definition, and 1,345 call sites credited
+to the wrong caller; on Django 5.2.7, 76 and 6,614. They are scope disclosures,
+present on empty and non-empty answers alike, because the wrong binding is
+made during extraction and no single answer can tell whether it is affected.
+Both retire when scope-qualified Python ids ship
+(`docs/superpowers/specs/2026-10-04-python-scope-identity-design.md`).
+
 ## [1.1.1] — 2026-10-03
 
 A patch release. Security fixes ship in the next patch release of the current

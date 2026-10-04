@@ -133,6 +133,41 @@ def test_the_callback_caveat_discriminates_where_the_blanket_one_cannot():
     assert "python-dynamic-dispatch" in codes_empty & codes_found
 
 
+SCOPE_BINDING_CODES = {"python-nested-name-shared-id", "python-bare-call-ignores-scope"}
+
+
+def test_the_call_binding_blindspots_are_declared_on_every_python_calls_answer():
+    """#70 and #71, confirmed 2026-10-04 and declared the same day, decoupled
+    from their fix (the registry's process rule).
+
+    Both are SCOPE disclosures, not hedges on a result. The wrong binding is
+    already baked into the graph by the time a query runs -- the ids were
+    merged, or the local name was bound to a definition -- so no answer can
+    tell whether it is affected. Measured on real code, the harm is in
+    NON-EMPTY answers (wrong callers at decision_grade: 118 sites on graphite,
+    76 on Django), so a form that appeared only on empty answers would be
+    absent exactly where it applies.
+    """
+    by_code = {e["code"]: e for e in active_caveats()}
+    for code in SCOPE_BINDING_CODES:
+        entry = by_code[code]
+        assert entry["since"] == "2026-10-04"
+        assert entry["relations"] == ("calls",)
+        assert entry["languages"] == ("python",)
+        assert not entry.get("only_when_empty")
+
+    g = _graph_ratio(".py", 10, 0)
+    empty = build_answer_block(g, relations=("calls",), languages=["python"], total=0)
+    found = build_answer_block(g, relations=("calls",), languages=["python"], total=3)
+    for block in (empty, found):
+        assert SCOPE_BINDING_CODES <= {c["code"] for c in block["caveats"]}
+
+    ts = build_answer_block(
+        _graph_ratio(".ts", 10, 0), relations=("calls",), languages=["typescript"], total=3
+    )
+    assert not SCOPE_BINDING_CODES & {c["code"] for c in ts["caveats"]}
+
+
 def test_scoped_cells_ignore_other_languages():
     """The firescraper regression: healthy python must not mask degraded ts."""
     g = _merged(_graph_ratio(".py", 9, 1), _graph_ratio(".ts", 1, 9))
@@ -224,6 +259,10 @@ def test_registry_initial_entries():
         # fix deliberately fails closed on.
         "js-dynamic-module-load-unmodelled",
         "js-shadowed-module-local-unbound",
+        # #70 and #71, declared 2026-10-04; both retire with the phase 1
+        # scope-identity release.
+        "python-nested-name-shared-id",
+        "python-bare-call-ignores-scope",
     }
 
 

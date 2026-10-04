@@ -54,6 +54,42 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         "only_when_empty": True,
     },
     {
+        "code": "python-nested-name-shared-id",
+        "relations": ("calls",),
+        "languages": ("python",),
+        "summary": (
+            "nested functions and methods share one node per file and short name, so a "
+            "call to or from one may be attributed to another definition of the same name"
+        ),
+        "since": "2026-10-04",
+        # #70. Every Python def and class gets `_make_id(file_id, name)` at
+        # every depth, so same-named nested helpers, methods of different
+        # classes, or a method and a module function are ONE node, and the
+        # first one walked keeps it. Measured with the real extractor against
+        # CPython `symtable`: 115 bare-name calls on graphite's own code (27 on
+        # Django 5.2.7) bound to a different same-named definition, and 1,345
+        # call sites (6,614) credited to the wrong CALLER. A scope disclosure,
+        # not a conditional one: the merge happens at extraction, so no answer
+        # can tell whether it is affected. Retires with the scope-identity
+        # release (docs/superpowers/specs/2026-10-04-python-scope-identity-design.md).
+    },
+    {
+        "code": "python-bare-call-ignores-scope",
+        "relations": ("calls",),
+        "languages": ("python",),
+        "summary": (
+            "a bare call through a local binding (a parameter, an assignment) or inside a "
+            "method body may be bound to a same-named module function or sibling method"
+        ),
+        "since": "2026-10-04",
+        # #71. Bare-name resolution reads file-wide maps and same-file ids with
+        # no view of local bindings: `def route_c(generate): generate()` is
+        # recorded as a call to the module's `generate`, and a bare `run()` in
+        # a method body as a call to the sibling method `run`, which Python
+        # never resolves to. Measured: 3 sites on graphite, 49 on Django, all
+        # wrong callers at decision_grade. Same retirement as the entry above.
+    },
+    {
         "code": "ts-external-calls-unclassified",
         "relations": ("calls",),
         "languages": ("typescript", "javascript"),
