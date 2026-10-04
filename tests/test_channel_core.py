@@ -222,6 +222,40 @@ def test_a_legacy_round_without_front_matter_still_lists(tmp_path: Path) -> None
     assert listed[0].legacy is True
 
 
+def test_a_round_without_a_title_field_is_named_by_its_heading_then_its_filename(
+    tmp_path: Path,
+) -> None:
+    """Legacy rounds carry no `title:`, so the heading names them in every
+    view, and a round with no heading falls back to its filename rather than to
+    nothing. (aramid mutation finding 9d47b26d: `heading or stem` swapped to
+    `heading and stem` survived the suite.)"""
+    root = _make_channel(tmp_path, {})
+    rounds = root / "rounds"
+    (rounds / "2026-07-30-aramid-review-request.md").write_text(
+        "# Round 12 - review request\n\nbody\n", encoding="utf-8"
+    )
+    (rounds / "2026-07-31-aramid-no-heading.md").write_text("just prose\n", encoding="utf-8")
+
+    titles = {entry.path.name: entry.title for entry in channel.list_rounds(root)}
+
+    assert titles["2026-07-30-aramid-review-request.md"] == "Round 12 - review request"
+    assert titles["2026-07-31-aramid-no-heading.md"] == "2026-07-31-aramid-no-heading"
+
+
+def test_a_missing_title_is_taken_from_the_body_never_the_front_matter(tmp_path: Path) -> None:
+    """Front matter is metadata, not prose: a hand-written `# ...` line inside it
+    must not become the round's title when the body has a heading of its own.
+    (aramid mutation finding 9d47b26d: `body or text` swapped to `body and text`
+    searched the whole file, front matter included, and survived the suite.)"""
+    root = _make_channel(tmp_path, {})
+    (root / "rounds" / "2026-08-02-aramid-agent-round-7-x.md").write_text(
+        "---\nround: 7\n# hand-added note\n---\n\n# The real heading\n\nbody\n",
+        encoding="utf-8",
+    )
+
+    assert channel.read_round(root, 7).title == "The real heading"
+
+
 def test_git_output_is_decoded_as_utf8_regardless_of_the_locale(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
