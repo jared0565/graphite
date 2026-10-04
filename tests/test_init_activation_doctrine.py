@@ -11,6 +11,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from graphite import init as init_mod
 from graphite.init import init_project
 
@@ -38,8 +40,42 @@ def test_doctrine_routes_agents_to_answer_grade() -> None:
     assert "graphite check ." in init_mod.GRAPHITE_DOC
 
 
-def test_doc_version_is_14() -> None:
-    assert init_mod.DOC_VERSION == 14
+def test_doc_version_is_15() -> None:
+    assert init_mod.DOC_VERSION == 15
+
+
+CONSUMER_TEMPLATES = ("GRAPHITE_DOC", "SHARED_POINTER", "CURSOR_POINTER")
+CHANNEL_RULE = "The channel carries only bug reports and recommended improvements."
+
+
+@pytest.mark.parametrize("name", CONSUMER_TEMPLATES)
+def test_every_template_says_the_channel_is_for_bugs_and_improvements_only(name: str) -> None:
+    """Operator rule, 2026-10-04: a consumer has the TOOL, never the agent behind
+    it. Every file `init` writes into a consumer repo states it, because an agent
+    may read only one of them (Cursor reads only its own rule file). The exact
+    sentence doubles as the marker a consumer survey greps for."""
+    text = getattr(init_mod, name)
+
+    assert CHANNEL_RULE in text
+    assert "never direct a question to another repository's agent" in text
+
+
+@pytest.mark.parametrize("name", CONSUMER_TEMPLATES)
+def test_no_template_tells_a_consumer_to_ask_another_agent(name: str) -> None:
+    """DOC_VERSION 14 told consumers "If you need a fact from another repo, ask
+    for it" and to "ask the owning agent to look" -- the opposite of the rule."""
+    text = getattr(init_mod, name)
+
+    assert "ask for it" not in text
+    assert "ask the owning agent" not in text
+
+
+def test_the_doc_names_how_to_classify_a_post() -> None:
+    doc = init_mod.GRAPHITE_DOC
+
+    assert '`kind: "bug_report"`' in doc
+    assert '`kind: "improvement"`' in doc
+    assert "next major release" in doc
 
 
 def test_doctrine_routes_agents_to_the_channel_broker(tmp_path: Path) -> None:

@@ -59,6 +59,15 @@ BROKER_ONLY_STATUSES = frozenset({"open", "delivered", "superseded"})
 RECIPIENT_STATUSES = frozenset({"acknowledged", "blocked", "done"})
 AUTHOR_STATUSES = frozenset({"withdrawn"})
 
+#: What a round may be: a defect in a tool another agent owns, or a recommended
+#: improvement to it -- nothing else (operator rule, 2026-10-04). A consumer has
+#: the TOOL, never the agent behind it, so a question, an announcement or a
+#: request to verify something is a message no real installation could answer.
+#: Closed for the same reason as STATUSES. Optional on a post in 1.x because the
+#: channel protocol is a stable surface (`docs/compatibility.md`); a post without
+#: it is warned as deprecated and becomes an error in the next major release.
+ROUND_KINDS = ("bug_report", "improvement")
+
 _ROUND_IN_NAME = re.compile(r"round-(\d+)")
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 _LOCK_TIMEOUT_SECONDS = 30.0
@@ -111,6 +120,9 @@ class Round:
     posted: str | None = None
     to: list[str] = field(default_factory=list)
     supersedes: int | None = None
+    # One of ROUND_KINDS, or None for a round posted without one (every round
+    # before the field existed, and deprecated posts since).
+    kind: str | None = None
 
     @property
     def legacy(self) -> bool:
@@ -686,7 +698,7 @@ def parse_round(text: str) -> tuple[dict, str]:
 
 def render_round(meta: dict, body: str) -> str:
     lines = ["---"]
-    for key in ("round", "author", "posted", "title", "to", "supersedes"):
+    for key in ("round", "author", "posted", "kind", "title", "to", "supersedes"):
         value = meta.get(key)
         if value is None or value == [] or value == "":
             continue
@@ -714,6 +726,7 @@ def _load_round(path: Path) -> Round:
         posted=meta.get("posted"),
         to=list(meta.get("to") or []),
         supersedes=meta.get("supersedes"),
+        kind=meta.get("kind") or None,
     )
 
 
@@ -1018,6 +1031,7 @@ def post_round(
     body: str,
     to: list[str] | tuple[str, ...] = (),
     supersedes: int | None = None,
+    kind: str | None = None,
     _force_number: int | None = None,
 ) -> dict:
     """Create a round. There is deliberately no `author` parameter.
@@ -1025,11 +1039,21 @@ def post_round(
     The caller supplies content, never identity and never a path: the author is
     derived and the filename is generated, which removes both forgery and path
     traversal as classes rather than filtering for them.
+
+    `kind` classifies the round as one of ROUND_KINDS. Anything else is refused
+    before a number is spent; leaving it out still posts, with a deprecation
+    warning in the result.
     """
     root = require_channel(root)
     agent = derive_identity(root, project_root)
     if not title.strip():
         raise ChannelError("empty_title", "a round needs a title")
+    if kind is not None and kind not in ROUND_KINDS:
+        raise ChannelError(
+            "invalid_kind",
+            f"kind must be one of {', '.join(ROUND_KINDS)}: the channel carries only bug "
+            f"reports and recommended improvements, not {kind!r}",
+        )
 
     with _Lock(root) as lock:
         number = _force_number if _force_number is not None else next_round_number(root)
@@ -1045,6 +1069,7 @@ def post_round(
             "round": number,
             "author": agent,
             "posted": stamped,
+            "kind": kind,
             "title": title.strip(),
             "to": list(to),
             "supersedes": supersedes,
@@ -1069,6 +1094,17 @@ def post_round(
     # and this one has to read as an event.
     if lock.recovered is not None:
         result["lock_recovered"] = lock.recovered
+    if kind is None:
+        # The deprecation policy (`docs/compatibility.md`): the old form keeps
+        # working for at least one minor, and warns, naming its replacement.
+        result["warning"] = {
+            "code": "kind_missing",
+            "message": (
+                "The channel carries only bug reports and recommended improvements. "
+                "Pass kind='bug_report' or kind='improvement'; a post without kind is "
+                "deprecated and becomes an error in the next major release."
+            ),
+        }
     return result
 
 
@@ -1554,6 +1590,7 @@ def build_report(
                 "author": entry.author,
                 "to": entry.to,
                 "posted": entry.posted,
+                "kind": entry.kind,
                 "supersedes": entry.supersedes,
                 "verification": verification,
                 **view,
@@ -1597,6 +1634,15 @@ def build_report(
     }
 
 
+def kind_tag(kind: str | None) -> str:
+    """`[bug_report] ` before a classified round's title in the human views.
+
+    Nothing for a round without a kind: every round before `kind` existed has
+    none, and tagging each of them would bury the ones that are classified.
+    """
+    return f"[{kind}] " if kind else ""
+
+
 def render_report(data: dict) -> str:
     """Human default. Every non-`verified` row must be visible without --json."""
     lines = [
@@ -1611,7 +1657,7 @@ def render_report(data: dict) -> str:
         status = (row["status"] or "-").upper()
         lines.append(
             f"{label:<10} {row['author'] or '(legacy)':<16} -> {recipients:<16} "
-            f"{status:<13} {row['verification'].upper():<12} {row['title']}"
+            f"{status:<13} {row['verification'].upper():<12} {kind_tag(row.get('kind'))}{row['title']}"
         )
         if row["status"] is not None:
             # The actor is what the event file claims; say so when its commit disagrees.

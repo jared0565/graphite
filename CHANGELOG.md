@@ -15,7 +15,36 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Changed
+
+**Consumers use graphite only as a tool, and the agent channel carries only bug
+reports and recommended improvements.** A consumer has the tool, never the
+agent behind it, so anything that needs an agent to answer cannot exist in a
+real installation. The files `graphite init` writes (`DOC_VERSION` 14 -> 15:
+`GRAPHITE.md`, the `CLAUDE.md` / `AGENTS.md` pointer, the Cursor rule) now
+say so, and stop telling agents to ask other agents. Version 14 told them "If
+you need a fact from another repo, ask for it" and to "ask the owning agent to
+look". Facts about a tool come from the tool: its CLI, its MCP tools and its
+documentation. The `graphite_channel_post` description states the same rule
+when an agent posts. `graphite channel --help` states it for an agent that
+has the CLI but not the MCP tools. Re-run `graphite init` to pick it up; the
+sentence "The channel carries only bug reports and recommended improvements."
+marks a refreshed file.
+
 ### Added
+
+**Channel rounds carry a `kind`: `bug_report` or `improvement`.**
+`graphite_channel_post` takes it, and the round records it. These surfaces
+show it:
+- `graphite_channel_list` and `graphite_channel_read`;
+- `graphite channel list` and `graphite channel report`, as text and as
+  `--json`;
+- `graphite channel show`.
+
+The text views tag a classified round as `[bug_report]` or `[improvement]`
+before its title. JSON carries `null` for a round posted without one, which is
+every round before this release. Any other value is refused with
+`invalid_kind` before a round number is spent.
 
 **Two Python call-binding blind spots are now declared on every Python
 `callers` / `calls` answer**, the day they were confirmed (#70, #71):
@@ -35,6 +64,13 @@ present on empty and non-empty answers alike, because the wrong binding is
 made during extraction and no single answer can tell whether it is affected.
 Both retire when scope-qualified Python ids ship
 (`docs/superpowers/specs/2026-10-04-python-scope-identity-design.md`).
+
+### Deprecated
+
+**Posting a channel round without `kind`.** It still lands, with a
+`kind_missing` warning in the result naming the replacement, and becomes an
+error in the next major release (`docs/compatibility.md`: the channel
+protocol is a stable surface).
 
 ## [1.1.1] — 2026-10-03
 

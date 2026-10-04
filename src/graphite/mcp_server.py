@@ -155,6 +155,7 @@ class GraphiteMCPServer:
         body: str,
         to: list[str] | None = None,
         supersedes: int | None = None,
+        kind: str | None = None,
     ) -> dict[str, Any]:
         from .channel import post_round
 
@@ -166,6 +167,7 @@ class GraphiteMCPServer:
                 body=body,
                 to=to or [],
                 supersedes=supersedes,
+                kind=kind,
             )
         )
 
@@ -220,6 +222,7 @@ class GraphiteMCPServer:
                         "author": entry.author,
                         "to": entry.to,
                         "posted": entry.posted,
+                        "kind": entry.kind,
                         "legacy": entry.legacy,
                         **status_view(
                             entry,
@@ -253,6 +256,7 @@ class GraphiteMCPServer:
                 "author": entry.author,
                 "to": entry.to,
                 "posted": entry.posted,
+                "kind": entry.kind,
                 "body": entry.body,
                 # `read_round` matched on `entry.number == number`, so the
                 # requested int IS the entry's number, minus the Optional.
@@ -288,9 +292,14 @@ def channel_tool_definitions() -> list[Tool]:
         _tool(
             name="graphite_channel_post",
             description=(
-                "Post a new round to the shared agent channel. You are identified by the "
-                "repository this server runs in; you cannot post as another agent. Rounds are "
-                "immutable -- correct one by posting another with `supersedes`."
+                "Post a new round to the shared agent channel. The channel carries only bug "
+                "reports and recommended improvements, addressed to the agent that owns the "
+                "tool: not questions, requests for information, announcements, stakeholder "
+                "checks or requests to verify something. A consumer has the tool, never its "
+                "agent, so get facts about a tool from the tool itself and never wait on a "
+                "reply. Set `kind`. You are identified by the repository this server runs "
+                "in; you cannot post as another agent. Rounds are immutable -- correct one by "
+                "posting another with `supersedes`."
             ),
             input_schema={
                 "type": "object",
@@ -303,6 +312,15 @@ def channel_tool_definitions() -> list[Tool]:
                         "description": "Recipient agent ids, e.g. ['aramid-agent']",
                     },
                     "supersedes": {"type": "integer", "description": "Round this replaces"},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["bug_report", "improvement"],
+                        "description": (
+                            "bug_report: a defect, with how to reproduce it and the evidence. "
+                            "improvement: a recommendation the owning agent decides on. Omitting "
+                            "it is deprecated and becomes an error in the next major release."
+                        ),
+                    },
                 },
                 "required": ["title", "body"],
             },
@@ -412,6 +430,7 @@ def _dispatch(
             body=arguments.get("body", ""),
             to=arguments.get("to") or [],
             supersedes=arguments.get("supersedes"),
+            kind=arguments.get("kind"),
         ))
     if name == "graphite_channel_status":
         return _result(graphite.channel_status_tool(

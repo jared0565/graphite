@@ -226,8 +226,8 @@ def test_template_change_requires_doc_version_bump() -> None:
         ).encode("utf-8")
     ).hexdigest()
     assert (init_module.DOC_VERSION, digest) == (
-        14,
-        "9d12d8d4b4ced674b38a0e7c06babcf3fcae08f7bcaa3fdd271e3d36aab02c7c",
+        15,
+        "af9a330a41c3aa8470293d674d01b57ff8e7bc54bab583481b82bcf4b14d3bc4",
     ), "template content changed: bump DOC_VERSION and update this pinned digest"
 
 
@@ -435,10 +435,10 @@ def test_init_wires_stop_hook(tmp_path: Path) -> None:
     assert commands == ["python -P -m graphite agent-hook stop"]
 
 
-def test_doc_version_is_14_and_template_documents_answer_contract():
+def test_doc_version_is_15_and_template_documents_answer_contract():
     from graphite import init as graphite_init
 
-    assert graphite_init.DOC_VERSION == 14
+    assert graphite_init.DOC_VERSION == 15
     template = graphite_init.GRAPHITE_DOC
     assert "decision_grade" in template
     assert "advisory" in template

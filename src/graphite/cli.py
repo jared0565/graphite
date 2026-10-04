@@ -1272,6 +1272,7 @@ def _cmd_channel_action(args: argparse.Namespace, action: str) -> int:
                         "author": e.author,
                         "to": e.to,
                         "posted": e.posted,
+                        "kind": e.kind,
                         "legacy": e.legacy,
                         **channel_mod.status_view(
                             e,
@@ -1287,7 +1288,7 @@ def _cmd_channel_action(args: argparse.Namespace, action: str) -> int:
             for entry in entries:
                 label = f"round {entry.number}" if entry.number is not None else "round ?"
                 who = entry.author or "(legacy)"
-                print(f"{label:<10} {who:<16} {entry.title}")
+                print(f"{label:<10} {who:<16} {channel_mod.kind_tag(entry.kind)}{entry.title}")
         return 0
 
     if action == "register":
@@ -1320,6 +1321,8 @@ def _cmd_channel_action(args: argparse.Namespace, action: str) -> int:
         except channel_mod.ChannelError as exc:
             print(f"[graphite] {exc}", file=sys.stderr)
             return 1
+        if entry.kind:
+            print(f"kind: {entry.kind}")
         print(entry.body)
         # Who set what, when, under which commit -- the question a human
         # brings to `show`, answered from the event log rather than the fold.
@@ -3087,6 +3090,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_channel = sub.add_parser(
         "channel",
         help="Print the path of the shared agent channel (the one repo-isolation exception)",
+        description=(
+            "The shared agent channel carries only bug reports and recommended "
+            "improvements, addressed to the agent that owns a tool. A consumer has "
+            "the tool, never the agent behind it: get facts about a tool from its "
+            "CLI, MCP tools and docs, and never direct a question to another "
+            "repository's agent. Rounds are posted through the graphite_channel_post "
+            "MCP tool, classified by kind (bug_report or improvement)."
+        ),
     )
     p_channel.add_argument(
         "action",

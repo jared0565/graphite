@@ -25,7 +25,7 @@ from .programs import require_program
 # test_template_change_requires_doc_version_bump pins the pairing. Files
 # written before versioning existed count as version 1 ("legacy unversioned")
 # and are never rewritten automatically.
-DOC_VERSION = 14
+DOC_VERSION = 15
 
 MANAGED_BEGIN = f"<!-- graphite:managed version={DOC_VERSION} -->"
 MANAGED_END = "<!-- graphite:managed-end -->"
@@ -79,14 +79,14 @@ that rather than guessing whether the graph is current. If an answer comes back
 
 **Your repository is your world.** Do not read, write, or run commands in any other repository — including its `graph-out/`. This holds even when the other repo sits on the same machine, is a dependency of this one, or plainly contains the answer you need.
 
-Cross-repo knowledge travels one way only: as a **recommendation**, through the shared interop channel, addressed to the agent that owns that repository. That agent decides and acts. A defect you find elsewhere is a request, never a patch — and never a read.
+Cross-repo knowledge travels one way only: as a **bug report** or a **recommended improvement**, through the shared interop channel, addressed to the agent that owns that repository. That agent decides and acts. A defect you find elsewhere is a report, never a patch — and never a read.
 
 - Do not open another repo's source, tests, config, or `graph.json`. Each repo's graph describes that repo and belongs to its agent.
 - Do not run any command with another repository as its working directory or root, including read-only ones such as `status`, `doctor`, or a test suite.
-- Do report what you observed from your own side, and ask the owning agent to look. Say plainly which parts you could not verify.
-- Do act on what another agent tells you about their repository, and attribute it to them.
+- Do report a defect you observed from your own side as a bug report, with the evidence you have. Say plainly which parts you could not verify.
+- Do act on a bug report or recommendation another agent sends you about your repository, and attribute it to them.
 
-**If you need a fact from another repo, ask for it.** A claim clearly labelled unverified is safer than a verified one obtained out of bounds — the boundary is the control, and stepping over it to be thorough defeats it.
+**If you need a fact about another tool, get it from the tool**: its command-line interface, its MCP tools and its documentation. For graphite that is `python -m graphite capabilities --json`, `query`, `search`, `context`, `impact` and the `graphite_*` MCP tools. Use graphite, and every other tool, only as a tool: never direct a question to another repository's agent. In a real installation a consumer has the tool, never the agent behind it. A claim clearly labelled unverified is safer than a verified one obtained out of bounds — the boundary is the control, and stepping over it to be thorough defeats it.
 
 ### The one exception: the shared agent channel
 
@@ -96,12 +96,16 @@ Its absolute location is machine-local and deliberately kept out of this file: p
 
 This is the exception that makes isolation workable: isolation without a channel is a wall, not a boundary. Read the channel's `PROTOCOL.md` before writing there.
 
+### What the channel is for
+
+**The channel carries only bug reports and recommended improvements.** Post a round only to report a defect in a tool another agent owns — what you observed, how to reproduce it, the evidence — or to recommend an improvement to it, which its owner decides on. It is not for questions, requests for information, announcements, stakeholder checks or requests to verify something, and nothing you do may wait on another agent's reply: never direct a question to another repository's agent. Classify every post with `kind: "bug_report"` or `kind: "improvement"`; a post without `kind` still lands for now, with a deprecation warning, and becomes an error in the next major release.
+
 **Use the broker, not the filesystem.** Graphite exposes the channel as MCP tools, so you never need write access outside your own repository — and if you are sandboxed to your workspace, these are the only way in:
 
 | tool | what it does |
 | --- | --- |
 | `graphite_channel_inbox` | messages addressed to you that you have not been handed yet — **call this at the start of a session** |
-| `graphite_channel_post` | write a new round |
+| `graphite_channel_post` | write a new round: a bug report or a recommended improvement, classified by `kind` |
 | `graphite_channel_status` | `acknowledged` / `blocked` (give a reason) / `done` / `withdrawn` |
 | `graphite_channel_list` | every round with its author and current status |
 | `graphite_channel_read` | one round by number |
@@ -141,7 +145,7 @@ canonical `graph-out` artifacts.
 - If `python -m graphite check .` reports stale output, rebuild before relying on context or impact data.
 - Canonical Graphite operations run locally and never use LLM or network inference.
 - For TypeScript resolver issues, use `python -m graphite --typescript-resolver disabled build .` only as a fallback.
-- Stay inside this repository: no reads, writes, or commands in any other repo or its graph. Findings about another repo go to its agent as a recommendation via the shared `.agent-channel/`.
+- Stay inside this repository: no reads, writes, or commands in any other repo or its graph. Findings about another repo go to its agent via the shared `.agent-channel/`, as a bug report or a recommended improvement only.
 """
 
 SHARED_POINTER_HEADER = "## Shared Graphite Instructions"
@@ -149,7 +153,7 @@ SHARED_POINTER = """## Shared Graphite Instructions
 
 Graphite-first is required in this repo. Follow `GRAPHITE.md` before making non-trivial code changes: for cross-file questions (who-calls, where-defined, impact, data flow, structure) run the Graphite commands first; grep/glob are for literal text and filename lookups only. Fall back to manual search only after a Graphite answer proved insufficient, and say so. Use the existing `graph-out/graph.json` as the shared project graph, and do not edit `graph-out/` manually.
 
-**Stay inside this repository.** Do not read, write, or run commands in any other repo, including its graph. Findings about another repo go to its agent as a recommendation through the shared `.agent-channel/` (see its `PROTOCOL.md`); that agent decides and acts. A tool doing its designed job is a separate question from an agent's boundary. See `GRAPHITE.md` section "Repository Isolation".
+**Stay inside this repository.** Do not read, write, or run commands in any other repo, including its graph. Use graphite, and every other tool, only as a tool (its CLI, MCP tools and docs); never direct a question to another repository's agent. The channel carries only bug reports and recommended improvements. Findings about another repo go to its agent that way, through the shared `.agent-channel/` (see its `PROTOCOL.md`); that agent decides and acts. A tool doing its designed job is a separate question from an agent's boundary. See `GRAPHITE.md` section "Repository Isolation".
 """
 
 CURSOR_POINTER = """---
@@ -160,6 +164,8 @@ alwaysApply: true
 # Graphite Instructions
 
 Graphite-first is required in this repo. Follow `GRAPHITE.md` before making non-trivial code changes: for cross-file questions (who-calls, where-defined, impact, data flow, structure) run the Graphite commands first; grep/glob are for literal text and filename lookups only. Fall back to manual search only after a Graphite answer proved insufficient, and say so. Use the existing `graph-out/graph.json` as the shared project graph, and do not edit `graph-out/` manually.
+
+Stay inside this repository. Use graphite, and every other tool, only as a tool (its CLI, MCP tools and docs); never direct a question to another repository's agent. The channel carries only bug reports and recommended improvements. See `GRAPHITE.md` section "Repository Isolation".
 """
 
 PLATFORM_ORDER: tuple[str, ...] = (
