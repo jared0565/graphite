@@ -69,6 +69,24 @@ def _strip_graphite(groups: Any) -> list[Any]:
     return kept
 
 
+def _merge_owned(groups: Any, entry: dict[str, Any]) -> list[Any]:
+    """One event's groups with graphite's ``entry`` in them, at most once.
+
+    An entry that is already exactly current stays where it is. Re-appending it
+    on every install moved it behind any other tool's hook. Claude Code runs
+    matching hooks in parallel, so the order means nothing, but
+    `.claude/settings.json` is tracked, and every `init` re-run showed a change
+    to a committed file. Anything else (stale, duplicated, or beside a legacy
+    graphite hook in another group) is stripped and appended as before.
+    """
+    stripped = _strip_graphite(groups)
+    if isinstance(groups, list) and entry in groups:
+        index = groups.index(entry)
+        if groups[:index] + groups[index + 1:] == stripped:
+            return list(groups)
+    return [*stripped, entry]
+
+
 def _load_settings(path: Path) -> dict[str, Any] | None:
     """Parsed settings dict, {} when absent, None when malformed."""
     if not path.exists():
@@ -212,8 +230,7 @@ def ensure_claude_settings(root: Path, *, mode: str | None = None) -> dict[str, 
     }
     changed = False
     for event, entry in desired.items():
-        groups = _strip_graphite(hooks.get(event))
-        groups.append(entry)
+        groups = _merge_owned(hooks.get(event), entry)
         if hooks.get(event) != groups:
             changed = True
         hooks[event] = groups

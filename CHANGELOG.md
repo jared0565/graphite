@@ -72,6 +72,17 @@ Both retire when scope-qualified Python ids ship
 error in the next major release (`docs/compatibility.md`: the channel
 protocol is a stable surface).
 
+### Fixed
+
+**`graphite init` no longer moves its hooks to the end of
+`.claude/settings.json` when they are already current.** It used to strip and
+re-append them on every run, so in a repo where another tool's hook came after
+graphite's, each `init` re-run reordered the file. That showed up as a change
+to a committed file although nothing had changed: Claude Code runs matching
+hooks in parallel, so their order has no effect. A current entry now stays
+where it is. A stale, duplicated or legacy graphite entry is still replaced,
+and a missing one is still appended.
+
 ## [1.1.1] — 2026-10-03
 
 A patch release. Security fixes ship in the next patch release of the current

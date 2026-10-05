@@ -99,6 +99,82 @@ def test_replaces_stale_graphite_entries_on_reinit(tmp_path: Path) -> None:
     assert settings["hooks"]["PreToolUse"][0]["matcher"] == "Grep|Glob|Bash|PowerShell"
 
 
+_FOREIGN_PRE = {"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command": "python -P -m aramid agent-hook pre-tool-use"}]}
+_FOREIGN_START = {"hooks": [{"type": "command", "command": "python -P -m aramid agent-hook session-start"}]}
+
+
+def _with_foreign_after(root: Path, *, mode: str) -> Path:
+    """Graphite's current entries first, another tool's hooks after them: the
+    layout a repo has once a second tool's `init` has run after graphite's."""
+    ensure_claude_settings(root, mode=mode)
+    path = root / ".claude" / "settings.json"
+    settings = _settings(root)
+    settings["hooks"]["PreToolUse"].append(_FOREIGN_PRE)
+    settings["hooks"]["SessionStart"].append(_FOREIGN_START)
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def test_a_current_entry_is_left_where_it_is_when_a_foreign_hook_follows_it(tmp_path: Path) -> None:
+    """Hooks run in parallel, so their order means nothing to Claude Code, but
+    `.claude/settings.json` is tracked: moving graphite's entries to the end on
+    every install made each `init` re-run show a change to a committed file in
+    every repo where another tool's hook came after graphite's."""
+    path = _with_foreign_after(tmp_path, mode="strict")
+    before = path.read_bytes()
+
+    result = ensure_claude_settings(tmp_path, mode="strict")
+
+    assert result["changed"] is False
+    assert result["action"] == "already current"
+    assert path.read_bytes() == before
+
+
+def test_a_stale_entry_is_still_rewritten_when_a_foreign_hook_follows_it(tmp_path: Path) -> None:
+    """Staying in place is only for an entry that is already right: a mode
+    change must still be written, and the other tool's hook kept."""
+    _with_foreign_after(tmp_path, mode="remind")
+
+    result = ensure_claude_settings(tmp_path, mode="strict")
+    commands = _commands(_settings(tmp_path), "PreToolUse")
+
+    assert result["changed"] is True
+    assert commands.count("python -P -m graphite agent-hook pre-tool-use --mode strict") == 1
+    assert not any("--mode remind" in c for c in commands)
+    assert "python -P -m aramid agent-hook pre-tool-use" in commands
+
+
+def test_a_duplicated_current_entry_is_collapsed_to_one(tmp_path: Path) -> None:
+    path = _with_foreign_after(tmp_path, mode="strict")
+    settings = _settings(tmp_path)
+    settings["hooks"]["PreToolUse"].append(settings["hooks"]["PreToolUse"][0])
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+    result = ensure_claude_settings(tmp_path, mode="strict")
+    commands = _commands(_settings(tmp_path), "PreToolUse")
+
+    assert result["changed"] is True
+    assert commands.count("python -P -m graphite agent-hook pre-tool-use --mode strict") == 1
+
+
+def test_a_current_entry_does_not_shelter_a_legacy_one_elsewhere(tmp_path: Path) -> None:
+    """A current entry in place must not stop a legacy graphite hook in another
+    group from being stripped: the legacy bare `-m` form is the shadowable one."""
+    path = _with_foreign_after(tmp_path, mode="strict")
+    settings = _settings(tmp_path)
+    settings["hooks"]["PreToolUse"].append(
+        {"matcher": "Grep", "hooks": [{"type": "command", "command": "python -m graphite agent-hook pre-tool-use --mode strict"}]}
+    )
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+
+    result = ensure_claude_settings(tmp_path, mode="strict")
+    commands = _commands(_settings(tmp_path), "PreToolUse")
+
+    assert result["changed"] is True
+    assert "python -m graphite agent-hook pre-tool-use --mode strict" not in commands
+    assert commands.count("python -P -m graphite agent-hook pre-tool-use --mode strict") == 1
+
+
 def test_mode_preserved_without_explicit_request(tmp_path: Path) -> None:
     ensure_claude_settings(tmp_path, mode="strict")
     assert existing_mode(tmp_path) == "strict"
