@@ -126,7 +126,10 @@ Python node ids changed:
   Django. Each of the 6 is a module-level function whose id a same-named method
   had taken.
 
-Do not persist node ids across this upgrade.
+Do not persist node ids across this upgrade. graphite's own node-id holders
+were audited: the incident ledger, daemon manifest, `check` records, rollback
+store, usage ledger, overlays and extraction cache. None reads a node id back
+across an engine change.
 
 The Python `calls` ratio moved from 0.977 to 0.975 on graphite (0.704 to 0.700
 on Django). The change was not broken down by cause. The candidates are:
