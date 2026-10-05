@@ -2209,6 +2209,18 @@ def _resolve_method_dispatch(
     return out
 
 
+def _location_order(location: str | None) -> tuple[int, str]:
+    """Sort key for an edge's `source_location`: the line NUMBER first (§4.5).
+
+    As a string `L12` sorts before `L9`, so the edge `_merge` kept for a
+    (source, target, relation) triple named an arbitrary site rather than the
+    first one. A missing or non-`L<digits>` location sorts after every line.
+    """
+    if location and location[0] == "L" and location[1:].isdigit():
+        return int(location[1:]), location
+    return sys.maxsize, location or ""
+
+
 def _merge(results: list[ExtractionResult]) -> ExtractionResult:
     merged = ExtractionResult()
     # Collect all nodes/edges, then sort deterministically before dedup.
@@ -2239,7 +2251,7 @@ def _merge(results: list[ExtractionResult]) -> ExtractionResult:
             e.get("target", ""),
             e.get("relation", ""),
             e.get("source_file", ""),
-            e.get("source_location", ""),
+            _location_order(e.get("source_location")),
         )
     )
     # Duplicate (source, target, relation) triples collapse to one edge, but the
