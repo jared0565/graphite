@@ -35,7 +35,8 @@
           "input": {"type": "string"},
           "node": {"type": "string"},
           "type": {"type": "string"},
-          "alternates": {"type": "array", "items": {"type": "string"}}
+          "alternates": {"type": "array", "items": {"type": "string"}},
+          "alternates_total": {"type": "integer", "description": "How many other nodes matched as well as `node`. `alternates` lists at most three (four for `path-suffix`), so compare the two before treating the list as complete."}
         }
       }
     },

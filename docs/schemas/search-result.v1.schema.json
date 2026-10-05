@@ -30,7 +30,8 @@
             "type": "string",
             "enum": ["exact-id", "name", "path-suffix", "id-substring", "name-substring", "tokens"]
           },
-          "score": {"type": "number"}
+          "score": {"type": "number"},
+          "qualname": {"type": "string", "description": "A Python method's or nested definition's qualified name (`Worker.run`); present only when it differs from `name`."}
         }
       }
     }

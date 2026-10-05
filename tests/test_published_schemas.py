@@ -39,10 +39,16 @@ def _graph():
         {"id": "src_app_main", "kind": "function", "name": "main", "source_file": "src/app.ts"},
         {"id": "src_lib", "kind": "file", "name": "lib.ts", "source_file": "src/lib.ts"},
         {"id": "src_lib_helper", "kind": "function", "name": "helper", "source_file": "src/lib.ts"},
+        {"id": "src_svc_py", "kind": "file", "name": "svc.py", "source_file": "src/svc.py"},
+        {"id": "src_svc_py_run", "kind": "function", "name": "run", "qualname": "run",
+         "source_file": "src/svc.py"},
+        {"id": "src_svc_py_worker_run_7c6b1a", "kind": "function", "name": "run",
+         "qualname": "Worker.run", "is_method": True, "source_file": "src/svc.py"},
     ]
     edges = [
         {"source": "src_app", "target": "src_lib", "relation": "imports"},
         {"source": "src_app_main", "target": "src_lib_helper", "relation": "calls"},
+        {"source": "src_app_main", "target": "src_svc_py_worker_run_7c6b1a", "relation": "calls"},
     ]
     return build_graph(nodes, edges)
 
@@ -93,6 +99,8 @@ def test_query_outputs_match_published_result_schema() -> None:
         "callers",
         "path src_app",
         "reaches src_lib -> src_app",
+        "callers run",
+        "callers worker.run",
     )
     for q in samples:
         assert matches_schema(query(g, q), schema) is True, q
@@ -121,7 +129,7 @@ def test_natural_outputs_match_published_result_schema() -> None:
 def test_search_outputs_match_published_schema() -> None:
     schema = _load("search-result.v1.schema.json")
     g = _graph()
-    for text in ("helper", "src/app.ts", "pairing accept", "zzqx", "   "):
+    for text in ("helper", "src/app.ts", "pairing accept", "zzqx", "   ", "run"):
         assert matches_schema(search_graph(g, text), schema) is True, text
 
 

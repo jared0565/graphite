@@ -51,11 +51,15 @@ def build_context(
     for item in inputs:
         detail = _find_node_detail(g, item)
         if detail:
-            node, match_type, alternates = detail
-            start_nodes.append(node)
-            entry: dict[str, Any] = {"input": item, "node": _node_summary(g, node), "match_type": match_type}
-            if alternates:
-                entry["alternates"] = alternates
+            start_nodes.append(detail.node)
+            entry: dict[str, Any] = {
+                "input": item,
+                "node": _node_summary(g, detail.node),
+                "match_type": detail.match_type,
+            }
+            if detail.alternates:
+                entry["alternates"] = detail.alternates
+                entry["alternates_total"] = detail.alternates_total
             matched.append(entry)
         else:
             missing.append(item)

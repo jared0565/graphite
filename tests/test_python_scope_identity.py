@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from graphite.config import Config
+from graphite.context import build_context
 from graphite.extract.ast import (
     _LOADER,
     _MAX_ID_LEN,
@@ -25,6 +26,7 @@ from graphite.extract.ast import (
 from graphite.graph import build_graph
 from graphite.health import resolution_health
 from graphite.ingest import collect_files
+from graphite.query import query, search_graph
 
 
 def test_merge_keeps_the_numerically_first_location():
@@ -337,3 +339,70 @@ def test_a_methods_default_binds_the_class_level_helper(tmp_path):
     ids, calls = _ids(result), _pairs(result)
     assert (ids["K.m"], ids["K.factory"]) in calls
     assert (ids["K.m"], ids["factory"]) not in calls
+
+
+# --- query surface (Task 7) -----------------------------------------------------
+
+
+def _qualname_graph():
+    """Same-named definitions whose ids sort the WRONG way round on purpose: by id
+    the nested one comes first, so id order alone cannot pass the ranking test."""
+    nodes = [
+        {"id": "m_py", "kind": "file", "name": "m.py", "source_file": "m.py"},
+        {"id": "m_py_caller", "kind": "function", "name": "caller", "qualname": "caller", "source_file": "m.py"},
+        {"id": "m_py_a_outer_run_1", "kind": "function", "name": "run", "qualname": "outer.run", "source_file": "m.py"},
+        {"id": "m_py_b_worker_run_2", "kind": "function", "name": "run", "qualname": "Worker.run",
+         "is_method": True, "source_file": "m.py"},
+        {"id": "m_py_run", "kind": "function", "name": "run", "qualname": "run", "source_file": "m.py"},
+        {"id": "pkg_n_py_worker_run_3", "kind": "function", "name": "run", "qualname": "Worker.run",
+         "is_method": True, "source_file": "pkg/n.py"},
+    ]
+    edges = [{"source": "m_py_caller", "target": "m_py_b_worker_run_2", "relation": "calls"}]
+    return build_graph(nodes, edges)
+
+
+def test_a_bare_name_means_the_module_level_definition():
+    (resolution,) = query(_qualname_graph(), "callers run")["resolution"]
+    assert (resolution["type"], resolution["node"]) == ("name", "m_py_run")
+    # equal path depth: method before nested definition; the deeper file last
+    assert resolution["alternates"] == ["m_py_b_worker_run_2", "m_py_a_outer_run_1", "pkg_n_py_worker_run_3"]
+    assert resolution["alternates_total"] == 3
+
+
+def test_a_dotted_qualname_selects_that_definition():
+    out = query(_qualname_graph(), "callers Worker.run")
+    (resolution,) = out["resolution"]
+    assert (resolution["type"], resolution["node"]) == ("qualname", "m_py_b_worker_run_2")
+    assert resolution["alternates"] == ["pkg_n_py_worker_run_3"]
+    assert resolution["alternates_total"] == 1
+    assert [c["id"] for c in out["callers"]] == ["m_py_caller"]
+
+
+def test_alternates_are_capped_and_alternates_total_is_not():
+    """Review Focus 5: `test_daemon.py` alone will have six nested `fake_build`s."""
+    nodes = [{"id": "m_py", "kind": "file", "name": "m.py", "source_file": "m.py"}] + [
+        {"id": f"m_py_t{i}_fake_build", "kind": "function", "name": "fake_build",
+         "qualname": f"t{i}.fake_build", "source_file": "m.py"}
+        for i in range(6)
+    ]
+    g = build_graph(nodes, [])
+    (resolution,) = query(g, "callers fake_build")["resolution"]
+    assert len(resolution["alternates"]) == 3
+    assert resolution["alternates_total"] == 5
+    (exact,) = query(g, "callers t0.fake_build")["resolution"]
+    assert (exact["type"], exact["node"]) == ("qualname", "m_py_t0_fake_build")
+    assert "alternates" not in exact
+
+
+def test_rows_carry_a_qualname_when_it_differs_from_the_name():
+    g = _qualname_graph()
+    (callee,) = query(g, "calls caller")["calls"]
+    assert callee["qualname"] == "Worker.run"
+    rows = {r["id"]: r for r in search_graph(g, "run")["results"]}
+    assert rows["m_py_b_worker_run_2"]["qualname"] == "Worker.run"
+    assert "qualname" not in rows["m_py_run"]
+
+
+def test_context_reports_alternates_total():
+    (entry,) = build_context(_qualname_graph(), ["run"])["matched"]
+    assert entry["alternates_total"] == 3

@@ -32,6 +32,8 @@ Deterministic ranked search
 paths, and concept tokens. `match_type` explains each hit (`exact-id`, `name`,
 `path-suffix`, `id-substring`, `name-substring`, `tokens`); results are bounded
 (`--limit`, default 20, max 100) with `truncated`/`total_matches` reported.
+A row for a Python method or nested definition carries `qualname`
+(`Worker.run`, `test_one.fake_build`) when it differs from `name`.
 Exit code is 0 even for zero matches — branch on the JSON.
 
 ## 3. Query the graph
@@ -48,9 +50,15 @@ envelope:
   `unknown_query_verb` (with `suggestions`), `invalid_query_format`,
   `node_not_found` (with `candidates`), `no_path`, `invalid_plan`.
 - On success, `resolution` lists how every input resolved
-  (`role`/`input`/`node`/`type`, plus `alternates` when a token was
-  ambiguous). Check it before trusting results — a `fuzzy` resolution with
-  alternates may mean the wrong node was picked.
+  (`role`/`input`/`node`/`type`, plus `alternates` and `alternates_total`
+  when a token was ambiguous). `type` is `exact-id`, `qualname` (a dotted
+  Python qualified name such as `Worker.run`), `name`, `path-suffix` or
+  `fuzzy`. Among same-named definitions at equal path depth a bare name picks
+  the module-level one, then a method, then a nested definition; name a nested
+  one by its qualname. `alternates` lists at most three (four for
+  `path-suffix`); `alternates_total` says how many there were. Check it before
+  trusting results — a `fuzzy` resolution with alternates may mean the wrong
+  node was picked.
 - Traversal is bounded with generous defaults (path/reaches `max_depth` 32,
   neighbor listings `max_results` 200). Results report `truncated` and
   `limits`. Important nuance: a `no_path` error with `truncated: true` means

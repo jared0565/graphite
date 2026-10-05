@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import networkx as nx
 
@@ -524,6 +524,32 @@ def _candidates(g: nx.DiGraph, token: str, limit: int = 5) -> list[dict[str, Any
     return [_node_view(g, n) for _score, n in scored[:limit]]
 
 
+class NodeMatch(NamedTuple):
+    """How a query token resolved to a node: `_find_node_detail`'s answer.
+
+    `alternates` lists a few other nodes that matched equally well;
+    `alternates_total` is how many there were in all, so a capped list cannot
+    read as a complete one.
+    """
+
+    node: str
+    match_type: str
+    alternates: list[str]
+    alternates_total: int
+
+
+def _scope_rank(g: nx.DiGraph, node_id: str) -> int:
+    """0 module scope (or no qualname: other languages, files), 1 method, 2 nested (#70).
+
+    A bare name then means the module-level definition when one exists, and the
+    choice among same-named definitions stops depending on id order.
+    """
+    data = g.nodes[node_id]
+    if "." not in str(data.get("qualname", "")):
+        return 0
+    return 1 if data.get("is_method") else 2
+
+
 def _path_depth(g: nx.DiGraph, node_id: str) -> int:
     """Number of directory segments in a node's source file (0 = repo root)."""
     source_file = g.nodes[node_id].get("source_file") or ""
@@ -531,17 +557,29 @@ def _path_depth(g: nx.DiGraph, node_id: str) -> int:
     return normalized.count("/") if normalized else 0
 
 
-def _find_node_detail(g: nx.DiGraph, token: str) -> tuple[str, str, list[str]] | None:
+def _find_node_detail(g: nx.DiGraph, token: str) -> NodeMatch | None:
     """Match a node and report HOW it matched.
 
-    Returns (node_id, match_type, alternates) where match_type is one of
-    "exact-id", "name", "path-suffix", or "fuzzy", and alternates lists other
-    nodes that matched equally well (so a silently-wrong pick is visible to the
-    caller). Ties are broken deterministically instead of by insertion order.
+    Match types, in precedence order: "exact-id", "qualname" (a dotted Python
+    qualified name such as `Worker.run`), "name", "path-suffix", "fuzzy".
+    `alternates` lists other nodes that matched equally well, so a
+    silently-wrong pick is visible to the caller; ties break deterministically
+    instead of by insertion order.
     """
     token = token.strip().lower().strip("`")
     if token in g:
-        return token, "exact-id", []
+        return NodeMatch(token, "exact-id", [], 0)
+
+    # A DOTTED token can name a nested definition exactly. An undotted one is
+    # left to the name tier: a module-level qualname equals its name, and
+    # matching it here would relabel every such match as `qualname`.
+    if "." in token:
+        qualname_hits = sorted(
+            (n for n in g.nodes() if "." in (q := str(g.nodes[n].get("qualname", ""))) and q.lower() == token),
+            key=lambda n: (_path_depth(g, n), n),
+        )
+        if qualname_hits:
+            return NodeMatch(qualname_hits[0], "qualname", qualname_hits[1:4], len(qualname_hits) - 1)
 
     # Multiple files can share a basename (README.md at root and under
     # hooks/, policy/, etc.) -- prefer the shallowest path, since a bare
@@ -549,13 +587,14 @@ def _find_node_detail(g: nx.DiGraph, token: str) -> tuple[str, str, list[str]] |
     # repo-root file, not whichever id happened to sort first alphabetically
     # (found via operation-firewall dogfooding, 2026-07-31: `README.md`
     # matched `hooks/README.md` over the root file purely because
-    # "hooks_readme" < "readme" as strings).
+    # "hooks_readme" < "readme" as strings). At equal depth a module-level
+    # definition beats a method, which beats a nested definition (#70).
     name_hits = sorted(
         (n for n in g.nodes() if g.nodes[n].get("name", "").lower() == token),
-        key=lambda n: (_path_depth(g, n), n),
+        key=lambda n: (_path_depth(g, n), _scope_rank(g, n), n),
     )
     if name_hits:
-        return name_hits[0], "name", name_hits[1:4]
+        return NodeMatch(name_hits[0], "name", name_hits[1:4], len(name_hits) - 1)
 
     normalized = token.replace("\\", "/")
     path_hits = sorted(
@@ -567,11 +606,12 @@ def _find_node_detail(g: nx.DiGraph, token: str) -> tuple[str, str, list[str]] |
         # Prefer the file node itself over symbols defined in the file.
         file_hits = [n for n in path_hits if g.nodes[n].get("kind") == "file"]
         chosen = file_hits[0] if file_hits else path_hits[0]
-        return chosen, "path-suffix", [n for n in path_hits if n != chosen][:4]
+        others = [n for n in path_hits if n != chosen]
+        return NodeMatch(chosen, "path-suffix", others[:4], len(others))
 
     fuzzy_hits = sorted((n for n in g.nodes() if token in n), key=lambda n: (len(n), n))
     if fuzzy_hits:
-        return fuzzy_hits[0], "fuzzy", fuzzy_hits[1:4]
+        return NodeMatch(fuzzy_hits[0], "fuzzy", fuzzy_hits[1:4], len(fuzzy_hits) - 1)
     return None
 
 
@@ -581,24 +621,32 @@ def _find_node(g: nx.DiGraph, token: str) -> str | None:
     return detail[0] if detail else None
 
 
-def _match_meta(token: str, detail: tuple[str, str, list[str]]) -> dict[str, Any]:
+def _match_meta(token: str, detail: NodeMatch) -> dict[str, Any]:
     """Query-response metadata describing how an input token was matched."""
-    node_id, match_type, alternates = detail
-    meta: dict[str, Any] = {"input": token, "node": node_id, "type": match_type}
-    if alternates:
-        meta["alternates"] = alternates
+    meta: dict[str, Any] = {"input": token, "node": detail.node, "type": detail.match_type}
+    if detail.alternates:
+        meta["alternates"] = detail.alternates
+        meta["alternates_total"] = detail.alternates_total
     return meta
 
 
 def _node_view(g: nx.DiGraph, n: str) -> dict[str, Any]:
-    """Compact node descriptor for call-graph results."""
+    """Compact node descriptor for call-graph results.
+
+    `qualname` appears only where it says more than `name`: a Python method or
+    nested definition (`Worker.run`), never a module-level one.
+    """
     data = g.nodes[n]
-    return {
+    view = {
         "id": n,
         "name": data.get("name", n),
         "kind": data.get("kind", "unknown"),
         "source_file": data.get("source_file", ""),
     }
+    qualname = data.get("qualname")
+    if qualname and qualname != view["name"]:
+        view["qualname"] = qualname
+    return view
 
 
 def _bounded_bfs_path(
