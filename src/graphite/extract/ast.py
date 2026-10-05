@@ -221,6 +221,27 @@ def _make_id(*parts: str) -> str:
     return f"{cleaned[: _MAX_ID_LEN - len(marker) - 1].rstrip('_')}_{marker}"
 
 
+def _scoped_id(file_id: str, qualname: str) -> str:
+    """Node id for a Python definition that is NOT at module scope (#70).
+
+    `qualname` is the enclosing definitions' names and its own, joined by `.`
+    (`Worker.run`, `test_one.fake_build`). Unlike `_make_id`, the hex marker is
+    ALWAYS appended, and it is hashed over a namespace tag no `_make_id` input
+    contains. `_make_id`'s ambiguity test would be the wrong tool here: it
+    treats `.` -> `_` as lossless, so -- measured -- `_make_id(f, "outer.inner")`
+    and a module-level `_make_id(f, "outer_inner")` are one id, and
+    `Worker.run` came out distinct only because of its capital letter.
+    """
+    marker = hashlib.blake2s(
+        f"py-scope\x00{file_id}\x00{qualname}".encode("utf-8"),
+        digest_size=_ID_DISCRIMINATOR_LEN // 2,
+    ).hexdigest()
+    readable = unicodedata.normalize("NFKC", f"{file_id}_{qualname}")
+    readable = re.sub(r"[^\w]+", "_", readable, flags=re.UNICODE)
+    readable = re.sub(r"_+", "_", readable).strip("_").casefold()
+    return f"{readable[: _MAX_ID_LEN - len(marker) - 1].rstrip('_')}_{marker}"
+
+
 def _file_node_id(rel_path: str) -> str:
     """Stable node id for a file: a slug of the FULL repo-relative path AND name.
 
