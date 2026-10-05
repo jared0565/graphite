@@ -1,8 +1,11 @@
 """Tests for the answer-scoped confidence contract (spec 2026-07-26)."""
+from datetime import date
+
 import networkx as nx
 
 from graphite.answer_contract import (
     ANSWER_SCHEMA,
+    CAVEAT_REGISTRY,
     GRADE_ADVISORY,
     GRADE_DECISION,
     GRADE_INCONCLUSIVE,
@@ -136,36 +139,51 @@ def test_the_callback_caveat_discriminates_where_the_blanket_one_cannot():
 SCOPE_BINDING_CODES = {"python-nested-name-shared-id", "python-bare-call-ignores-scope"}
 
 
-def test_the_call_binding_blindspots_are_declared_on_every_python_calls_answer():
-    """#70 and #71, confirmed 2026-10-04 and declared the same day, decoupled
-    from their fix (the registry's process rule).
-
-    Both are SCOPE disclosures, not hedges on a result. The wrong binding is
-    already baked into the graph by the time a query runs -- the ids were
-    merged, or the local name was bound to a definition -- so no answer can
-    tell whether it is affected. Measured on real code, the harm is in
-    NON-EMPTY answers (wrong callers at decision_grade: 118 sites on graphite,
-    76 on Django), so a form that appeared only on empty answers would be
-    absent exactly where it applies.
-    """
-    by_code = {e["code"]: e for e in active_caveats()}
+def test_the_call_binding_blindspots_retired_with_scope_identity():
+    """#70 and #71 were declared 2026-10-04 and retire with the phase 1 engine,
+    which measured zero wrong-target bare-name calls on graphite and Django
+    (scripts/pyscopeoracle.py). Retired, never deleted: a consumer that
+    recorded either code keeps the meaning it was published with."""
+    by_code = {e["code"]: e for e in CAVEAT_REGISTRY}
+    active = {e["code"] for e in active_caveats()}
     for code in SCOPE_BINDING_CODES:
         entry = by_code[code]
         assert entry["since"] == "2026-10-04"
-        assert entry["relations"] == ("calls",)
-        assert entry["languages"] == ("python",)
-        assert not entry.get("only_when_empty")
+        assert date.fromisoformat(entry["retired_by"]) >= date(2026, 10, 5)
+        assert code not in active
 
     g = _graph_ratio(".py", 10, 0)
-    empty = build_answer_block(g, relations=("calls",), languages=["python"], total=0)
-    found = build_answer_block(g, relations=("calls",), languages=["python"], total=3)
-    for block in (empty, found):
-        assert SCOPE_BINDING_CODES <= {c["code"] for c in block["caveats"]}
+    for total in (0, 3):
+        block = build_answer_block(g, relations=("calls",), languages=["python"], total=total)
+        assert not SCOPE_BINDING_CODES & {c["code"] for c in block["caveats"]}
+
+OVER_CAP_CODE = "python-member-call-over-dispatch-cap"
+
+
+def test_the_over_cap_member_call_drop_is_declared_on_every_python_calls_answer():
+    """Declared 2026-10-05, the day phase 1's measurement confirmed it (#73).
+
+    Methods now have their own nodes, so more member calls (`self.m()`,
+    `super().m()`) exceed `_MAX_METHOD_DISPATCH_CANDIDATES`, and an over-cap
+    call gets no edge. The dropped site also leaves the denominator, so the
+    harm is in NON-EMPTY answers that miss a caller at decision_grade -- a
+    scope disclosure, not a hedge on an empty result.
+    """
+    entry = {e["code"]: e for e in active_caveats()}[OVER_CAP_CODE]
+    assert entry["since"] == "2026-10-05"
+    assert entry["relations"] == ("calls",)
+    assert entry["languages"] == ("python",)
+    assert not entry.get("only_when_empty")
+
+    g = _graph_ratio(".py", 10, 0)
+    for total in (0, 3):
+        block = build_answer_block(g, relations=("calls",), languages=["python"], total=total)
+        assert OVER_CAP_CODE in {c["code"] for c in block["caveats"]}
 
     ts = build_answer_block(
         _graph_ratio(".ts", 10, 0), relations=("calls",), languages=["typescript"], total=3
     )
-    assert not SCOPE_BINDING_CODES & {c["code"] for c in ts["caveats"]}
+    assert OVER_CAP_CODE not in {c["code"] for c in ts["caveats"]}
 
 
 def test_scoped_cells_ignore_other_languages():
@@ -259,10 +277,9 @@ def test_registry_initial_entries():
         # fix deliberately fails closed on.
         "js-dynamic-module-load-unmodelled",
         "js-shadowed-module-local-unbound",
-        # #70 and #71, declared 2026-10-04; both retire with the phase 1
-        # scope-identity release.
-        "python-nested-name-shared-id",
-        "python-bare-call-ignores-scope",
+        # #73, declared 2026-10-05 when phase 1's measurement confirmed it.
+        # (#70 and #71, declared 2026-10-04, retired with that same release.)
+        "python-member-call-over-dispatch-cap",
     }
 
 

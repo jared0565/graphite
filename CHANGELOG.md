@@ -62,8 +62,25 @@ bare-name calls bound to the wrong definition, and 1,345 call sites credited
 to the wrong caller; on Django 5.2.7, 76 and 6,614. They are scope disclosures,
 present on empty and non-empty answers alike, because the wrong binding is
 made during extraction and no single answer can tell whether it is affected.
-Both retire when scope-qualified Python ids ship
-(`docs/superpowers/specs/2026-10-04-python-scope-identity-design.md`).
+Both are retired in this same release by the fix under "Fixed".
+
+**A new Python `calls` caveat, `python-member-call-over-dispatch-cap`, declared
+the day it was measured (#73).** A member call (`obj.m()`, `self.m()`,
+`super().m()`) whose method name has more than three definitions in the
+caller's file and the files it imports gets no edge. So a `callers` or
+`impact` result on a method may be missing real callers. It is a scope
+disclosure, present on every Python `calls` answer; the measurement is under
+"Fixed".
+
+**Query by qualified name.** A dotted Python qualified name (`Worker.run`,
+`test_one.fake_build`) now selects that definition in `query`, `context` and
+`impact`, as match type `qualname`, tried after `exact-id` and before `name`.
+Among same-named definitions at equal path depth, a bare name picks the
+module-level one, then a method, then a nested definition. Two published
+schemas gain an optional field, an additive change:
+- `search-result` rows carry `qualname` when it differs from `name`;
+- `query-result` `resolution[]` items carry `alternates_total`, the number of
+  alternates. `alternates` still lists at most three (four for `path-suffix`).
 
 ### Deprecated
 
@@ -73,6 +90,70 @@ error in the next major release (`docs/compatibility.md`: the channel
 protocol is a stable surface).
 
 ### Fixed
+
+**Python methods and nested definitions get their own node, and bare-name
+calls bind the way Python resolves them (#70, #71).**
+
+- Every `def` and `class` that is not at module scope now has a scope-qualified
+  id, built from its qualified name (`Worker.run`, `test_one.fake_build`), so
+  same-named methods and nested helpers stop sharing one node.
+- Module-scope ids are unchanged.
+- Every Python definition node carries `qualname`.
+- A bare call now resolves in the scope it is made in: parameters,
+  assignments, loop and `with` targets, `except` and `match` captures,
+  comprehension targets, function-local imports, `global` and `nonlocal`.
+  Enclosing class scopes are skipped from inside a method.
+- A call through a local name is kept as an unbound edge rather than bound to
+  a same-named definition.
+
+Measured with `scripts/pyscopeoracle.py` against CPython's `symtable`:
+- wrong-target bare-name calls went from 118 to 0 on graphite and from 77 to 0 on
+  Django 5.2.7;
+- 1,075 call sites on graphite (4,411 on Django) were credited to a different caller
+  before this change.
+
+The oracle grades bare-name calls only; member calls (`obj.m()`) are not
+graded. Its figures differ slightly from the census quoted under "Added":
+- Django's 77 is the census's 76, plus two generator-target sites the census
+  missed, minus one site the oracle reports as rebound and does not score;
+- 1,075 (4,411) counts only call sites that produce an edge, while 1,345
+  (6,614) also counts calls that produce none, such as `len()`.
+
+Python node ids changed:
+- 4,505 of 5,420 definition ids survive with the same meaning on graphite;
+- 8,959 of 34,609 survive on Django (the whole sdist, tests included);
+- id strings that now name a different definition: 0 on graphite and 6 on
+  Django. Each of the 6 is a module-level function whose id a same-named method
+  had taken.
+
+Do not persist node ids across this upgrade.
+
+The Python `calls` ratio moved from 0.977 to 0.975 on graphite (0.704 to 0.700
+on Django). The change was not broken down by cause. The candidates are:
+- local-value calls kept as unbound edges;
+- split nodes no longer sharing deduplicated edges;
+- over-cap member edges leaving the denominator.
+
+The retired caveats `python-nested-name-shared-id` and
+`python-bare-call-ignores-scope` stay in the registry, marked retired.
+
+Member calls on a commonly reused method name now lose their edge more often,
+though method dispatch itself is unchanged. A member call with more than
+three candidate methods gets no edge, counting candidates in the caller's own
+file and the files it imports. Same-named methods in one file used to be one
+candidate; now each is its own. On Django 5.2.7:
+- over-limit member-call sites rose from 2,889 to 3,817;
+- dropped member-call sites rose from 7,149 to 8,518.
+
+Many of the lost edges were wrong, such as `super().__init__()` bound to the
+class's own `__init__`. Some were right but imprecise.
+
+`graphite impact <file>` is unchanged for every file on graphite and on
+Django, both impacted files and likely tests, measured over the whole
+population. `impact` and `callers` on a method can lose callers: 8 of 1,803
+definitions on graphite and 236 of 8,439 on Django lost at least one likely
+test. This is disclosed as the caveat `python-member-call-over-dispatch-cap`.
+Class-aware `self.`/`super()` dispatch is #73.
 
 **`graphite init` no longer moves its hooks to the end of
 `.claude/settings.json` when they are already current.** It used to strip and

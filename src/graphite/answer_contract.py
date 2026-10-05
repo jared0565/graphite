@@ -62,6 +62,7 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
             "call to or from one may be attributed to another definition of the same name"
         ),
         "since": "2026-10-04",
+        "retired_by": "2026-10-05",
         # #70. Every Python def and class gets `_make_id(file_id, name)` at
         # every depth, so same-named nested helpers, methods of different
         # classes, or a method and a module function are ONE node, and the
@@ -72,6 +73,8 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         # not a conditional one: the merge happens at extraction, so no answer
         # can tell whether it is affected. Retires with the scope-identity
         # release (docs/superpowers/specs/2026-10-04-python-scope-identity-design.md).
+        # RETIRED by the phase 1 scope-identity engine: measured 0 wrong-target
+        # bare-name calls on graphite and on Django 5.2.7 (scripts/pyscopeoracle.py).
     },
     {
         "code": "python-bare-call-ignores-scope",
@@ -82,12 +85,39 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
             "method body may be bound to a same-named module function or sibling method"
         ),
         "since": "2026-10-04",
+        "retired_by": "2026-10-05",
         # #71. Bare-name resolution reads file-wide maps and same-file ids with
         # no view of local bindings: `def route_c(generate): generate()` is
         # recorded as a call to the module's `generate`, and a bare `run()` in
         # a method body as a call to the sibling method `run`, which Python
         # never resolves to. Measured: 3 sites on graphite, 49 on Django, all
         # wrong callers at decision_grade. Same retirement as the entry above.
+        # RETIRED by the phase 1 scope-identity engine: measured 0 wrong-target
+        # bare-name calls on graphite and on Django 5.2.7 (scripts/pyscopeoracle.py).
+    },
+    {
+        "code": "python-member-call-over-dispatch-cap",
+        "relations": ("calls",),
+        "languages": ("python",),
+        "summary": (
+            "a member call (obj.m(), self.m(), super().m()) whose method name has more than "
+            "3 definitions in the caller's file and the files it imports gets no edge, so a "
+            "callers or impact result on a method may be missing real callers"
+        ),
+        "since": "2026-10-05",
+        # #73. `_resolve_method_dispatch` is name-based; over
+        # `_MAX_METHOD_DISPATCH_CANDIDATES` it keeps an edge only when the
+        # placeholder is a real node or the call is EXTERNAL_CALL, so the site
+        # leaves the graph AND the denominator. Unchanged by phase 1, but phase 1
+        # gave every method its own node: same-named methods in one file used to
+        # be one candidate. Measured against 1.1.1: over-cap sites 210 -> 436
+        # (graphite), 2,889 -> 3,817 (Django 5.2.7); Django lost 1,372 member
+        # edges, 743 of them `super().m()` and 259 `self.m()`. Symbol-level
+        # `impact` lost a likely test for 8 of 1,803 definitions (graphite) and
+        # 236 of 8,439 (Django); file-level `impact` was unchanged for every
+        # file. A scope disclosure: the harm is in NON-EMPTY answers. The cap is
+        # language-agnostic, but only Python was measured. Retires with
+        # class-aware `self.`/`super()` dispatch (#73).
     },
     {
         "code": "ts-external-calls-unclassified",

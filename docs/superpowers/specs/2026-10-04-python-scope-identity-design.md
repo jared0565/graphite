@@ -179,9 +179,16 @@ iff its binder is an unresolved import.
 
 The algorithm is unchanged; it indexes `is_method` nodes by name, so methods
 that shared one node become distinct candidates. A name with several same-named
-methods now fans out (one edge per candidate, cap 3) or exceeds the cap (the
-phantom edge is kept). Measured before and after on graphite and Django and
-reported: re-pointed edges, fan-out edges, cap overflows.
+methods now fans out (one edge per candidate, cap 3) or exceeds the cap. Over
+the cap, the edge is kept only if its target is a real node or it is
+EXTERNAL_CALL; otherwise it is dropped, and leaves the `calls` denominator.
+(Corrected 2026-10-05: this section first said "the phantom edge is kept",
+which misread the code.) Measured before and after on graphite and Django and
+reported: re-pointed edges, fan-out edges, cap overflows. Measured result: more
+member calls exceed the cap, because same-named methods in one file are no
+longer one candidate. This is disclosed as the caveat
+`python-member-call-over-dispatch-cap`; class-aware `self.`/`super()` dispatch
+is #73.
 
 ### 4.4 Query surface (`query.py`)
 

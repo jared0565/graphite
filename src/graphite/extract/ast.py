@@ -2142,8 +2142,10 @@ def _resolve_method_dispatch(
     reaches, including across files.
 
     Ambiguity policy (``_MAX_METHOD_DISPATCH_CANDIDATES``): a unique name re-points to
-    the single definition; 2..cap candidates each get an edge; more than cap (or zero)
-    candidates leaves the original phantom edge unchanged. Arrow-valued class fields
+    the single definition; 2..cap candidates each get an edge; with more than cap (or
+    zero) candidates the original edge is kept only if its target is a real node or it
+    is EXTERNAL_CALL, and is otherwise DROPPED -- the site leaves the graph and the
+    `calls` denominator (caveat `python-member-call-over-dispatch-cap`). Arrow-valued class fields
     (``foo = () => {}``) parse as ``public_field_definition`` rather than
     ``method_definition``; they are tagged ``is_method`` at extraction so they are
     indexed here on equal terms (#19).

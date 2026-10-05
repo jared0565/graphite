@@ -120,9 +120,23 @@ through the plan.
 
 **A node id from an older graph no longer resolves.** → Node ids are stable
 only within an engine version; 0.5.0 deliberately changed id construction
-(`index.ts` and `index.js` were one node before). → Never persist node ids
-across upgrades; re-read them from the new graph, or key on paths and
-symbol names.
+(`index.ts` and `index.js` were one node before), and the Python
+scope-identity release changed it again: a Python method or nested
+definition's id is now `<file>_<qualname>_<hex>` (`m_py_worker_run_7c6b1a`),
+while module-level ids are unchanged. → Never persist node ids across
+upgrades; re-read them from the new graph, or key on paths and qualified
+names (`graphite query "callers Worker.run"` resolves a qualname).
+
+**`callers` or `impact` on a Python method misses a caller that calls it as
+`self.m()`, `super().m()` or `obj.m()`, and the answer still says
+`decision_grade`.** → Member calls are dispatched by method name. When more
+than three methods of that name are defined in the caller's file and the
+files it imports, the call gets no edge, and the dropped site also leaves
+the ratio. Since Python methods got their own nodes, common names (`__init__`,
+`get_queryset`, `to_dict`) hit this more often. The answer's caveats list
+`python-member-call-over-dispatch-cap`. → Confirm with grep for `.m(`. File
+input was unaffected where measured: on graphite and on Django, no file's
+`impact <file>` result changed. Class-aware dispatch is #73.
 
 ## The daemon
 
