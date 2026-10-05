@@ -1264,6 +1264,91 @@ def _python_from_import_submodules(
     return out
 
 
+def _python_import_bindings(
+    node: Any, rel_path: str, source_index: SourceIndex | None
+) -> list[tuple[str, str, str | None]]:
+    """(local name, kind, target) for each name ONE import statement binds.
+
+    kind is "alias" (a module: target its file id, or None for the package root
+    `import pkg.sub` binds), "symbol" (target the definition id in the module's
+    file), "external" (did not resolve in-repo), or "unknown" (no source index
+    to ask). For `from P import name`, `P.name` is tried as a MODULE first.
+    Star imports bind nothing this can name.
+
+    Where each binding LIVES is not decided here. The scope walk
+    (`extract/pyscope.py`) binds it in the scope the statement sits in, so a
+    function-local import no longer binds the name for the whole file (#71).
+    """
+    def _text(n: Any) -> str:
+        return n.text.decode("utf-8", errors="ignore") if n is not None and n.text else ""
+
+    out: list[tuple[str, str, str | None]] = []
+    if node.type == "import_statement":
+        for child in node.children:
+            if child.type == "dotted_name":
+                module = _text(child)
+                if not module:
+                    continue
+                root = module.split(".", 1)[0]
+                if source_index is None:
+                    out.append((root, "unknown", None))
+                elif "." not in module:
+                    resolved = source_index.resolve_python_module(rel_path, module)
+                    out.append((module, "alias", _file_node_id(resolved)) if resolved else (module, "external", None))
+                elif source_index.resolve_python_module(rel_path, root) is None:
+                    # `import pkg.sub` binds only the root name `pkg`. Mark it
+                    # external ONLY if that root does not resolve in-repo -- a
+                    # false external costs more than a missed one (spec §4.2).
+                    out.append((root, "external", None))
+                else:
+                    out.append((root, "alias", None))
+            elif child.type == "aliased_import":
+                module = _text(child.child_by_field_name("name"))
+                local = _text(child.child_by_field_name("alias"))
+                if not module or not local:
+                    continue
+                if source_index is None:
+                    out.append((local, "unknown", None))
+                    continue
+                resolved = source_index.resolve_python_module(rel_path, module)
+                out.append((local, "alias", _file_node_id(resolved)) if resolved else (local, "external", None))
+    elif node.type == "import_from_statement":
+        modules = _python_import_modules(node)
+        if not modules:
+            return out
+        base_module, dots = modules[0]
+        module_field = node.child_by_field_name("module_name")
+        for child in node.children:
+            if module_field is not None and child.id == module_field.id:
+                # The module_name field's own dotted_name is ALSO a plain child.
+                # Skipped by identity: sibling-token sniffing missed the first
+                # name inside parentheses (`from x import (a, b)`).
+                continue
+            if child.type == "dotted_name":
+                original = local = _text(child)
+            elif child.type == "aliased_import":
+                original = _text(child.child_by_field_name("name"))
+                local = _text(child.child_by_field_name("alias"))
+            else:
+                continue
+            if not original or not local or "." in original:
+                continue
+            if source_index is None:
+                out.append((local, "unknown", None))
+                continue
+            sub = f"{base_module}.{original}" if base_module else original
+            as_module = source_index.resolve_python_module(rel_path, sub, dots)
+            if as_module:
+                out.append((local, "alias", _file_node_id(as_module)))
+                continue
+            parent = source_index.resolve_python_module(rel_path, base_module, dots)
+            if parent:
+                out.append((local, "symbol", _make_id(_file_node_id(parent), original)))
+            else:
+                out.append((local, "external", None))
+    return out
+
+
 def _collect_python_import_maps(
     root: Any, rel_path: str, source_index: SourceIndex | None
 ) -> tuple[dict[str, str], dict[str, str], frozenset[str]]:
@@ -1285,74 +1370,15 @@ def _collect_python_import_maps(
     if source_index is None:
         return symbol_map, alias_map, frozenset()
 
-    def _text(n: Any) -> str:
-        return n.text.decode("utf-8", errors="ignore") if n is not None and n.text else ""
-
     def visit(node: Any) -> None:
-        if node.type == "import_statement":
-            for child in node.children:
-                if child.type == "dotted_name":
-                    module = _text(child)
-                    if module and "." not in module:
-                        resolved = source_index.resolve_python_module(rel_path, module)
-                        if resolved:
-                            alias_map[module] = _file_node_id(resolved)
-                        else:
-                            external.add(module)
-                    elif module:
-                        # `import pkg.sub` binds only the root name `pkg`.
-                        # Mark it external ONLY if that root does not
-                        # resolve in-repo -- a local `pkg` would otherwise
-                        # have its calls excluded from the ratio as a false
-                        # external (spec §4.2: a false external costs more
-                        # than a missed one).
-                        root = module.split(".", 1)[0]
-                        if source_index.resolve_python_module(rel_path, root) is None:
-                            external.add(root)
-                elif child.type == "aliased_import":
-                    module = _text(child.child_by_field_name("name"))
-                    # Optional by declaration: the `from` branch below starts
-                    # the name at None and narrows before every use.
-                    local: str | None = _text(child.child_by_field_name("alias"))
-                    if module and local:
-                        resolved = source_index.resolve_python_module(rel_path, module)
-                        if resolved:
-                            alias_map[local] = _file_node_id(resolved)
-                        else:
-                            external.add(local)
-        elif node.type == "import_from_statement":
-            modules = _python_import_modules(node)
-            if modules:
-                base_module, dots = modules[0]
-                module_field = node.child_by_field_name("module_name")
-                for child in node.children:
-                    if module_field is not None and child.id == module_field.id:
-                        # The module_name field's own dotted_name (e.g. `pkg`
-                        # in `from pkg import a`) is ALSO a plain child of
-                        # this statement. Skip it by identity rather than by
-                        # sibling-token sniffing: `prev_sibling in ("import",
-                        # ",")` fails for the first name inside parens
-                        # (`from x import (a, b)` — `a`'s prev_sibling is
-                        # `(`), silently dropping black-style multi-imports.
-                        continue
-                    local = original = None
-                    if child.type == "dotted_name":
-                        original = local = _text(child)
-                    elif child.type == "aliased_import":
-                        original = _text(child.child_by_field_name("name"))
-                        local = _text(child.child_by_field_name("alias"))
-                    if not original or not local or "." in original:
-                        continue
-                    sub = f"{base_module}.{original}" if base_module else original
-                    as_module = source_index.resolve_python_module(rel_path, sub, dots)
-                    if as_module:
-                        alias_map[local] = _file_node_id(as_module)
-                        continue
-                    parent = source_index.resolve_python_module(rel_path, base_module, dots)
-                    if parent:
-                        symbol_map[local] = _make_id(_file_node_id(parent), original)
-                    else:
-                        external.add(local)
+        if node.type in ("import_statement", "import_from_statement"):
+            for local, kind, target in _python_import_bindings(node, rel_path, source_index):
+                if kind == "alias" and target is not None:
+                    alias_map[local] = target
+                elif kind == "symbol" and target is not None:
+                    symbol_map[local] = target
+                elif kind == "external":
+                    external.add(local)
         for child in node.children:
             visit(child)
 
