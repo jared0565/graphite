@@ -277,6 +277,31 @@ def test_two_unresolved_imports_of_one_name_stay_external(tmp_path):
     assert edge["confidence"] == "EXTERNAL_CALL"
 
 
+def test_an_optional_dependency_stays_external_and_is_not_re_pointed(tmp_path):
+    """Refinement 13, Django's `autoreload.py` shape: `pywatchman.client()` must not dispatch to `R.client`."""
+    source = (
+        "try:\n"
+        "    import pywatchman\n"
+        "except ImportError:\n"
+        "    pywatchman = None\n"
+        "\n"
+        "\n"
+        "class R:\n"
+        "    def client(self):\n"
+        "        return pywatchman.client(timeout=1)\n"
+        "\n"
+        "\n"
+        "def probe():\n"
+        "    return pywatchman()\n"
+    )
+    result = _extract(tmp_path, {"m.py": source})
+    by_line = {e["source_location"]: e for e in _call_edges(result)}
+    member, bare = by_line["L9"], by_line["L13"]
+    assert member["confidence"] == "EXTERNAL_CALL"
+    assert member["target"] != _ids(result)["R.client"]
+    assert bare["confidence"] == "EXTERNAL_CALL"
+
+
 def test_a_local_value_named_like_a_global_is_a_local_receiver():
     """Refinement 2a: `it` is a test-framework global, but here a loop variable."""
     (edge,) = _call_edges(_extract_one("def f(items):\n    for it in items:\n        it.process()\n"))

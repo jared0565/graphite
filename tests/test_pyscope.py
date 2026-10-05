@@ -197,6 +197,26 @@ def test_two_unresolved_imports_of_one_name_stay_external():
     assert _one(src, "loads") == S.Resolution("external")
 
 
+def test_an_optional_dependency_with_a_none_fallback_stays_external():
+    """Refinement 13: `try: import X` / `except ImportError: X = None` leaves the repo or is None."""
+    src = "try:\n    import extwatch\nexcept ImportError:\n    extwatch = None\nextwatch()\n"
+    assert _one(src, "extwatch") == S.Resolution("external")
+
+
+def test_a_none_fallback_for_an_in_repo_import_is_ambiguous():
+    src = "try:\n    from repo import f\nexcept ImportError:\n    f = None\nf()\n"
+    assert _one(src, "f") == VALUE
+
+
+def test_a_fallback_that_is_not_none_is_ambiguous():
+    src = "try:\n    import extwatch\nexcept ImportError:\n    extwatch = make()\nextwatch()\n"
+    assert _one(src, "extwatch") == VALUE
+
+
+def test_a_none_assignment_alone_is_a_value():
+    assert _one("x = None\nx()\n", "x") == VALUE
+
+
 def test_a_def_and_an_import_of_one_name_are_ambiguous():
     assert _one("from repo import f\ndef f(): pass\nf()\n", "f") == VALUE
 

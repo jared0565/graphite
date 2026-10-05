@@ -45,9 +45,11 @@ class Binder:
     module_level: bool = False
     import_kind: str | None = None
     target: str | None = None
+    none_literal: bool = False  # a value binder whose value is the literal `None`
 
 
 _VALUE = Binder("value")
+_NONE_VALUE = Binder("value", none_literal=True)
 
 
 @dataclass(eq=False)
@@ -267,9 +269,11 @@ def collect_scopes(root: Any, import_bindings: ImportBindings, name_of: NameOf) 
             call_scope[node.id] = scope
         elif kind == "assignment":
             # An annotation with no value (`x: int`) binds only in a function.
-            if node.child_by_field_name("right") is not None or scope.kind in ("function", "lambda"):
+            right = node.child_by_field_name("right")
+            if right is not None or scope.kind in ("function", "lambda"):
+                binder = _NONE_VALUE if right is not None and right.type == "none" else _VALUE
                 for name in _target_names(node.child_by_field_name("left")):
-                    scope.bind(name, _VALUE)
+                    scope.bind(name, binder)
         elif kind == "augmented_assignment":
             for name in _target_names(node.child_by_field_name("left")):
                 scope.bind(name, _VALUE)
@@ -378,8 +382,11 @@ def _outcome(binders: list[Binder]) -> Resolution:
         if binder.kind == "import" and binder.import_kind is not None and binder.import_kind != "unknown":
             return Resolution(binder.import_kind, target=binder.target)
         return Resolution("value")
-    # Two unresolved imports of one name (`try: import ujson as json` /
-    # `except ImportError: import json`) leave the repo whichever one runs.
-    if all(b.kind == "import" and b.import_kind == "external" for b in binders):
+    # Unresolved imports of one name (`try: import ujson as json` /
+    # `except ImportError: import json`) leave the repo whichever one runs. So
+    # does an optional dependency (`except ImportError: X = None`): calling
+    # `None` is an error, never repo code. (`None` alone is one distinct
+    # binder, a value, so reaching here means some binder is not `None`.)
+    if all((b.kind == "import" and b.import_kind == "external") or b.none_literal for b in binders):
         return Resolution("external")
     return Resolution("value")
