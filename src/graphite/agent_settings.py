@@ -205,7 +205,7 @@ def ensure_claude_settings(root: Path, *, mode: str | None = None) -> dict[str, 
         # silently overwrite with {} — treat it like unparseable JSON: no-op.
         return {"path": str(path), "changed": False, "action": "malformed settings", "mode": resolved}
     hooks = dict(hooks_value) if isinstance(hooks_value, dict) else {}
-    desired = {
+    desired: dict[str, dict[str, Any]] = {
         "PreToolUse": {
             # The shells are matched because the previous matcher, "Grep|Glob",
             # named TOOLS rather than behaviour: `grep -rn ...` through the Bash
