@@ -178,7 +178,7 @@ def test_module_boundary_calls_bind_to_their_definition(
     Only `import { f }` bound before this. `const { f } = require()` was
     declared as `ts-destructured-locals-unbound`; the two module-object shapes
     and ESM `import * as ns` were undeclared until 2026-08-10. Python already
-    binds the module-object shape via its `alias_map`, so this is a mirror of
+    binds the module-object shape via its alias bindings, so this is a mirror of
     an in-tree design rather than a new one.
     """
     _cjs_fixture(tmp_path)
@@ -757,7 +757,10 @@ def test_python_calls_are_function_scoped(tmp_path: Path) -> None:
     assert ("mod_py_caller_one", "mod_py_helper") in calls
     assert ("mod_py_caller_two", "mod_py_helper") in calls
     # attributed to the enclosing function, never the file node.
-    assert not any(src == "mod" for src, tgt in calls if tgt == "mod_py_helper")
+    # The file node's id is `mod_py` (#58 kept the extension); this guard read
+    # `src == "mod"` and could not fail. Pin the id it compares against.
+    assert {n["id"] for n in result.nodes if n["kind"] == "file"} == {"mod_py"}
+    assert not any(src == "mod_py" for src, tgt in calls if tgt == "mod_py_helper")
 
     g = build_graph(result.nodes, result.edges)
     callers = query(g, "callers helper")

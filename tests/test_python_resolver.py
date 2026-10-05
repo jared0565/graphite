@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from graphite.config import Config
-from graphite.extract.ast import _file_node_id, extract_all
+from graphite.extract.ast import _file_node_id, _scoped_id, extract_all
 from graphite.graph import build_graph
 from graphite.ingest import collect_files
 from graphite.query import query
@@ -455,8 +455,8 @@ def test_same_file_call_binding_unchanged(tmp_path):
 
 def test_aliased_dotted_import_binds_cross_module(tmp_path):
     # `import pkg.ledger as lg` then `lg.scan()` — exercises the
-    # aliased_import child of _collect_python_import_maps's import_statement
-    # branch (dotted module + alias -> alias_map).
+    # aliased_import child of _python_import_bindings's import_statement
+    # branch (dotted module + alias -> an alias binding).
     _write(tmp_path / "src" / "pkg" / "__init__.py", "")
     _write(
         tmp_path / "src" / "pkg" / "ledger.py",
@@ -480,9 +480,9 @@ def test_aliased_dotted_import_binds_cross_module(tmp_path):
 
 def test_plain_import_binds_cross_module(tmp_path):
     # `import flatmod` (non-dotted, no alias) then `flatmod.func()` —
-    # exercises the dotted_name child of _collect_python_import_maps's
-    # import_statement branch (non-dotted module -> alias_map keyed by
-    # its own name).
+    # exercises the dotted_name child of _python_import_bindings's
+    # import_statement branch (non-dotted module -> an alias binding keyed
+    # by its own name).
     _write(tmp_path / "flatmod.py", "def func():\n    return 1\n")
     _write(
         tmp_path / "consumer.py",
@@ -527,7 +527,7 @@ def test_self_call_binds_to_own_class_method(tmp_path):
     )
     g = _graph_for(tmp_path)
     out = query(g, "callers helper")
-    assert "svc_py_run" in [c["id"] for c in out.get("callers", [])]
+    assert _scoped_id("svc_py", "Svc.run") in [c["id"] for c in out.get("callers", [])]
 
 
 def test_unresolved_member_phantom_dropped(tmp_path):
@@ -560,7 +560,7 @@ def test_python_methods_tagged_top_level_functions_not(tmp_path):
     _py_fixture(tmp_path)
     result = _extract(tmp_path)
     by_id = {n["id"]: n for n in result.nodes}
-    assert by_id["src_pkg_ledger_py_record_run"].get("is_method") is True
+    assert by_id[_scoped_id("src_pkg_ledger_py", "Ledger.record_run")].get("is_method") is True
     assert by_id["src_pkg_tdd_py_auto_resolve_tdd"].get("is_method") is None
 
 

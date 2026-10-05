@@ -37,14 +37,35 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _calls(tmp_path: Path) -> set[tuple[str, str]]:
+def _result(tmp_path: Path):
     cfg = Config(
         workers=1,
         cache_dir=tmp_path / ".cache" / "graphite",
         typescript_resolver="disabled",
     )
-    result = extract_all(collect_files(tmp_path, cfg), cfg)
+    return extract_all(collect_files(tmp_path, cfg), cfg)
+
+
+def _pairs(result) -> set[tuple[str, str]]:
     return {(e["source"], e["target"]) for e in result.edges if e["relation"] == "calls"}
+
+
+def _calls(tmp_path: Path) -> set[tuple[str, str]]:
+    return _pairs(_result(tmp_path))
+
+
+def _def_id(result, source_file: str, qualname: str) -> str:
+    """A definition's id, LOOKED UP rather than spelled (#70).
+
+    A spelled id in a negative assertion goes vacuous when ids change: the edge
+    is absent because the id no longer exists, and the guard passes whatever
+    dispatch does. A lookup raises instead. Non-Python nodes carry no
+    `qualname`, so their `name` stands in.
+    """
+    for n in result.nodes:
+        if n.get("source_file") == source_file and n.get("qualname", n.get("name")) == qualname:
+            return n["id"]
+    raise AssertionError(f"no definition {qualname!r} in {source_file}")
 
 
 def _double(tmp_path: Path, method: str = "resolve") -> None:
@@ -75,7 +96,10 @@ def test_a_stdlib_call_does_not_bind_to_an_unimported_double(tmp_path: Path) -> 
         "    return Path(__file__).resolve()\n",
     )
 
-    assert ("src_prod_py_where", "tests_test_double_py_resolve") not in _calls(tmp_path)
+    result = _result(tmp_path)
+    where = _def_id(result, "src/prod.py", "where")
+    double = _def_id(result, "tests/test_double.py", "FakePath.resolve")
+    assert (where, double) not in _pairs(result)
 
 
 def test_a_local_receiver_does_not_bind_to_an_unimported_double(tmp_path: Path) -> None:
@@ -92,7 +116,10 @@ def test_a_local_receiver_does_not_bind_to_an_unimported_double(tmp_path: Path) 
         "    return path.resolve()\n",
     )
 
-    assert ("src_prod_py_where", "tests_test_double_py_resolve") not in _calls(tmp_path)
+    result = _result(tmp_path)
+    where = _def_id(result, "src/prod.py", "where")
+    double = _def_id(result, "tests/test_double.py", "FakePath.resolve")
+    assert (where, double) not in _pairs(result)
 
 
 def test_a_file_handle_write_does_not_bind_to_an_unimported_double(tmp_path: Path) -> None:
@@ -105,7 +132,10 @@ def test_a_file_handle_write_does_not_bind_to_an_unimported_double(tmp_path: Pat
         "        f.write(text)\n",
     )
 
-    assert ("src_prod_py_save", "tests_test_double_py_write") not in _calls(tmp_path)
+    result = _result(tmp_path)
+    save = _def_id(result, "src/prod.py", "save")
+    double = _def_id(result, "tests/test_double.py", "FakePath.write")
+    assert (save, double) not in _pairs(result)
 
 
 # --- the recall the gate must NOT cost ----------------------------------------
@@ -129,7 +159,9 @@ def test_an_imported_classs_method_still_binds_across_files(tmp_path: Path) -> N
         "    return ledger.record_run(run_id)\n",
     )
 
-    assert ("src_pipeline_py_run", "src_ledger_py_record_run") in _calls(tmp_path)
+    result = _result(tmp_path)
+    run = _def_id(result, "src/pipeline.py", "run")
+    assert (run, _def_id(result, "src/ledger.py", "Ledger.record_run")) in _pairs(result)
 
 
 def test_a_self_call_still_binds_in_the_same_file(tmp_path: Path) -> None:
@@ -142,7 +174,8 @@ def test_a_self_call_still_binds_in_the_same_file(tmp_path: Path) -> None:
         "        return self.helper()\n",
     )
 
-    assert ("svc_py_run", "svc_py_helper") in _calls(tmp_path)
+    result = _result(tmp_path)
+    assert (_def_id(result, "svc.py", "Svc.run"), _def_id(result, "svc.py", "Svc.helper")) in _pairs(result)
 
 
 def test_typescript_dispatch_is_untouched(tmp_path: Path) -> None:
@@ -261,7 +294,8 @@ def test_a_dotted_import_reaches_the_package_it_binds(tmp_path: Path) -> None:
     _write(tmp_path / "pkg" / "sub.py", "def helper():\n    return 1\n")
     _write(tmp_path / "m.py", "import pkg.sub\n\ndef go():\n    return pkg.build()\n")
 
-    assert ("m_py_go", "pkg_init_py_56bf3f_build") in _calls(tmp_path)
+    result = _result(tmp_path)
+    assert (_def_id(result, "m.py", "go"), _def_id(result, "pkg/__init__.py", "Widget.build")) in _pairs(result)
 
 
 @pytest.mark.parametrize(
@@ -291,4 +325,6 @@ def test_both_import_spellings_reach_their_target(tmp_path: Path, statement: str
         "    return ledger.record_run(run_id)\n",
     )
 
-    assert ("src_pkg_pipeline_py_run", "src_pkg_ledger_py_record_run") in _calls(tmp_path)
+    result = _result(tmp_path)
+    run = _def_id(result, "src/pkg/pipeline.py", "run")
+    assert (run, _def_id(result, "src/pkg/ledger.py", "Ledger.record_run")) in _pairs(result)

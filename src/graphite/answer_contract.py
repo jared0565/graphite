@@ -146,7 +146,7 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         # `const { f } = require(...)`. A published code's meaning never
         # changes, so the member-access shape gets its own entry rather than a
         # widened summary on that one. Python already binds this shape via
-        # `alias_map` (extract/ast.py); JavaScript has no equivalent.
+        # its alias bindings (extract/ast.py); JavaScript has no equivalent.
         #
         # Fixed by #49, which gave JavaScript that equivalent: `_ImportBindings
         # .namespaces` maps a whole-module local to its file, and `_resolve_call`

@@ -14,6 +14,7 @@ from ..cache import Cache
 from ..config import Config
 from ..ingest import LANGUAGE_BY_EXT, FileEntry
 from ..resolve import SourceIndex, should_keep_call_target
+from .pyscope import Resolution, ScopeTable, collect_scopes, resolve
 
 
 @dataclass
@@ -120,12 +121,10 @@ def _call_confidence(
     (``crypto`` the module vs. `crypto` the Web Crypto global) cannot make it
     external.
 
-    This precedence check is threaded for BOTH TypeScript and Python (#14
-    mechanism B). Python's bare-identifier and unresolved-member paths pass the
-    keys of `symbol_map` from `_collect_python_import_maps`, so a name the
-    source index proved local -- `helpers.py` defining `def format(...)`, then
-    `from helpers import format` and a call to `format(...)` -- stays
-    `LOCAL_CALL` rather than colliding with `_EXTERNAL_GLOBALS`.
+    This precedence check is threaded for TypeScript (#14 mechanism B). Python
+    no longer comes here: `_python_name_confidence` reads the binder the scope
+    walk found for the name, which is the same rule made per scope -- an in-repo
+    binding is never external, an unresolved import is (#71).
 
     ``attributable`` is False when ``called`` is a bare method name recovered
     from a receiver the extractor could not name -- a regex or string literal,
@@ -657,7 +656,7 @@ class _ImportBindings:
     #: Local name -> the FILE node id it stands for, for a whole-module binding:
     #: `import * as ns from './x'` and `const m = require('./x')`. A call
     #: `ns.f()` resolves to `<that file>_f`, which is exactly what Python's
-    #: `alias_map` has always done for `import x` + `x.attr()`. Separate from
+    #: alias bindings have always done for `import x` + `x.attr()`. Separate from
     #: `resolved` because that maps a name to a DEFINITION, and these names
     #: stand for a whole file rather than any one export.
     namespaces: dict[str, str] = field(default_factory=dict)
@@ -1226,9 +1225,9 @@ def _python_from_import_submodules(
 ) -> list[str]:
     """Resolved submodule paths for `from P import a, b` when a/b are modules.
 
-    Mirrors _collect_python_import_maps' module-first probe (the
+    Mirrors _python_import_bindings' module-first probe (the
     `as_module = source_index.resolve_python_module(...)` check tried
-    before the symbol-map fallback, in its import_from_statement branch)
+    before the symbol fallback, in its import_from_statement branch)
     at the import-EDGE layer: the emission site only ever saw the base
     module, which is how `from aramid import pipeline` bound to the package
     __init__ and hid test files from impact (issue #7).
@@ -1248,7 +1247,7 @@ def _python_from_import_submodules(
     for child in node.children:
         if module_field is not None and child.id == module_field.id:
             # Identity-skip the module_name's own dotted_name (paren-safe;
-            # see _collect_python_import_maps for the sibling-token trap).
+            # see _python_import_bindings for the sibling-token trap).
             continue
         original = None
         if child.type == "dotted_name":
@@ -1349,41 +1348,54 @@ def _python_import_bindings(
     return out
 
 
-def _collect_python_import_maps(
-    root: Any, rel_path: str, source_index: SourceIndex | None
-) -> tuple[dict[str, str], dict[str, str], frozenset[str]]:
-    """(symbol_map, alias_map, external_names).
+def _python_definition_name(node: Any) -> str | None:
+    """A def/class node's name exactly as its graph node records it."""
+    name_node = node.child_by_field_name("name")
+    if name_node is None or not name_node.text:
+        return None
+    return _short_name(name_node.text.decode("utf-8", errors="ignore"))
 
-    symbol_map: local -> definition node id. alias_map: local -> module file id.
-    external_names: local names bound by imports that did NOT resolve in-repo --
-    calls through them leave the repo (EXTERNAL_CALL).
 
-    Walked at ALL depths (Python allows function-local imports). For
-    `from P import name`, `P.name` is tried as a MODULE first (alias), then
-    as a symbol defined in P's file. Unresolvable modules enter neither map,
-    but DO enter external_names.
-    Last binding wins, matching Python shadowing.
+def _python_def_id(file_id: str, qualname: str, module_level: bool) -> str:
+    """Module-scope definitions keep `_make_id(file, name)`; every other is scope-qualified (#70)."""
+    return _make_id(file_id, qualname) if module_level else _scoped_id(file_id, qualname)
+
+
+def _python_name_confidence(name: str, resolution: Resolution) -> str:
+    """`EXTERNAL_CALL` iff what `name` denotes provably leaves the repo (spec §4.2).
+
+    A name bound in the file is external only when its binder is an import that
+    did not resolve in-repo. A name bound nowhere in the file is Python's
+    builtins scope, so `_EXTERNAL_GLOBALS` still classifies it. A local value
+    named like a global (`for it in items: it.process()`) is NOT external: the
+    binding is local, and a false external hides real code from the ratio and
+    from dispatch's evidence gate.
     """
-    symbol_map: dict[str, str] = {}
-    alias_map: dict[str, str] = {}
-    external: set[str] = set()
-    if source_index is None:
-        return symbol_map, alias_map, frozenset()
+    if resolution.kind == "external":
+        return "EXTERNAL_CALL"
+    if resolution.kind == "none" and name in _EXTERNAL_GLOBALS:
+        return "EXTERNAL_CALL"
+    return "LOCAL_CALL"
 
-    def visit(node: Any) -> None:
-        if node.type in ("import_statement", "import_from_statement"):
-            for local, kind, target in _python_import_bindings(node, rel_path, source_index):
-                if kind == "alias" and target is not None:
-                    alias_map[local] = target
-                elif kind == "symbol" and target is not None:
-                    symbol_map[local] = target
-                elif kind == "external":
-                    external.add(local)
-        for child in node.children:
-            visit(child)
 
-    visit(root)
-    return symbol_map, alias_map, frozenset(external)
+def _python_bare_call(file_id: str, name: str, resolution: Resolution, table: ScopeTable) -> tuple[str, str]:
+    """(target id, confidence) for a bare-name call, from what the name denotes there.
+
+    A local value -- a parameter, an assignment, a module object, two binders --
+    keeps an UNBOUND edge rather than none: dropping it would take the site out
+    of the `calls` denominator, and a ratio cannot see a missing site. Its
+    target is today's placeholder, unless that id is a module-scope definition
+    in this file and would bind it; then it is a phantom no definition can own
+    (`<` is not an identifier character).
+    """
+    confidence = _python_name_confidence(name, resolution)
+    if resolution.kind == "def" and resolution.qualname is not None:
+        return _python_def_id(file_id, resolution.qualname, resolution.module_level), confidence
+    if resolution.kind == "symbol" and resolution.target is not None:
+        return resolution.target, confidence
+    if resolution.kind in ("value", "alias") and table.module_defines(name):
+        return _scoped_id(file_id, f"<local>.{name}"), confidence
+    return _resolve_call(file_id, name), confidence
 
 
 def _python_call_target(func: Any) -> tuple[str | None, str | None, str | None]:
@@ -1429,44 +1441,49 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
 
     result.nodes.append(_node(file_id, "file", Path(rel_path).name, rel_path))
 
-    symbol_map, alias_map, external_names = _collect_python_import_maps(root, rel_path, source_index)
+    # One pass builds every Python scope and what each binds (#70, #71). The walk
+    # below reads it: each def/class gets its scope-qualified identity, and each
+    # bare name resolves in the scope its call is EVALUATED in.
+    table = collect_scopes(
+        root,
+        lambda statement: _python_import_bindings(statement, rel_path, source_index),
+        _python_definition_name,
+    )
 
     class_ids: set[str] = set()
 
     # ``parent_id`` is the nearest named container (for ``contains`` edges);
     # ``scope_id`` is the nearest enclosing function (for ``calls`` attribution).
     def walk(node: Any, parent_id: str | None, scope_id: str) -> None:
-        if node.type == "function_definition":
-            name_node = node.child_by_field_name("name")
-            name = _short_name(name_node.text.decode("utf-8", errors="ignore")) if name_node and name_node.text else None
-            if name:
-                mid = _make_id(file_id, name)
-                extra = {"is_method": True} if parent_id in class_ids else None
-                result.nodes.append(_node(mid, "function", name, rel_path, _line(node), extra))
-                if parent_id:
-                    result.edges.append(_edge(parent_id, mid, "contains", rel_path, _line(node)))
-                walk_children(node, mid, mid)
-            else:
+        if node.type in ("function_definition", "class_definition"):
+            located = table.definitions.get(node.id)
+            name = _python_definition_name(node)
+            if located is None or name is None:
                 walk_children(node, parent_id, scope_id)
-        elif node.type == "class_definition":
-            name_node = node.child_by_field_name("name")
-            name = _short_name(name_node.text.decode("utf-8", errors="ignore")) if name_node and name_node.text else None
-            if name:
-                cid = _make_id(file_id, name)
-                class_ids.add(cid)
-                result.nodes.append(_node(cid, "class", name, rel_path, _line(node)))
+                return
+            qualname, module_level = located
+            did = _python_def_id(file_id, qualname, module_level)
+            if node.type == "function_definition":
+                extra: dict[str, Any] = {"qualname": qualname}
+                if parent_id in class_ids:
+                    extra["is_method"] = True
+                result.nodes.append(_node(did, "function", name, rel_path, _line(node), extra))
                 if parent_id:
-                    result.edges.append(_edge(parent_id, cid, "contains", rel_path, _line(node)))
-                # Inheritance
-                for base in node.children:
-                    if base.type == "argument_list":
-                        for arg in base.children:
-                            if arg.type.endswith("identifier") and arg.text:
-                                base_name = arg.text.decode("utf-8", errors="ignore")
-                                result.edges.append(_edge(cid, _make_id(base_name), "inherits", rel_path, _line(arg)))
-                walk_children(node, cid, scope_id)
-            else:
-                walk_children(node, parent_id, scope_id)
+                    result.edges.append(_edge(parent_id, did, "contains", rel_path, _line(node)))
+                walk_children(node, did, did)
+                return
+            class_ids.add(did)
+            result.nodes.append(_node(did, "class", name, rel_path, _line(node), {"qualname": qualname}))
+            if parent_id:
+                result.edges.append(_edge(parent_id, did, "contains", rel_path, _line(node)))
+            # Inheritance
+            for base in node.children:
+                if base.type == "argument_list":
+                    for arg in base.children:
+                        if arg.type.endswith("identifier") and arg.text:
+                            base_name = arg.text.decode("utf-8", errors="ignore")
+                            result.edges.append(_edge(did, _make_id(base_name), "inherits", rel_path, _line(arg)))
+            walk_children(node, did, scope_id)
         elif node.type in ("import_statement", "import_from_statement"):
             for module, dots in _python_import_modules(node):
                 resolved = (
@@ -1504,38 +1521,40 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                 ))
             walk_children(node, parent_id, scope_id)
         elif node.type == "call":
+            # `_python_call_target` and `_edge` stay module-global lookups, and the
+            # edge is made BEFORE the call's children are walked:
+            # scripts/pyscopeoracle.py pairs each site with its edge on exactly that.
             func = node.child_by_field_name("function")
             bare, obj_name, attr = _python_call_target(func) if func is not None else (None, None, None)
             edge = None
+            scope = table.scope_of_call(node)
             if bare and bare not in _LANGUAGE_BUILTIN_GLOBALS:
-                target = symbol_map.get(bare) or _resolve_call(file_id, bare)
-                edge = _edge(
-                    scope_id, target, "calls", rel_path, _line(node),
-                    confidence=_call_confidence(bare, external_names, symbol_map),
-                )
+                resolution = resolve(scope, bare)
+                target, confidence = _python_bare_call(file_id, bare, resolution, table)
+                edge = _edge(scope_id, target, "calls", rel_path, _line(node), confidence=confidence)
             elif attr:
                 dotted = f"{obj_name}.{attr}" if obj_name else attr
-                if obj_name and obj_name in alias_map:
-                    edge = _edge(scope_id, _make_id(alias_map[obj_name], attr), "calls", rel_path, _line(node), confidence="LOCAL_CALL")
+                recovered_root = obj_name or _python_attribute_root(func)
+                root_binding = resolve(scope, recovered_root) if recovered_root else None
+                if obj_name and root_binding is not None and root_binding.kind == "alias" and root_binding.target:
+                    edge = _edge(
+                        scope_id, _make_id(root_binding.target, attr), "calls", rel_path, _line(node),
+                        confidence="LOCAL_CALL",
+                    )
                 elif should_keep_call_target(dotted):
                     # Unresolved member call: file-scoped phantom now, re-pointed
                     # (or dropped) by the method-dispatch post-pass via _member.
-                    # Confidence is classified off the recovered chain root
-                    # (falls back to `dotted` itself for a non-attribute
-                    # receiver, e.g. `foo().bar()`), not off `dotted` -- a
-                    # depth->=2 chain like `os.path.join` would otherwise
-                    # test "join" instead of the bound name "os".
-                    # When neither a simple receiver nor a chain root can be
-                    # recovered, `dotted` is the bare attribute name and carries
-                    # no information about the receiver -- classifying it would
-                    # be a false external (#14).
-                    recovered_root = obj_name or _python_attribute_root(func)
-                    root_name = recovered_root or dotted
+                    # Confidence is read off the receiver's ROOT as the scope walk
+                    # resolved it (a depth->=2 chain like `os.path.join` tests `os`,
+                    # not `join`). When no receiver root can be recovered,
+                    # `dotted` is the bare attribute name and says nothing about
+                    # where the call goes, so it is never classified external (#14).
                     edge = _edge(
                         scope_id, _resolve_call(file_id, dotted), "calls", rel_path, _line(node),
-                        confidence=_call_confidence(
-                            root_name, external_names, symbol_map,
-                            attributable=recovered_root is not None,
+                        confidence=(
+                            _python_name_confidence(recovered_root, root_binding)
+                            if recovered_root is not None and root_binding is not None
+                            else "LOCAL_CALL"
                         ),
                     )
                     edge["_member"] = attr

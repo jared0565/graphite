@@ -174,18 +174,13 @@ def test_classify(oracle, truth, bound, category):
     assert oracle.classify(truth, bound) == category
 
 
-def test_todays_engine_mis_binds_the_three_planted_sites(oracle, tmp_path):
-    """CONTROL. Today's engine binds #70's second call, and both #71 shapes, wrongly."""
+def test_the_engine_binds_every_planted_site_correctly(oracle, tmp_path):
+    """Was the CONTROL (Task 4: today's engine bound three of these wrongly).
+    Flipped in the rewire commit, deliberately: the same fixture now reads zero."""
     _write(tmp_path / "m.py", SCOPE_FIXTURE)
     report = oracle.measure_sites(oracle.load(tmp_path))
-    assert report["stats"] == {
-        "sites": 4,
-        "correct": 1,
-        "WRONG-def->other-def": 1,
-        "WRONG-value-bound": 1,
-        "WRONG-none-bound": 1,
-    }
-    assert report["wrong"] == 3
+    assert report["stats"] == {"sites": 4, "correct": 2, "correct-unbound": 2}
+    assert report["wrong"] == 0
     assert report["selfcheck"]["call_nodes"] == report["selfcheck"]["distinct_call_ids"] == 4
     assert report["selfcheck"]["symtable_disagreements"] == 0
 

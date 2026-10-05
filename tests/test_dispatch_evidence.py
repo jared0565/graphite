@@ -50,18 +50,43 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _edges(tmp_path: Path) -> list[dict]:
+def _result(tmp_path: Path):
     cfg = Config(
         workers=1,
         cache_dir=tmp_path / ".cache" / "graphite",
         typescript_resolver="disabled",
     )
-    result = extract_all(collect_files(tmp_path, cfg), cfg)
+    return extract_all(collect_files(tmp_path, cfg), cfg)
+
+
+def _call_edges(result) -> list[dict]:
     return [e for e in result.edges if e["relation"] == "calls"]
 
 
+def _pairs(result) -> set[tuple[str, str]]:
+    return {(e["source"], e["target"]) for e in _call_edges(result)}
+
+
+def _edges(tmp_path: Path) -> list[dict]:
+    return _call_edges(_result(tmp_path))
+
+
 def _calls(tmp_path: Path) -> set[tuple[str, str]]:
-    return {(e["source"], e["target"]) for e in _edges(tmp_path)}
+    return _pairs(_result(tmp_path))
+
+
+def _def_id(result, source_file: str, qualname: str) -> str:
+    """A definition's id, LOOKED UP rather than spelled (#70).
+
+    A spelled id in a negative assertion goes vacuous when ids change: the edge
+    is absent because the id no longer exists, and the guard passes whatever
+    dispatch does. A lookup raises instead. Non-Python nodes carry no
+    `qualname`, so their `name` stands in.
+    """
+    for n in result.nodes:
+        if n.get("source_file") == source_file and n.get("qualname", n.get("name")) == qualname:
+            return n["id"]
+    raise AssertionError(f"no definition {qualname!r} in {source_file}")
 
 
 # --- evidence: a proven-external call is not re-pointed -----------------------
@@ -90,7 +115,9 @@ def test_a_stdlib_call_is_not_re_pointed_to_an_imported_definition(tmp_path: Pat
         "    return os.read(fd, 8)\n",
     )
 
-    assert ("app_py_go", "cache_py_read") not in _calls(tmp_path)
+    result = _result(tmp_path)
+    go, read = _def_id(result, "app.py", "go"), _def_id(result, "cache.py", "Cache.read")
+    assert (go, read) not in _pairs(result)
 
 
 def test_a_proven_external_typescript_call_is_not_re_pointed(tmp_path: Path) -> None:
@@ -134,12 +161,14 @@ def test_the_external_edge_is_kept_rather_than_dropped(tmp_path: Path) -> None:
         "    return os.read(fd, 8)\n",
     )
 
+    result = _result(tmp_path)
+    go, read = _def_id(result, "app.py", "go"), _def_id(result, "cache.py", "Cache.read")
     external = [
-        e for e in _edges(tmp_path)
-        if e["source"] == "app_py_go" and e.get("confidence") == "EXTERNAL_CALL"
+        e for e in _call_edges(result)
+        if e["source"] == go and e.get("confidence") == "EXTERNAL_CALL"
     ]
     assert external, "the os.read call lost its EXTERNAL_CALL edge entirely"
-    assert all(e["target"] != "cache_py_read" for e in external)
+    assert all(e["target"] != read for e in external)
 
 
 # --- the recall this must NOT cost --------------------------------------------
@@ -164,7 +193,8 @@ def test_a_local_receiver_still_dispatches_to_the_same_method_name(tmp_path: Pat
         "    return cache.read()\n",
     )
 
-    assert ("app_py_go", "cache_py_read") in _calls(tmp_path)
+    result = _result(tmp_path)
+    assert (_def_id(result, "app.py", "go"), _def_id(result, "cache.py", "Cache.read")) in _pairs(result)
 
 
 def test_an_in_repo_binding_still_beats_an_external_name_collision(tmp_path: Path) -> None:
@@ -190,7 +220,8 @@ def test_an_in_repo_binding_still_beats_an_external_name_collision(tmp_path: Pat
         "    return formatter.format(value)\n",
     )
 
-    assert ("app_py_go", "helpers_py_format") in _calls(tmp_path)
+    result = _result(tmp_path)
+    assert (_def_id(result, "app.py", "go"), _def_id(result, "helpers.py", "Formatter.format")) in _pairs(result)
 
 
 # --- interop family: dispatch may not cross a language boundary ---------------
@@ -217,7 +248,9 @@ def test_a_javascript_call_does_not_dispatch_to_a_python_method(tmp_path: Path) 
         "        return 1\n",
     )
 
-    assert ("web_app_js_run", "api_worker_py_handle") not in _calls(tmp_path)
+    result = _result(tmp_path)
+    run, handle = _def_id(result, "web/app.js", "run"), _def_id(result, "api/worker.py", "Worker.handle")
+    assert (run, handle) not in _pairs(result)
 
 
 def test_typescript_and_tsx_are_one_interop_family(tmp_path: Path) -> None:
