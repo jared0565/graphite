@@ -69,6 +69,7 @@ def _def(qualname: str, module_level: bool = False) -> S.Resolution:
 
 VALUE = S.Resolution("value")
 NONE = S.Resolution("none")
+AMBIGUOUS_IMPORT = S.Resolution("ambiguous-import")
 
 #: One body per binder kind §4.2 lists. Each binds `fn` locally before calling it.
 BINDER_CASES = [
@@ -205,7 +206,17 @@ def test_an_optional_dependency_with_a_none_fallback_stays_external():
 
 def test_a_none_fallback_for_an_in_repo_import_is_ambiguous():
     src = "try:\n    from repo import f\nexcept ImportError:\n    f = None\nf()\n"
-    assert _one(src, "f") == VALUE
+    assert _one(src, "f") == AMBIGUOUS_IMPORT
+
+
+def test_two_in_repo_imports_of_one_name_are_an_ambiguous_import():
+    """Final review I1: `import pkg` beside `import pkg.sub` names a MODULE either way."""
+    assert _one("import pkg\nimport pkg.sub\npkg()\n", "pkg") == AMBIGUOUS_IMPORT
+
+
+def test_an_in_repo_module_with_an_external_fallback_is_an_ambiguous_import():
+    src = "try:\n    import fastjson as json\nexcept ImportError:\n    import extjson as json\njson()\n"
+    assert _one(src, "json") == AMBIGUOUS_IMPORT
 
 
 def test_a_fallback_that_is_not_none_is_ambiguous():

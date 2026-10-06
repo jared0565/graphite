@@ -55,6 +55,70 @@ def test_a_nested_definition_never_shares_a_module_definitions_id():
     assert _scoped_id("m_py", "outer.inner") == "m_py_outer_inner_b0dec9"
 
 
+def test_a_module_level_def_spelled_like_a_scoped_id_stays_its_own_node(tmp_path):
+    """Final review I2: `_make_id` returns a canonical name unchanged, so
+    `def worker_run_7c6b1a()` WAS `Worker.run`'s id and the two merged. No
+    spelling of the separator can prevent it -- `build_graph`'s `normalize_id`
+    collapses `__` -- so a file's ids are assigned together and a colliding
+    scoped id is re-salted. Asserted on the BUILT graph, where the merge happened.
+    """
+    source = (
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        return 1\n"
+        "\n"
+        "\n"
+        "def worker_run_7c6b1a():\n"
+        "    return 2\n"
+    )
+    result = _extract(tmp_path, {"m.py": source})
+    g = build_graph(result.nodes, result.edges)
+    by_qualname = {d["qualname"]: n for n, d in g.nodes(data=True) if d.get("qualname")}
+    assert {"Worker", "Worker.run", "worker_run_7c6b1a"} <= set(by_qualname)
+    assert by_qualname["worker_run_7c6b1a"] == "m_py_worker_run_7c6b1a"  # module-scope id unchanged
+    assert by_qualname["Worker.run"] != by_qualname["worker_run_7c6b1a"]
+
+
+def test_id_assignment_is_bounded_when_salting_cannot_free_an_id(monkeypatch):
+    """With a `_scoped_id` that ignores its salt, a collision can never be
+    freed. Measured: an unbounded re-salt loop then HUNG (a mutation run stalled
+    on it). Bounded, the colliding id is kept -- the pre-I2 merge -- and
+    extraction returns. Run on a thread so a regression fails instead of hanging."""
+    import threading
+
+    import graphite.extract.ast as ast_module
+
+    monkeypatch.setattr(
+        ast_module, "_scoped_id", lambda file_id, qualname, salt=0: ast_module._make_id(file_id, qualname)
+    )
+    source = "def outer_inner():\n    pass\n\n\ndef outer():\n    def inner():\n        pass\n"
+    done: list[object] = []
+    worker = threading.Thread(target=lambda: done.append(_extract_one(source)), daemon=True)
+    worker.start()
+    worker.join(timeout=30)
+    assert done, "id assignment did not return"
+
+
+def test_a_def_spelled_like_the_local_phantom_cannot_capture_a_parameter_call(tmp_path):
+    """Final review I2: the `<local>` phantom exists so no definition can own a
+    call through a local name; `def local_generate_1c9caf()` used to own it."""
+    source = (
+        "def generate():\n"
+        "    return 1\n"
+        "\n"
+        "\n"
+        "def local_generate_1c9caf():\n"
+        "    return 2\n"
+        "\n"
+        "\n"
+        "def route(generate):\n"
+        "    return generate()\n"
+    )
+    result = _extract(tmp_path, {"m.py": source})
+    (edge,) = [e for e in _call_edges(result) if e["source"] == "m_py_route"]
+    assert edge["target"] not in {n["id"] for n in result.nodes}
+
+
 def test_scoped_ids_differ_by_file_and_by_qualname():
     assert _scoped_id("a_py", "K.run") != _scoped_id("b_py", "K.run")
     assert _scoped_id("m_py", "test_one.fake_build") == "m_py_test_one_fake_build_4e414e"
@@ -300,6 +364,34 @@ def test_an_optional_dependency_stays_external_and_is_not_re_pointed(tmp_path):
     assert member["confidence"] == "EXTERNAL_CALL"
     assert member["target"] != _ids(result)["R.client"]
     assert bare["confidence"] == "EXTERNAL_CALL"
+
+
+def test_a_module_receiver_with_two_import_binders_is_not_name_dispatched(tmp_path):
+    """Final review I1: `import pkg` and `import pkg.sub` both bind the package,
+    so `pkg.f()` is a call on a module, never on an instance. Name dispatch bound
+    it to `S.f`; it stays an honest unbound edge instead."""
+    files = {
+        "pkg/__init__.py": "def f():\n    return 1\n",
+        "pkg/sub.py": "class S:\n    def f(self):\n        return 2\n",
+        "m.py": "import pkg\nimport pkg.sub\n\n\ndef go():\n    return pkg.f()\n",
+    }
+    result = _extract(tmp_path, files)
+    (edge,) = [e for e in _call_edges(result) if e["source"] == "m_py_go"]
+    assert edge["target"] != _ids(result)["S.f"]
+    assert edge["confidence"] == "LOCAL_CALL"
+
+
+def test_an_ambiguous_import_named_like_a_module_def_does_not_bind_it(tmp_path):
+    """Regression guard (passes before I1 too): the `<local>` phantom must cover
+    an ambiguous import exactly as it covers a local value."""
+    files = {
+        "pkg/__init__.py": "VERSION = 1\n",
+        "pkg/sub.py": "VERSION = 2\n",
+        "m.py": "def pkg():\n    return 0\n\n\ndef go():\n    import pkg\n    import pkg.sub\n    return pkg()\n",
+    }
+    result = _extract(tmp_path, files)
+    (edge,) = [e for e in _call_edges(result) if e["source"] == "m_py_go"]
+    assert edge["target"] != "m_py_pkg"
 
 
 def test_a_local_value_named_like_a_global_is_a_local_receiver():

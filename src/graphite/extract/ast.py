@@ -12,6 +12,7 @@ from typing import Any, Collection, Final, Sequence
 
 from ..cache import Cache
 from ..config import Config
+from ..graph import normalize_id
 from ..ingest import LANGUAGE_BY_EXT, FileEntry
 from ..resolve import SourceIndex, should_keep_call_target
 from .pyscope import Resolution, ScopeTable, collect_scopes, resolve
@@ -160,6 +161,10 @@ _MAX_ID_LEN = 120
 #: anything else would be eaten by the very code it exists to defeat.
 _ID_DISCRIMINATOR_LEN: Final = 6
 
+#: How many re-salted `_scoped_id`s `_python_file_ids` tries before it keeps a
+#: colliding id. Real names never collide even once.
+_MAX_ID_SALTS: Final = 64
+
 
 def _identity_preserving_form(parts: Sequence[str]) -> str:
     """The id these parts would produce if the only loss were separator identity.
@@ -220,7 +225,7 @@ def _make_id(*parts: str) -> str:
     return f"{cleaned[: _MAX_ID_LEN - len(marker) - 1].rstrip('_')}_{marker}"
 
 
-def _scoped_id(file_id: str, qualname: str) -> str:
+def _scoped_id(file_id: str, qualname: str, salt: int = 0) -> str:
     """Node id for a Python definition that is NOT at module scope (#70).
 
     `qualname` is the enclosing definitions' names and its own, joined by `.`
@@ -230,9 +235,17 @@ def _scoped_id(file_id: str, qualname: str) -> str:
     treats `.` -> `_` as lossless, so -- measured -- `_make_id(f, "outer.inner")`
     and a module-level `_make_id(f, "outer_inner")` are one id, and
     `Worker.run` came out distinct only because of its capital letter.
+
+    The marker cannot make the id UNREACHABLE: `_make_id` returns a canonical
+    name unchanged, so a module-level `def worker_run_7c6b1a()` spells this
+    id exactly, and `build_graph`'s `normalize_id` collapses any separator a
+    name could not contain. Uniqueness is therefore enforced where a file's ids
+    are assigned together (`_python_file_ids`), which re-salts a colliding id
+    with `salt` (final review I2). `salt=0` is the id every real file gets.
     """
+    tag = f"py-scope\x00{file_id}\x00{qualname}" + (f"\x00{salt}" if salt else "")
     marker = hashlib.blake2s(
-        f"py-scope\x00{file_id}\x00{qualname}".encode("utf-8"),
+        tag.encode("utf-8"),
         digest_size=_ID_DISCRIMINATOR_LEN // 2,
     ).hexdigest()
     readable = unicodedata.normalize("NFKC", f"{file_id}_{qualname}")
@@ -1356,9 +1369,46 @@ def _python_definition_name(node: Any) -> str | None:
     return _short_name(name_node.text.decode("utf-8", errors="ignore"))
 
 
-def _python_def_id(file_id: str, qualname: str, module_level: bool) -> str:
-    """Module-scope definitions keep `_make_id(file, name)`; every other is scope-qualified (#70)."""
-    return _make_id(file_id, qualname) if module_level else _scoped_id(file_id, qualname)
+def _python_file_ids(file_id: str, table: ScopeTable) -> dict[tuple[str, bool], str]:
+    """Every definition's node id in one file, keyed by (qualname, module_level).
+
+    Module-scope definitions keep `_make_id(file, name)` byte for byte; every
+    other is scope-qualified (#70). The `<local>.<name>` phantom of each
+    module-scope name is assigned here too, keyed as a scoped qualname.
+
+    Assigned TOGETHER so they are distinct as the built graph sees them
+    (`normalize_id`): a scoped id or phantom that a module-scope id -- or an
+    earlier scoped id -- already holds is re-salted until it is free. Before,
+    `def worker_run_7c6b1a()` merged into `Worker.run`, and
+    `def local_generate_1c9caf()` owned every call through a parameter named
+    `generate` (final review I2). Real names never collide, so a real file's
+    ids are exactly `_scoped_id(file, qualname)`; only a crafted name moves.
+    Sorted, so which of two colliding names keeps its id is deterministic.
+
+    Bounded: after `_MAX_ID_SALTS` attempts the id is kept even though taken,
+    which merges two definitions exactly as before this existed. Reaching that
+    takes dozens of crafted names; an unbounded loop instead HUNG the build the
+    moment `_scoped_id` stopped honouring `salt` (measured, by mutation).
+    """
+    module_names = sorted({q for q, module_level in table.definitions.values() if module_level})
+    scoped = sorted(
+        {q for q, module_level in table.definitions.values() if not module_level}
+        | {f"<local>.{name}" for name in module_names}
+    )
+    ids: dict[tuple[str, bool], str] = {}
+    taken: set[str] = set()
+    for name in module_names:
+        ids[(name, True)] = _make_id(file_id, name)
+        taken.add(normalize_id(ids[(name, True)]))
+    for qualname in scoped:
+        salt = 0
+        candidate = _scoped_id(file_id, qualname)
+        while normalize_id(candidate) in taken and salt < _MAX_ID_SALTS:
+            salt += 1
+            candidate = _scoped_id(file_id, qualname, salt)
+        ids[(qualname, False)] = candidate
+        taken.add(normalize_id(candidate))
+    return ids
 
 
 def _python_name_confidence(name: str, resolution: Resolution) -> str:
@@ -1378,7 +1428,9 @@ def _python_name_confidence(name: str, resolution: Resolution) -> str:
     return "LOCAL_CALL"
 
 
-def _python_bare_call(file_id: str, name: str, resolution: Resolution, table: ScopeTable) -> tuple[str, str]:
+def _python_bare_call(
+    file_id: str, name: str, resolution: Resolution, table: ScopeTable, ids: dict[tuple[str, bool], str]
+) -> tuple[str, str]:
     """(target id, confidence) for a bare-name call, from what the name denotes there.
 
     A local value -- a parameter, an assignment, a module object, two binders --
@@ -1390,11 +1442,11 @@ def _python_bare_call(file_id: str, name: str, resolution: Resolution, table: Sc
     """
     confidence = _python_name_confidence(name, resolution)
     if resolution.kind == "def" and resolution.qualname is not None:
-        return _python_def_id(file_id, resolution.qualname, resolution.module_level), confidence
+        return ids[(resolution.qualname, resolution.module_level)], confidence
     if resolution.kind == "symbol" and resolution.target is not None:
         return resolution.target, confidence
-    if resolution.kind in ("value", "alias") and table.module_defines(name):
-        return _scoped_id(file_id, f"<local>.{name}"), confidence
+    if resolution.kind in ("value", "alias", "ambiguous-import") and table.module_defines(name):
+        return ids[(f"<local>.{name}", False)], confidence
     return _resolve_call(file_id, name), confidence
 
 
@@ -1449,6 +1501,7 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
         lambda statement: _python_import_bindings(statement, rel_path, source_index),
         _python_definition_name,
     )
+    ids = _python_file_ids(file_id, table)
 
     class_ids: set[str] = set()
 
@@ -1462,7 +1515,7 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                 walk_children(node, parent_id, scope_id)
                 return
             qualname, module_level = located
-            did = _python_def_id(file_id, qualname, module_level)
+            did = ids[(qualname, module_level)]
             if node.type == "function_definition":
                 extra: dict[str, Any] = {"qualname": qualname}
                 if parent_id in class_ids:
@@ -1530,7 +1583,7 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
             scope = table.scope_of_call(node)
             if bare and bare not in _LANGUAGE_BUILTIN_GLOBALS:
                 resolution = resolve(scope, bare)
-                target, confidence = _python_bare_call(file_id, bare, resolution, table)
+                target, confidence = _python_bare_call(file_id, bare, resolution, table, ids)
                 edge = _edge(scope_id, target, "calls", rel_path, _line(node), confidence=confidence)
             elif attr:
                 dotted = f"{obj_name}.{attr}" if obj_name else attr
@@ -1541,6 +1594,15 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                         scope_id, _make_id(root_binding.target, attr), "calls", rel_path, _line(node),
                         confidence="LOCAL_CALL",
                     )
+                elif root_binding is not None and root_binding.kind == "ambiguous-import":
+                    # Imports that disagree on what the root is (final review I1):
+                    # a module object either way, so no `_member` and no name
+                    # dispatch -- an honest unbound edge, kept in the denominator.
+                    if should_keep_call_target(dotted):
+                        edge = _edge(
+                            scope_id, _resolve_call(file_id, dotted), "calls", rel_path, _line(node),
+                            confidence="LOCAL_CALL",
+                        )
                 elif should_keep_call_target(dotted):
                     # Unresolved member call: file-scoped phantom now, re-pointed
                     # (or dropped) by the method-dispatch post-pass via _member.

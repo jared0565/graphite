@@ -73,7 +73,7 @@ class PyScope:
 class Resolution:
     """What a bare name denotes at one call site."""
 
-    kind: str  # "def" | "symbol" | "alias" | "external" | "value" | "none"
+    kind: str  # "def" | "symbol" | "alias" | "external" | "ambiguous-import" | "value" | "none"
     qualname: str | None = None
     module_level: bool = False
     target: str | None = None
@@ -389,4 +389,10 @@ def _outcome(binders: list[Binder]) -> Resolution:
     # binder, a value, so reaching here means some binder is not `None`.)
     if all((b.kind == "import" and b.import_kind == "external") or b.none_literal for b in binders):
         return Resolution("external")
+    # Imports (and `None`) that disagree -- `import pkg` beside `import pkg.sub`,
+    # or an in-repo module with an external fallback -- still name a MODULE, not
+    # a local value: the receiver of `pkg.f()` is no instance, and name dispatch
+    # must not guess a method for it (final review I1).
+    if all(b.kind == "import" or b.none_literal for b in binders):
+        return Resolution("ambiguous-import")
     return Resolution("value")

@@ -105,6 +105,13 @@ calls bind the way Python resolves them (#70, #71).**
   Enclosing class scopes are skipped from inside a method.
 - A call through a local name is kept as an unbound edge rather than bound to
   a same-named definition.
+- A call on a module name bound by two different imports is kept as an unbound
+  edge rather than guessed by method name. Examples: `import pkg` beside
+  `import pkg.sub`, or an in-repo module with an external fallback. 1.1.1 bound
+  the first shape through its file-wide alias map; neither corpus has one.
+- A file's Python node ids are distinct by construction. A module-level def
+  spelled like a scoped id (`def worker_run_7c6b1a()`) no longer merges into
+  `Worker.run`; the scoped id is re-salted instead. Real names never collide.
 
 Measured with `scripts/pyscopeoracle.py` against CPython's `symtable`:
 - wrong-target bare-name calls went from 118 to 0 on graphite and from 77 to 0 on

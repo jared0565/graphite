@@ -106,6 +106,14 @@ but now names a different definition is the dangerous case):
   `_make_id(f, "outer.inner")` and `_make_id(f, "outer", "inner")` both return
   the same id as a module-level `outer_inner`. `Worker.run` happened to come
   out distinct only because of its capital letter.
+  *Amended 2026-10-05 (final review I2):* the marker alone did not make ids
+  distinct. A module-level `def worker_run_7c6b1a()` IS `Worker.run`'s scoped
+  id, because `_make_id` returns a canonical name unchanged. A separator cannot
+  fix that, because `build_graph`'s `normalize_id` collapses `__` (measured).
+  So a file's ids are assigned together: module-scope ids first (unchanged),
+  then scoped ids and `<local>` phantoms in sorted order. Any scoped id whose
+  normalised form is taken is re-salted (`"\x00" + salt` appended to the hashed
+  tag), at most 64 times. Real names never collide, so no real id changes.
 - **Same-scope redefinitions share one node**, exactly as module-level ones do
   today: `if X: def f(): ... else: def f(): ...` is one binding slot.
 - **A `qualname` attribute on every Python def/class node** (equal to `name`
