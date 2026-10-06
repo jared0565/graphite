@@ -1389,11 +1389,17 @@ def _python_file_ids(file_id: str, table: ScopeTable) -> dict[tuple[str, bool], 
     which merges two definitions exactly as before this existed. Reaching that
     takes dozens of crafted names; an unbounded loop instead HUNG the build the
     moment `_scoped_id` stopped honouring `salt` (measured, by mutation).
+
+    Phantoms are keyed by the RAW names `module_defines` answers for -- the
+    guard `_python_bare_call` tests before it looks one up -- never by the
+    recorded qualname: `_short_name` shortens a name over `_MAX_NAME_LEN`, and
+    a phantom keyed by the short form made the lookup raise KeyError, which
+    dropped the whole file from the graph (commit security review).
     """
     module_names = sorted({q for q, module_level in table.definitions.values() if module_level})
     scoped = sorted(
         {q for q, module_level in table.definitions.values() if not module_level}
-        | {f"<local>.{name}" for name in module_names}
+        | {f"<local>.{name}" for name in table.module.binders if table.module_defines(name)}
     )
     ids: dict[tuple[str, bool], str] = {}
     taken: set[str] = set()

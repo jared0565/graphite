@@ -119,6 +119,20 @@ def test_a_def_spelled_like_the_local_phantom_cannot_capture_a_parameter_call(tm
     assert edge["target"] not in {n["id"] for n in result.nodes}
 
 
+def test_a_local_call_named_like_a_long_module_def_extracts(tmp_path):
+    """Commit security review of the I2 fix: a module-level def whose name is
+    longer than `_MAX_NAME_LEN` records a SHORTENED qualname, while
+    `module_defines` matches the raw name. The phantom lookup missed and raised
+    KeyError: with parallel workers the file became a `worker_error` with no
+    nodes; with one worker the build aborted."""
+    long_name = "f" * 100
+    source = f"def {long_name}():\n    return 1\n\n\ndef route({long_name}):\n    return {long_name}()\n"
+    result = _extract(tmp_path, {"m.py": source})
+    (edge,) = [e for e in _call_edges(result) if e["source"] == "m_py_route"]
+    assert edge["target"] not in {n["id"] for n in result.nodes}
+    assert edge["confidence"] == "LOCAL_CALL"
+
+
 def test_scoped_ids_differ_by_file_and_by_qualname():
     assert _scoped_id("a_py", "K.run") != _scoped_id("b_py", "K.run")
     assert _scoped_id("m_py", "test_one.fake_build") == "m_py_test_one_fake_build_4e414e"
