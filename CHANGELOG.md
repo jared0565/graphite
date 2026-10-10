@@ -174,6 +174,24 @@ hooks in parallel, so their order has no effect. A current entry now stays
 where it is. A stale, duplicated or legacy graphite entry is still replaced,
 and a missing one is still appended.
 
+**A name typed in its exact case now picks the definition spelled that way.**
+`graphite query "callers Verdict"` could answer about a function named
+`verdict`, and grade that answer like any other. The whole query string was
+lowercased before the matcher ranked same-named definitions, so the tie
+between `Verdict` and `verdict` fell to id order. Now only the verb is folded.
+Where two matches rank equally by path depth and scope, the one spelled as
+typed comes first. The same holds for a dotted qualname (`Worker.run`), and
+for `context` and `impact`. Matching still ignores case: `callers verdict`
+still finds a class `Verdict` when nothing is spelled `verdict`.
+
+A query plan (`query --plan-only`) and each `resolution[].input` now carry a
+target as it was typed. They used to carry it lowercased.
+
+Not changed: path depth still outranks case. A shallower `verdict` is still
+chosen over a deeper `Verdict`, and the other one is listed in `alternates`.
+`query --natural` still lowercases the question, so "Who calls Verdict?" is
+still matched as `verdict`.
+
 ## [1.1.1] — 2026-10-03
 
 A patch release. Security fixes ship in the next patch release of the current

@@ -295,11 +295,14 @@ def build_plan(q: str) -> dict[str, Any]:
     stable error_code; plans never carry an "error" key, so callers distinguish
     the two by that key alone.
     """
-    tokens = q.strip().lower().split()
+    # Only the verb is folded. A target keeps the case it was typed in: the
+    # matcher folds for itself, and needs the original spelling to tell
+    # `Verdict` from `verdict` when a repo defines both.
+    tokens = q.strip().split()
     if not tokens:
         return {"error": "empty query", "error_code": "empty_query"}
 
-    verb = tokens[0]
+    verb = tokens[0].lower()
     spec = _VERB_INDEX.get(verb)
     if spec is None:
         return {
@@ -565,8 +568,12 @@ def _find_node_detail(g: nx.DiGraph, token: str) -> NodeMatch | None:
     `alternates` lists other nodes that matched equally well, so a
     silently-wrong pick is visible to the caller; ties break deterministically
     instead of by insertion order.
+
+    Matching ignores case throughout. Among equally ranked qualname or name
+    matches, one spelled exactly as typed comes before one that differs in case.
     """
-    token = token.strip().lower().strip("`")
+    typed = token.strip().strip("`")
+    token = typed.lower()
     if token in g:
         return NodeMatch(token, "exact-id", [], 0)
 
@@ -576,7 +583,7 @@ def _find_node_detail(g: nx.DiGraph, token: str) -> NodeMatch | None:
     if "." in token:
         qualname_hits = sorted(
             (n for n in g.nodes() if "." in (q := str(g.nodes[n].get("qualname", ""))) and q.lower() == token),
-            key=lambda n: (_path_depth(g, n), n),
+            key=lambda n: (_path_depth(g, n), g.nodes[n].get("qualname") != typed, n),
         )
         if qualname_hits:
             return NodeMatch(qualname_hits[0], "qualname", qualname_hits[1:4], len(qualname_hits) - 1)
@@ -588,10 +595,12 @@ def _find_node_detail(g: nx.DiGraph, token: str) -> NodeMatch | None:
     # (found via operation-firewall dogfooding, 2026-07-31: `README.md`
     # matched `hooks/README.md` over the root file purely because
     # "hooks_readme" < "readme" as strings). At equal depth a module-level
-    # definition beats a method, which beats a nested definition (#70).
+    # definition beats a method, which beats a nested definition (#70). Where
+    # those tie, the name spelled as typed wins: `Verdict` means the class, not
+    # a function `verdict` whose id happens to sort first.
     name_hits = sorted(
         (n for n in g.nodes() if g.nodes[n].get("name", "").lower() == token),
-        key=lambda n: (_path_depth(g, n), _scope_rank(g, n), n),
+        key=lambda n: (_path_depth(g, n), _scope_rank(g, n), g.nodes[n].get("name") != typed, n),
     )
     if name_hits:
         return NodeMatch(name_hits[0], "name", name_hits[1:4], len(name_hits) - 1)

@@ -6,6 +6,7 @@ import json
 import networkx as nx
 
 from graphite.cli import main
+from graphite.context import build_context
 from graphite.graph import build_graph
 from graphite.query import QUERY_VERBS, build_plan, execute_plan, query
 from graphite.query_plan import PLAN_SCHEMA, make_plan, plan_error
@@ -377,3 +378,128 @@ def test_execute_plan_fail_open_when_answer_computation_raises(monkeypatch):
     # (never-reached) scoped-grade overwrite.
     assert result["resolution_health"]["healthy"] is True
     assert result["inconclusive"] is False
+
+
+# --- a name typed in its exact case (channel round 317) --------------------------
+#
+# `callers Verdict` answered about a function named `verdict`: `build_plan`
+# lowercased the whole query, so by the time the matcher ranked same-named
+# definitions nothing was left to tell `Verdict` from `verdict`, and the tie fell
+# to id order. The answer was then graded like any other.
+
+
+def _case_graph():
+    """Definitions whose names differ only by case, at equal path depth and scope.
+
+    The ids sort the WRONG way round on purpose, in both directions: the function
+    `verdict` sorts before the class `Verdict` it must lose to, and the class
+    `Report` sorts before the function `report` it must lose to. Id order alone
+    can therefore pass neither exact-case assertion.
+    """
+    nodes = [
+        {"id": "a_py", "kind": "file", "name": "a.py", "source_file": "a.py"},
+        {"id": "b_py", "kind": "file", "name": "b.py", "source_file": "b.py"},
+        {"id": "a_py_verdict", "kind": "function", "name": "verdict", "qualname": "verdict", "source_file": "a.py"},
+        {"id": "b_py_verdict_a01b45", "kind": "class", "name": "Verdict", "qualname": "Verdict",
+         "source_file": "b.py"},
+        {"id": "a_py_report_9f31c2", "kind": "class", "name": "Report", "qualname": "Report", "source_file": "a.py"},
+        {"id": "b_py_report", "kind": "function", "name": "report", "qualname": "report", "source_file": "b.py"},
+        {"id": "a_py_lower_user", "kind": "function", "name": "lower_user", "qualname": "lower_user",
+         "source_file": "a.py"},
+        {"id": "b_py_upper_user", "kind": "function", "name": "upper_user", "qualname": "upper_user",
+         "source_file": "b.py"},
+    ]
+    edges = [
+        {"source": "a_py_lower_user", "target": "a_py_verdict", "relation": "calls"},
+        {"source": "b_py_upper_user", "target": "b_py_verdict_a01b45", "relation": "calls"},
+    ]
+    return build_graph(nodes, edges)
+
+
+def test_a_name_typed_in_exact_case_picks_that_definition() -> None:
+    out = query(_case_graph(), "callers Verdict")
+
+    (resolution,) = out["resolution"]
+    assert (resolution["type"], resolution["node"]) == ("name", "b_py_verdict_a01b45")
+    assert resolution["alternates"] == ["a_py_verdict"]
+    assert [c["id"] for c in out["callers"]] == ["b_py_upper_user"]
+
+
+def test_exact_case_wins_in_the_lowercase_direction_too() -> None:
+    (resolution,) = query(_case_graph(), "callers report")["resolution"]
+
+    assert (resolution["type"], resolution["node"]) == ("name", "b_py_report")
+    assert resolution["alternates"] == ["a_py_report_9f31c2"]
+
+
+def test_a_name_with_no_exact_case_match_keeps_the_previous_order() -> None:
+    """The case key only breaks a tie one definition can win. `VERDICT` matches
+    neither spelling exactly, so the order is what it was: by id."""
+    (resolution,) = query(_case_graph(), "callers VERDICT")["resolution"]
+
+    assert (resolution["type"], resolution["node"]) == ("name", "a_py_verdict")
+    assert resolution["alternates"] == ["b_py_verdict_a01b45"]
+
+
+def test_the_plan_and_the_resolution_keep_the_token_as_typed() -> None:
+    assert build_plan("callers Verdict")["targets"] == [{"role": "node", "input": "Verdict"}]
+    assert build_plan("reaches Upper_User -> Verdict")["targets"] == [
+        {"role": "source", "input": "Upper_User"},
+        {"role": "target", "input": "Verdict"},
+    ]
+    (resolution,) = query(_case_graph(), "callers Verdict")["resolution"]
+    assert resolution["input"] == "Verdict"
+
+
+def test_the_verb_is_still_read_case_insensitively() -> None:
+    assert build_plan("CALLERS Verdict")["operation"] == "callers"
+    assert build_plan("Called-By Verdict")["operation"] == "callers"
+
+
+def test_a_node_id_typed_in_upper_case_still_resolves_as_an_exact_id() -> None:
+    (resolution,) = query(_case_graph(), "callers B_PY_VERDICT_A01B45")["resolution"]
+
+    assert (resolution["type"], resolution["node"]) == ("exact-id", "b_py_verdict_a01b45")
+
+
+def test_context_picks_the_exact_case_definition() -> None:
+    """`context` and `impact` call the matcher directly, without a plan."""
+    (entry,) = build_context(_case_graph(), ["Verdict"])["matched"]
+
+    assert entry["node"]["id"] == "b_py_verdict_a01b45"
+
+
+def test_a_dotted_qualname_typed_in_exact_case_picks_that_definition() -> None:
+    nodes = [
+        {"id": "m_py", "kind": "file", "name": "m.py", "source_file": "m.py"},
+        {"id": "m_py_a_worker_run_1", "kind": "function", "name": "run", "qualname": "worker.run",
+         "is_method": True, "source_file": "m.py"},
+        {"id": "m_py_b_worker_run_2", "kind": "function", "name": "run", "qualname": "Worker.run",
+         "is_method": True, "source_file": "m.py"},
+    ]
+    g = build_graph(nodes, [])
+
+    (upper,) = query(g, "callers Worker.run")["resolution"]
+    assert (upper["type"], upper["node"]) == ("qualname", "m_py_b_worker_run_2")
+    (lower,) = query(g, "callers worker.run")["resolution"]
+    assert (lower["type"], lower["node"]) == ("qualname", "m_py_a_worker_run_1")
+
+
+def test_path_depth_still_outranks_exact_case_pending_a_maintainer_decision() -> None:
+    """OPEN DECISION, pinned so it cannot change by accident.
+
+    Exact case replaces only the id-order tie-break, so it is consulted after
+    path depth and scope. Here the exact-case class is one directory deeper than
+    the lowercase function, and the shallower definition still wins. Whether
+    exact case should outrank path depth is a change to the ranking rule (spec
+    4.4 of the scope-identity design), which is the maintainer's to make.
+    """
+    nodes = [
+        {"id": "a_py_verdict", "kind": "function", "name": "verdict", "qualname": "verdict", "source_file": "a.py"},
+        {"id": "pkg_b_py_verdict_345430", "kind": "class", "name": "Verdict", "qualname": "Verdict",
+         "source_file": "pkg/b.py"},
+    ]
+    (resolution,) = query(build_graph(nodes, []), "callers Verdict")["resolution"]
+
+    assert resolution["node"] == "a_py_verdict"
+    assert resolution["alternates"] == ["pkg_b_py_verdict_345430"]
