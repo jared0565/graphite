@@ -15,6 +15,41 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-10-10
+
+A minor release. Query and search results, channel rounds and Python
+definition nodes gain fields, which are additions under
+`docs/compatibility.md`. No field is removed or renamed, and nothing under
+`docs/reference/` changes. Python node ids change, which that document allows
+when the CHANGELOG says so: **do not persist node ids across this upgrade.**
+
+The graph changes in this release. On this repository, measured against the
+deployed 1.1.1 engine:
+
+- 4,776 of 5,716 definition ids keep both their id and their definition. 937
+  are gone and 1,322 are new. No id names a different definition. 3 survive
+  as strings and now name the placeholder for a call made through a local
+  name (`poll = getattr(process, "poll", None)`, then `poll()`), which 1.1.1
+  bound to the method of that name;
+- all 408 file ids survive, and 2,046 of 2,049 placeholder ids;
+- nodes go from 8,173 to 8,555 and edges from 23,073 to 23,363. `calls` goes
+  from 14,758 to 14,994 and `contains` from 6,042 to 6,096; `imports` (2,310)
+  and `inherits` (118) are unchanged. 18,983 of 23,228 edge triples are
+  unchanged;
+- `analysis.cycles` goes from 20 to 19, and the community count from 170 to
+  171;
+- the Python `calls` ratio goes from 0.978 to 0.975.
+
+Two builds of this tree are byte-identical (`graph.json`, `GRAPH_REPORT.md`,
+`graph.html`). The parser version plays no part in these figures: each engine
+gives the same graph under tree-sitter 0.25.2 and 0.26.0.
+
+The entries below quote figures measured when each change was made, on earlier
+commits of this tree, so they differ slightly from the ones above.
+
+`graphite init` now writes `DOC_VERSION` 15. Re-run it in each repository to
+refresh the managed files.
+
 ### Changed
 
 **Consumers use graphite only as a tool, and the agent channel carries only bug
