@@ -7,11 +7,12 @@ never break a tool call or a session. The CLI wrapper adds a second catch-all.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import threading
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import savings as savings_model
 from . import usage_ledger
@@ -19,7 +20,7 @@ from .activation import mark_active
 from .config import Config
 from .freshness import check_graph_freshness
 from .graph_io import load_validated_graph_bundle
-from .health import persisted_resolution
+from .health import _edge_language, is_placeholder, persisted_resolution
 from .incident_ledger import record_incident, repo_ledger_dir
 
 SESSION_CONTRACT = (
@@ -145,35 +146,95 @@ _MAX_TOKENS_CHECKED = 5
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 
 
-def _pattern_tokens(pattern: str) -> list[str]:
-    """Identifier-like tokens from a grep pattern, deduplicated, capped."""
+_IDENTIFIER_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
+# What follows a file's stem: a dot, escaped or not, an extension, and no more
+# of a word. The extensions are the ones a name before them is a file's stem
+# for; `self\.run` and `graph\.jsonify` end in neither.
+_FILE_EXTENSION_RE = re.compile(r"\\?\.([A-Za-z0-9]{1,5})(?![A-Za-z0-9_])")
+_FILE_EXTENSIONS = frozenset({
+    "py", "pyi", "md", "txt", "json", "jsonl", "toml", "yaml", "yml", "cfg", "ini", "lock", "log",
+    "html", "css", "js", "jsx", "mjs", "cjs", "ts", "tsx", "go", "rs",
+    "sh", "ps1", "cmd", "bat", "xml", "csv", "sql",
+})
+
+
+def _is_literal_fragment(pattern: str, start: int, end: int) -> bool:
+    """The identifier at `pattern[start:end]` is one piece of a longer literal.
+
+    `graph-out` is a directory, `src/graphite/query` a path and `graph\\.json`
+    a file. Judged piece by piece, each was refused for a symbol it merely
+    contains (#72). A piece is skipped only where the text the search matches
+    must carry the joining character right beside it, so the search cannot be
+    finding the bare name:
+
+    - a hyphen directly before it, or directly after it and followed by more
+      of a word: `--no-verify`, `pre-tool-use`. Not `name-?` or `name->`.
+    - a slash on either side: `tests/`, `src/pkg`.
+    - a file extension after it: `query\\.py`, `uv.lock`.
+
+    The extension itself is still judged, as is every piece of a dotted name
+    that is not a file's: `self\\.run` is a search for callers of `run`.
+    """
+    before = pattern[start - 1] if start else ""
+    after = pattern[end:end + 2]
+    if before == "-" or (after[:1] == "-" and after[1:] and after[1] in _IDENTIFIER_CHARS):
+        return True
+    if before == "/" or after[:1] == "/" or after == "\\/":
+        return True
+    extension = _FILE_EXTENSION_RE.match(pattern, end)
+    return extension is not None and extension.group(1).lower() in _FILE_EXTENSIONS
+
+
+def _pattern_tokens(pattern: str, fold_case: bool) -> list[str]:
+    """Identifier-like tokens from a grep pattern, deduplicated, capped.
+
+    Two spellings of one word are one token only when the search folds case.
+    Otherwise `Done|done` would keep `Done` alone and never check `done`.
+    """
     seen: set[str] = set()
     tokens: list[str] = []
-    for token in _IDENTIFIER_RE.findall(pattern):
-        low = token.lower()
-        if low in seen:
+    for found in _IDENTIFIER_RE.finditer(pattern):
+        if _is_literal_fragment(pattern, found.start(), found.end()):
             continue
-        seen.add(low)
+        token = found.group()
+        key = token.lower() if fold_case else token
+        if key in seen:
+            continue
+        seen.add(key)
         tokens.append(token)
         if len(tokens) >= _MAX_TOKENS_CHECKED:
             break
     return tokens
 
 
-def _graph_symbol(root: Path, tokens: list[str]) -> tuple[str, str] | None:
-    """First token that IS a graph node (exact id or name match), else None."""
+def _hook_graph(root: Path) -> Any | None:
+    """The repo's graph, or None when it is absent or too large to load in a hook."""
     graph_path = root / "graph-out" / "graph.json"
     if not graph_path.is_file() or graph_path.stat().st_size > MAX_HOOK_GRAPH_BYTES:
         return None
     _, graph = load_validated_graph_bundle(graph_path, root=root, max_bytes=MAX_HOOK_GRAPH_BYTES)
-    lowered = {token.lower(): token for token in tokens}
+    return graph
+
+
+def _graph_symbol(graph: Any, tokens: list[str], fold_case: bool) -> tuple[str, str] | None:
+    """First token that IS something this repo defines (exact id or name), else None.
+
+    A placeholder does not count. `json` is in the graph because a file imports
+    it, not because the repo defines it, so there is nothing to query. About a
+    quarter of the nodes in graphite's own graph are placeholders, and each of
+    their names used to refuse a plain-word search.
+
+    Case is compared the way the search compares it. A case-exact search for
+    `DONE` cannot find a function `done`, so it is not a search for one.
+    """
+    wanted = {(token.lower() if fold_case else token): token for token in tokens}
     for node_id, data in graph.nodes(data=True):
-        node_lower = node_id.lower()
-        name = str(data.get("name", "")).lower()
-        if node_lower in lowered:
-            return node_id, lowered[node_lower]
-        if name and name in lowered:
-            return node_id, lowered[name]
+        if is_placeholder(data):
+            continue
+        for candidate in (node_id, str(data.get("name", ""))):
+            key = candidate.lower() if fold_case else candidate
+            if key and key in wanted:
+                return node_id, wanted[key]
     return None
 
 
@@ -260,8 +321,30 @@ def _strip_flag_values(rest: list[str]) -> list[str]:
     return kept
 
 
+def _repo_scope(root_resolved: Path, target: Path) -> str | None:
+    """Where `target` sits against the repository.
+
+    Its path from the root when it is inside, `.` for the root itself and for
+    any directory the repository lies under, None when the two are apart.
+
+    A directory above the repository holds all of it, so a search rooted there
+    is a whole-repo search. Read as "outside", `..` let a symbol search through.
+
+    Compared case-folded on every platform. A case-insensitive filesystem
+    opens `SRC/` as `src/`, and folding can only place more paths inside the
+    repository, never fewer, so it cannot create an exemption.
+    """
+    repo = root_resolved.as_posix().casefold().rstrip("/")
+    there = target.resolve().as_posix().casefold().rstrip("/")
+    if there == repo or repo.startswith(there + "/"):
+        return "."
+    if there.startswith(repo + "/"):
+        return there[len(repo) + 1:]
+    return None
+
+
 def _is_outside_repository(root: Path, paths: list[str]) -> bool:
-    """Every named path lies outside this repository.
+    """Every named path lies apart from this repository.
 
     The graph describes THIS repo. A search rooted anywhere else is not a
     question it can answer, so denying it points the reader at a tool with
@@ -280,15 +363,24 @@ def _is_outside_repository(root: Path, paths: list[str]) -> bool:
         if not candidate.is_absolute():
             candidate = root / candidate
         try:
-            candidate.resolve().relative_to(root_resolved)
-        except (ValueError, OSError):
-            continue  # outside, keep looking
-        return False  # at least one path is inside the repo
+            if _repo_scope(root_resolved, candidate) is None:
+                continue  # apart, keep looking
+        except OSError:
+            continue
+        return False  # at least one path is inside the repo, or holds it
     return True
 
 
-def _bash_command_heads(command: str) -> list[list[str]]:
-    """argv of each command in `command` that is NOT downstream of a pipe.
+class _Head(NamedTuple):
+    """One command of a command line, with the operators on either side of it."""
+
+    before: str
+    argv: list[str]
+    after: str
+
+
+def _bash_command_heads(command: str) -> list[_Head]:
+    """Each command in `command` that is NOT downstream of a pipe.
 
     A search downstream of a pipe filters another command's output rather than
     searching the repository -- `graphite query ... | grep name` is the obvious
@@ -302,34 +394,176 @@ def _bash_command_heads(command: str) -> list[list[str]]:
         tokens = list(lexer)
     except ValueError:
         return []  # unbalanced quotes: fail open, never break the user's shell
-    heads: list[list[str]] = []
+    heads: list[_Head] = []
     current: list[str] = []
+    before = ""
     piped = False
     for token in tokens:
         if token in _SHELL_OPERATORS:
             if current and not piped:
-                heads.append(current)
+                heads.append(_Head(before, current, token))
             # `||` is or-else, not a pipe -- only `|` and `|&` feed stdout on.
             piped = token in ("|", "|&")
+            before = token
             current = []
             continue
         current.append(token)
     if current and not piped:
-        heads.append(current)
+        heads.append(_Head(before, current, ""))
     return heads
 
 
-def _bash_search_pattern(command: str) -> tuple[str, list[str]] | None:
-    """`(pattern, path arguments)` when `command` searches the repo, else None.
+_CD_COMMANDS = frozenset({"cd", "pushd"})
+# What a shell expands before `cd` runs. The hook cannot expand it, so a
+# directory spelled with any of these is not followed.
+_SHELL_EXPANSION_CHARS = frozenset("$`~*?%")
+_MSYS_DRIVE_RE = re.compile(r"^/([A-Za-z])(?=/|$)")
+
+
+def _shell_path(text: str, msys: bool) -> Path:
+    """`text` as the shell that runs the command will open it.
+
+    Git Bash on Windows spells a drive as a top-level directory: `/c/work` is
+    `work` on drive C. Python on Windows reads that as a path on the current
+    drive, so a scratch directory was not found at all, and a path into the
+    repository read as one outside it.
+    """
+    if msys:
+        drive = _MSYS_DRIVE_RE.match(text)
+        if drive:
+            text = f"{drive.group(1).upper()}:{text[drive.end():] or '/'}"
+    return Path(text)
+
+
+def _cd_target(start: Path, arguments: list[str], msys: bool) -> Path | None:
+    """The directory `cd <arguments>` leaves the shell in, or None when unknown."""
+    if len(arguments) != 1 or os.environ.get("CDPATH"):
+        return None  # with `CDPATH` set, `cd docs` may land somewhere other than `./docs`
+    text = arguments[0]
+    if text.startswith("-") or _SHELL_EXPANSION_CHARS.intersection(text):
+        return None
+    target = start / _shell_path(text, msys)  # an absolute path replaces `start`
+    try:
+        return target if target.is_dir() else None
+    except OSError:  # pragma: no cover - a path the platform cannot stat
+        return None
+
+
+def _located(paths: list[str], base: Path | None, msys: bool) -> list[str]:
+    """Each path as the shell will open it.
+
+    After a `cd` the hook followed, a relative path is relative to that
+    directory, and a search that names no path searches it.
+    """
+    if base is None:
+        return [str(_shell_path(text, msys)) for text in paths]
+    if not paths:
+        return [str(base)]
+    return [str(base / _shell_path(text, msys)) for text in paths]  # absolute replaces `base`
+
+
+class _Search(NamedTuple):
+    """A search found in a shell command: what it looks for, where, and how."""
+
+    pattern: str
+    paths: list[str]
+    fold_case: bool
+
+
+# The only tools modelled as matching case exactly. Every other one is treated
+# as folding, which is how this check read all of them before case was
+# considered: `Select-String` folds unless told otherwise, and `ag` folds an
+# all-lowercase pattern.
+#
+# Each is listed with the environment variable that hands it options the
+# command line does not show. While that variable is set the tool is not known
+# to match case exactly either. What the hook sees of the environment is
+# partial: the shell that runs the command loads the user's profile, and the
+# hook does not.
+_CASE_EXACT_TOOLS = {
+    "grep": "GREP_OPTIONS",
+    "egrep": "GREP_OPTIONS",
+    "fgrep": "GREP_OPTIONS",
+    "rg": "RIPGREP_CONFIG_PATH",
+}
+# An inline flag group that turns folding on: `(?i)`, `(?si)`, `(?i:...)`.
+_INLINE_FOLD_RE = re.compile(r"\(\?[A-Za-z]*i")
+
+
+def _search_folds_case(name: str, rest: list[str]) -> bool:
+    """Whether the command's own options make the search ignore case.
+
+    Unsure means True. Folding refuses more, never less, so a flag read as
+    folding by mistake costs a refusal the search had before, and nothing else.
+    That is why a short-flag cluster is searched for its letters without
+    working out which of them take a value.
+
+    A flag inside the pattern is read in `_denial_for`, for every route.
+    """
+    configured_by = _CASE_EXACT_TOOLS.get(name)
+    if configured_by is None or os.environ.get(configured_by):
+        return True
+    for flag in rest:
+        if flag.startswith("--"):
+            option = flag.split("=", 1)[0]
+            # GNU grep accepts any unambiguous prefix of a long option.
+            if option == "--smart-case" or (len(option) > 3 and "--ignore-case".startswith(option)):
+                return True
+        elif flag.startswith("-") and any(letter in flag for letter in "iyS"):
+            return True
+    return False
+
+
+def _search_in(name: str, rest: list[str], base: Path | None, msys: bool) -> _Search | None:
+    """The search one command runs, else None.
 
     Deliberately conservative: the first non-flag argument is taken as the
     pattern, which is the positional order of every tool in
-    `_BASH_SEARCH_TOOLS`. A flag that takes a separate value (`grep -e X`,
+    `_SEARCH_COMMANDS`. A flag that takes a separate value (`grep -e X`,
     `rg --glob X`) can mis-identify the pattern, and that is the safe
     direction -- a mis-read pattern simply fails to match a graph symbol and
     nothing is denied.
     """
-    for argv in _bash_command_heads(command):
+    rest = _strip_flag_values(rest)
+    fold_case = _search_folds_case(name, rest)
+    for index, token in enumerate(rest):
+        if (
+            token in _PATTERN_FLAGS_EXACT or token.lower() in _PATTERN_FLAGS_FOLDED
+        ) and index + 1 < len(rest):
+            paths = [
+                value
+                for position, value in enumerate(rest)
+                if position not in (index, index + 1) and not value.startswith("-")
+            ]
+            return _Search(rest[index + 1], _located(paths, base, msys), fold_case)
+    positional = [token for token in rest if not token.startswith("-")]
+    if not positional:
+        return None
+    return _Search(positional[0], _located(positional[1:], base, msys), fold_case)
+
+
+def _bash_searches(command: str, root: Path, msys: bool = False) -> list[_Search]:
+    """Every search `command` runs that is not downstream of a pipe.
+
+    All of them, not the first: `grep x notes.md ; grep -rn <symbol> src/` is
+    two searches, and judging one let the other through behind it.
+
+    A `cd` is followed only where the search cannot run without it having
+    worked: `cd <dir> && ...`, with every command up to the search joined by
+    `&&`. After `;`, `||` or `&` the search runs in the old directory if the
+    `cd` failed, and a `cd` in a pipeline moves a subshell. The directory then
+    holds only through another `cd` or a search. Any other command may be a
+    builtin, an alias or a function that moves the shell again, so
+    `cd docs && ls && grep ...` is not followed. In every such case, and when
+    the directory is not one the hook can find, paths resolve against the
+    repository root as they did before `cd` was read at all.
+    """
+    searches: list[_Search] = []
+    base: Path | None = None
+    for head in _bash_command_heads(command):
+        if head.before != "&&":
+            base = None
+        argv = head.argv
         while argv and _ENV_ASSIGNMENT_RE.match(argv[0]):
             argv = argv[1:]
         argv = _strip_redirections(argv)
@@ -339,26 +573,18 @@ def _bash_search_pattern(command: str) -> tuple[str, list[str]] | None:
         if name.endswith(".exe"):
             name = name[:-4]
         rest = argv[1:]
+        if name in _CD_COMMANDS:
+            base = _cd_target(base or root, rest, msys) if head.after == "&&" else None
+            continue
         if name == "git" and rest and rest[0] == "grep":
             name, rest = "grep", rest[1:]
         if name not in _SEARCH_COMMANDS:
+            base = None  # `popd`, `builtin cd ..`, a function: the shell may have moved
             continue
-        rest = _strip_flag_values(rest)
-        for index, token in enumerate(rest):
-            if (
-                token in _PATTERN_FLAGS_EXACT or token.lower() in _PATTERN_FLAGS_FOLDED
-            ) and index + 1 < len(rest):
-                paths = [
-                    value
-                    for position, value in enumerate(rest)
-                    if position not in (index, index + 1) and not value.startswith("-")
-                ]
-                return rest[index + 1], paths
-        positional = [token for token in rest if not token.startswith("-")]
-        if not positional:
-            continue
-        return positional[0], positional[1:]
-    return None
+        found = _search_in(name, rest, base, msys)
+        if found is not None:
+            searches.append(found)
+    return searches
 
 
 def _is_single_file_scope(root: Path, paths: list[str]) -> bool:
@@ -376,28 +602,94 @@ def _is_single_file_scope(root: Path, paths: list[str]) -> bool:
     return True
 
 
-def _denial_for(root: Path, pattern: str, paths: list[str]) -> str | None:
-    """Shared by the Grep and Bash routes so both enforce the same rule."""
-    if not pattern:
-        return None
-    if _is_single_file_scope(root, paths):
-        return None
-    if _is_outside_repository(root, paths):
-        return None
-    tokens = _pattern_tokens(pattern)
-    if not tokens:
-        return None
-    match = _graph_symbol(root, tokens)
-    if match is None:
-        return None
-    node_id, token = match
-    return (
-        f"graphite-first (strict): '{token}' is a symbol in this repo's code graph "
-        f"({node_id}). Use the graph instead of cross-file grep: "
-        f'python -m graphite query "callers {token}" | python -m graphite query "calls {token}" | '
-        f'python -m graphite search "{token}" | python -m graphite context <file>. '
-        "Literal-text searches scoped to a single file path are always allowed."
-    )
+def _holds_no_code(root: Path, paths: list[str], graph: Any) -> bool:
+    """No directory the search names holds a source file the graph models.
+
+    The graph answers questions about code. Under a `docs/` of Markdown and
+    JSON there is no definition and no call site, so a word found there is
+    text, whatever it names elsewhere in the repo.
+
+    Every named path must exist. A glob or a shell variable reaches the hook
+    unexpanded, so what it will match is unknown, and "no code under a path
+    that is not there" must not read as "no code": that would let `src/*.py`
+    through.
+
+    Which files hold code is read from the extension. A document has a file
+    node and nothing else, so any other node counts as code whatever its file
+    is called.
+    """
+    if not paths:
+        return False
+    try:
+        root_resolved = root.resolve()
+    except OSError:  # pragma: no cover - a repo root that cannot resolve
+        return False
+    scopes: list[str] = []
+    for target in paths:
+        candidate = Path(target)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        if candidate.is_file():
+            continue  # a named file is literal text, as in `_is_single_file_scope`
+        if not candidate.is_dir():
+            return False
+        try:
+            scope = _repo_scope(root_resolved, candidate)
+        except OSError:  # pragma: no cover - a directory that cannot resolve
+            return False
+        if scope is None:
+            continue  # a directory apart from the repo holds none of its code
+        scopes.append(scope)
+    for _node_id, data in graph.nodes(data=True):
+        source_file = data.get("source_file")
+        if not isinstance(source_file, str):
+            continue
+        if _edge_language(source_file) == "other" and data.get("kind") == "file":
+            continue  # a document
+        modelled = source_file.replace("\\", "/").casefold()
+        for scope in scopes:
+            if scope == "." or modelled.startswith(scope + "/"):
+                return False
+    return True
+
+
+def _denial_for(root: Path, searches: list[_Search]) -> str | None:
+    """Shared by the Grep and Bash routes so both enforce the same rule.
+
+    One refused search refuses the command. The graph is loaded at most once,
+    and only if some search gets as far as needing it.
+    """
+    graph: Any | None = None
+    for pattern, paths, fold_case in searches:
+        if not pattern:
+            continue
+        if _is_single_file_scope(root, paths):
+            continue
+        if _is_outside_repository(root, paths):
+            continue
+        # `(?i)` folds whatever the tool's own flags say, on the Grep tool and in a shell.
+        fold_case = fold_case or _INLINE_FOLD_RE.search(pattern) is not None
+        tokens = _pattern_tokens(pattern, fold_case)
+        if not tokens:
+            continue
+        if graph is None:
+            graph = _hook_graph(root)
+            if graph is None:
+                return None
+        match = _graph_symbol(graph, tokens, fold_case)
+        if match is None:
+            continue
+        if _holds_no_code(root, paths, graph):
+            continue
+        node_id, token = match
+        return (
+            f"graphite-first (strict): '{token}' is a symbol in this repo's code graph "
+            f"({node_id}). Use the graph instead of cross-file grep: "
+            f'python -m graphite query "callers {token}" | python -m graphite query "calls {token}" | '
+            f'python -m graphite search "{token}" | python -m graphite context <file>. '
+            "Literal-text searches scoped to a single file path are always allowed."
+        )
+    return None
 
 
 def _strict_denial(payload: dict[str, Any], root: Path) -> str | None:
@@ -410,7 +702,13 @@ def _strict_denial(payload: dict[str, Any], root: Path) -> str | None:
             return None
         target = tool_input.get("path")
         paths = [target] if isinstance(target, str) and target else []
-        return _denial_for(root, pattern, paths)
+        # The Grep tool matches case exactly unless `-i` is set. A value that
+        # is not plainly "off" is read as on: unsure folds.
+        # The tool is built on ripgrep, so it is read as `rg` with no flags of
+        # its own. Whether it reads ripgrep's config file is not known here,
+        # and a set `RIPGREP_CONFIG_PATH` therefore folds.
+        fold_case = tool_input.get("-i") not in (None, False) or _search_folds_case("rg", [])
+        return _denial_for(root, [_Search(pattern, paths, fold_case)])
     except Exception:
         return None
 
@@ -535,11 +833,13 @@ def handle_pre_tool_use(payload: dict[str, Any], mode: str) -> dict[str, Any] | 
             # that never onboarded.
             tool_input = payload.get("tool_input")
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
-            found = _bash_search_pattern(command) if isinstance(command, str) else None
-            if found is None:
+            # On Windows the Bash tool is Git Bash, which spells drives `/c/...`.
+            msys = tool_name == "Bash" and os.name == "nt"
+            searches = _bash_searches(command, root, msys) if isinstance(command, str) else []
+            if not searches:
                 return None
             if mode == "strict":
-                denial = _denial_for(root, found[0], found[1])
+                denial = _denial_for(root, searches)
         elif mode == "strict" and tool_name == "Grep":
             denial = _strict_denial(payload, root)
         if denial is not None:

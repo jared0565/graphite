@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Final
+from typing import Any, Callable, Final, Mapping
 
 import networkx as nx
 
@@ -50,6 +50,15 @@ def _edge_language(source_file: object) -> str:
     return _EXTENSION_LANGUAGES.get(suffix, "other")
 
 
+def is_placeholder(data: Mapping[str, Any]) -> bool:
+    """A node the graph names but could not bind to anything this repo defines.
+
+    The target of `import json`, or a call whose callee was never resolved. It
+    has no kind of its own and no source file.
+    """
+    return data.get("kind", "unknown") == "unknown"
+
+
 def _cell(bound: int, total: int, external: int) -> dict[str, Any]:
     return {
         "total": total,
@@ -62,9 +71,7 @@ def _cell(bound: int, total: int, external: int) -> dict[str, Any]:
 def resolution_health(g: nx.DiGraph) -> dict[str, Any]:
     """Measured resolver health: bound-edge ratios per relation and language."""
     node_total = g.number_of_nodes()
-    unknown_nodes = sum(
-        1 for _n, data in g.nodes(data=True) if data.get("kind", "unknown") == "unknown"
-    )
+    unknown_nodes = sum(1 for _n, data in g.nodes(data=True) if is_placeholder(data))
     relation_counts = {rel: [0, 0, 0] for rel in _COUNTED_RELATIONS}  # [bound, total, external]
     language_counts: dict[str, dict[str, list[int]]] = {}
     for _u, v, data in g.edges(data=True):
@@ -79,7 +86,7 @@ def resolution_health(g: nx.DiGraph) -> dict[str, Any]:
             buckets = language_counts.setdefault(
                 language, {rel: [0, 0, 0] for rel in _COUNTED_RELATIONS}
             )
-            bound = int(g.nodes[v].get("kind", "unknown") != "unknown")
+            bound = int(not is_placeholder(g.nodes[v]))
             if not bound and data.get("confidence") == _EXTERNAL_CONFIDENCE.get(relation):
                 counts[2] += 1
                 buckets[relation][2] += 1

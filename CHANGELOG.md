@@ -192,6 +192,68 @@ chosen over a deeper `Verdict`, and the other one is listed in `alternates`.
 `query --natural` still lowercases the question, so "Who calls Verdict?" is
 still matched as `verdict`.
 
+**The strict graph-first hook no longer refuses searches for directory names,
+filenames and plain words (#72).** It refused a cross-file search whenever one
+fragment of the pattern matched a node in the graph. `graph-out`,
+`graph\.json` and the word `round` under `docs/` were all turned away, against
+the hook's own "literal text and filename searches are fine". Four things
+changed:
+
+- **A placeholder is not a symbol.** `json` is in the graph because a file
+  imports it, not because the repo defines it. About a quarter of the nodes in
+  graphite's own graph are placeholders.
+- **A directory with no code is searched as text.** When no source file the
+  graph models (Python, TypeScript, JavaScript, Go, Rust) lies under any
+  directory the search names, the search is allowed. Every named path must
+  exist: a glob or a shell variable reaches the hook unexpanded, so it gets no
+  exemption. A directory the repository lies under, such as `..`, holds all of
+  its code.
+- **The symbol check ignores case only when the search does.** `DONE` in a log
+  line is not the function `done`. The Grep tool without `-i` is compared
+  case-exactly. So are `grep`, `git grep` and `rg`, unless they carry `-i`,
+  `-y`, `--ignore-case`, `-S` or `--smart-case`. An inline `(?i)` in the
+  pattern folds on every route. Every other tool (`Select-String`, `ag`,
+  `ack`, `findstr`) is still treated as ignoring case. So is `grep` while
+  `GREP_OPTIONS` is set, and `rg` while `RIPGREP_CONFIG_PATH` is set: either
+  can turn folding on without showing in the command. The Grep tool is built
+  on ripgrep and is treated the same way while `RIPGREP_CONFIG_PATH` is set.
+  Whether it reads that file was not measured, so the hook does not assume it
+  matches case exactly.
+- **A piece of a longer literal is not judged alone.** A name joined to its
+  neighbour by a hyphen (`graph-out`, `--no-verify`) or a slash (`src/pkg`), or
+  followed by a file extension (`graph\.json`, `query.py`), is skipped.
+  `name-?`, `name->` and member access such as `self\.run` are still judged.
+
+Still refused: the name of a real definition, searched across a directory that
+holds code. `dependents` over `src/` is the control.
+
+**The strict hook resolves a search's paths where the shell will.**
+`cd <scratch> && grep check ci.log` reads one file outside the repository. The
+hook resolved `ci.log` against the repository root, found no such file, and
+refused the search for a symbol named `check`. A `cd` or `pushd` is now
+followed when the directory exists and it is joined to the search by `&&`,
+with nothing between them but another `cd` or another search. A search that
+then names no path searches that directory. After `;`, `||`, `&` or a pipe the
+search can run without the `cd` having worked, so paths resolve against the
+repository root as before. The same goes for a directory spelled with syntax
+only the shell can expand (`$VAR`, `~`, `-` or a glob), for any other command
+in between (`cd docs && ls && grep ...`: the hook cannot tell `ls` from a
+function that changes directory), and while `CDPATH` is set.
+
+Four kinds of search are now refused that used to pass:
+
+- `cd docs && grep -rn <symbol> ..`, where `..` is the repository root. The
+  path was resolved against the root itself and read as leading outside.
+- On Windows, a Git Bash drive path into the repository, such as
+  `grep -rn <symbol> /f/Projects/repo/src`. Read by Python it was a path on
+  the current drive. The Bash tool's `/c/...` paths are now read as the drive.
+- A search rooted at a directory the repository lies under, such as
+  `grep -rn <symbol> ..`. It was read as a search outside the repository,
+  although it covers all of it.
+- A search behind another search. Only the first search of a command line was
+  judged, so `grep x notes.md ; grep -rn <symbol> src/` passed. Every search in
+  the command is judged now, and one refusal refuses the command.
+
 ## [1.1.1] — 2026-10-03
 
 A patch release. Security fixes ship in the next patch release of the current

@@ -315,11 +315,31 @@ two builds to get a structural changelog. If either becomes necessary they are
 additions to this model, not corrections to it.
 
 **On the strict hook.** `graphite-first (strict)` denies a cross-file grep when
-the search term matches a symbol in the graph. That is a heuristic on the
+the search term names something this repo defines. That is a heuristic on the
 *term*, not on the question, so it can fire on a history or existence question
-that merely mentions a symbol name. Literal-text searches scoped to a single
-file path are always allowed; when a genuine history/existence question is
-denied, that is the heuristic misfiring, not a scope violation.
+that merely mentions a symbol name. It does not fire when:
+
+- the search names only existing files, or only paths outside the repository
+  (a directory above the repository holds it, so it is not outside);
+- no directory it names holds code the graph models, such as a `docs/` of
+  Markdown and JSON;
+- the term matches only a placeholder, such as an imported standard-library
+  module;
+- the term differs in case from the symbol and the search matches case exactly;
+- the term is one piece of a hyphenated name, a path or a filename
+  (`graph-out`, `src/pkg`, `graph\.json`).
+
+A command line that holds several searches is refused if any one of them is.
+
+Two of these rest on what the hook can see. It reads the command, not the
+shell that runs it: a `cd` is followed only as `cd <dir> && <search>`, and a
+search tool is taken to ignore case while `GREP_OPTIONS` or
+`RIPGREP_CONFIG_PATH` is set in the hook's own environment. That environment
+is not the shell's. The shell loads the user's profile and the hook does not,
+so an alias or a variable set there is invisible to it.
+
+When a genuine history/existence question is still denied, that is the
+heuristic misfiring, not a scope violation.
 
 ## Non-goals (governance)
 

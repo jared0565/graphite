@@ -3,11 +3,18 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shutil
 from pathlib import Path
 
 import pytest
 
-from graphite.agent_hooks import handle_pre_tool_use, handle_session_start, handle_stop
+from graphite.agent_hooks import (
+    _shell_path,
+    handle_pre_tool_use,
+    handle_session_start,
+    handle_stop,
+)
 from graphite.usage_ledger import record_usage, set_savings_display
 
 
@@ -697,3 +704,695 @@ def test_filename_lookups_are_never_denied(built_repo: Path) -> None:
     out = handle_pre_tool_use(_bash_payload(built_repo, "find . -name 'target_symbol*'"), "strict")
 
     assert out is None or "permissionDecision" not in out.get("hookSpecificOutput", {})
+
+
+# ------------------------------------------- literal searches the gate refused (#72) --
+# The strict gate refused searches for directory names, filenames and plain words
+# because one fragment of the pattern matched a node in the graph. Each mechanism
+# below has its own arm and its own deny control: an arm that starts to allow by
+# removing the rule, instead of repairing it, turns a control red.
+
+
+def _decision(out: dict | None) -> str:
+    return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision", "allow")
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_search_options(monkeypatch) -> None:
+    """The gate reads these from its environment. A developer's own ripgrep
+    config must not decide what the arms below assert."""
+    for name in ("RIPGREP_CONFIG_PATH", "GREP_OPTIONS", "CDPATH"):
+        monkeypatch.delenv(name, raising=False)
+
+
+_LITERAL_REPO_FILES = {
+    "src/pkg/__init__.py": "",
+    "src/pkg/core.py": (
+        "import json\n\n\n"
+        "def dependents(x):\n    return json.dumps(x)\n\n\n"
+        "def check():\n    return dependents(1)\n\n\n"
+        "def run():\n    return check()\n\n\n"
+        "def done():\n    return run()\n\n\n"
+        "def out():\n    return done()\n\n\n"
+        "def graph():\n    return out()\n"
+    ),
+    "src/pkg/channel.py": "class Ledger:\n    pass\n\n\ndef round(x):\n    return x\n",
+    "tests/test_consume.py": "class Out:\n    pass\n\n\ndef test_x():\n    return Out()\n",
+    "examples/demo.py": "VALUE = 1\n",
+    "docs/schemas/round.schema.json": '{"title": "round"}\n',
+    "docs/notes.md": "A round is one message.\n",
+}
+
+
+@pytest.fixture(scope="module")
+def literal_repo(tmp_path_factory) -> Path:
+    """Symbols named like ordinary words, a test-local class, docs with no code.
+
+    Built once: the arms below only read it, and there are several dozen. A
+    module fixture is set up before the per-test state isolation in conftest,
+    so the build gets its own state directory here.
+    """
+    from graphite import activation
+    from graphite.cli import main
+
+    root = tmp_path_factory.mktemp("literal-repo")
+    for rel, text in _LITERAL_REPO_FILES.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(activation.ENV_STATE_DIR, str(tmp_path_factory.mktemp("literal-repo-state")))
+        patch.chdir(root)  # cmd_build writes cfg.output_dir relative to CWD
+        assert main(["build", "."]) == 0
+    return root
+
+
+def test_a_real_function_is_still_refused_over_a_source_directory(literal_repo: Path) -> None:
+    """The deny control every arm below is read against (round 312's `dependents`)."""
+    out = handle_pre_tool_use(_grep_payload(literal_repo, "dependents", path="src/"), "strict")
+
+    assert _decision(out) == "deny"
+    assert "src_pkg_core_py_dependents" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_an_import_placeholder_is_not_a_symbol_of_this_repo(literal_repo: Path) -> None:
+    """`json` is in the graph only as the target of `import json`: a placeholder
+    with no kind and no source file. Nothing in this repository defines it, so
+    the graph has no callers to offer and the search is for a plain word."""
+    out = handle_pre_tool_use(_grep_payload(literal_repo, "json", path="src/"), "strict")
+
+    assert _decision(out) == "allow"
+
+
+def test_an_unresolved_call_placeholder_is_not_a_symbol_either(literal_repo: Path) -> None:
+    """`json.dumps(x)` leaves a second placeholder, named by its own id."""
+    out = handle_pre_tool_use(
+        _grep_payload(literal_repo, "src_pkg_core_py_json_dumps", path="src/"), "strict"
+    )
+
+    assert _decision(out) == "allow"
+
+
+def test_a_directory_with_no_code_is_searched_as_text(literal_repo: Path) -> None:
+    """`round` is a function in `src/`. `docs/` holds JSON and Markdown only: no
+    definition and no call site lives there, so the graph has nothing to say
+    about a word found in it."""
+    out = handle_pre_tool_use(_grep_payload(literal_repo, "round", path="docs/"), "strict")
+
+    assert _decision(out) == "allow"
+
+
+@pytest.mark.parametrize("path", ["src/", "examples/", ".", None])
+def test_the_same_word_is_still_refused_where_code_lives(literal_repo: Path, path: str | None) -> None:
+    """`examples/` holds one Python file that defines nothing: still code the
+    graph models. No path at all is the whole repository."""
+    tool_input = {} if path is None else {"path": path}
+    out = handle_pre_tool_use(_grep_payload(literal_repo, "round", **tool_input), "strict")
+
+    assert _decision(out) == "deny", path
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("grep -rn round docs/", "allow"),
+        ("grep -rn round docs/schemas docs/notes.md", "allow"),
+        ("grep -rn round docs/ src/", "deny"),
+        ("grep -rn round docs/ examples/demo.py src/pkg", "deny"),
+    ],
+)
+def test_every_directory_searched_must_be_free_of_code(
+    literal_repo: Path, command: str, expected: str
+) -> None:
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == expected, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["grep -rn round src/*.py", "grep -rn round $DOCS", "grep -rn round docs/*.md", "grep -rn round nosuchdir/"],
+)
+def test_a_path_that_does_not_exist_gets_no_exemption(literal_repo: Path, command: str) -> None:
+    """A glob or a shell variable reaches the hook unexpanded, so what it will
+    match is unknown. Reading "no code under a path that is not there" as "no
+    code" would let `src/*.py` through."""
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == "deny", command
+
+
+def test_a_directory_outside_the_repo_holds_none_of_its_code(
+    literal_repo: Path, tmp_path_factory
+) -> None:
+    """Searched together with `docs/`, a scratch directory adds no code."""
+    outside = tmp_path_factory.mktemp("outside-the-repo")
+    (outside / "logs").mkdir()
+
+    command = f"grep -rn round {(outside / 'logs').as_posix()} docs/"
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == "allow"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # a directory the repository lies under holds all of its code
+        ("grep -rn round docs/ ..", "deny"),
+        ("grep -rn round docs/ ../..", "deny"),
+        ("grep -rn round docs/ {parent}", "deny"),
+        ("grep -rn round ..", "deny"),
+        ("grep -rn round {parent}", "deny"),
+        ("rg round ../..", "deny"),
+        # a directory beside the repository holds none of it
+        ("grep -rn round docs/ ../{beside}", "allow"),
+        ("grep -rn round ../{beside}", "allow"),
+        ("grep -rn round {parent}/{beside}", "allow"),
+    ],
+)
+def test_a_directory_above_the_repository_is_not_outside_it(
+    literal_repo: Path, tmp_path_factory, command: str, expected: str
+) -> None:
+    """`..` holds the whole repository, so a search rooted there is a
+    whole-repo search. Read as "outside", it let a symbol search through, alone
+    and beside a directory with no code in it."""
+    beside = literal_repo.parent / "beside-the-repo"
+    beside.mkdir(exist_ok=True)
+    command = command.format(parent=literal_repo.parent.as_posix(), beside=beside.name)
+
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == expected, command
+
+
+def test_the_grep_tool_cannot_search_from_above_the_repository_either(literal_repo: Path) -> None:
+    out = handle_pre_tool_use(_grep_payload(literal_repo, "round", path=".."), "strict")
+
+    assert _decision(out) == "deny"
+
+
+def test_a_path_is_placed_against_the_repository_case_folded(tmp_path: Path) -> None:
+    """A case-insensitive filesystem opens `/USERS/ME/REPO/src` as the repo's
+    own `src`. Compared exactly, that spelling read as a directory elsewhere.
+    The repository here does not exist, so no filesystem corrects the case and
+    the arm means the same on every platform."""
+    from graphite.agent_hooks import _repo_scope
+
+    repo = tmp_path.resolve() / "nope" / "repo"
+    other_case = Path(str(repo).swapcase())
+
+    assert _repo_scope(repo, other_case / "SRC" / "Pkg") == "src/pkg"
+    assert _repo_scope(repo, other_case) == "."
+    assert _repo_scope(repo, other_case.parent) == "."
+    assert _repo_scope(repo, other_case.parent / "other") is None
+    assert _repo_scope(repo, other_case.parent / "repository") is None  # shares a prefix, not a parent
+    assert _repo_scope(repo, other_case.parent / "re") is None  # a prefix of the name, not a directory above
+
+
+def test_a_definition_in_a_file_of_no_known_language_still_counts_as_code(tmp_path: Path) -> None:
+    """Which files hold code is read from the extension, and a document has a
+    file node and nothing else. If the graph ever holds a function in a file
+    whose extension is not listed, the directory is not free of code."""
+    from graphite.agent_hooks import _holds_no_code
+    from graphite.graph import build_graph
+
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "docs").mkdir()
+    graph = build_graph(
+        [
+            {"id": "bin_tool", "kind": "file", "name": "tool", "source_file": "bin/tool"},
+            {"id": "bin_tool_main", "kind": "function", "name": "main", "source_file": "bin/tool"},
+            {"id": "docs_notes_md", "kind": "file", "name": "notes.md", "source_file": "docs/notes.md"},
+        ],
+        [],
+    )
+
+    assert _holds_no_code(tmp_path, ["bin"], graph) is False
+    assert _holds_no_code(tmp_path, ["docs"], graph) is True
+
+
+def test_a_code_directory_named_in_another_case_still_counts_its_code(
+    literal_repo: Path, tmp_path: Path
+) -> None:
+    """A case-insensitive filesystem opens `SRC/` as `src/`. The graph records
+    `src/pkg/...`, so comparing the two spellings exactly would find "no code"
+    under a directory full of it. The directory is renamed, in a copy, so the
+    arm means the same thing on a case-sensitive filesystem."""
+    repo = tmp_path / "repo"
+    shutil.copytree(literal_repo, repo)
+    (repo / "src").rename(repo / "SRC")
+
+    out = handle_pre_tool_use(_bash_payload(repo, "grep -rn round SRC/"), "strict")
+
+    assert _decision(out) == "deny"
+
+
+def test_a_word_in_another_case_is_not_the_symbol(literal_repo: Path) -> None:
+    """`DONE` in a log line is not the function `done`. The Grep tool matches
+    case exactly unless told otherwise, so the search cannot even find the
+    function: it is a search for a word."""
+    out = handle_pre_tool_use(_grep_payload(literal_repo, "DONE", path="src/"), "strict")
+
+    assert _decision(out) == "allow"
+
+
+def test_a_grep_that_ignores_case_matches_the_symbol_in_any_case(literal_repo: Path) -> None:
+    payload = _grep_payload(literal_repo, "DONE", path="src/", **{"-i": True})
+
+    out = handle_pre_tool_use(payload, "strict")
+
+    assert _decision(out) == "deny"
+    assert "src_pkg_core_py_done" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        # the pattern itself turns folding on, so the search finds `done`
+        ("(?i)DONE", "deny"),
+        ("(?si)DONE", "deny"),
+        ("(?i:DONE)", "deny"),
+        # a flag group that does not: `s` only, or `i` switched off
+        ("(?s)DONE", "allow"),
+        ("(?-i)DONE", "allow"),
+    ],
+)
+def test_an_inline_flag_folds_case_for_the_grep_tool_as_well(
+    literal_repo: Path, pattern: str, expected: str
+) -> None:
+    """Measured on the Grep tool: `ledger` does not find `class Ledger:`, and
+    `(?i)ledger` does. The inline flag was read on the shell route only, so the
+    same search passed here and was refused there."""
+    out = handle_pre_tool_use(_grep_payload(literal_repo, pattern, path="src/"), "strict")
+
+    assert _decision(out) == expected, pattern
+
+
+@pytest.mark.parametrize(("flag", "expected"), [("true", "deny"), (1, "deny"), (False, "allow"), (None, "allow")])
+def test_a_case_flag_the_gate_cannot_read_is_taken_as_folding(
+    literal_repo: Path, flag: object, expected: str
+) -> None:
+    """`-i` is a boolean. Any other value that is not plainly "off" folds:
+    unsure refuses more, never less."""
+    payload = _grep_payload(literal_repo, "DONE", path="src/", **{"-i": flag})
+
+    out = handle_pre_tool_use(payload, "strict")
+
+    assert _decision(out) == expected, flag
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # the search matches case exactly, and so does the symbol check
+        ("grep -rn DONE src/", "allow"),
+        ("grep -rn -E 'group\\]Run .*finished' src/", "allow"),
+        ("rg DONE src/", "allow"),
+        ("git grep DONE", "allow"),
+        ("grep -rn -- DONE src/", "allow"),  # `--` ends the options; it abbreviates none
+        ("grep -rn ledger src/", "allow"),  # the class is `Ledger`
+        ("grep -rn done src/", "deny"),
+        ("grep -rn Ledger src/", "deny"),
+        ("grep -rn 'Done\\|done' src/", "deny"),
+        # the search folds case, so a symbol in any case is what it would find
+        ("grep -rni DONE src/", "deny"),
+        ("grep -rn -i DONE src/", "deny"),
+        ("grep -rn --ignore-case DONE src/", "deny"),
+        ("grep -rn --ignore DONE src/", "deny"),
+        ("grep -rny DONE src/", "deny"),
+        ("grep -rnP '(?i)DONE' src/", "deny"),
+        ("git grep -i DONE", "deny"),
+        ("rg -i DONE src/", "deny"),
+        ("rg --smart-case DONE src/", "deny"),
+        ("rg -S DONE src/", "deny"),
+        # tools whose case rules are not modelled fold, as every tool did before
+        ("ag DONE src/", "deny"),
+        ("ack DONE src/", "deny"),
+    ],
+)
+def test_the_symbol_check_folds_case_only_when_the_search_does(
+    literal_repo: Path, command: str, expected: str
+) -> None:
+    """Folding is a property of the search, not of the gate. Where it is not
+    known, the gate folds: that refuses more, never less."""
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == expected, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Select-String -Pattern DONE -Path src",
+        "sls DONE src",
+        "Select-String -Pattern DONE -Path src -CaseSensitive",
+    ],
+)
+def test_select_string_is_treated_as_folding_case(literal_repo: Path, command: str) -> None:
+    """`Select-String` ignores case unless told otherwise. `-CaseSensitive` is
+    not modelled, so that search keeps the refusal it had."""
+    out = handle_pre_tool_use(_ps_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == "deny", command
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        # each bare word is a function in `src/`, so each is refused on its own
+        ("graph", "deny"),
+        ("out", "deny"),
+        ("check", "deny"),
+        # kebab-case names and command-line options
+        ("graph-out", "allow"),
+        ("--check", "allow"),
+        ("pre-check-run", "allow"),
+        # a path
+        ("src/pkg/check", "allow"),
+        ("graph/", "allow"),
+        ("check\\/run", "allow"),
+        # a file's name, with the dot escaped or not
+        ("graph\\.json", "allow"),
+        ("graph.json", "allow"),
+        ("check\\.py", "allow"),
+        ("zzqx|graph\\.json", "allow"),
+        ("dependents|graph\\.json", "deny"),
+        # not a literal: the hyphen is optional or part of an arrow, so the text
+        # this finds still includes the bare name
+        ("check-?", "deny"),
+        ("check->", "deny"),
+        ("->check", "deny"),
+        # member access, not a file's name. `attr` is no symbol, so only the
+        # stem `dependents` can refuse the first of these
+        ("dependents\\.attr", "deny"),
+        ("dependents\\.run", "deny"),
+        ("self\\.check\\(", "deny"),
+        ("graph\\.jsonify", "deny"),
+    ],
+)
+def test_a_fragment_of_a_literal_is_not_judged_alone(
+    literal_repo: Path, pattern: str, expected: str
+) -> None:
+    """`graph-out` is a directory and `graph\\.json` a file. Neither is the
+    function `graph`, though each contains its name. A fragment is skipped only
+    where the text matched must carry the joining character, so the search
+    cannot be finding the bare symbol."""
+    out = handle_pre_tool_use(_grep_payload(literal_repo, pattern, path="src/"), "strict")
+
+    assert _decision(out) == expected, pattern
+
+
+# ------------------------------------------- options the command line does not show --
+# Measured: `GREP_OPTIONS=-i grep ledger` finds `class Ledger:` with the grep
+# Git Bash ships, and `rg ledger` finds it once `RIPGREP_CONFIG_PATH` names a
+# file holding `--ignore-case`. Neither shows in the command the hook reads.
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "command", "expected"),
+    [
+        ("RIPGREP_CONFIG_PATH", "ripgreprc", "rg DONE src/", "deny"),
+        ("RIPGREP_CONFIG_PATH", "ripgreprc", "grep -rn DONE src/", "allow"),
+        ("RIPGREP_CONFIG_PATH", "", "rg DONE src/", "allow"),  # ripgrep reads no config for an empty value
+        ("GREP_OPTIONS", "-i", "grep -rn DONE src/", "deny"),
+        ("GREP_OPTIONS", "-i", "egrep -rn DONE src/", "deny"),
+        ("GREP_OPTIONS", "-i", "fgrep -rn DONE src/", "deny"),
+        ("GREP_OPTIONS", "-i", "rg DONE src/", "allow"),
+        ("GREP_OPTIONS", "", "grep -rn DONE src/", "allow"),
+    ],
+)
+def test_a_search_tool_configured_from_the_environment_is_taken_as_folding(
+    literal_repo: Path, monkeypatch, variable: str, value: str, command: str, expected: str
+) -> None:
+    """What the configuration says is not read. That it exists is enough to be
+    unsure, and unsure folds."""
+    monkeypatch.setenv(variable, value)
+
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == expected, (variable, command)
+
+
+@pytest.mark.parametrize(("variable", "expected"), [("RIPGREP_CONFIG_PATH", "deny"), ("GREP_OPTIONS", "allow")])
+def test_the_grep_tool_is_taken_as_folding_while_ripgrep_is_configured(
+    literal_repo: Path, monkeypatch, variable: str, expected: str
+) -> None:
+    """The Grep tool is built on ripgrep. Whether it reads ripgrep's config
+    file was not measured, so while the variable is set it is not known to
+    match case exactly, and unsure folds."""
+    monkeypatch.setenv(variable, "set")
+
+    out = handle_pre_tool_use(_grep_payload(literal_repo, "DONE", path="src/"), "strict")
+
+    assert _decision(out) == expected, variable
+
+
+def test_a_cd_is_not_followed_while_cdpath_is_set(literal_repo: Path, monkeypatch) -> None:
+    """With `CDPATH` set, `cd docs` may land in a `docs` under one of its
+    entries instead of `./docs`."""
+    command = "cd docs && grep -rn round ."
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "allow"
+
+    monkeypatch.setenv("CDPATH", str(literal_repo / "src"))
+
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "deny"
+
+
+# ------------------------------------------------ more than one search in a command --
+# Only the first search of a command line was judged. Once a first search could
+# earn an exemption, any search could ride through behind it.
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("grep -rn round docs/ ; grep -rn round src/", "deny"),
+        ("grep -rn round docs/ && grep -rn round src/", "deny"),
+        ("grep -rn round docs/ || rg round", "deny"),
+        ("grep zzqx docs/notes.md ; grep -rn dependents src/", "deny"),
+        ("grep -e zzqx docs/notes.md ; grep -rn dependents src/", "deny"),
+        ("grep -rn zzqx src/ ; grep -rn zzqy src/ ; grep -rn dependents src/", "deny"),
+        ("grep -rn dependents src/ ; grep zzqx docs/notes.md", "deny"),
+        ("cd docs && grep -rn round . && grep -rn round ../src", "deny"),
+        # a first command that is no search to judge: no pattern, an empty one, no word in it
+        ("grep -c ; grep -rn dependents src/", "deny"),
+        ("grep -rn '' src/ ; grep -rn dependents src/", "deny"),
+        ("grep -rn '[0-9]+' src/ ; grep -rn dependents src/", "deny"),
+        # every search passes on its own
+        ("grep -rn round docs/ ; grep -rn round docs/schemas", "allow"),
+        ("grep -n round docs/notes.md ; grep -rn zzqx src/", "allow"),
+        ("cd docs && grep -rn round . && rg round schemas", "allow"),
+    ],
+)
+def test_every_search_in_a_command_is_judged(literal_repo: Path, command: str, expected: str) -> None:
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == expected, command
+
+
+def test_a_search_outside_the_repository_does_not_end_the_judging(
+    literal_repo: Path, scratch: Path
+) -> None:
+    command = f"grep -rn check {scratch.as_posix()} ; grep -rn check src/"
+
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == "deny"
+
+
+def test_the_refusal_names_the_search_that_earned_it(literal_repo: Path) -> None:
+    command = "grep -rn round docs/ ; grep -rn dependents src/"
+
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "src_pkg_core_py_dependents" in reason
+    assert "'round'" not in reason
+
+
+def test_the_graph_is_loaded_once_for_a_command_of_several_searches(
+    literal_repo: Path, monkeypatch
+) -> None:
+    """Each search here reaches the graph: `round` is a symbol, and only the
+    graph can say that `docs/` holds no code."""
+    from graphite import agent_hooks
+
+    loads: list[Path] = []
+    real = agent_hooks._hook_graph
+
+    def counting(root: Path):
+        loads.append(root)
+        return real(root)
+
+    monkeypatch.setattr(agent_hooks, "_hook_graph", counting)
+    command = "grep -rn round docs/ ; grep -rn round docs/schemas ; grep -rn round docs/"
+
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == "allow"
+    assert len(loads) == 1
+
+
+# --------------------------------------------- a search after `cd` (channel round 318) --
+# `cd <scratch> && grep check ci.log` reads one file outside the repository. The
+# hook resolved `ci.log` against the repository root, found no such file there,
+# and refused the search for a symbol named `check`.
+
+
+@pytest.fixture()
+def scratch(tmp_path_factory) -> Path:
+    outside = tmp_path_factory.mktemp("outside-the-repo")
+    (outside / "ci.log").write_text("##[group]Run pkg check --all\n", encoding="utf-8")
+    return outside
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd {out} && grep -n check ci.log",
+        "cd {out} && grep -n check ./ci.log",
+        'cd "{out}" && grep -n check ci.log',
+        "cd {out} && grep -rn check .",
+        "cd {out} && rg check",
+        "pushd {out} && grep -n check ci.log",
+        "cd src && grep -n check pkg/core.py",
+        "cd docs && grep -rn round schemas",
+        "cd docs && cd schemas && grep -rn round .",
+        "cd docs && rg round",
+        # an assignment and a search leave the shell where it was
+        "cd docs && LC_ALL=C && grep -rn round .",
+        "cd docs && grep -c zzqx notes.md && grep -rn round .",
+    ],
+)
+def test_a_path_after_cd_is_found_where_the_shell_will_find_it(
+    literal_repo: Path, scratch: Path, command: str
+) -> None:
+    command = command.format(out=scratch.as_posix())
+
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == "allow", command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # the directory moved into holds code, or the path leads back into the repo
+        "cd src && grep -rn check .",
+        "cd src && rg check",
+        "cd {out} && grep -rn check {repo}/src",
+        "cd {out} && cd {repo} && grep -rn check src",
+        # the search runs whether or not the `cd` worked
+        "cd {out} ; grep -n check ci.log",
+        "cd {out} || grep -n check ci.log",
+        "cd {out} & grep -n check ci.log",
+        "cd {out} | cat && grep -n check ci.log",
+        "cd {out} && ls ; grep -n check ci.log",
+        # where the `cd` leads is not known to the hook
+        "cd $OUT && grep -rn check .",
+        "cd ~ && grep -rn check .",
+        "cd nosuchdir && grep -rn check .",
+        "cd {out}/nosuchdir && grep -n check ci.log",
+        "cd -P {out} && grep -rn check .",
+        "cd {out} extra && grep -rn check .",
+        "cd {out} && cd - && grep -rn check .",
+        # a command the hook does not model may have moved the shell again
+        "pushd docs && popd && grep -rn round .",
+        "cd docs && builtin cd .. && grep -rn round .",
+        "cd docs && source env.sh && grep -rn round .",
+        "cd docs && ls && grep -rn round .",
+        "cd {out} && ls && grep -n check ci.log",
+        "cd {out} && ls | sort && grep -n check ci.log",
+    ],
+)
+def test_a_cd_that_cannot_be_trusted_moves_nothing(
+    literal_repo: Path, scratch: Path, command: str
+) -> None:
+    """Following a `cd` must not become a way out of the gate. Wherever the
+    hook cannot be sure the search runs in the new directory, paths resolve
+    against the repository root, as they did before."""
+    command = command.format(out=scratch.as_posix(), repo=literal_repo.as_posix())
+
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == "deny", command
+
+
+@pytest.mark.parametrize("name", ["-", "$OUT", "~"])
+def test_a_directory_named_like_shell_syntax_is_not_the_cd_target(
+    literal_repo: Path, tmp_path: Path, name: str
+) -> None:
+    """`cd -` goes back, `cd $OUT` and `cd ~` go wherever the shell expands them
+    to. A directory in the repository that happens to carry such a name, with no
+    code in it, is not where the search runs."""
+    repo = tmp_path / "repo"
+    shutil.copytree(literal_repo, repo)
+    (repo / name).mkdir()
+
+    out = handle_pre_tool_use(_bash_payload(repo, f"cd {name} && grep -rn check ."), "strict")
+
+    assert _decision(out) == "deny"
+
+
+def test_a_parent_path_after_cd_no_longer_reads_as_outside_the_repository(literal_repo: Path) -> None:
+    """The same mistake in the other direction. From `docs/`, `..` is the
+    repository root. Resolved against the root itself it was the directory
+    above, so a whole-repo search for a symbol read as a search elsewhere and
+    passed."""
+    out = handle_pre_tool_use(_bash_payload(literal_repo, "cd docs && grep -rn round .."), "strict")
+
+    assert _decision(out) == "deny"
+
+
+@pytest.mark.parametrize(
+    ("text", "msys", "expected"),
+    [
+        ("/c/Users/x", True, "C:/Users/x"),
+        ("/F/Projects", True, "F:/Projects"),
+        ("/c", True, "C:/"),
+        ("/cache/x", True, "/cache/x"),  # a directory named `cache`, not drive C
+        ("src/pkg", True, "src/pkg"),
+        ("/c/Users/x", False, "/c/Users/x"),  # PowerShell, or any shell off Windows
+    ],
+)
+def test_a_git_bash_drive_path_is_read_as_the_drive(text: str, msys: bool, expected: str) -> None:
+    assert _shell_path(text, msys) == Path(expected)
+
+
+def _git_bash(path: Path) -> str:
+    """`C:\\Users\\x` the way Git Bash spells it: `/c/Users/x`."""
+    return f"/{path.drive[0].lower()}{path.as_posix()[2:]}"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Git Bash drive paths exist only on Windows")
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("cd {out} && grep -n check ci.log", "allow"),
+        ("grep -n check {out}/ci.log", "allow"),
+        ("grep -rn check {out}", "allow"),
+        # read as a path on the current drive, this was "outside the repository"
+        ("grep -rn check {repo}/src", "deny"),
+        ("cd {repo}/src && grep -rn check .", "deny"),
+    ],
+)
+def test_git_bash_drive_paths_are_located_on_windows(
+    literal_repo: Path, scratch: Path, command: str, expected: str
+) -> None:
+    command = command.format(out=_git_bash(scratch), repo=_git_bash(literal_repo))
+
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == expected, command
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Git Bash drive paths exist only on Windows")
+def test_powershell_does_not_read_a_git_bash_drive_path(literal_repo: Path) -> None:
+    """To PowerShell `/f/x` is a directory `f` at the root of the current
+    drive. The search keeps the reading it had."""
+    command = f"Select-String -Pattern check -Path {_git_bash(literal_repo)}/src"
+
+    out = handle_pre_tool_use(_ps_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == "allow"
