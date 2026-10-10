@@ -44,6 +44,12 @@ def _graph():
          "source_file": "src/svc.py"},
         {"id": "src_svc_py_worker_run_7c6b1a", "kind": "function", "name": "run",
          "qualname": "Worker.run", "is_method": True, "source_file": "src/svc.py"},
+        # Two spellings of one name, the lowercase one a directory deeper, so
+        # `report` resolves to the class and the result says `case_ambiguous`.
+        {"id": "src_svc_py_report_1a2b3c", "kind": "class", "name": "Report", "qualname": "Report",
+         "source_file": "src/svc.py"},
+        {"id": "src_deep_util_py_report", "kind": "function", "name": "report", "qualname": "report",
+         "source_file": "src/deep/util.py"},
     ]
     edges = [
         {"source": "src_app", "target": "src_lib", "relation": "imports"},
@@ -101,9 +107,20 @@ def test_query_outputs_match_published_result_schema() -> None:
         "reaches src_lib -> src_app",
         "callers run",
         "callers worker.run",
+        "callers report",
+        "reaches main -> report",
     )
     for q in samples:
         assert matches_schema(query(g, q), schema) is True, q
+
+
+def test_the_conformance_graph_exercises_the_case_ambiguous_field() -> None:
+    """`resolution[]` items are closed objects, so a field the samples never
+    emit is a field the test above cannot see drift on."""
+    g = _graph()
+    assert query(g, "callers report")["resolution"][0]["case_ambiguous"] is True
+    assert answer_natural(g, "Who calls report?")["resolution"][0]["case_ambiguous"] is True
+    assert "case_ambiguous" not in query(g, "callers Report")["resolution"][0]
 
 
 def test_natural_outputs_match_published_result_schema() -> None:
@@ -112,6 +129,7 @@ def test_natural_outputs_match_published_result_schema() -> None:
     g = _graph()
     answered = (
         "who calls helper?",
+        "Who calls report?",
         "what breaks if I change lib.ts",
         "something about the helper maybe",
         "what is this",

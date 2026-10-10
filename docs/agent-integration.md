@@ -59,11 +59,23 @@ envelope:
   `path-suffix`); `alternates_total` says how many there were. Check it before
   trusting results — a `fuzzy` resolution with alternates may mean the wrong
   node was picked.
+- Matching ignores case. When a name matched more than one spelling and the
+  node chosen is not spelled as you typed it (`Verdict` typed, a function
+  `verdict` chosen because it sits in a shallower directory), the resolution
+  entry carries `case_ambiguous: true`, the answer grades `advisory` at most,
+  and it carries the caveat `target-resolved-to-another-spelling`. Ask again by
+  node id. `context` reports the same field on its `matched` entries, and
+  `impact` and `context` print the `answer health:` line for it. A `no_path`
+  error carries no `answer` block, so there the node id in the message is the
+  only sign (#76).
 - Traversal is bounded with generous defaults (path/reaches `max_depth` 32,
   neighbor listings `max_results` 200). Results report `truncated` and
   `limits`. Important nuance: a `no_path` error with `truncated: true` means
-  the depth bound was hit — a longer path may exist; `truncated: false` means
-  absence is proven.
+  the depth bound was hit — a longer path may exist. `truncated: false` means
+  only that the walk was not cut short. It is not proof of absence: a
+  `no_path` error carries no `answer` block, so nothing grades it, and where
+  call edges are unbound a real path can be missing from the graph (#76).
+  Check `resolution_health` yourself before acting on a `no_path`.
 - `query` always exits 0; errors live in the JSON (documented contract).
 
 ## 4. Validate before you spend
@@ -88,7 +100,9 @@ graphite query --natural "what breaks if I change db.ts"
 
 `--natural` is a fixed deterministic grammar — anchored patterns, first match
 wins, published in full under `natural_language.intents` in capabilities. It
-is not an LLM and never touches the network. Three outcomes:
+is not an LLM and never touches the network. The grammar ignores case, and a
+name or path in the question reaches the matcher in the case you typed it.
+Three outcomes:
 
 1. **Recognized query question** → translated to a plan and executed; the
    response includes `natural` (matched pattern) and `plan` for transparency.
@@ -205,6 +219,12 @@ this answer actually walked, not the whole graph:
   result is a trustworthy absence (subject to `caveats`).
 - `grade: "advisory"` — a used cell is below threshold and the result is
   non-empty. Treat the list as incomplete: verify with grep and say so.
+  Two healthy answers also grade `advisory`, and `caveats` says which
+  applies: an empty answer over a relation where a real edge can go
+  undetected (`calls`; `imports` for JavaScript and TypeScript), and an
+  answer about a node not spelled as you typed it while another spelling
+  matched (`target-resolved-to-another-spelling`; see `case_ambiguous`
+  under section 3).
 - `grade: "inconclusive"` — a used cell is below threshold and the result
   is empty. Unknown, not safe. The legacy `inconclusive` boolean mirrors
   this grade (its derivation is scoped since answer-contract v1; it used

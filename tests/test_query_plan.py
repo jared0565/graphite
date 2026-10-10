@@ -485,14 +485,20 @@ def test_a_dotted_qualname_typed_in_exact_case_picks_that_definition() -> None:
     assert (lower["type"], lower["node"]) == ("qualname", "m_py_a_worker_run_1")
 
 
-def test_path_depth_still_outranks_exact_case_pending_a_maintainer_decision() -> None:
-    """OPEN DECISION, pinned so it cannot change by accident.
+def test_path_depth_outranks_exact_case_and_the_result_says_so() -> None:
+    """DECIDED 2026-10-10: the ranking stays, and the pick is declared.
 
     Exact case replaces only the id-order tie-break, so it is consulted after
     path depth and scope. Here the exact-case class is one directory deeper than
-    the lowercase function, and the shallower definition still wins. Whether
-    exact case should outrank path depth is a change to the ranking rule (spec
-    4.4 of the scope-identity design), which is the maintainer's to make.
+    the lowercase function, and the shallower definition still wins.
+
+    Ranking exact case first was measured on Django 5.2.7 and not taken. It ends
+    all 128 of 330 exact-case queries answered about another spelling, and it
+    moves 78 of 163 all-lowercase queries to a different node. Lowercase is how
+    a name is usually typed, and a bare name meaning the shallowest definition
+    is the rule those queries rely on. The resolution carries `case_ambiguous`
+    instead and the answer is capped at `advisory`
+    (`tests/test_case_ambiguous_answer.py`).
     """
     nodes = [
         {"id": "a_py_verdict", "kind": "function", "name": "verdict", "qualname": "verdict", "source_file": "a.py"},
@@ -503,3 +509,4 @@ def test_path_depth_still_outranks_exact_case_pending_a_maintainer_decision() ->
 
     assert resolution["node"] == "a_py_verdict"
     assert resolution["alternates"] == ["pkg_b_py_verdict_345430"]
+    assert resolution["case_ambiguous"] is True

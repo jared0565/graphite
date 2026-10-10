@@ -382,7 +382,8 @@ def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
         # itself — must never be able to error the query. On any failure
         # here the envelope is left exactly as it was before this block.
         try:
-            seeds = [entry.get("node") for entry in envelope.get("resolution", [])]
+            resolved = envelope.get("resolution", [])
+            seeds = [entry.get("node") for entry in resolved]
             matched_languages = languages_for_nodes(g, seeds)
             block = build_answer_block(
                 g,
@@ -390,6 +391,7 @@ def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
                 languages=matched_languages,
                 total=0 if _is_empty(spec, result) else 1,
                 empty_meaning=spec.empty_meaning or None,
+                case_ambiguous=any(entry.get("case_ambiguous") for entry in resolved),
             )
             if block is not None:
                 envelope["answer"] = block
@@ -533,12 +535,28 @@ class NodeMatch(NamedTuple):
     `alternates` lists a few other nodes that matched equally well;
     `alternates_total` is how many there were in all, so a capped list cannot
     read as a complete one.
+
+    `case_ambiguous` is True when the token matched names in more than one
+    spelling and the node chosen is not spelled as typed. Matching ignores
+    case, so the choice between `Verdict` and `verdict` then fell to path depth
+    and scope, and the answer may be about the other one (round 317).
     """
 
     node: str
     match_type: str
     alternates: list[str]
     alternates_total: int
+    case_ambiguous: bool = False
+
+
+def _case_ambiguous(spellings: list[str], typed: str) -> bool:
+    """`spellings` are those of every hit, the chosen one first.
+
+    Every hit, not the few published in `alternates`: the spelling typed may
+    be the fifth. Hits spelled alike are a duplicate, not a collision of case,
+    and are left to `alternates` as before.
+    """
+    return spellings[0] != typed and len(set(spellings)) > 1
 
 
 def _scope_rank(g: nx.DiGraph, node_id: str) -> int:
@@ -586,7 +604,11 @@ def _find_node_detail(g: nx.DiGraph, token: str) -> NodeMatch | None:
             key=lambda n: (_path_depth(g, n), g.nodes[n].get("qualname") != typed, n),
         )
         if qualname_hits:
-            return NodeMatch(qualname_hits[0], "qualname", qualname_hits[1:4], len(qualname_hits) - 1)
+            spellings = [str(g.nodes[n].get("qualname")) for n in qualname_hits]
+            return NodeMatch(
+                qualname_hits[0], "qualname", qualname_hits[1:4], len(qualname_hits) - 1,
+                _case_ambiguous(spellings, typed),
+            )
 
     # Multiple files can share a basename (README.md at root and under
     # hooks/, policy/, etc.) -- prefer the shallowest path, since a bare
@@ -603,7 +625,10 @@ def _find_node_detail(g: nx.DiGraph, token: str) -> NodeMatch | None:
         key=lambda n: (_path_depth(g, n), _scope_rank(g, n), g.nodes[n].get("name") != typed, n),
     )
     if name_hits:
-        return NodeMatch(name_hits[0], "name", name_hits[1:4], len(name_hits) - 1)
+        spellings = [str(g.nodes[n].get("name")) for n in name_hits]
+        return NodeMatch(
+            name_hits[0], "name", name_hits[1:4], len(name_hits) - 1, _case_ambiguous(spellings, typed)
+        )
 
     normalized = token.replace("\\", "/")
     path_hits = sorted(
@@ -624,18 +649,14 @@ def _find_node_detail(g: nx.DiGraph, token: str) -> NodeMatch | None:
     return None
 
 
-def _find_node(g: nx.DiGraph, token: str) -> str | None:
-    """Match a node by exact id, name, or file path."""
-    detail = _find_node_detail(g, token)
-    return detail[0] if detail else None
-
-
 def _match_meta(token: str, detail: NodeMatch) -> dict[str, Any]:
     """Query-response metadata describing how an input token was matched."""
     meta: dict[str, Any] = {"input": token, "node": detail.node, "type": detail.match_type}
     if detail.alternates:
         meta["alternates"] = detail.alternates
         meta["alternates_total"] = detail.alternates_total
+    if detail.case_ambiguous:
+        meta["case_ambiguous"] = True
     return meta
 
 

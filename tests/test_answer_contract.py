@@ -5,13 +5,19 @@ import networkx as nx
 
 from graphite.answer_contract import (
     ANSWER_SCHEMA,
+    CASE_AMBIGUOUS_CODE,
+    CASE_AMBIGUOUS_REASON,
     CAVEAT_REGISTRY,
     GRADE_ADVISORY,
     GRADE_DECISION,
     GRADE_INCONCLUSIVE,
+    INCONCLUSIVE_EMPTY,
     active_caveats,
     build_answer_block,
+    empty_marker,
+    is_case_ambiguous,
     languages_for_nodes,
+    unverified_empty,
 )
 
 
@@ -280,7 +286,101 @@ def test_registry_initial_entries():
         # #73, declared 2026-10-05 when phase 1's measurement confirmed it.
         # (#70 and #71, declared 2026-10-04, retired with that same release.)
         "python-member-call-over-dispatch-cap",
+        # Channel round 317, declared 2026-10-10: the matcher's pick between
+        # spellings. Conditional, so it is on an answer only where that pick
+        # was made.
+        "target-resolved-to-another-spelling",
     }
+
+
+# --- the pick between spellings (channel round 317) ---------------------------
+#
+# `tests/test_case_ambiguous_answer.py` drives these through `query`, `context`
+# and `impact`. The arms here are the ones a query cannot reach cleanly: a
+# degraded cell, and a relation x language no other caveat covers.
+
+
+def _caveat_codes(block):
+    return [c["code"] for c in block["caveats"]]
+
+
+def test_a_pick_between_spellings_caps_a_healthy_nonempty_answer_at_advisory():
+    g = _graph_ratio(".py", 10, 0)
+    plain = build_answer_block(g, relations=("calls",), languages=["python"], total=3)
+    hedged = build_answer_block(
+        g, relations=("calls",), languages=["python"], total=3, case_ambiguous=True
+    )
+
+    assert plain["grade"] == GRADE_DECISION
+    assert CASE_AMBIGUOUS_CODE not in _caveat_codes(plain)
+    assert hedged["health"] == plain["health"]
+    assert hedged["grade"] == GRADE_ADVISORY
+    # First, so it leads the `known limits:` line and is not buried behind the
+    # scope disclosures that are on every python `calls` answer.
+    assert _caveat_codes(hedged)[0] == CASE_AMBIGUOUS_CODE
+    assert _caveat_codes(hedged)[1:] == _caveat_codes(plain)
+
+
+def test_a_pick_between_spellings_lowers_a_grade_and_never_raises_one():
+    """It caps `decision_grade`. A degraded answer keeps the grade its cells
+    earned, `inconclusive` included, and still says what was picked."""
+    g = _graph_ratio(".ts", 1, 9)
+    found = build_answer_block(
+        g, relations=("calls",), languages=["typescript"], total=3, case_ambiguous=True
+    )
+    empty = build_answer_block(
+        g, relations=("calls",), languages=["typescript"], total=0, case_ambiguous=True
+    )
+
+    assert found["grade"] == GRADE_ADVISORY
+    assert empty["grade"] == GRADE_INCONCLUSIVE
+    assert CASE_AMBIGUOUS_CODE in _caveat_codes(found)
+    assert CASE_AMBIGUOUS_CODE in _caveat_codes(empty)
+    assert empty_marker(empty) == INCONCLUSIVE_EMPTY
+
+
+def test_the_pick_is_declared_on_any_relation_and_language():
+    """It describes how the target was chosen, not what a relation can see, so
+    it is on a Rust `imports` answer that no other caveat reaches. A grade
+    lowered with no caveat to say why would be a hedge nobody can act on."""
+    g = _graph_imports(".rs", 5, 0)
+    plain = build_answer_block(g, relations=("imports",), languages=["rust"], total=0)
+    hedged = build_answer_block(
+        g, relations=("imports",), languages=["rust"], total=0, case_ambiguous=True
+    )
+
+    assert plain["grade"] == GRADE_DECISION
+    assert plain["caveats"] == []
+    assert empty_marker(plain) == "none found"
+    assert hedged["grade"] == GRADE_ADVISORY
+    assert _caveat_codes(hedged) == [CASE_AMBIGUOUS_CODE]
+    assert is_case_ambiguous(hedged) and not is_case_ambiguous(plain)
+    assert empty_marker(hedged) == unverified_empty(CASE_AMBIGUOUS_REASON)
+
+
+def test_the_pick_is_declared_where_no_listed_language_applies():
+    """The flag decides alone. `languages=None` on a graph whose edges name no
+    source file grades the `other` bucket, which is outside every caveat's
+    declared languages; scoped like the rest, the pick would lower this grade
+    and say nothing."""
+    g = nx.DiGraph()
+    g.add_node("a", kind="function")
+    for i in range(5):
+        g.add_node(f"b{i}", kind="function")
+        g.add_edge("a", f"b{i}", relation="calls")
+    plain = build_answer_block(g, relations=("calls",), languages=None, total=3)
+    hedged = build_answer_block(g, relations=("calls",), languages=None, total=3, case_ambiguous=True)
+
+    assert plain["languages"] == ["other"]
+    assert plain["grade"] == GRADE_DECISION
+    assert plain["caveats"] == []
+    assert hedged["grade"] == GRADE_ADVISORY
+    assert _caveat_codes(hedged) == [CASE_AMBIGUOUS_CODE]
+
+
+def test_no_block_means_no_pick_to_report():
+    assert is_case_ambiguous(None) is False
+    assert is_case_ambiguous({}) is False
 
 
 def test_fail_open_returns_none(monkeypatch):

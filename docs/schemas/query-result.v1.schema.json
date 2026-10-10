@@ -36,7 +36,8 @@
           "node": {"type": "string"},
           "type": {"type": "string"},
           "alternates": {"type": "array", "items": {"type": "string"}},
-          "alternates_total": {"type": "integer", "description": "How many other nodes matched as well as `node`. `alternates` lists at most three (four for `path-suffix`), so compare the two before treating the list as complete."}
+          "alternates_total": {"type": "integer", "description": "How many other nodes matched as well as `node`. `alternates` lists at most three (four for `path-suffix`), so compare the two before treating the list as complete."},
+          "case_ambiguous": {"type": "boolean", "description": "Present, and true, only when `input` matched names in more than one spelling and `node` is not spelled as typed (`Verdict` typed, a function `verdict` chosen). The answer may be about a different symbol: its grade is then at most `advisory` and it carries the caveat `target-resolved-to-another-spelling`. Ask again by node id to settle it."}
         }
       }
     },
@@ -81,7 +82,7 @@
     "answer": {
       "type": "object",
       "additionalProperties": true,
-      "description": "Answer-scoped confidence: relations walked, per-language health cells for exactly those, derived grade, applicable caveat codes; empty_meaning present iff the primary result is empty. Absent when the block could not be computed (fail-open) or on error results other than no_path.",
+      "description": "Answer-scoped confidence: relations walked, per-language health cells for exactly those, derived grade, applicable caveat codes; empty_meaning present iff the primary result is empty. Absent when the block could not be computed (fail-open) and on every error result. That includes no_path: such a result is not graded, so check resolution_health before reading it as an absence (issue #76).",
       "required": ["schema", "relations", "languages", "health", "grade", "caveats"],
       "properties": {
         "schema": {"type": "integer"},

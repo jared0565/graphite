@@ -35,7 +35,13 @@ def _graph():
     ("question", "operation", "inputs"),
     [
         ("who calls helper", "callers", ["helper"]),
-        ("What calls Helper?", "callers", ["helper"]),
+        # The grammar ignores case; a captured name keeps the case it was typed
+        # in, because `Helper` and `helper` can be two definitions (round 317).
+        ("What calls Helper?", "callers", ["Helper"]),
+        ("WHO USES The Helper Function", "callers", ["Helper"]),
+        ("Callers Of `HTTPServer`", "callers", ["HTTPServer"]),
+        ("Path From App.ts To Lib.ts", "path", ["App.ts", "Lib.ts"]),
+        ("Does Main Eventually Call Helper?", "reaches", ["Main", "Helper"]),
         ("callers of helper", "callers", ["helper"]),
         ("who uses the helper function", "callers", ["helper"]),
         ("what does main call", "calls", ["main"]),
@@ -79,6 +85,9 @@ def test_grammar_translates_questions_to_valid_plans(question, operation, inputs
         ("tests for db.ts", "tests", "impact", "db.ts"),
         ("context for db.ts", "context", "context", "db.ts"),
         ("tell me about db.ts", "context", "context", "db.ts"),
+        # a suggested command names the path as it was typed
+        ("What Breaks If I Change src/DB.ts?", "impact", "impact", "src/DB.ts"),
+        ("Tell me about The README.md File", "context", "context", "README.md"),
     ],
 )
 def test_grammar_redirects_command_intents(question, intent, command, target) -> None:
@@ -95,9 +104,29 @@ def test_unmatched_question_falls_back_to_search_with_stripped_terms() -> None:
     assert translated["suggestion"]["command"] == ["graphite", "search", "pairing work"]
 
 
-def test_degenerate_capture_fails_closed_to_search() -> None:
-    translated = translate_natural("who calls the")
+def test_search_fallback_terms_stay_lowercase_whatever_the_question() -> None:
+    """Search ranks without regard to case, and the stopword list is lowercase:
+    kept in the question's case, "How" and "Does" would become search terms."""
+    translated = translate_natural("How Does Pairing WORK?")
     assert translated["natural"]["intent"] == "search"
+    assert translated["natural"]["question"] == "How Does Pairing WORK?"
+    assert translated["suggestion"]["command"] == ["graphite", "search", "pairing work"]
+
+
+@pytest.mark.parametrize("question", ["who calls the", "Who Calls The", "WHO CALLS AN"])
+def test_degenerate_capture_fails_closed_to_search(question) -> None:
+    translated = translate_natural(question)
+    assert translated["natural"]["intent"] == "search"
+
+
+def test_a_capitalised_question_resolves_as_the_structured_query_does() -> None:
+    g = _graph()
+    answered = answer_natural(g, "Who Calls Helper?")
+    structured = query(g, "callers Helper")
+    assert answered["resolution"][0]["input"] == "Helper"
+    assert answered["resolution"][0]["node"] == "src_lib_helper"
+    without_wrapper = {k: v for k, v in answered.items() if k not in ("natural", "plan")}
+    assert without_wrapper == structured
 
 
 def test_empty_and_termless_questions_return_stable_errors() -> None:

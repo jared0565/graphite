@@ -37,11 +37,14 @@ class NaturalRule:
 
 
 def _rule(intent: str, kind: str, template: str, pattern: str) -> NaturalRule:
-    return NaturalRule(intent, kind, template, re.compile(pattern))
+    return NaturalRule(intent, kind, template, re.compile(pattern, re.IGNORECASE))
 
 
-# Ordered, first match wins; every pattern is fullmatched against the
-# normalized (lowercased, squashed, unpunctuated) question.
+# Ordered, first match wins; every pattern is fullmatched, ignoring case,
+# against the normalized (squashed, unpunctuated) question. The question keeps
+# its case so a captured name reaches the matcher as it was typed: `Verdict`
+# and `verdict` can be two definitions, and lowercasing the question erased
+# which one was asked about (round 317).
 NATURAL_RULES: tuple[NaturalRule, ...] = (
     _rule("callers", "operation", "who calls <symbol>", r"(?:who|what) calls (?P<node>.+)"),
     _rule("callers", "operation", "callers of <symbol>", r"(?:list |show )?callers of (?P<node>.+)"),
@@ -140,20 +143,20 @@ _STOPWORDS = frozenset(
 
 
 def _normalize(question: str) -> str:
-    text = re.sub(r"\s+", " ", question.strip().lower()).strip("\"'")
+    text = re.sub(r"\s+", " ", question.strip()).strip("\"'")
     return re.sub(r"[?!.]+$", "", text).strip()
 
 
 def _clean_target(text: str) -> str:
     cleaned = text.strip().strip("`\"'")
-    if cleaned in {article.strip() for article in _ARTICLES}:
+    if cleaned.lower() in {article.strip() for article in _ARTICLES}:
         return ""
     for article in _ARTICLES:
-        if cleaned.startswith(article):
+        if cleaned.lower().startswith(article):
             cleaned = cleaned[len(article):]
             break
     for descriptor in _DESCRIPTORS:
-        if cleaned.endswith(descriptor):
+        if cleaned.lower().endswith(descriptor):
             cleaned = cleaned[: -len(descriptor)]
             break
     return cleaned.strip().strip("`\"'")
@@ -172,7 +175,8 @@ def natural_catalog() -> list[dict[str, Any]]:
 
 
 def _search_fallback(question: str, normalized: str) -> dict[str, Any]:
-    terms = " ".join(w for w in normalized.split() if w not in _STOPWORDS)
+    # Search ranks tokens without regard to case, so its terms stay lowercase.
+    terms = " ".join(w for w in normalized.lower().split() if w not in _STOPWORDS)
     if not terms:
         return {
             "schema_version": RESULT_SCHEMA_VERSION,

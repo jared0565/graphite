@@ -22,10 +22,50 @@ GRADE_DECISION = "decision_grade"
 GRADE_ADVISORY = "advisory"
 GRADE_INCONCLUSIVE = "inconclusive"
 
+CASE_AMBIGUOUS_CODE = "target-resolved-to-another-spelling"
+
+#: Why an empty answer under that caveat is not proof. Leads the listing line.
+CASE_AMBIGUOUS_REASON = (
+    "the name matched more than one spelling and this answer is for one not "
+    "spelled as typed (ask again by node id)"
+)
+
 # Confirmed blindspot classes. Process rule (spec §5): a confirmed class
 # gets an entry the day it is confirmed, decoupled from its fix; fixed
 # classes get retired_by and are never emitted again.
 CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
+    {
+        "code": CASE_AMBIGUOUS_CODE,
+        "relations": ("calls", "imports"),
+        "languages": ("python", "typescript", "javascript", "go", "rust"),
+        "summary": (
+            "the name matched definitions in more than one spelling and the one chosen "
+            "is not spelled as typed, so this answer may be about a different symbol -- "
+            "see `alternates` in the resolution, or ask again by node id"
+        ),
+        "since": "2026-10-10",
+        # Channel round 317. Matching ignores case, so `Verdict` and `verdict`
+        # are both hits for either spelling and path depth and scope choose
+        # between them; exact case only breaks what is still tied. The answer
+        # was graded like any other, the other spelling visible only in
+        # `alternates`, which a reader gating on the grade does not consult.
+        #
+        # Ranking exact case FIRST was measured and not taken. On Django 5.2.7
+        # it ends all 128 of 330 exact-case queries answered about another
+        # spelling, and moves 78 of 163 all-lowercase queries to a different
+        # node, 20 of them from one test definition to another. Lowercase is
+        # what people type; this entry costs those queries nothing they had.
+        #
+        # CONDITIONAL, like `python-callback-registration`, and for its reason:
+        # emitted only where the matcher made that pick, which is 2 of 10 such
+        # queries on graphite and 128 of 330 on Django. First in the tuple so it
+        # leads `known limits:`, where the scope disclosures would bury it.
+        #
+        # Its scope is every relation and language because it describes how the
+        # TARGET was chosen, not what a relation can see; `build_answer_block`
+        # emits it on the flag alone.
+        "only_when_case_ambiguous": True,
+    },
     {
         "code": "python-dynamic-dispatch",
         "relations": ("calls",),
@@ -353,6 +393,17 @@ def is_unmeasured(block: dict[str, Any] | None) -> bool:
     return not any(langs for langs in (block.get("health") or {}).values())
 
 
+def is_case_ambiguous(block: dict[str, Any] | None) -> bool:
+    """True when the answer is about a node not spelled as the name was typed.
+
+    Read from the caveat rather than a field of its own: the caveat is the
+    published statement, so the printed line and the JSON cannot disagree.
+    """
+    if not block:
+        return False
+    return any(c.get("code") == CASE_AMBIGUOUS_CODE for c in block.get("caveats") or ())
+
+
 def empty_marker(block: dict[str, Any] | None) -> str:
     """Empty-listing text for an answer surface, scoped to the answer's grade.
 
@@ -374,10 +425,14 @@ def empty_marker(block: dict[str, Any] | None) -> str:
         triggered = non_detecting_relations(
             block.get("relations", ()), block.get("languages", ())
         )
-        if triggered:
-            return unverified_empty(
-                " and ".join(NON_DETECTION_REASONS[r] for r in triggered)
-            )
+        reasons = [NON_DETECTION_REASONS[r] for r in triggered]
+        # The pick leads: an answer for another symbol is the likelier cause of
+        # "none", and it is the only cause where the relation has no
+        # non-detection class (`imported-by` on Python).
+        if is_case_ambiguous(block):
+            reasons.insert(0, CASE_AMBIGUOUS_REASON)
+        if reasons:
+            return unverified_empty(" and ".join(reasons))
         return UNVERIFIED_EMPTY
     return "none found"
 
@@ -401,8 +456,14 @@ def build_answer_block(
     languages: Sequence[str] | None,
     total: int,
     empty_meaning: str | None = None,
+    case_ambiguous: bool = False,
 ) -> dict[str, Any] | None:
     """The `answer` block for one graph answer, or None (fail-open).
+
+    ``case_ambiguous`` says a target was resolved to a node not spelled as
+    typed while another spelling matched (`NodeMatch.case_ambiguous`). The
+    cells then measure the right graph for what may be the wrong symbol, so
+    the answer cannot grade `decision_grade`, empty or not.
 
     ``languages=None`` means "no filter, grade against every language in the
     graph" -- distinct from ``languages=()``/``[]``, which means the caller
@@ -458,18 +519,28 @@ def build_answer_block(
         )
         if degraded or unmeasured:
             grade = GRADE_INCONCLUSIVE if empty else GRADE_ADVISORY
-        elif undetectable_absence:
+        elif undetectable_absence or case_ambiguous:
+            # Advisory for the pick as well, and for the same reason: the
+            # health is good. What is unsupported is that the answer is about
+            # the symbol the reader named.
             grade = GRADE_ADVISORY
         else:
             grade = GRADE_DECISION
         caveats = [
             {"code": e["code"], "summary": e["summary"]}
             for e in active_caveats()
-            if relation_set.intersection(e["relations"])
-            and language_set.intersection(e["languages"])
-            # A conditional caveat is emitted only where it applies, so its
-            # presence carries signal a reader can act on.
-            and (empty or not e.get("only_when_empty"))
+            if (
+                # About how the target was chosen, so the flag decides alone.
+                # Scoping it by relation and language as well would let the
+                # grade be capped with no caveat to say why.
+                case_ambiguous
+                if e.get("only_when_case_ambiguous")
+                else relation_set.intersection(e["relations"])
+                and language_set.intersection(e["languages"])
+                # A conditional caveat is emitted only where it applies, so its
+                # presence carries signal a reader can act on.
+                and (empty or not e.get("only_when_empty"))
+            )
         ]
         block: dict[str, Any] = {
             "schema": ANSWER_SCHEMA,

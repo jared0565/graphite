@@ -187,10 +187,59 @@ still finds a class `Verdict` when nothing is spelled `verdict`.
 A query plan (`query --plan-only`) and each `resolution[].input` now carry a
 target as it was typed. They used to carry it lowercased.
 
-Not changed: path depth still outranks case. A shallower `verdict` is still
-chosen over a deeper `Verdict`, and the other one is listed in `alternates`.
-`query --natural` still lowercases the question, so "Who calls Verdict?" is
-still matched as `verdict`.
+Path depth still outranks case: a shallower `verdict` is still chosen over a
+deeper `Verdict`. The next entry is what such an answer now says about itself.
+
+**An answer about a different spelling than the one typed is no longer graded
+`decision_grade` (#77, channel round 317).** When a name matched definitions in more
+than one spelling and the node chosen is not spelled as typed, the answer may
+be about another symbol. `callers Verdict` could list the callers of a function
+`verdict` at `decision_grade`, with the class named only in `alternates`. Now:
+
+- the `resolution[]` entry carries `case_ambiguous: true`, and so does the
+  `matched` entry in `context`. It is an optional field of the `query-result`
+  schema, an additive change;
+- the answer grades `advisory` at most, in `query`, `context` and `impact`;
+- the answer carries a new caveat, `target-resolved-to-another-spelling`. It is
+  conditional: present only where that pick was made, and listed first;
+- `impact` and `context` print their `answer health:` and `known limits:`
+  lines for such an answer even when it is not empty;
+- an empty listing reads "none found — UNVERIFIED: the name matched more than
+  one spelling ...".
+
+A name with one spelling is not affected, however it is typed and however many
+definitions share it. Those are listed in `alternates` as before. Ask again by
+node id for an answer about exactly one node.
+
+`query --natural` now keeps the case of the question. It used to lowercase it,
+so "Who calls Verdict?" reached the matcher as `verdict`. The grammar itself
+still ignores case. A suggested `impact` or `context` command now names the
+path as typed. Search-fallback terms are still lowercased.
+
+Ranking exact case before path depth was measured and not taken. Over every
+name with more than one spelling:
+
+| | graphite | Django 5.2.7 |
+|---|---|---|
+| names with more than one spelling | 5 of 5,264 | 163 of 28,868 |
+| queries, each spelling typed exactly | 10 | 330 |
+| answered about another spelling | 2 | 128 |
+| the same, with exact case ranked first | 0 | 0 |
+| the same names typed in lowercase | 5 | 163 |
+| of those, resolving to a different node with exact case ranked first | 1 | 78 |
+
+Lowercase is how a name is usually typed, and those queries rely on a bare name
+meaning the shallowest definition. On Django, 20 of the 78 would move from one
+test definition to another. The grade change moves no query to another node. It
+applies to the 2 and the 128 exact-case queries above, and to 1 of the 5 and 88
+of the 163 lowercase ones.
+
+Not changed: a `reaches` or `path` result of "no path" is an error with no
+`answer` block, so it has no grade to lower. Its message names the node ids it
+used. That such a result is never graded, on a degraded graph included, is #76.
+Two published sentences said otherwise and are corrected: the integration guide
+called a `no_path` with `truncated: false` proof of absence, and the
+`query-result` schema described the `answer` block as present on `no_path`.
 
 **The strict graph-first hook no longer refuses searches for directory names,
 filenames and plain words (#72).** It refused a cross-file search whenever one

@@ -27,6 +27,7 @@ from .answer_contract import (
     active_caveats,
     build_answer_block,
     empty_marker,
+    is_case_ambiguous,
     is_degraded,
     is_unmeasured,
     languages_for_nodes,
@@ -67,7 +68,7 @@ from .natural_query import answer_natural, natural_catalog, translate_natural
 from .query import (
     DEFAULT_SEARCH_LIMIT,
     MAX_SEARCH_LIMIT,
-    _find_node,
+    _find_node_detail,
     annotate_communities,
     build_plan,
     plan_preview,
@@ -470,10 +471,12 @@ def _is_test_file(path: str) -> bool:
 def _impact(g: Any, changes: list[str], depth: int) -> dict[str, Any]:
     start_nodes: list[str] = []
     missing: list[str] = []
+    case_ambiguous = False
     for change in changes:
-        node = _find_node(g, change)
-        if node:
-            start_nodes.append(node)
+        detail = _find_node_detail(g, change)
+        if detail:
+            start_nodes.append(detail.node)
+            case_ambiguous = case_ambiguous or detail.case_ambiguous
         else:
             missing.append(change)
 
@@ -512,6 +515,7 @@ def _impact(g: Any, changes: list[str], depth: int) -> dict[str, Any]:
             languages=matched_languages,
             total=total,
             empty_meaning="no impacted files or tests reachable through bound edges",
+            case_ambiguous=case_ambiguous,
         )
     except Exception:
         block = None
@@ -1520,14 +1524,21 @@ def cmd_agent_hook(args: argparse.Namespace) -> int:
 
 
 def _answer_lines(block: dict[str, Any] | None, *, empty: bool) -> list[str]:
-    """Human epistemology lines; [] unless empty or a scoped cell is degraded.
+    """Human epistemology lines; [] unless empty, degraded, or about another spelling.
 
     Rendered at column 0, matching context.py and the `note:` line, so they
     cannot be read as entries of the list they follow.
     """
     if not block:
         return []
-    if not empty and not is_degraded(block) and not is_unmeasured(block):
+    if (
+        not empty
+        and not is_degraded(block)
+        and not is_unmeasured(block)
+        # A full list for a symbol the reader did not name looks like any
+        # other full list; this is the one line that tells them apart.
+        and not is_case_ambiguous(block)
+    ):
         return []
     cells = ", ".join(
         f"{relation} ({language}) {langs[language]['ratio']:.2f}"

@@ -10,6 +10,7 @@ from .answer_contract import (
     GRADE_INCONCLUSIVE,
     build_answer_block,
     empty_marker,
+    is_case_ambiguous,
     is_degraded,
     is_unmeasured,
     languages_for_nodes,
@@ -48,6 +49,7 @@ def build_context(
     matched: list[dict[str, Any]] = []
     missing: list[str] = []
     start_nodes: list[str] = []
+    case_ambiguous = False
     for item in inputs:
         detail = _find_node_detail(g, item)
         if detail:
@@ -60,6 +62,9 @@ def build_context(
             if detail.alternates:
                 entry["alternates"] = detail.alternates
                 entry["alternates_total"] = detail.alternates_total
+            if detail.case_ambiguous:
+                entry["case_ambiguous"] = True
+                case_ambiguous = True
             matched.append(entry)
         else:
             missing.append(item)
@@ -86,6 +91,7 @@ def build_context(
             languages=matched_languages,
             total=total,
             empty_meaning="no impacted files or tests reachable through bound edges",
+            case_ambiguous=case_ambiguous,
         )
     except Exception:
         block = None
@@ -205,7 +211,7 @@ def format_context_markdown(context: dict[str, Any]) -> str:
 
     empty = not impact["impacted_files"] and not impact["likely_tests"]
     if answer:
-        if empty or is_degraded(answer) or is_unmeasured(answer):
+        if empty or is_degraded(answer) or is_unmeasured(answer) or is_case_ambiguous(answer):
             cells = ", ".join(
                 f"{relation} ({language}) {langs[language]['ratio']:.2f}"
                 for relation, langs in sorted(answer.get("health", {}).items())

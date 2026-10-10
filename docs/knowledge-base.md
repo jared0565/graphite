@@ -138,6 +138,14 @@ the ratio. Since Python methods got their own nodes, common names (`__init__`,
 input was unaffected where measured: on graphite and on Django, no file's
 `impact <file>` result changed. Class-aware dispatch is #73.
 
+**`callers Verdict` lists the callers of a function `verdict`.** → Matching
+ignores case, and among the matches a shallower path wins before exact case
+is consulted. The class `Verdict` lives a directory deeper, so the function
+was chosen. → The result says so: `resolution[].case_ambiguous` is `true`, the
+grade is `advisory` at most, the caveat `target-resolved-to-another-spelling`
+leads the list, and the class is in `alternates`. Ask again with its node id.
+A name with one spelling is never marked, however many definitions share it.
+
 ## The daemon
 
 **`daemon-health` shows warnings right after a restart.** → Pending initial
