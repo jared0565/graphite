@@ -15,6 +15,17 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-10-11
+
+A patch release. It carries one fix, to the agent hooks (#80). No stable
+surface in `docs/compatibility.md` changes: nothing under `docs/reference/` or
+`docs/schemas/` moves, `graphite agent-hook` still always exits 0, and the
+wording of a hook's message is not a stable surface. The graph itself does not
+change: on this repository, measured against the deployed 1.2.0 engine,
+8581 of 8581 node ids survive, 23612 of 23612 edge triples are unchanged,
+every relation count is equal, and `analysis` is identical. Only the engine
+fingerprint moves, because graphite's own bytes did.
+
 ### Fixed
 
 **The agent hooks find the repository from a subfolder (#80).** A hook payload
@@ -40,6 +51,11 @@ It is taken only where graphite is set up: a `graph-out/graph.json`, or the
 a directory outside every checkout, the hooks read the session's directory as
 they did. A repository inside the repository, with its own `.git`, stays its
 own root.
+
+One reading changes inside a checkout that is set up. A folder there that has
+its own `GRAPHITE.md` or `graph-out/` but no `.git` was read as a project of
+its own: `Graph status: missing`, or `unknown` over a leftover graph, with a
+`build .` that is refused there. It is now read as part of the checkout.
 
 Below the root:
 
