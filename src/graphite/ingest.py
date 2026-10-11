@@ -157,6 +157,19 @@ def _normalize_git_path(root: Path, value: str) -> str | None:
     return native_path.as_posix()
 
 
+def enclosing_git_root(path: Path) -> Path | None:
+    """The nearest directory, from `path` upward, that holds `.git`.
+
+    `.git` is a directory in a clone and a file in a linked worktree or a
+    submodule, so it is tested for existence only. None means `path` is in no
+    repository at all.
+    """
+    for directory in (path, *path.parents):
+        if os.path.lexists(directory / ".git"):
+            return directory
+    return None
+
+
 def _git_ls_files(
     root: Path,
     *,
@@ -164,9 +177,9 @@ def _git_ls_files(
     is_eligible: Callable[[str], bool] | None = None,
 ) -> list[str] | None:
     """Return bounded Git files, or None only when *root* is not a Git repository."""
-    git_dir = root / ".git"
-    if not os.path.lexists(git_dir):
-        if any(os.path.lexists(ancestor / ".git") for ancestor in root.parents):
+    enclosing = enclosing_git_root(root)
+    if enclosing != root:
+        if enclosing is not None:
             raise IngestError("nested Git roots are unsupported")
         return None
     try:

@@ -1396,3 +1396,322 @@ def test_powershell_does_not_read_a_git_bash_drive_path(literal_repo: Path) -> N
     out = handle_pre_tool_use(_ps_payload(literal_repo, command), "strict")
 
     assert _decision(out) == "allow"
+
+
+# --- A session below the repository root (#80, channel round 319) -------------
+# The hook payload carries the session's directory, and that follows a `cd` in
+# the shell. Read as the repository root, a subfolder had no graph: session
+# start said "missing", the gate wrote nothing at all, and the daemon was handed
+# a directory it could never build.
+
+
+@pytest.fixture(scope="module")
+def checkout(literal_repo: Path, tmp_path_factory) -> Path:
+    """The literal repo as a git checkout: one graph, at the root, beside `.git`."""
+    root = tmp_path_factory.mktemp("checkout") / "repo"
+    shutil.copytree(literal_repo, root)
+    (root / ".git").mkdir()
+    return root
+
+
+def _active_roots() -> list[Path]:
+    from graphite import activation
+
+    return [record.root for record in activation.read_active()]
+
+
+def _session_context(cwd: Path) -> str:
+    return handle_session_start(_payload(cwd))["hookSpecificOutput"]["additionalContext"]
+
+
+def test_session_start_below_the_root_reads_the_repository_graph(checkout: Path, monkeypatch) -> None:
+    """The reported case: `fresh` at the root, `missing` one directory down."""
+    import graphite.agent_hooks as hooks
+
+    checked: list[Path] = []
+
+    def _fresh(root, cfg):
+        checked.append(root)
+        return {"stale": False}
+
+    monkeypatch.setattr(hooks, "check_graph_freshness", _fresh)
+
+    ctx = _session_context(checkout / "src" / "pkg")
+
+    assert "Graph status: fresh." in ctx
+    assert "missing" not in ctx
+    assert checked == [checkout]
+
+
+@pytest.mark.parametrize(
+    ("freshness", "expected"),
+    [
+        ({"stale": False}, "Graph status: fresh."),
+        ({"stale": True, "reason": "engine_changed"}, "STALE (engine_changed)"),
+        (RuntimeError("boom"), "could not determine"),
+    ],
+)
+def test_session_start_below_the_root_says_where_graphite_runs(
+    checkout: Path, monkeypatch, freshness, expected: str
+) -> None:
+    """The commands these lines print find the graph from the root and nowhere
+    else: `query` and `check .` run in a subfolder report it missing. The root
+    is therefore named in every status, and never when the session is at it."""
+    import graphite.agent_hooks as hooks
+
+    def _check(root, cfg):
+        if isinstance(freshness, Exception):
+            raise freshness
+        return freshness
+
+    monkeypatch.setattr(hooks, "check_graph_freshness", _check)
+
+    below = _session_context(checkout / "docs")
+    at_the_root = _session_context(checkout)
+
+    assert expected in below and expected in at_the_root
+    assert f"run graphite from `{checkout}`" in below
+    assert "run graphite from" not in at_the_root
+
+
+def test_a_missing_graph_below_the_root_sends_the_build_to_the_root(tmp_path: Path) -> None:
+    """`python -m graphite build .` run in a subfolder of a checkout fails with
+    "nested Git roots are unsupported". `GRAPHITE.md` is committed, so a fresh
+    clone has it before it has a graph."""
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / "GRAPHITE.md").write_text("# graphite\n", encoding="utf-8")
+
+    ctx = _session_context(repo / "app")
+
+    assert "Graph status: missing" in ctx
+    assert f"run graphite from `{repo}`" in ctx
+    assert _active_roots() == [repo.resolve()]
+
+
+def test_a_checkout_graphite_is_not_set_up_in_is_not_taken_over(tmp_path: Path) -> None:
+    """No graph and no `GRAPHITE.md` at the git root. A session that wanders into
+    a subfolder of such a checkout must not register the whole repository, or
+    the daemon would build a `graph-out/` into a project that never asked for
+    one. The subfolder is not registered either: no build can run there."""
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / ".git").mkdir()
+
+    ctx = _session_context(repo / "app")
+    handle_stop(_stop_payload(repo / "app"))
+
+    assert "Graph status: missing" in ctx
+    assert "run graphite from" not in ctx
+    assert handle_pre_tool_use(_grep_payload(repo / "app", "round"), "strict") is None
+    assert _active_roots() == []
+
+
+def test_the_root_of_any_checkout_is_registered_as_before(tmp_path: Path) -> None:
+    """The control for the test above: at a git root nothing changes, set up or
+    not. That is how a fresh clone gets its first graph."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+
+    _session_context(repo)
+
+    assert _active_roots() == [repo.resolve()]
+
+
+@pytest.mark.parametrize("event", ["session-start", "stop"])
+def test_a_session_below_the_root_renews_the_repository(checkout: Path, tmp_path: Path, event: str) -> None:
+    """`stop` is the heartbeat that keeps an open repository supervised. From a
+    subfolder it renewed a marker for the subfolder, which the daemon fails on
+    every discovery cycle, and let the marker of the repository lapse."""
+    repo = tmp_path / "repo"
+    shutil.copytree(checkout, repo)
+
+    if event == "stop":
+        handle_stop(_stop_payload(repo / "src" / "pkg"))
+    else:
+        handle_session_start(_payload(repo / "src" / "pkg"))
+
+    assert _active_roots() == [repo.resolve()]
+
+
+def test_stop_below_the_root_keeps_its_books_at_the_root(checkout: Path, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    shutil.copytree(checkout, repo)
+    record_usage(repo, cmd="context", wall_ms=50, result={"files": [{"path": "src/pkg/core.py"}]})
+
+    out = handle_stop(_stop_payload(repo / "docs"))
+
+    assert out["systemMessage"].startswith("graphite: est. ")
+    assert (repo / ".graphite" / "local" / "stop-cursor.json").is_file()
+    assert not (repo / "docs" / ".graphite").exists()
+
+
+@pytest.mark.parametrize(
+    ("below", "command", "expected"),
+    [
+        # the search runs where the shell is
+        ("src", "grep -rn round .", "deny"),
+        ("src", "rg round", "deny"),
+        ("src/pkg", "grep -n round channel.py", "allow"),
+        ("src", "grep -n round pkg/channel.py", "allow"),
+        ("docs", "grep -rn round .", "allow"),
+        ("docs", "rg round", "allow"),
+        ("docs", "grep -rn round schemas", "allow"),
+        ("docs", "LC_ALL=C grep -rn round .", "allow"),
+        # a search does not move the shell
+        ("docs", "grep -c zzqx notes.md ; grep -rn round .", "allow"),
+        # a path is not looked for at the root: `docs/notes.md` is a file there, not under `src/`
+        ("src", "grep -n round docs/notes.md", "deny"),
+        ("src", "grep -rn round docs", "deny"),
+        # the way back up
+        ("docs", "grep -rn round ..", "deny"),
+        ("docs", "grep -rn round ../src", "deny"),
+        ("docs", "cd .. && grep -rn round .", "deny"),
+        ("docs", "cd ../src && rg round", "deny"),
+        ("src", "cd ../docs && grep -rn round .", "allow"),
+        ("src", "cd pkg && grep -n round channel.py", "allow"),
+        ("src", "grep -rn round {repo}/docs", "allow"),
+        ("docs", "grep -rn round {repo}/src", "deny"),
+    ],
+)
+def test_a_search_below_the_root_is_judged_where_the_shell_is(
+    checkout: Path, below: str, command: str, expected: str
+) -> None:
+    """The graph is at the root. A relative path, and a search that names none,
+    belong to the directory the shell is in."""
+    command = command.format(repo=checkout.as_posix())
+
+    out = handle_pre_tool_use(_bash_payload(checkout / below, command), "strict")
+
+    assert _decision(out) == expected, (below, command)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # the shell may be in `src` by the time the search runs
+        ("cd ../src ; grep -rn round .", "deny"),
+        ("cd ../src || grep -rn round .", "deny"),
+        ("cd ../src & grep -rn round .", "deny"),
+        ("cd ../src && true ; grep -rn round .", "deny"),
+        ("cd ../src && grep -c zzqx pkg/core.py ; grep -rn round .", "deny"),
+        ("builtin cd ../src && grep -rn round .", "deny"),
+        ("pushd ../src && popd && grep -rn round .", "deny"),
+        ("cd $SRC && grep -rn round .", "deny"),
+        ("cd nosuchdir && grep -rn round .", "deny"),
+        ("source env.sh && grep -rn round .", "deny"),
+        ("source env.sh && grep -rn round schemas", "deny"),
+        ("cd $SRC && grep -rn round docs {repo}/docs", "deny"),
+        ("cd $SRC && grep -n round notes.md schemas", "deny"),
+        # nor is a relative path looked for at the root: `docs/` there has no code
+        ("source env.sh ; grep -rn round docs", "deny"),
+        ("cd $SRC && grep -n round docs/notes.md", "deny"),
+        ("source env.sh && cd docs && grep -rn round .", "deny"),
+        # one file is one file's text, wherever the shell is
+        ("ls && grep -n round notes.md", "allow"),
+        ("source env.sh ; grep -n round notes.md schemas/round.schema.json", "allow"),
+        # a path that says where it is needs no shell to place it
+        ("source env.sh && grep -n round {repo}/docs/notes.md", "allow"),
+        ("source env.sh && grep -n round notes.md {repo}/docs", "allow"),
+        ("cd $SRC && grep -rn round {repo}/docs", "allow"),
+        ("cd $SRC && grep -rn round {repo}/src", "deny"),
+        ("cd $SRC ; cd {repo}/docs && grep -rn round .", "allow"),
+    ],
+)
+def test_below_the_root_a_search_the_hook_cannot_place_is_a_search_of_the_repository(
+    checkout: Path, command: str, expected: str
+) -> None:
+    """At the root, a `cd` the hook cannot follow leaves paths resolved against
+    the root, which holds every directory the shell could be in. Below it the
+    session's directory holds only itself: from `docs/`, which has no code,
+    `cd ../src ; grep` would otherwise pass as a search of `docs/`."""
+    command = command.format(repo=checkout.as_posix())
+
+    out = handle_pre_tool_use(_bash_payload(checkout / "docs", command), "strict")
+
+    assert _decision(out) == expected, command
+
+
+@pytest.mark.parametrize(
+    ("below", "tool_input", "expected"),
+    [
+        ("src", {}, "deny"),
+        ("src/pkg", {"path": "channel.py"}, "allow"),
+        ("docs", {}, "allow"),
+        ("docs", {"path": "schemas"}, "allow"),
+        ("docs", {"path": ".."}, "deny"),
+        ("src", {"path": "docs/notes.md"}, "deny"),
+        ("docs", {"path": "{repo}/src"}, "deny"),
+        ("src", {"path": "{repo}/docs"}, "allow"),
+    ],
+)
+def test_the_grep_tool_below_the_root_searches_the_session_directory(
+    checkout: Path, below: str, tool_input: dict, expected: str
+) -> None:
+    """With no `path` the tool searches the session's directory, and a relative
+    `path` starts there."""
+    tool_input = {key: value.format(repo=checkout.as_posix()) for key, value in tool_input.items()}
+
+    out = handle_pre_tool_use(_grep_payload(checkout / below, "round", **tool_input), "strict")
+
+    assert _decision(out) == expected, (below, tool_input)
+
+
+def test_a_refusal_below_the_root_says_where_graphite_runs(checkout: Path) -> None:
+    """The refusal recommends `python -m graphite query`, which reports the
+    graph missing when it is run from the subfolder the refusal was given in."""
+    below = handle_pre_tool_use(_grep_payload(checkout / "src", "round"), "strict")
+    at_the_root = handle_pre_tool_use(_grep_payload(checkout, "round"), "strict")
+
+    assert f"run graphite from `{checkout}`" in below["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "run graphite from" not in at_the_root["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_the_reminder_below_the_root_says_where_graphite_runs(checkout: Path) -> None:
+    below = handle_pre_tool_use(_grep_payload(checkout / "src", "round"), "remind")
+    at_the_root = handle_pre_tool_use(_grep_payload(checkout, "round"), "remind")
+
+    assert f"run graphite from `{checkout}`" in below["hookSpecificOutput"]["additionalContext"]
+    assert "run graphite from" not in at_the_root["hookSpecificOutput"]["additionalContext"]
+
+
+def test_a_suspended_refusal_below_the_root_says_where_graphite_runs(checkout: Path, tmp_path: Path) -> None:
+    """Low resolution health turns the refusal into a reminder. It still
+    recommends the graph, so it still has to say where the graph answers."""
+    repo = tmp_path / "repo"
+    shutil.copytree(checkout, repo)
+    _write_analysis(repo, healthy=False)
+
+    out = handle_pre_tool_use(_grep_payload(repo / "src", "round"), "strict")
+
+    context = out["hookSpecificOutput"]["additionalContext"]
+    assert "strict denial suspended" in context
+    assert f"run graphite from `{repo}`" in context
+
+
+def test_a_repository_inside_the_repository_is_its_own_root(checkout: Path, tmp_path: Path) -> None:
+    """A vendored checkout has its own `.git`, and the outer graph does not
+    model it. The nearest `.git` decides, not the nearest graph."""
+    repo = tmp_path / "repo"
+    shutil.copytree(checkout, repo)
+    inner = repo / "vendor" / "inner"
+    (inner / ".git").mkdir(parents=True)
+    (inner / "lib").mkdir()
+
+    for cwd in (inner, inner / "lib"):
+        assert "Graph status: missing" in _session_context(cwd), cwd
+        assert handle_pre_tool_use(_grep_payload(cwd, "round"), "strict") is None, cwd
+    assert _active_roots() == [inner.resolve()]
+
+
+def test_a_worktree_root_is_found_by_its_git_file(checkout: Path, tmp_path: Path) -> None:
+    """In a linked worktree, and in a submodule, `.git` is a file."""
+    repo = tmp_path / "repo"
+    shutil.copytree(checkout, repo)
+    shutil.rmtree(repo / ".git")
+    (repo / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+
+    out = handle_pre_tool_use(_grep_payload(repo / "src", "round"), "strict")
+
+    assert _decision(out) == "deny"

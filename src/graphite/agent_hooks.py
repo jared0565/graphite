@@ -21,7 +21,9 @@ from .config import Config
 from .freshness import check_graph_freshness
 from .graph_io import load_validated_graph_bundle
 from .health import _edge_language, is_placeholder, persisted_resolution
+from .hook_entry import MARKER as _SETUP_MARKER
 from .incident_ledger import record_incident, repo_ledger_dir
+from .ingest import enclosing_git_root
 
 SESSION_CONTRACT = (
     "graphite-first: this repo uses a shared code graph. For cross-file questions "
@@ -34,22 +36,64 @@ SESSION_CONTRACT = (
 _FRESHNESS_BUDGET_SECONDS = 2.0
 
 
-def _payload_root(payload: dict[str, Any]) -> Path:
+def _payload_cwd(payload: dict[str, Any]) -> Path:
+    """The directory the session is in. It follows a `cd` in the shell."""
     cwd = payload.get("cwd")
     if isinstance(cwd, str) and cwd:
         return Path(cwd)
     return Path.cwd()
 
 
+def _repo_root(cwd: Path) -> Path:
+    """The repository a session in `cwd` belongs to: where its graph is.
+
+    Taking the session's directory for the root made the graph "missing" one
+    `cd` below it, and switched the gate off there (#80). The repository is the
+    nearest directory upward that holds `.git`, the one place a build of it can
+    run (`ingest.enclosing_git_root`).
+
+    That directory is used only where graphite is already set up: it has a
+    graph, or the `GRAPHITE.md` that `init` commits. Anywhere else `cwd` stands,
+    as it did before, so a session that wanders into a subfolder of some other
+    checkout does not hand the daemon that whole project to build.
+    """
+    top = enclosing_git_root(cwd)
+    if top is None or top == cwd:
+        return cwd
+    if (top / "graph-out" / "graph.json").is_file() or (top / _SETUP_MARKER).is_file():
+        return top
+    return cwd
+
+
+def _where_to_run(root: Path, cwd: Path) -> str:
+    """One sentence for a session below the repository root, else nothing.
+
+    The commands these hooks print are run where the agent is, and the CLI
+    looks for the graph in its own working directory. Below the root `query`,
+    `context` and `check .` report the graph missing and `build .` is refused,
+    so a status or a refusal that names no directory sends the agent to a
+    command that fails.
+    """
+    if cwd == root:
+        return ""
+    return f" This session is below the repository root: run graphite from `{root}`."
+
+
 def _activate(root: Path) -> None:
     """Register this repo as open, so the daemon supervises it and leaves the
     rest of the machine alone.
+
+    A directory below a checkout's root is never registered. No build can run
+    there (`ingest` refuses it), so the daemon would fail on it at every
+    discovery cycle for as long as the marker lived.
 
     Guarded separately from the caller's own try/except: activation is
     bookkeeping, and this module is fail-open by contract -- a broken registry
     must never cost the agent its session context or its graph-first reminder.
     """
     try:
+        if enclosing_git_root(root) not in (None, root):
+            return
         mark_active(root, "claude")
     except Exception:
         return
@@ -97,7 +141,8 @@ def _freshness_within_budget(root: Path) -> tuple[str, str | None]:
 
 def handle_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
     try:
-        root = _payload_root(payload)
+        cwd = _payload_cwd(payload)
+        root = _repo_root(cwd)
         _activate(root)
         if (root / "graph-out" / "graph.json").is_file():
             state, reason = _freshness_within_budget(root)
@@ -121,7 +166,7 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
         return {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
-                "additionalContext": f"{SESSION_CONTRACT}\n{status}",
+                "additionalContext": f"{SESSION_CONTRACT}\n{status}{_where_to_run(root, cwd)}",
             }
         }
     except Exception:
@@ -435,14 +480,22 @@ def _shell_path(text: str, msys: bool) -> Path:
     return Path(text)
 
 
-def _cd_target(start: Path, arguments: list[str], msys: bool) -> Path | None:
-    """The directory `cd <arguments>` leaves the shell in, or None when unknown."""
+def _cd_target(start: Path | None, arguments: list[str], msys: bool) -> Path | None:
+    """The directory `cd <arguments>` leaves the shell in, or None when unknown.
+
+    `start` is None when the hook does not know where the shell is. From there
+    only an absolute path leads somewhere known.
+    """
     if len(arguments) != 1 or os.environ.get("CDPATH"):
         return None  # with `CDPATH` set, `cd docs` may land somewhere other than `./docs`
     text = arguments[0]
     if text.startswith("-") or _SHELL_EXPANSION_CHARS.intersection(text):
         return None
-    target = start / _shell_path(text, msys)  # an absolute path replaces `start`
+    target = _shell_path(text, msys)
+    if start is not None:
+        target = start / target  # an absolute path replaces `start`
+    elif not target.is_absolute():
+        return None
     try:
         return target if target.is_dir() else None
     except OSError:  # pragma: no cover - a path the platform cannot stat
@@ -542,7 +595,29 @@ def _search_in(name: str, rest: list[str], base: Path | None, msys: bool) -> _Se
     return _Search(positional[0], _located(positional[1:], base, msys), fold_case)
 
 
-def _bash_searches(command: str, root: Path, msys: bool = False) -> list[_Search]:
+def _unplaced(search: _Search, cwd: Path) -> _Search:
+    """`search` when the hook does not know which directory it runs in.
+
+    An absolute path says where it is. A relative one that names a file in the
+    session's directory is still one file's text, as it is at the root:
+    `ls && grep x notes.md`. A directory, a path that is not there, and a
+    search that names no path could be anywhere in the repository. The search
+    is then one of all of it, and no path is left to earn an exemption.
+    """
+    placed: list[str] = []
+    for text in search.paths:
+        path = Path(text)
+        if not path.is_absolute():
+            path = cwd / path
+            if not path.is_file():
+                return search._replace(paths=[])
+        placed.append(str(path))
+    return search._replace(paths=placed)
+
+
+def _bash_searches(
+    command: str, root: Path, msys: bool = False, cwd: Path | None = None
+) -> list[_Search]:
     """Every search `command` runs that is not downstream of a pipe.
 
     All of them, not the first: `grep x notes.md ; grep -rn <symbol> src/` is
@@ -557,12 +632,23 @@ def _bash_searches(command: str, root: Path, msys: bool = False) -> list[_Search
     `cd docs && ls && grep ...` is not followed. In every such case, and when
     the directory is not one the hook can find, paths resolve against the
     repository root as they did before `cd` was read at all.
+
+    `cwd` is the directory the shell starts in when that is below the root
+    (#80). The line's first command runs there, and so does a search reached
+    through searches alone. Once a `cd` or a command the hook does not model
+    has run, the shell may be anywhere. At the root that costs nothing, since
+    the root holds every directory it could be in. Below the root the session's
+    directory holds only itself: from a `docs/` with no code in it,
+    `cd ../src ; grep` would pass as a search of `docs/`. There the search
+    keeps only the paths that do not depend on where the shell is (`_unplaced`).
     """
     searches: list[_Search] = []
-    base: Path | None = None
+    base: Path | None = cwd  # None is the repository root
+    placed = True  # `base` is where the shell is
+    moved = False  # a `cd`, or a command the hook does not model, has run
     for head in _bash_command_heads(command):
         if head.before != "&&":
-            base = None
+            base, placed = (None, False) if moved else (cwd, True)
         argv = head.argv
         while argv and _ENV_ASSIGNMENT_RE.match(argv[0]):
             argv = argv[1:]
@@ -574,16 +660,22 @@ def _bash_searches(command: str, root: Path, msys: bool = False) -> list[_Search
             name = name[:-4]
         rest = argv[1:]
         if name in _CD_COMMANDS:
-            base = _cd_target(base or root, rest, msys) if head.after == "&&" else None
+            moved = True
+            # At the root an unplaced shell is read as being at the root. Below
+            # it, only an absolute path leads somewhere known.
+            start = base or (root if cwd is None else None)
+            base = _cd_target(start, rest, msys) if head.after == "&&" else None
+            placed = base is not None
             continue
         if name == "git" and rest and rest[0] == "grep":
             name, rest = "grep", rest[1:]
         if name not in _SEARCH_COMMANDS:
-            base = None  # `popd`, `builtin cd ..`, a function: the shell may have moved
+            # `popd`, `builtin cd ..`, a function: the shell may have moved
+            base, placed, moved = None, False, True
             continue
         found = _search_in(name, rest, base, msys)
         if found is not None:
-            searches.append(found)
+            searches.append(found if placed or cwd is None else _unplaced(found, cwd))
     return searches
 
 
@@ -692,7 +784,7 @@ def _denial_for(root: Path, searches: list[_Search]) -> str | None:
     return None
 
 
-def _strict_denial(payload: dict[str, Any], root: Path) -> str | None:
+def _strict_denial(payload: dict[str, Any], root: Path, cwd: Path | None = None) -> str | None:
     try:
         tool_input = payload.get("tool_input")
         if not isinstance(tool_input, dict):
@@ -702,6 +794,10 @@ def _strict_denial(payload: dict[str, Any], root: Path) -> str | None:
             return None
         target = tool_input.get("path")
         paths = [target] if isinstance(target, str) and target else []
+        if cwd is not None:
+            # Below the root: with no `path` the tool searches the session's
+            # directory, and a relative one starts there.
+            paths = _located(paths, cwd, False)
         # The Grep tool matches case exactly unless `-i` is set. A value that
         # is not plainly "off" is read as on: unsure folds.
         # The tool is built on ripgrep, so it is read as `rg` with no flags of
@@ -747,7 +843,7 @@ def _cursor_number(value: Any, cast: type) -> Any:
 def handle_stop(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Turn-end savings summary; silent unless graphite was used this turn."""
     try:
-        root = _payload_root(payload)
+        root = _repo_root(_payload_cwd(payload))
         # Stop fires once per assistant turn, which makes it the heartbeat that
         # keeps a working session inside the activation TTL. It must run before
         # the session_id guard below, which returns early on most turns.
@@ -821,9 +917,14 @@ def handle_pre_tool_use(payload: dict[str, Any], mode: str) -> dict[str, Any] | 
         tool_name = payload.get("tool_name")
         if tool_name not in ("Grep", "Glob", "Bash", "PowerShell"):
             return None
-        root = _payload_root(payload)
+        cwd = _payload_cwd(payload)
+        root = _repo_root(cwd)
         if not (root / "graph-out" / "graph.json").is_file():
             return None
+        # Two directories, not one: the graph is at `root`, and a search's
+        # relative paths start where the shell is.
+        below = None if cwd == root else cwd
+        where = _where_to_run(root, cwd)
         denial: str | None = None
         if tool_name in ("Bash", "PowerShell"):
             # The matcher now routes EVERY Bash call here, so anything that is
@@ -835,13 +936,13 @@ def handle_pre_tool_use(payload: dict[str, Any], mode: str) -> dict[str, Any] | 
             command = tool_input.get("command") if isinstance(tool_input, dict) else None
             # On Windows the Bash tool is Git Bash, which spells drives `/c/...`.
             msys = tool_name == "Bash" and os.name == "nt"
-            searches = _bash_searches(command, root, msys) if isinstance(command, str) else []
+            searches = _bash_searches(command, root, msys, below) if isinstance(command, str) else []
             if not searches:
                 return None
             if mode == "strict":
                 denial = _denial_for(root, searches)
         elif mode == "strict" and tool_name == "Grep":
-            denial = _strict_denial(payload, root)
+            denial = _strict_denial(payload, root, below)
         if denial is not None:
             health = persisted_resolution(
                 root,
@@ -858,19 +959,19 @@ def handle_pre_tool_use(payload: dict[str, Any], mode: str) -> dict[str, Any] | 
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
-                        "permissionDecisionReason": denial,
+                        "permissionDecisionReason": denial + where,
                     }
                 }
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
-                    "additionalContext": PRE_TOOL_REMINDER + STRICT_SUSPENSION_NOTE,
+                    "additionalContext": PRE_TOOL_REMINDER + STRICT_SUSPENSION_NOTE + where,
                 }
             }
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "additionalContext": PRE_TOOL_REMINDER,
+                "additionalContext": PRE_TOOL_REMINDER + where,
             }
         }
     except Exception:

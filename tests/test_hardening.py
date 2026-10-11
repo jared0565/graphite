@@ -263,6 +263,23 @@ def test_nested_path_inside_git_repository_fails_closed_without_walk(
         collect_files(nested, Config(include_dotfiles=True))
 
 
+def test_the_enclosing_git_root_is_the_nearest_directory_that_holds_git(tmp_path: Path) -> None:
+    """The one definition of "the repository this path is in". The refusal above
+    and the agent hooks both read it (#80), so they cannot come to disagree
+    about which directory a build can run in."""
+    outer = tmp_path / "outer"
+    inner = outer / "vendor" / "inner"
+    (outer / ".git").mkdir(parents=True)
+    (inner / "lib").mkdir(parents=True)
+    _write(inner / ".git", "gitdir: elsewhere\n")  # a linked worktree, or a submodule
+
+    assert ingest_module.enclosing_git_root(outer) == outer
+    assert ingest_module.enclosing_git_root(outer / "vendor") == outer
+    assert ingest_module.enclosing_git_root(inner) == inner
+    assert ingest_module.enclosing_git_root(inner / "lib") == inner
+    assert ingest_module.enclosing_git_root(tmp_path / "plain" / "dir") is None
+
+
 def test_git_enumeration_applies_max_files_before_returning_paths(
     tmp_path: Path, monkeypatch
 ) -> None:

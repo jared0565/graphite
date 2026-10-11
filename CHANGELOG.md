@@ -15,6 +15,59 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Fixed
+
+**The agent hooks find the repository from a subfolder (#80).** A hook payload
+carries the session's directory, and in Claude Code that follows a `cd` in the
+shell. All three hooks took it for the repository root. One directory below the
+root, with the graph fresh at the root:
+
+- `session-start` said `Graph status: missing`, the status that licenses a full
+  fallback from graph-first. The remedy it printed, `python -m graphite build .`,
+  is refused there ("nested Git roots are unsupported").
+- `pre-tool-use` wrote nothing: no refusal in strict mode and no reminder. A
+  `cd` into any subfolder switched the gate off.
+- `stop` created a `.graphite/local/` in the subfolder for its cursor and looked
+  for the turn's usage there.
+- The subfolder was registered as an open project. The daemon cannot build
+  one, so it logged `project_snapshot_failed` for it at every discovery cycle,
+  and the repository's own marker was no longer renewed.
+
+The repository is now the nearest directory upward that holds `.git`, the test
+the build already uses to refuse a nested path (`ingest.enclosing_git_root`).
+It is taken only where graphite is set up: a `graph-out/graph.json`, or the
+`GRAPHITE.md` that `init` commits. In a subfolder of any other checkout, and in
+a directory outside every checkout, the hooks read the session's directory as
+they did. A repository inside the repository, with its own `.git`, stays its
+own root.
+
+Below the root:
+
+- The graph, the freshness check, the usage ledger and the activation marker
+  are the repository's.
+- A search's relative paths, and a search that names no path, belong to the
+  directory the shell is in. `grep <symbol> core.py` beside the file is one
+  file. A search with no path in a `docs/` that holds no code is text. `..` and
+  `../src` are judged as the directories they are.
+- Once the command line has run a `cd` the hook does not follow, or any command
+  it does not model, the shell may be anywhere in the repository. A search then
+  keeps an absolute path, and a relative one that names a file in the session's
+  directory. With a directory, or no path, it is judged as a search of the
+  whole repository: from a `docs/` with no code, `cd ../src ; grep -rn <symbol> .`
+  is refused. At the root this case resolves paths against the root, as before.
+- Every status, refusal and reminder ends by naming the root: "This session is
+  below the repository root: run graphite from `<root>`." The CLI still looks
+  for the graph in its own working directory (#81), so the commands those
+  messages print work from the root only.
+
+The hooks no longer register a directory below a checkout's root with the
+daemon, whether or not graphite is set up in that checkout.
+
+Nothing changes for a session at the repository root. Measured on the 1.2.0
+wheel and on this change: 32 strict-hook arms from the #72 work (25 refused, 7
+allowed) and 12 hook arms on a checkout with `.git` and `GRAPHITE.md` read the
+same on both.
+
 ## [1.2.0] — 2026-10-10
 
 A minor release. Query and search results, channel rounds and Python
