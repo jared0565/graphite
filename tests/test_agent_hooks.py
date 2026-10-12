@@ -1072,6 +1072,8 @@ def test_select_string_is_treated_as_folding_case(literal_repo: Path, command: s
         ("src/pkg/check", "allow"),
         ("graph/", "allow"),
         ("check\\/run", "allow"),
+        # a function's name directly before a slash, with more of the path after it
+        ("check/run", "allow"),
         # a file's name, with the dot escaped or not
         ("graph\\.json", "allow"),
         ("graph.json", "allow"),
