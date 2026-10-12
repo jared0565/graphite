@@ -1715,3 +1715,59 @@ def test_a_worktree_root_is_found_by_its_git_file(checkout: Path, tmp_path: Path
     out = handle_pre_tool_use(_grep_payload(repo / "src", "round"), "strict")
 
     assert _decision(out) == "deny"
+
+
+# A payload that does not say where the session is: `cwd` absent, empty, or not
+# a string. `absent` is the control the other three are read against.
+_NO_USABLE_CWD = [
+    pytest.param({}, id="absent"),
+    pytest.param({"cwd": ""}, id="empty"),
+    pytest.param({"cwd": 7}, id="number"),
+    pytest.param({"cwd": ["src"]}, id="list"),
+]
+
+
+@pytest.mark.parametrize("cwd_field", _NO_USABLE_CWD)
+def test_session_start_without_a_usable_cwd_reads_the_process_directory(
+    checkout: Path, monkeypatch, cwd_field: dict
+) -> None:
+    """With no usable `cwd` the hook's own directory stands, the walk up to the
+    root included. Read as a path, an empty string is `.`, which has no
+    parents: the repository above it would not be found, and the status would
+    read "missing". A number or a list is no path at all: the handler would
+    raise and, failing open, say nothing."""
+    import graphite.agent_hooks as hooks
+
+    monkeypatch.setattr(hooks, "check_graph_freshness", lambda root, cfg: {"stale": False})
+    monkeypatch.chdir(checkout / "src" / "pkg")
+    payload = {"session_id": "s1", "hook_event_name": "SessionStart", **cwd_field}
+
+    out = handle_session_start(payload)
+
+    assert out is not None
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "Graph status: fresh." in ctx
+    assert "run graphite from" in ctx
+    assert _active_roots() == [checkout.resolve()]
+
+
+@pytest.mark.parametrize("cwd_field", _NO_USABLE_CWD)
+def test_the_gate_without_a_usable_cwd_judges_the_process_directory(
+    checkout: Path, monkeypatch, cwd_field: dict
+) -> None:
+    """The same payloads at the gate, from below the root. Unless the process's
+    directory stands in, a search for a real function is waved through with no
+    hook output at all: the silence #80 was about."""
+    monkeypatch.chdir(checkout / "src")
+    payload = {
+        "session_id": "s1",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Grep",
+        "tool_input": {"pattern": "round"},
+        **cwd_field,
+    }
+
+    out = handle_pre_tool_use(payload, "strict")
+
+    assert _decision(out) == "deny"
+    assert "run graphite from" in out["hookSpecificOutput"]["permissionDecisionReason"]
