@@ -160,6 +160,35 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         # class-aware `self.`/`super()` dispatch (#73).
     },
     {
+        "code": "python-member-call-bound-by-name",
+        "relations": ("calls",),
+        "languages": ("python",),
+        "summary": (
+            "a member call (obj.m()) is bound by the NAME m unless the source states what "
+            "obj is: to every method named m (up to 3) in the caller's file and the files "
+            "it imports, so a callers or impact result on a method may list callers of a "
+            "same-named method of another class"
+        ),
+        "since": "2026-10-13",
+        # #79. The under-cap half of `_resolve_method_dispatch`; the entry above
+        # is the over-cap half. A by-name edge counts as bound, so the ratio
+        # rises with every one and cannot see any.
+        #
+        # A STATED receiver no longer comes here. A class called to build the
+        # object, the class itself, and a local bound only from such a call are
+        # bound to that class's own method; a literal, the result of a builtin
+        # that returns a builtin type, and a local bound only from those get no
+        # edge. What is left is what the source does not state: a parameter,
+        # `self`, `super()`, an attribute, the result of any other call, and a
+        # method the stated class inherits.
+        #
+        # A scope disclosure, like the entry above and for its reason: the harm
+        # is a caller that is not one, in a NON-EMPTY answer. It is on every
+        # Python `calls` answer because an edge does not record how it was
+        # bound, so no answer can tell whether it holds one. Narrows when
+        # `self.`/`super()` dispatch becomes class-aware (#73).
+    },
+    {
         "code": "ts-external-calls-unclassified",
         "relations": ("calls",),
         "languages": ("typescript", "javascript"),

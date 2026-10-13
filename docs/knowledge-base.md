@@ -158,6 +158,21 @@ the ratio. Since Python methods got their own nodes, common names (`__init__`,
 input was unaffected where measured: on graphite and on Django, no file's
 `impact <file>` result changed. Class-aware dispatch is #73.
 
+**`callers` on a Python method lists a function that calls another class's
+method of the same name, and the answer says `decision_grade`.** → A member
+call is bound by the method's NAME unless the source states what it is called
+on: to every method of that name, up to three, in the caller's file and the
+files it imports. Each such edge counts as bound, so the ratio cannot see
+it. The answer's caveats list `python-member-call-bound-by-name`. → Read the
+caller's line. Still bound by name: a parameter, `self`, `super()`, an
+attribute, what another call returns, a method the class inherits. Bound by
+what the receiver is, from the release that follows 1.2.1: a class called to
+build the object (`Beta().m()`), the class itself (`Beta.m()`), a local name
+bound only from such a call; and a literal, `open(...)` and other builtins
+that return a builtin type, or a local bound only from those, which get no
+edge. Before that release `f.read()` on an opened file was a call to the
+repository's `read` method wherever only one was in reach (#79).
+
 **`callers Verdict` lists the callers of a function `verdict`.** → Matching
 ignores case, and among the matches a shallower path wins before exact case
 is consulted. The class `Verdict` lives a directory deeper, so the function

@@ -192,6 +192,36 @@ def test_the_over_cap_member_call_drop_is_declared_on_every_python_calls_answer(
     assert OVER_CAP_CODE not in {c["code"] for c in ts["caveats"]}
 
 
+BY_NAME_CODE = "python-member-call-bound-by-name"
+
+
+def test_binding_a_member_call_by_name_is_declared_on_every_python_calls_answer():
+    """Declared 2026-10-13, the day it was measured (#79).
+
+    A member call whose receiver the source does not state is bound to every
+    method of its name in reach, up to three. Each such edge counts as bound,
+    so the ratio cannot see it, and the harm is a caller that is not one in a
+    NON-EMPTY answer at decision_grade: a scope disclosure, like the cap's.
+    """
+    entry = {e["code"]: e for e in active_caveats()}[BY_NAME_CODE]
+    assert entry["since"] == "2026-10-13"
+    assert entry["relations"] == ("calls",)
+    assert entry["languages"] == ("python",)
+    assert not entry.get("only_when_empty")
+
+    g = _graph_ratio(".py", 10, 0)
+    for total in (0, 3):
+        block = build_answer_block(g, relations=("calls",), languages=["python"], total=total)
+        assert BY_NAME_CODE in {c["code"] for c in block["caveats"]}
+
+    ts = build_answer_block(
+        _graph_ratio(".ts", 10, 0), relations=("calls",), languages=["typescript"], total=3
+    )
+    assert BY_NAME_CODE not in {c["code"] for c in ts["caveats"]}
+    imports = build_answer_block(g, relations=("imports",), languages=["python"], total=3)
+    assert imports is None or BY_NAME_CODE not in {c["code"] for c in imports["caveats"]}
+
+
 def test_scoped_cells_ignore_other_languages():
     """The firescraper regression: healthy python must not mask degraded ts."""
     g = _merged(_graph_ratio(".py", 9, 1), _graph_ratio(".ts", 1, 9))
@@ -286,6 +316,9 @@ def test_registry_initial_entries():
         # #73, declared 2026-10-05 when phase 1's measurement confirmed it.
         # (#70 and #71, declared 2026-10-04, retired with that same release.)
         "python-member-call-over-dispatch-cap",
+        # #79, declared 2026-10-13: the same pass, under the cap. A member call
+        # whose receiver the source does not state is bound by its name.
+        "python-member-call-bound-by-name",
         # Channel round 317, declared 2026-10-10: the matcher's pick between
         # spellings. Conditional, so it is on an answer only where that pick
         # was made.

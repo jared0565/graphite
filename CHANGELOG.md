@@ -193,6 +193,78 @@ Five Django files still have no node, and none of them is this defect: three
 are binary, one is under a dot-directory, and one has the node id of another
 path beside it (`file_txt` and `file.txt`).
 
+**A Python member call is bound by what its receiver is, where the source
+says so (#79).** A member call (`obj.m()`) was bound by the name `m` alone: to
+every method of that name in the caller's file and the files it imports, up to
+three. So `Beta().setup()` was also a call to `Alpha.setup`, and
+`callers Alpha.setup` listed a function that only ever builds a `Beta`, at
+`decision_grade`. With one method of the name in reach the call was simply
+pointed at it: `f.read()` on a file opened on the line above was a call to
+the repository's one `read` method.
+
+Where the source states the receiver, that now decides:
+
+- **One class.** A class called to build the object (`Beta().m()`), the class
+  itself (`Beta.m()`), or a local name bound only from such a call
+  (`x = Beta()`, then `x.m()`) is bound to that class's own `m` and to nothing
+  else. The class may be defined in the file or imported by name.
+- **Not an object of the repository.** A literal (`", ".join(parts)`), the
+  result of a builtin that returns exactly a builtin type (`open(p).read()`,
+  `set(x).add(y)`), or a local name bound only from those
+  (`with open(p) as f:`) has no method the repository defines. The call gets
+  no edge.
+
+No edge, and not an `EXTERNAL_CALL` edge. That tag is for a call whose NAME
+is shown to leave the repository (`re.compile`, `expect`), and its placeholder
+node carries that name. Here the name on the edge is a local variable's
+(`f.read`), so a placeholder would say nothing, and for a literal the
+placeholder is a function of the module (`", ".join(x)` beside a `def join`),
+which is the false edge over again. No edge is also where a member call that
+binds to nothing already ends: the dispatch pass drops one with no method of
+the name in reach, and the noise list drops `parts.append(x)` before that. So
+these calls are not counted under `external`.
+
+A name is "bound only from" a value when every statement that binds it in its
+scope says the same; `None` is skipped, because it has no method to call.
+Flow is not followed.
+
+Bound by name as before: `self.m()` and `super().m()` (#73); a parameter,
+annotated or not, because an annotation admits a subclass; an attribute
+(`self.x.m()`); what any other call returns; a method the stated class
+inherits and does not define; `a = b = Beta()` (only `b` is read);
+`(x := Beta())`; `y = x`; what `with Beta() as x` hands over; a builtin's
+name in a file with a star import, which may bind it; and `str(x)`,
+`repr(x)`, `format(x)` and `bytes(x)`, which return whatever the argument's
+own method returned.
+
+Measured on Django 5.2.7 (2,224 Python files), with every member call of the
+1.2.1 engine set beside the same call under this change, and each receiver
+read a second time from CPython's own `ast`:
+
+- 201 calls on a builtin object that were bound to a method of the
+  repository have no edge (`"...".format()` was a call to
+  `NumberAwareString.format`, `s = set(); s.add(x)` to `Collector.add`);
+- 6 calls of a string's method that were recorded as calls to a module
+  function of that name have no edge;
+- 327 calls bound to their own class's method and to one or two others keep
+  the one;
+- 250 calls that had no edge, because more than three methods share the
+  name, are bound to their own class's method;
+- no call changed whose receiver the source does not state.
+
+On this repository: 3, 0, 45 and 3. The three are `read` called on an opened
+file, which had put two functions that only read a file among the callers of
+`Cache.read` (10 rows before, 8 now). `callers Cache.write` is unchanged at 17
+rows: it still lists a function that writes to a stream it is handed as a
+parameter. That row is false, it is bound by name, and the answer now says
+that a member call may be.
+
+What is still bound by name is now said on the answer: every Python `calls`
+answer carries the new caveat `python-member-call-bound-by-name`, next to
+`python-member-call-over-dispatch-cap`, which is the same pass over the cap.
+A new caveat code is an addition to a JSON output that carries
+`schema_version`.
+
 ## [1.2.1] — 2026-10-11
 
 A patch release. It carries one fix, to the agent hooks (#80). No stable

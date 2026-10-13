@@ -34,6 +34,29 @@ _TARGET_CONTAINERS = frozenset({
     "expression_list", "parenthesized_expression", "list_splat_pattern", "as_pattern_target",
 })
 _SPLATS = frozenset({"list_splat_pattern", "dictionary_splat_pattern", "splat_pattern"})
+#: Expressions whose value is an instance of a builtin type whatever they hold.
+#: `none` is absent on purpose: `None` has no method to call, so it says nothing.
+_BUILTIN_LITERALS = frozenset({
+    "string", "concatenated_string", "integer", "float", "true", "false",
+    "list", "dictionary", "set", "tuple", *_COMPREHENSIONS,
+})
+#: Builtins whose RESULT is always an instance of exactly a builtin type, so a
+#: method called on it is never one the repository defines.
+#:
+#: Absent on purpose, because what they return is decided by the argument:
+#: `str`, `repr`, `format`, `bytes` and `ascii` hand back whatever `__str__`,
+#: `__repr__`, `__format__` or `__bytes__` returned, which may be an instance
+#: of a SUBCLASS the repository defines; `reversed` and `divmod` return what
+#: `__reversed__` and `__divmod__` return; and `super`, `getattr`, `next`,
+#: `iter`, `min`, `max`, `sum`, `type`, `vars`, `abs`, `round` and `complex`
+#: can each hand back an object of the repository.
+_BUILTIN_TYPED_RESULTS = frozenset({
+    "all", "any", "bin", "bool", "bytearray", "callable", "chr", "dict", "dir",
+    "enumerate", "filter", "float", "frozenset", "hasattr", "hash", "hex", "id",
+    "input", "int", "isinstance", "issubclass", "len", "list", "map", "memoryview",
+    "object", "oct", "open", "ord", "print", "range", "set", "slice", "sorted",
+    "tuple", "zip",
+})
 
 
 @dataclass(frozen=True)
@@ -46,6 +69,10 @@ class Binder:
     import_kind: str | None = None
     target: str | None = None
     none_literal: bool = False  # a value binder whose value is the literal `None`
+    #: For a value binder, what ONE statement says the value is (see
+    #: `_value_origin`) and the scope that statement is evaluated in. None where
+    #: the statement does not say: a parameter, a loop target, an unpacking.
+    origin: tuple[str, str, PyScope] | None = None
 
 
 _VALUE = Binder("value")
@@ -60,6 +87,9 @@ class PyScope:
     binders: dict[str, list[Binder]] = field(default_factory=dict)
     globals: set[str] = field(default_factory=set)
     nonlocals: set[str] = field(default_factory=set)
+    #: On the module scope: the file has a `from m import *`, so a name it binds
+    #: nowhere else may still be bound.
+    star_import: bool = False
 
     def bind(self, name: str, binder: Binder) -> None:
         self.binders.setdefault(name, []).append(binder)
@@ -77,6 +107,22 @@ class Resolution:
     qualname: str | None = None
     module_level: bool = False
     target: str | None = None
+
+
+@dataclass(frozen=True)
+class Receiver:
+    """What the object a method is called on IS, where the source states it.
+
+    `definition` is None for an instance of a builtin type. Otherwise it is
+    what a bare name denotes in this file: the class the object was built from,
+    or the class itself. It may denote a function instead; whoever reads it
+    finds no method under a function and binds by name as before.
+    """
+
+    definition: Resolution | None = None
+
+
+_BUILTIN_RECEIVER = Receiver()
 
 
 @dataclass
@@ -108,6 +154,47 @@ def _target_names(node: Any) -> Iterator[str]:
     elif node.type in _TARGET_CONTAINERS:
         for child in node.named_children:
             yield from _target_names(child)
+
+
+def _unparenthesized(node: Any) -> Any:
+    """The expression inside any parentheses around it, or None when there is none."""
+    while node is not None and node.type == "parenthesized_expression":
+        node = next((child for child in node.named_children if child.type != "comment"), None)
+    return node
+
+
+def _value_origin(node: Any) -> tuple[str, str] | None:
+    """What an expression's own text says its value is, or None.
+
+    ("literal", "") for a literal of a builtin type; ("call", text) for the
+    result of a call, `text` being what is called as written. Nothing else is
+    read: an attribute, a subscript or a conditional says too little.
+
+    Only a bare NAME is ever resolved from that text. `a.b()` and `f()()` give
+    a text that no scope binds and no builtin is named, so they stay unstated
+    without a test of the node's type here.
+    """
+    node = _unparenthesized(node)
+    if node is None:
+        return None
+    if node.type in _BUILTIN_LITERALS:
+        return ("literal", "")
+    if node.type == "call":
+        return ("call", _text(node.child_by_field_name("function")))
+    return None
+
+
+def _value_binder(value: Any, scope: PyScope, handed_over: bool = False) -> Binder:
+    """The binder of a name one statement binds to `value`, evaluated in `scope`.
+
+    `handed_over` is a `with ... as name`: the name gets what the value's
+    `__enter__` returns, which for a class of the repository is not stated.
+    """
+    origin = _value_origin(value)
+    if origin is None:
+        return _VALUE
+    how, name = origin
+    return Binder("value", origin=("with" if handed_over and how == "call" else how, name, scope))
 
 
 def _parameter_names(params: Any) -> Iterator[str]:
@@ -262,6 +349,8 @@ def collect_scopes(root: Any, import_bindings: ImportBindings, name_of: NameOf) 
             scope.nonlocals.update(_text(c) for c in node.named_children if c.type == "identifier")
             return
         if kind in ("import_statement", "import_from_statement"):
+            if any(child.type == "wildcard_import" for child in node.children):
+                module.star_import = True
             for local, import_kind, target in import_bindings(node):
                 scope.bind(local, Binder("import", import_kind=import_kind, target=target))
             return
@@ -271,8 +360,14 @@ def collect_scopes(root: Any, import_bindings: ImportBindings, name_of: NameOf) 
             # An annotation with no value (`x: int`) binds only in a function.
             right = node.child_by_field_name("right")
             if right is not None or scope.kind in ("function", "lambda"):
-                binder = _NONE_VALUE if right is not None and right.type == "none" else _VALUE
-                for name in _target_names(node.child_by_field_name("left")):
+                left = node.child_by_field_name("left")
+                if right is not None and right.type == "none":
+                    binder = _NONE_VALUE
+                elif left is not None and left.type == "identifier":
+                    binder = _value_binder(right, scope)
+                else:
+                    binder = _VALUE  # an unpacking: which part each name gets is not read
+                for name in _target_names(left):
                     scope.bind(name, binder)
         elif kind == "augmented_assignment":
             for name in _target_names(node.child_by_field_name("left")):
@@ -289,8 +384,16 @@ def collect_scopes(root: Any, import_bindings: ImportBindings, name_of: NameOf) 
                 scope.bind(name, _VALUE)
         elif kind == "as_pattern" and node.parent is not None and node.parent.type != "case_pattern":
             # `with ... as x` and `except E as x`. A case pattern's `as` is a capture.
-            for name in _target_names(node.child_by_field_name("alias")):
-                scope.bind(name, _VALUE)
+            alias = node.child_by_field_name("alias")
+            binder = _VALUE
+            if (
+                node.parent.type == "with_item"
+                and alias is not None
+                and [child.type for child in alias.named_children] == ["identifier"]
+            ):
+                binder = _value_binder(node.named_children[0], scope, handed_over=True)
+            for name in _target_names(alias):
+                scope.bind(name, binder)
         elif kind == "delete_statement":
             for child in node.named_children:
                 for name in _target_names(child):
@@ -396,3 +499,60 @@ def _outcome(binders: list[Binder]) -> Resolution:
     if all(b.kind == "import" or b.none_literal for b in binders):
         return Resolution("ambiguous-import")
     return Resolution("value")
+
+
+def _origin_receiver(how: str, name: str, scope: PyScope) -> Receiver | None:
+    """What a value of this origin is, with the name it calls resolved in `scope`."""
+    if how == "literal":
+        return _BUILTIN_RECEIVER
+    found = resolve(scope, name)
+    if found.kind == "none":
+        # Bound nowhere in the file, so the name is the builtin's own -- unless
+        # a star import is there to bind it out of sight.
+        if name in _BUILTIN_TYPED_RESULTS and not _module_of(scope).star_import:
+            return _BUILTIN_RECEIVER
+        return None
+    if how == "call" and found.kind in ("def", "symbol"):
+        return Receiver(found)
+    return None
+
+
+def _held_by(binders: list[Binder]) -> Receiver | None:
+    """What a local name holds, when every statement that binds it agrees.
+
+    Flow is not followed: the binders of the name in its resolving scope are
+    read together, so one that says nothing (a parameter, a loop target, an
+    augmented assignment) or two that disagree leave the name unstated.
+    `None` is skipped, because it has no method to call.
+    """
+    stated: set[Receiver] = set()
+    for binder in binders:
+        if binder.none_literal:
+            continue
+        found = _origin_receiver(*binder.origin) if binder.origin is not None else None
+        if found is None:
+            return None
+        stated.add(found)
+    return stated.pop() if len(stated) == 1 else None
+
+
+def stated_receiver(node: Any, scope: PyScope) -> Receiver | None:
+    """What the receiver of a member call is, where the source states it (#79).
+
+    Stated means: a literal, a call of a bare name (`Beta()`, `open(p)`), a
+    name that denotes a definition (`Beta.m()`), or a name bound only from
+    those. A parameter, `self`, an attribute, a call on an attribute and a
+    name the file binds nowhere are not stated, and None is returned for them.
+    """
+    node = _unparenthesized(node)
+    if node is not None and node.type == "identifier":
+        name = _text(node)
+        home = resolving_scope(scope, name)
+        if home is None:
+            return None
+        found = _outcome(home.binders[name])
+        if found.kind in ("def", "symbol"):
+            return Receiver(found)
+        return _held_by(home.binders[name])
+    origin = _value_origin(node)
+    return _origin_receiver(*origin, scope) if origin is not None else None

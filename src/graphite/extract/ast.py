@@ -15,7 +15,7 @@ from ..config import Config
 from ..graph import normalize_id
 from ..ingest import LANGUAGE_BY_EXT, FileEntry
 from ..resolve import SourceIndex, should_keep_call_target
-from .pyscope import Resolution, ScopeTable, collect_scopes, resolve
+from .pyscope import Resolution, ScopeTable, collect_scopes, resolve, stated_receiver
 
 
 @dataclass
@@ -1456,6 +1456,13 @@ def _python_bare_call(
     return _resolve_call(file_id, name), confidence
 
 
+def _python_definition_id(resolution: Resolution, ids: dict[tuple[str, bool], str]) -> str | None:
+    """The node id of what a name denotes: a definition of this file, or an imported one."""
+    if resolution.kind == "def" and resolution.qualname is not None:
+        return ids[(resolution.qualname, resolution.module_level)]
+    return resolution.target
+
+
 def _python_call_target(func: Any) -> tuple[str | None, str | None, str | None]:
     """(bare_name, object_name, attribute_name) for a Python call's function node."""
     def _text(n: Any) -> str | None:
@@ -1610,22 +1617,36 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                             confidence="LOCAL_CALL",
                         )
                 elif should_keep_call_target(dotted):
-                    # Unresolved member call: file-scoped phantom now, re-pointed
-                    # (or dropped) by the method-dispatch post-pass via _member.
-                    # Confidence is read off the receiver's ROOT as the scope walk
-                    # resolved it (a depth->=2 chain like `os.path.join` tests `os`,
-                    # not `join`). When no receiver root can be recovered,
-                    # `dotted` is the bare attribute name and says nothing about
-                    # where the call goes, so it is never classified external (#14).
-                    edge = _edge(
-                        scope_id, _resolve_call(file_id, dotted), "calls", rel_path, _line(node),
-                        confidence=(
-                            _python_name_confidence(recovered_root, root_binding)
-                            if recovered_root is not None and root_binding is not None
-                            else "LOCAL_CALL"
-                        ),
-                    )
-                    edge["_member"] = attr
+                    # What the receiver IS, where the source states it (#79). An
+                    # instance of a builtin type -- a literal, `open(p)`, a local
+                    # bound only from those -- has no method of this repository,
+                    # so the call gets no edge, as a bare `len(x)` gets none.
+                    # Bound by name it was a call to whichever method of the
+                    # repository shared the name: `f.read()` to `Cache.read`.
+                    stated = stated_receiver(func.child_by_field_name("object"), scope)
+                    definition = stated.definition if stated is not None else None
+                    if stated is None or definition is not None:
+                        # Unresolved member call: file-scoped phantom now, re-pointed
+                        # (or dropped) by the method-dispatch post-pass via _member.
+                        # Confidence is read off the receiver's ROOT as the scope walk
+                        # resolved it (a depth->=2 chain like `os.path.join` tests `os`,
+                        # not `join`). When no receiver root can be recovered,
+                        # `dotted` is the bare attribute name and says nothing about
+                        # where the call goes, so it is never classified external (#14).
+                        edge = _edge(
+                            scope_id, _resolve_call(file_id, dotted), "calls", rel_path, _line(node),
+                            confidence=(
+                                _python_name_confidence(recovered_root, root_binding)
+                                if recovered_root is not None and root_binding is not None
+                                else "LOCAL_CALL"
+                            ),
+                        )
+                        edge["_member"] = attr
+                        if definition is not None:
+                            # `Beta().m()`, `Beta.m()`, or a local bound only from
+                            # `Beta()`: the post-pass binds to that class's own `m`
+                            # where it has one, and by name where it has not.
+                            edge["_receiver"] = _python_definition_id(definition, ids)
             if edge is not None:
                 result.edges.append(edge)
             walk_children(node, parent_id, scope_id)
@@ -2224,16 +2245,32 @@ def _resolve_method_dispatch(
     ``method_definition``; they are tagged ``is_method`` at extraction so they are
     indexed here on equal terms (#19).
 
-    ``_member`` is stripped from every returned edge so it never leaks into the graph.
+    A Python member call whose receiver the source STATES also carries
+    ``_receiver``, the id of the class it names (#79). Where that class has a
+    method of the name itself, the call is bound to it and to nothing else; the
+    name is not consulted. Where it has none (the method is inherited, or the id
+    is not a class at all) the call is bound by name as above.
+
+    ``_member`` and ``_receiver`` are stripped from every returned edge so
+    neither leaks into the graph.
     """
     # method name (casefolded) -> set of definition node ids. A set collapses the
     # same method appearing twice in the pre-dedup node list, so the cap counts
     # distinct definitions.
     methods_by_name: dict[str, set[str]] = {}
+    method_names: dict[str, str] = {}
     for n in nodes:
         if n.get("is_method") and n.get("name"):
             methods_by_name.setdefault(n["name"].casefold(), set()).add(n["id"])
+            method_names[n["id"]] = n["name"]
     known_ids = {n["id"] for n in nodes}
+    # class id -> its OWN methods by name, read off the `contains` edges. A node
+    # is tagged `is_method` only where its container is a class, so whatever
+    # contains one is a class and no kind needs checking.
+    own_methods: dict[str, dict[str, str]] = {}
+    for e in edges:
+        if e.get("relation") == "contains" and e.get("target") in method_names:
+            own_methods.setdefault(e["source"], {})[method_names[e["target"]]] = e["target"]
 
     # Which file each definition lives in, and which files each file imports
     # DIRECTLY. Both are needed to answer "could this caller have reached that
@@ -2262,7 +2299,17 @@ def _resolve_method_dispatch(
     out: list[dict[str, Any]] = []
     for e in edges:
         method = e.pop("_member", None)  # strip from every edge, resolved or not
+        receiver = e.pop("_receiver", None)
         if not method or e.get("relation") != "calls":
+            out.append(e)
+            continue
+        # The source states the receiver's class and that class defines the
+        # method (#79): bound there, with no guess to gate. Bound by name this
+        # was also a call to every other method of the name in reach, so
+        # `callers Alpha.setup` listed a function that only builds a `Beta`.
+        own = own_methods.get(receiver, {}).get(method) if receiver else None
+        if own is not None:
+            e["target"] = own
             out.append(e)
             continue
         # Evidence gate (#56), applied BEFORE the name lookup and in every language.
