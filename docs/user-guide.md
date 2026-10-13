@@ -60,8 +60,9 @@ TypeScript/JavaScript, Python, Go and Rust, resolves cross-file identities,
 builds and analyses the graph, validates it, and writes `graph-out/`. The
 output directory is gitignored by `init`/`bootstrap`. Only changed files are
 re-parsed on later builds: the extraction cache under `.cache/graphite` is
-content-addressed and partitioned by engine identity, so upgrading graphite
-re-extracts once and never serves a graph built by an older engine.
+keyed on each file's path and bytes and partitioned by engine identity, so
+upgrading graphite re-extracts once and never serves a graph built by an older
+engine. A moved file is parsed again where it now is.
 
 `check` exits non-zero when the graph is stale and says why: source changes
 (files added, changed, removed) or `engine_changed` (graphite itself was

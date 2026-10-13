@@ -148,6 +148,51 @@ was:
 
 The hook still fails open on a command it cannot read.
 
+**Two files with the same bytes each keep their place in the graph, and a
+moved file is named where it is (#74).** The extraction cache keyed an entry
+on a file's bytes and its language. What an entry holds names the file: every
+node id and every `source_file` in it is built from the path. So two files
+with the same bytes shared one entry, and one of them was answered with the
+other's nodes and had none of its own.
+
+- **On every build after the first**, one file of each such group was in the
+  graph and the others were not, with everything they define and every edge
+  from them. A tree of seven files, six of them in identical pairs (two
+  modules, two templates, two empty `__init__.py`), went from nine nodes to
+  five on a second build with nothing changed.
+- **On a first build** it was a race between worker threads, which is how the
+  issue was filed: one tree, built twice from an empty cache, gave two node
+  sets.
+- **An import of a package whose `__init__.py` is empty** pointed at a file
+  node that was not there, once another empty `__init__.py` had been read.
+- **A file moved with its bytes unchanged** kept its old path in the graph.
+  Python and TypeScript were spared, because the set of paths is already in
+  their key. Go, Rust, templates and every other file were not, and neither
+  were two Python files that exchange their contents.
+
+The issue was filed as file nodes with no edges coming and going. It was
+wider than that: definitions went with their file. Measured on Django 5.2.7,
+1.2.1 against this change, each built from an empty cache two or three times
+and then once more on the cache it had left:
+
+- 1.2.1 gave three different graphs, with 109, 110 and 118 files of a kind
+  the graph takes left without a node;
+- this change gave one graph four times, the same `graph.json` byte for byte.
+  Nothing a 1.2.1 graph holds is missing from it. It gains 128 to 137 nodes
+  and 166 to 168 edges, and 24 of the nodes are classes and functions in
+  Python files that had a twin.
+
+The file's path is now part of the key. An entry belongs to one file, an
+unchanged file is still answered from the cache, and nothing else about the
+cache changes. The first build after the upgrade extracts every file again,
+as after any change to the engine. On a tree where no two files of one
+language share their bytes the graph is what it was: this repository builds
+the same 8,655 nodes and 23,691 edges before and after.
+
+Five Django files still have no node, and none of them is this defect: three
+are binary, one is under a dot-directory, and one has the node id of another
+path beside it (`file_txt` and `file.txt`).
+
 ## [1.2.1] — 2026-10-11
 
 A patch release. It carries one fix, to the agent hooks (#80). No stable

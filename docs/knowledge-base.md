@@ -71,6 +71,18 @@ backoff and the real error is no longer masked by cleanup. On older
 versions the daemon's next cycle heals it; hook- or agent-driven builds fail
 that turn.
 
+**A file is missing from the graph, or the graph names a path the file has
+been moved from, and nothing about the file is wrong.** → The file has the
+same bytes as another file, or it was moved without being edited. The
+extraction cache keyed an entry on a file's bytes while the entry names the
+file's path, so identical files answered for each other: one kept its node
+and its definitions and the others had none, on every build after the first
+and by a race on the first (#74). Empty `__init__.py` files are the usual
+case; copied modules and identical templates are the others. → Fixed in the
+release that follows 1.2.1: the path is part of the key. On older versions no
+setting avoids it, and deleting `.cache/graphite` before a build brings back
+the race, not the nodes.
+
 **Git-backed enumeration reports `git_unavailable` on a machine where Git
 works.** → The `git --version` probe had its own fixed two-second budget
 while the command it gated was allowed far longer; on a slow first launch the

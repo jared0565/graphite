@@ -1998,8 +1998,14 @@ def extract_file(entry: FileEntry, cfg: Config, cache: Cache | None = None, sour
         # Only resolver-consulting languages pay this invalidation: Go and Rust
         # extraction is file-local and cannot go stale this way.
         cache_language = f"{cache_language}:fs{source_index.file_set_digest()}"
+    # What is cached names the file: every node id and `source_file` in it is
+    # built from the path. Keyed on the bytes and the language alone, two files
+    # with the same bytes shared one entry, so one of them was answered with
+    # the other's nodes and had none of its own, and a file moved with its
+    # bytes unchanged kept its old path (#74).
+    cache_key = ("ast", entry.content_hash, cache_language, entry.rel_path)
     if cache is not None and not compiler_resolver_active:
-        cached = cache.read("ast", entry.content_hash, cache_language)
+        cached = cache.read(*cache_key)
         if cached is not None:
             return _result_from_dict(cached)
 
@@ -2039,7 +2045,7 @@ def extract_file(entry: FileEntry, cfg: Config, cache: Cache | None = None, sour
         result = _extract_generic(file_id, rel_path, source, entry.language or "unknown")
 
     if cache is not None:
-        cache.write(_result_to_dict(result), "ast", entry.content_hash, cache_language)
+        cache.write(_result_to_dict(result), *cache_key)
 
     return result
 
