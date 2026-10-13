@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from graphite.incident_ledger import (
     append_lifecycle,
     fold_incidents,
@@ -292,6 +294,76 @@ def test_natural_query_inconclusive_records_incident(tmp_path, monkeypatch):
     assert e["code"] == "query_inconclusive"
     assert e["subject"] == "query who calls lonely"
     assert "calls 0.0" in e["detail"]
+
+
+def _mostly_unbound_graph():
+    """`start` makes ten calls, nine of them to names nothing defines, so the
+    python calls cell reads 0.1. Nothing reaches `goal`."""
+    import networkx as nx
+
+    g = nx.DiGraph()
+    for name in ("start", "near", "goal"):
+        g.add_node(name, kind="function", name=name, source_file="a.py")
+    g.add_edge("start", "near", relation="calls", source_file="a.py")
+    for i in range(9):
+        g.add_node(f"ghost{i}", kind="unknown", source_file=None)
+        g.add_edge("start", f"ghost{i}", relation="calls", source_file="a.py")
+    return g
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["query", "reaches start -> goal"], ["query", "can start reach goal", "--natural"]],
+)
+def test_an_inconclusive_no_path_records_an_incident(tmp_path, monkeypatch, capsys, argv):
+    """A "no path" graded `inconclusive` is an inconclusive answer like any
+    other (#76), so it is captured like any other. It used to be skipped with
+    every error result, which was right while a `no_path` was never graded.
+
+    Such a result carries no `resolution_health`, so the detail is the scoped
+    cell and the grade, with no aggregate ratios printed as `None`."""
+    import graphite.cli as cli
+
+    g = _mostly_unbound_graph()
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: g)
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(argv) == 0
+
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["error_code"] == "no_path"
+    assert printed["inconclusive"] is True
+    entries, _ = read_incident_entries(repo_ledger_dir(tmp_path))
+    (entry,) = [e for e in entries if e["class"] == "query"]
+    assert entry["code"] == "query_inconclusive"
+    assert entry["subject"] == f"query {argv[1]}"
+    assert entry["detail"] == "answer calls(python) 0.1 inconclusive"
+
+
+def test_a_no_path_that_is_not_inconclusive_records_nothing(tmp_path, monkeypatch, capsys):
+    """Every call edge is bound, so the answer is `advisory`: unverified, and
+    not a failure of the graph. An error that resolved nothing records nothing
+    either, as before."""
+    import networkx as nx
+
+    import graphite.cli as cli
+
+    g = nx.DiGraph()
+    for name in ("caller", "callee", "idle"):
+        g.add_node(name, kind="function", name=name, source_file="a.py")
+    g.add_edge("caller", "callee", relation="calls", source_file="a.py")
+    monkeypatch.setattr(cli, "_load_graph", lambda *a, **k: g)
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["query", "reaches idle -> callee"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["error_code"] == "no_path"
+    assert printed["answer"]["grade"] == "advisory"
+    assert cli.main(["query", "reaches idle -> zzqx"]) == 0
+    assert json.loads(capsys.readouterr().out)["error_code"] == "node_not_found"
+
+    entries, _ = read_incident_entries(repo_ledger_dir(tmp_path))
+    assert [e for e in entries if e["class"] == "query"] == []
 
 
 def _list_json(tmp_path, capsys, **over):

@@ -109,9 +109,29 @@ def test_query_outputs_match_published_result_schema() -> None:
         "callers worker.run",
         "callers report",
         "reaches main -> report",
+        "reaches report -> main",
+        "path src_lib_helper -> report",
     )
     for q in samples:
         assert matches_schema(query(g, q), schema) is True, q
+
+
+def test_the_conformance_graph_exercises_a_graded_no_path() -> None:
+    """A `no_path` result carries `resolution`, `answer` and `inconclusive`
+    (#76). `answer` and the items of `resolution` are constrained objects, so
+    the samples above have to emit them on that result for the schema to be
+    checked against it at all."""
+    g = _graph()
+    for q in ("reaches src_lib -> src_app", "reaches report -> main", "path src_lib_helper -> report"):
+        out = query(g, q)
+        assert out["error_code"] == "no_path", q
+        assert {"resolution", "answer", "inconclusive"} <= out.keys(), q
+    assert query(g, "reaches report -> main")["resolution"][0]["case_ambiguous"] is True
+    assert query(g, "path src_lib_helper -> report")["resolution"][1]["case_ambiguous"] is True
+
+    natural = answer_natural(g, "can helper reach main?")
+    assert natural["error_code"] == "no_path"
+    assert {"resolution", "answer", "inconclusive", "plan", "natural"} <= natural.keys()
 
 
 def test_the_conformance_graph_exercises_the_case_ambiguous_field() -> None:
@@ -134,6 +154,7 @@ def test_natural_outputs_match_published_result_schema() -> None:
         "something about the helper maybe",
         "what is this",
         "who calls zzqx",
+        "can helper reach main?",
     )
     for q in answered:
         assert matches_schema(answer_natural(g, q), result_schema) is True, q
@@ -178,8 +199,8 @@ def test_query_result_schema_admits_answer_block() -> None:
     with_answer = query(g, "callers helper")
     assert "answer" in with_answer
     assert matches_schema(with_answer, schema) is True
-    # WITHOUT: an error result (never carries answer) also validates — the
-    # key is optional, not required.
+    # WITHOUT: an error result that resolved no target (only `no_path` carries
+    # answer, #76) also validates — the key is optional, not required.
     without_answer = query(g, "bogus verb")
     assert "answer" not in without_answer
     assert matches_schema(without_answer, schema) is True

@@ -434,7 +434,8 @@ def _record_inconclusive(subject: str, result: Any) -> None:
             cell = by_rel.get(rel) or {}
             return cell.get("ratio")
 
-        detail = f"imports {_ratio('imports')}, calls {_ratio('calls')}, healthy {health.get('healthy')}"
+        aggregate = f"imports {_ratio('imports')}, calls {_ratio('calls')}, healthy {health.get('healthy')}"
+        scoped = ""
         answer = result.get("answer")
         if isinstance(answer, dict):
             # The aggregate ratios above can read "healthy True" while a
@@ -450,7 +451,14 @@ def _record_inconclusive(subject: str, result: Any) -> None:
             grade = answer.get("grade", "")
             parts = [p for p in (degraded_cells, grade) if p]
             if parts:
-                detail += ", answer " + " ".join(parts)
+                scoped = "answer " + " ".join(parts)
+        # A graded `no_path` carries no `resolution_health` (#76). The scoped
+        # cells are then the whole account, and the aggregate line in front of
+        # them would read `imports None, calls None, healthy None`.
+        details = [aggregate] if "resolution_health" in result or not scoped else []
+        if scoped:
+            details.append(scoped)
+        detail = ", ".join(details)
 
         record_incident(
             repo_ledger_dir(Path.cwd()),
@@ -1147,8 +1155,9 @@ def cmd_query(args: argparse.Namespace) -> int:
         g = _load_graph(Path(args.graph_json), root=Path.cwd())
         result = answer_natural(g, args.query)
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        # As for a plain query below: the flag decides, error or not (#76).
+        _record_inconclusive(f"query {args.query}", result)
         if "error" not in result:
-            _record_inconclusive(f"query {args.query}", result)
             _record_canonical_usage("query-natural", result, started)
         return 0
     if args.plan_only:
@@ -1161,8 +1170,10 @@ def cmd_query(args: argparse.Namespace) -> int:
         if "error" not in plan:
             result = {**result, "plan": plan}
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    # The flag decides, error or not: a `no_path` graded `inconclusive` is both
+    # (#76), and no other error result carries the flag.
+    _record_inconclusive(f"query {args.query}", result)
     if "error" not in result:
-        _record_inconclusive(f"query {args.query}", result)
         _record_canonical_usage("query", result, started)
     return 0
 

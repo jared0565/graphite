@@ -555,20 +555,38 @@ def test_query_error_outputs_are_golden_stable() -> None:
         "error": "reaches query format: reaches <a> -> <b>",
         "error_code": "invalid_query_format",
     }
-    assert query(g, "reaches src_lib -> src_app") == {
+    # `no_path` is the one error that resolved its targets, and since #76 it
+    # says so and is graded by them. Both ends are `.ts` files, so the scope is
+    # typescript. This fixture's edges carry no source_file, so they are counted
+    # under "other" and typescript has no cell: nothing was measured for the
+    # answer, and an empty answer nothing measured is `inconclusive` (#12).
+    #
+    # It is NOT graded against "other". That was the defect of 2026-07-31
+    # (operation-firewall dogfooding): with no resolved seeds, the grade fell
+    # back to every language in `by_language` and read a bucket that has
+    # nothing to do with src_lib or src_app. That cell is healthy here (1.0),
+    # so a grade taken from it would read `advisory` and fail this assertion.
+    no_path = query(g, "reaches src_lib -> src_app")
+    answer = no_path.pop("answer")
+    assert no_path == {
         "schema_version": 1,
         "error": "no call path from src_lib to src_app",
         "error_code": "no_path",
         "truncated": False,
         "limits": {"max_depth": 32},
-        # no_path carries no resolved seeds (the reaches handler doesn't
-        # surface match info on error), so languages_for_nodes([]) means
-        # "nothing to scope against" -- no answer block at all, rather than
-        # the pre-fix behavior of falling back to every language in
-        # resolution_health's by_language ("other", since this fixture's
-        # edges carry no source_file) and grading against a bucket that has
-        # nothing to do with src_lib/src_app (operation-firewall dogfooding
-        # fix, 2026-07-31).
+        "resolution": [
+            {"role": "source", "input": "src_lib", "node": "src_lib", "type": "exact-id"},
+            {"role": "target", "input": "src_app", "node": "src_app", "type": "exact-id"},
+        ],
+        "inconclusive": True,
+    }
+    assert {key: answer[key] for key in ("schema", "relations", "languages", "health", "grade", "empty_meaning")} == {
+        "schema": 1,
+        "relations": ["calls"],
+        "languages": ["typescript"],
+        "health": {},
+        "grade": "inconclusive",
+        "empty_meaning": "no call path found within depth",
     }
 
 

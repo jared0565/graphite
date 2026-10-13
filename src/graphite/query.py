@@ -75,22 +75,36 @@ def _verb_reaches(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> 
     if not dst_detail:
         return _not_found(g, b, label="target")
     src, dst = src_detail[0], dst_detail[0]
+    match = {"source": _match_meta(a, src_detail), "target": _match_meta(b, dst_detail)}
     p, limited = _bounded_bfs_path(g, src, dst, max_depth, relations=_CALL_RELATIONS)
     if p is None:
-        return {
-            "error": f"no call path from {src} to {dst}",
-            "error_code": "no_path",
-            "truncated": limited,
-            "limits": {"max_depth": max_depth},
-        }
+        return _no_path(f"no call path from {src} to {dst}", match, limited, max_depth)
     return {
         "source": src,
         "target": dst,
-        "match": {"source": _match_meta(a, src_detail), "target": _match_meta(b, dst_detail)},
+        "match": match,
         "length": len(p) - 1,
         "path": [_node_view(g, n) for n in p],
         "truncated": False,
         "limits": {"max_depth": max_depth},
+    }
+
+
+def _no_path(
+    message: str, match: dict[str, dict[str, Any]], limited: bool, max_depth: int
+) -> dict[str, Any]:
+    """The empty answer of `reaches` and `path`: both ends resolved, no path found.
+
+    `match` says which two nodes the walk ran between. `execute_plan` grades
+    the absence by their languages and publishes them as `resolution` (#76);
+    without it there was nothing to scope a grade against, and none was given.
+    """
+    return {
+        "error": message,
+        "error_code": "no_path",
+        "truncated": limited,
+        "limits": {"max_depth": max_depth},
+        "match": match,
     }
 
 
@@ -161,18 +175,14 @@ def _verb_path(g: nx.DiGraph, inputs: list[str], options: dict[str, Any]) -> dic
     if not dst_detail:
         return _not_found(g, b, label="target")
     src, dst = src_detail[0], dst_detail[0]
+    match = {"source": _match_meta(a, src_detail), "target": _match_meta(b, dst_detail)}
     p, limited = _bounded_bfs_path(g, src, dst, max_depth, relations=None)
     if p is None:
-        return {
-            "error": f"no path from {src} to {dst}",
-            "error_code": "no_path",
-            "truncated": limited,
-            "limits": {"max_depth": max_depth},
-        }
+        return _no_path(f"no path from {src} to {dst}", match, limited, max_depth)
     return {
         "source": src,
         "target": dst,
-        "match": {"source": _match_meta(a, src_detail), "target": _match_meta(b, dst_detail)},
+        "match": match,
         "length": len(p) - 1,
         "path": [
             {"id": n, "name": g.nodes[n].get("name", n), "kind": g.nodes[n].get("kind", "unknown")}
@@ -374,9 +384,18 @@ def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
     result = spec.handler(g, inputs, plan["options"])
     envelope = {"schema_version": RESULT_SCHEMA_VERSION, **result}
     is_error = "error" in result
-    if not is_error:
+    # `no_path` is the one error that resolved its targets. The walk ran and
+    # found nothing, so it is an empty answer: it says how each end was matched
+    # and is graded, like an empty `callers` listing (#76).
+    no_path = result.get("error_code") == "no_path"
+    if not is_error or no_path:
         envelope["resolution"] = _resolution(spec, result)
-    if spec.relations and (not is_error or result.get("error_code") == "no_path"):
+    if no_path:
+        # How the handler hands its two matches over. A found path publishes
+        # `match` beside `resolution`, for readers older than `resolution`; a
+        # `no_path` never carried it and has no such reader.
+        envelope.pop("match", None)
+    if spec.relations and (not is_error or no_path):
         # Fail-open (spec R6): computation performed only to build the
         # `answer` block — seed derivation, language lookup, the block
         # itself — must never be able to error the query. On any failure
@@ -395,7 +414,11 @@ def execute_plan(g: nx.DiGraph, plan: object) -> dict[str, Any]:
             )
             if block is not None:
                 envelope["answer"] = block
-                if "inconclusive" in envelope:
+                # A listing arrives with the flag set from the whole graph, and
+                # the scoped grade replaces it. A `no_path` arrives without it
+                # and gets it here. With no block there is nothing to say, and
+                # it stays without: two files that are not code are not graded.
+                if no_path or "inconclusive" in envelope:
                     envelope["inconclusive"] = block["grade"] == GRADE_INCONCLUSIVE
             elif seeds and not matched_languages and "inconclusive" in envelope:
                 # Matched real nodes, but none have an applicable code
@@ -430,8 +453,8 @@ def query(g: nx.DiGraph, q: str) -> dict[str, Any]:
 
     Every query is first translated into a canonical plan (build_plan) and then
     executed (execute_plan); errors at either stage carry a stable error_code,
-    and every response carries schema_version (successes also carry a uniform
-    per-target resolution listing).
+    and every response carries schema_version (successes, and a `no_path`,
+    also carry a uniform per-target resolution listing).
     """
     plan = build_plan(q)
     if "error" in plan:

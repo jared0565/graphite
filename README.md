@@ -185,6 +185,7 @@ graphite report .
 # Traversal is bounded with generous defaults (path/reaches max_depth 32;
 # neighbor listings max_results 200) — results report truncated + limits, and
 # a no_path with truncated:true means the bound was hit, not proven absence.
+# A no_path is graded like any other empty answer: read its answer.grade.
 graphite query "depends-on src/lib/db.ts"
 graphite query "callers calculateCommissionPence"
 

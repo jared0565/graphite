@@ -15,6 +15,52 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Added
+
+**A "no path" answer is graded (#76).** `reaches` and `path` answer an
+unreachable pair with the error `no_path`. Of everything those two verbs
+return it is the one result that asserts an absence, and nothing graded it.
+On a fixture where nine of a function's ten call edges are unbound, `callers`
+on a node answered `inconclusive` and `reaches` to that same node answered "no
+call path" as a plain error.
+
+A `no_path` result now carries three more fields:
+
+- `resolution`: how each end was matched, as a found path reports it;
+- `answer`: the block every other answer carries, scoped to the languages of
+  the two nodes the question resolved to;
+- `inconclusive`: true exactly when `answer.grade` is `inconclusive`.
+
+The grade is `inconclusive` where a cell the answer used is degraded or was
+not measured, and `advisory` otherwise. It is never `decision_grade`, for the
+reason an empty `callers` answer is not: a call the graph did not bind, or a
+caller registered as a callback, leaves a real path out of the graph, and no
+ratio can see an edge that was never emitted.
+
+Where one end was a pick between spellings (`Verdict` typed, a function
+`verdict` chosen), that end's `resolution` entry carries `case_ambiguous` and
+the answer carries the caveat `target-resolved-to-another-spelling`. Before
+this change the node id in the message was the only sign of the pick.
+
+Not changed: `error_code: no_path`, the message, `truncated` and `limits`. A
+`no_path` cut short by the depth bound still says `truncated: true`. Between
+two files that are not code there is nothing to grade by, and the result
+carries neither `answer` nor `inconclusive`, as before. The grade is taken
+from the two resolved nodes and never from the whole graph: grading a
+`no_path` against every language in the graph was the defect fixed on
+2026-07-31, and it is why such a result then carried no block at all.
+
+`graphite query` records a `query_inconclusive` incident for a `no_path`
+graded `inconclusive`, as it does for every other inconclusive answer. It
+used to skip every error result, which was right while a `no_path` was never
+graded. Such a result carries no `resolution_health`, so the incident's detail
+is the scoped cell and the grade (`answer calls(python) 0.1 inconclusive`).
+
+These are fields added to a JSON output that carries `schema_version`, which
+`docs/compatibility.md` makes a minor release. The sentences in
+`docs/agent-integration.md` and in the `query-result` schema that said a
+`no_path` is not graded are replaced with what it now carries.
+
 ## [1.2.1] — 2026-10-11
 
 A patch release. It carries one fix, to the agent hooks (#80). No stable

@@ -118,6 +118,14 @@ Traversal is bounded (default depth 32) and the bound was hit. → That is
 "not proven absent", not "absent". Narrow the endpoints or raise the limit
 through the plan.
 
+**A `path` or `reaches` query says `no_path` with `truncated: false`.** →
+The walk finished and the graph holds no such path. That is still not proof:
+a call the graph did not bind, or a caller registered as a callback, leaves a
+real path out. → Read `answer.grade` on the result. `inconclusive` means the
+call edges around those two nodes are mostly unbound; `advisory` means they
+are fine and only the absence is unverified. It is never `decision_grade`.
+Confirm with a text search before treating the two as unconnected.
+
 **A node id from an older graph no longer resolves.** → Node ids are stable
 only within an engine version; 0.5.0 deliberately changed id construction
 (`index.ts` and `index.js` were one node before), and the Python

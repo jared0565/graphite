@@ -49,7 +49,7 @@ envelope:
 - Branch on the presence of `error_code` first. Stable codes: `empty_query`,
   `unknown_query_verb` (with `suggestions`), `invalid_query_format`,
   `node_not_found` (with `candidates`), `no_path`, `invalid_plan`.
-- On success, `resolution` lists how every input resolved
+- On success, and on a `no_path`, `resolution` lists how every input resolved
   (`role`/`input`/`node`/`type`, plus `alternates` and `alternates_total`
   when a token was ambiguous). `type` is `exact-id`, `qualname` (a dotted
   Python qualified name such as `Worker.run`), `name`, `path-suffix` or
@@ -66,16 +66,20 @@ envelope:
   and it carries the caveat `target-resolved-to-another-spelling`. Ask again by
   node id. `context` reports the same field on its `matched` entries, and
   `impact` and `context` print the `answer health:` line for it. A `no_path`
-  error carries no `answer` block, so there the node id in the message is the
-  only sign (#76).
+  says it the same way: the field on the end that was picked, and the caveat.
 - Traversal is bounded with generous defaults (path/reaches `max_depth` 32,
   neighbor listings `max_results` 200). Results report `truncated` and
   `limits`. Important nuance: a `no_path` error with `truncated: true` means
   the depth bound was hit — a longer path may exist. `truncated: false` means
-  only that the walk was not cut short. It is not proof of absence: a
-  `no_path` error carries no `answer` block, so nothing grades it, and where
-  call edges are unbound a real path can be missing from the graph (#76).
-  Check `resolution_health` yourself before acting on a `no_path`.
+  only that the walk was not cut short. It is not proof of absence.
+- A `no_path` is the empty answer of `reaches` and `path`, and it is graded
+  like one. Besides `error_code` it carries `resolution`, an `answer` block
+  scoped to the languages of the two nodes it resolved, and `inconclusive`.
+  The grade is `inconclusive` where a cell it used is degraded or was not
+  measured, and `advisory` otherwise. It is never `decision_grade`: a call the
+  graph did not bind, or a caller registered as a callback, leaves a real path
+  out of the graph. Between two files that are not code there is nothing to
+  grade by, and the result carries neither `answer` nor `inconclusive`.
 - `query` always exits 0; errors live in the JSON (documented contract).
 
 ## 4. Validate before you spend
@@ -203,7 +207,8 @@ to distinguish "no results" from "the resolver could not bind".
   any aggregate ratio for a specific question.
 - `impact`, `context`, and the relation verbs (`callers`, `calls`,
   `imported-by`, `depends-on`) additionally return `"inconclusive": true` when
-  the result is EMPTY and the graph is unhealthy. **An inconclusive empty
+  the result is EMPTY and the graph is unhealthy. So does a `no_path` from
+  `reaches` or `path` (section 3). **An inconclusive empty
   answer means "unknown", never "safe"** — fall back to grep and say so.
 - ABSENT block (graphs built before 2026-07-25): treat exactly like
   `inconclusive` on empty results — fail open, never assume health.
@@ -221,7 +226,8 @@ this answer actually walked, not the whole graph:
   non-empty. Treat the list as incomplete: verify with grep and say so.
   Two healthy answers also grade `advisory`, and `caveats` says which
   applies: an empty answer over a relation where a real edge can go
-  undetected (`calls`; `imports` for JavaScript and TypeScript), and an
+  undetected (`calls`; `imports` for JavaScript and TypeScript), which
+  includes every `no_path`, and an
   answer about a node not spelled as you typed it while another spelling
   matched (`target-resolved-to-another-spelling`; see `case_ambiguous`
   under section 3).
@@ -253,8 +259,8 @@ every session.
     unreadable artifact stays silent — OSError is not malformation, only
     ValueError/RecursionError fire this code).
   - `query`: `query_inconclusive` (a structured or `--natural` query
-    returned `"inconclusive": true` — see the resolution-health section
-    above).
+    returned `"inconclusive": true`, a `no_path` included — see the
+    resolution-health section above).
   - `daemon`: `daemon_build_failed` (a daemon-triggered build failed),
     `provider_probe_failed` (a daemon observer cycle raised).
 - Fingerprint stability: `fingerprint = sha256(f"{class}|{code}|{subject}")[:16]`.

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/jared0565/graphite/docs/schemas/query-result.v1.schema.json",
   "title": "graphite query result envelope v1",
-  "description": "Common envelope for `graphite query` and `graphite query --natural` responses. Consume rule: branch on the presence of error_code first; success responses carry resolution (per-target, aligned with plan roles). Verb-specific payload keys (callers, calls, depends_on, imported_by, source/target/length/path, community, stats fields, ...) are additive and deliberately not constrained here. Bounded verbs report truncated + limits; a no_path error with truncated:true means the depth bound was hit, not that absence was proven. Note for consumers reusing graphite's subset validator (routing/schema_validation.py): it treats ABSENT additionalProperties as closed, so every deliberately open object in this file says additionalProperties:true explicitly.",
+  "description": "Common envelope for `graphite query` and `graphite query --natural` responses. Consume rule: branch on the presence of error_code first; success responses, and a no_path, carry resolution (per-target, aligned with plan roles). Verb-specific payload keys (callers, calls, depends_on, imported_by, source/target/length/path, community, stats fields, ...) are additive and deliberately not constrained here. Bounded verbs report truncated + limits; a no_path error with truncated:true means the depth bound was hit, not that absence was proven. A no_path is the empty answer of reaches and path: it also carries answer and inconclusive (see those properties). Note for consumers reusing graphite's subset validator (routing/schema_validation.py): it treats ABSENT additionalProperties as closed, so every deliberately open object in this file says additionalProperties:true explicitly.",
   "type": "object",
   "additionalProperties": true,
   "required": ["schema_version"],
@@ -77,12 +77,12 @@
     },
     "inconclusive": {
       "type": "boolean",
-      "description": "True when the result is empty AND the graph's resolution health is below threshold — treat as unknown, not as 'no dependents'."
+      "description": "True when the result is empty AND the graph's resolution health is below threshold — treat as unknown, not as 'no dependents'. When present beside answer, it is true exactly when answer.grade is inconclusive. Carried by the listing verbs, and by a no_path that carries answer."
     },
     "answer": {
       "type": "object",
       "additionalProperties": true,
-      "description": "Answer-scoped confidence: relations walked, per-language health cells for exactly those, derived grade, applicable caveat codes; empty_meaning present iff the primary result is empty. Absent when the block could not be computed (fail-open) and on every error result. That includes no_path: such a result is not graded, so check resolution_health before reading it as an absence (issue #76).",
+      "description": "Answer-scoped confidence: relations walked, per-language health cells for exactly those, derived grade, applicable caveat codes; empty_meaning present iff the primary result is empty. Absent when the block could not be computed (fail-open), when no resolved node is in a language whose relations are measured (two markdown files), and on every error result except no_path. A no_path is graded like any other empty answer, by the languages of the two nodes it resolved: inconclusive where a cell it used is degraded or unmeasured, advisory otherwise, never decision_grade (issue #76).",
       "required": ["schema", "relations", "languages", "health", "grade", "caveats"],
       "properties": {
         "schema": {"type": "integer"},

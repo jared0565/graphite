@@ -294,18 +294,48 @@ def test_stats_has_no_answer_block():
     assert "answer" not in result
 
 
-def test_no_path_error_has_no_answer_block():
-    """no_path carries no resolved seeds (the reaches handler doesn't
-    surface match info on error), so languages_for_nodes([]) now means
-    "nothing to scope against" rather than "fall back to the whole graph".
-    Before the operation-firewall dogfooding fix (2026-07-31), this
-    silently graded against every unrelated language in the graph and
-    produced a coincidental-looking answer block; now it correctly carries
-    none at all."""
+def test_no_path_is_graded_against_its_two_ends_and_nothing_else():
+    """Reversed on purpose (#76). This was `test_no_path_error_has_no_answer_block`.
+
+    Before the operation-firewall dogfooding fix (2026-07-31) a `no_path` had
+    no resolved seeds, and an empty seed list fell back to every language in
+    the graph: the answer was graded against languages that had nothing to do
+    with either end. The fix made an empty list mean "nothing to scope
+    against", and a `no_path` then carried no block at all. That left the one
+    result of `reaches` and `path` that asserts an absence with no grade.
+
+    It now names the two nodes it resolved and is graded by their languages.
+    The reason for the 2026-07-31 fix still stands, so the graph here holds a
+    second language whose calls cell is degraded: a grade taken from the whole
+    graph reads `inconclusive` for the python pair, and this test fails."""
     g = _contract_graph()
-    result = execute_plan(g, make_plan("reaches", [("source", "b_fn"), ("target", "a_fn")], {}))
-    assert result["error_code"] == "no_path"
-    assert "answer" not in result
+    g.add_node("c_start", kind="function", name="start", source_file="c.ts")
+    g.add_node("c_goal", kind="function", name="goal", source_file="c.ts")
+    for i in range(9):
+        g.add_node(f"c_unbound_{i}", kind="unknown")
+        g.add_edge("c_start", f"c_unbound_{i}", relation="calls", source_file="c.ts")
+
+    python_pair = execute_plan(g, make_plan("reaches", [("source", "b_fn"), ("target", "a_fn")], {}))
+    assert python_pair["error_code"] == "no_path"
+    assert python_pair["answer"]["languages"] == ["python"]
+    assert list(python_pair["answer"]["health"]["calls"]) == ["python"]
+    assert python_pair["answer"]["health"]["calls"]["python"]["healthy"] is True
+    assert python_pair["answer"]["grade"] == "advisory"
+    assert python_pair["inconclusive"] is False
+
+    # The same question asked of the degraded language, so the scope is seen to
+    # follow the ends and not to be fixed at python.
+    typescript_pair = execute_plan(g, make_plan("reaches", [("source", "c_goal"), ("target", "c_start")], {}))
+    assert typescript_pair["error_code"] == "no_path"
+    assert typescript_pair["answer"]["languages"] == ["typescript"]
+    assert typescript_pair["answer"]["health"]["calls"]["typescript"]["healthy"] is False
+    assert typescript_pair["answer"]["grade"] == "inconclusive"
+    assert typescript_pair["inconclusive"] is True
+
+    across = execute_plan(g, make_plan("reaches", [("source", "b_fn"), ("target", "c_goal")], {}))
+    assert across["error_code"] == "no_path"
+    assert across["answer"]["languages"] == ["python", "typescript"]
+    assert across["answer"]["grade"] == "inconclusive"
 
 
 def test_neighbor_listing_entries_carry_source_file():

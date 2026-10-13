@@ -194,15 +194,43 @@ def test_a_two_target_question_typed_as_chosen_is_graded_as_before() -> None:
     assert out["answer"]["grade"] == GRADE_DECISION
 
 
-def test_no_path_has_no_grade_to_hedge_and_names_the_node_it_used() -> None:
-    """A limit this round leaves where it was (#76). "No path" is an error with
-    no `answer` block (`test_no_path_error_has_no_answer_block`), so there is no
-    grade to lower. What a reader has is the node id in the message."""
+def test_no_path_from_a_pick_between_spellings_says_so() -> None:
+    """Reversed on purpose (#76). This was
+    `test_no_path_has_no_grade_to_hedge_and_names_the_node_it_used`: "no path"
+    carried no `answer` block, so the node id in the message was the only sign
+    that `Verdict` had been answered about `verdict`.
+
+    An empty `reaches` answer is `advisory` whoever was asked about, so the
+    grade does not tell the two cases apart. The resolution entry, the caveat
+    and the reason in the listing line do."""
     out = query(_graph(), "reaches Verdict -> other")
 
     assert out["error_code"] == "no_path"
     assert "a_py_verdict" in out["error"]
-    assert "answer" not in out
+    assert [entry["role"] for entry in out["resolution"] if entry.get("case_ambiguous")] == ["source"]
+    assert _measured_healthy(out["answer"])
+    assert out["answer"]["grade"] == GRADE_ADVISORY
+    assert CASE_AMBIGUOUS_CODE in _codes(out["answer"])
+    assert empty_marker(out["answer"]).startswith(
+        "none found — UNVERIFIED: the name matched more than one spelling"
+    )
+
+    exact = query(_graph(), "reaches verdict -> other")
+    assert exact["error_code"] == "no_path"
+    assert not any(entry.get("case_ambiguous") for entry in exact["resolution"])
+    assert exact["answer"]["grade"] == GRADE_ADVISORY
+    assert CASE_AMBIGUOUS_CODE not in _codes(exact["answer"])
+    assert "more than one spelling" not in empty_marker(exact["answer"])
+
+
+def test_no_path_to_a_pick_between_spellings_says_so() -> None:
+    """The other end. `Quiet` typed, the function `quiet` chosen as the target."""
+    out = query(_graph(), "path verdict -> Quiet")
+
+    assert out["error_code"] == "no_path"
+    assert [entry["role"] for entry in out["resolution"] if entry.get("case_ambiguous")] == ["target"]
+    assert out["answer"]["grade"] == GRADE_ADVISORY
+    assert CASE_AMBIGUOUS_CODE in _codes(out["answer"])
 
 
 def test_an_empty_answer_about_another_spelling_names_that_as_the_reason() -> None:
