@@ -2324,7 +2324,16 @@ def test_windows_cleanup_worker_deletes_nested_readonly_tree_by_handle(tmp_path)
 
 def test_expired_deadline_still_reaps_default_cleanup_without_retaining_ownership(
     tmp_path,
+    monkeypatch,
 ):
+    # The default cleanup starts a REAL worker process, and an expired deadline
+    # gives it the production cap of one second: 0.6s to start an interpreter
+    # and remove the directory, the rest reserved for the transport's own
+    # cleanup. A loaded machine misses that, the worker is reported as timed out
+    # and the directory is still there (graphite#78: holding the calling thread
+    # 0.7s inside the transport fails this test at `not isolated.exists()`).
+    # The cap is not what this test is about, so it is moved out of the way.
+    monkeypatch.setattr(typescript_activation, "_CLEANUP_MAX_SECONDS", _HANG_GUARD_SECONDS)
     root = tmp_path / "repo"
     root.mkdir()
     lease = typescript_activation._new_temporary_directory()

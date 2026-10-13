@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
@@ -66,6 +67,27 @@ _HANG_GUARD_SECONDS = 15
 #: Do not "tighten" either constant back. Precision here measures the machine's
 #: scheduler, not this code.
 _UNREACHABLE_CHILD_SECONDS = 60
+
+#: Budget for a transport call that a fake process answers at once (graphite#78).
+#:
+#: Nothing in such a call takes time, so its deadline is a hang guard like the
+#: elapsed checks above. It used to be written `timeout_seconds=1` or less, and
+#: that budget is real: at one second the caller has 0.6s to reach its first
+#: wait, the rest being reserved for cleanup. A caller held longer than that is
+#: told `timeout` -- the correct answer for a spent budget, given to a test that
+#: was asking about an error code. One of them failed that way in a full run on
+#: a loaded machine.
+#:
+#: Measured by sleeping on the calling thread inside the call. At 0.7s eight
+#: tests in this file answered `timeout`, the reported one at its own
+#: assertion. A ninth, whose fake answers from the reader thread, did so at 2s,
+#: and at 0.7s in most runs on Linux. With this budget neither sleep changes
+#: any of them.
+#:
+#: It costs nothing when the code is correct, because the run returns as soon as
+#: the fake does. It is NOT for a test whose expected outcome is a timeout:
+#: those wait their budget out on purpose and keep their own number.
+_ANSWERED_AT_ONCE_BUDGET_SECONDS = _HANG_GUARD_SECONDS
 
 #: How long to let a would-be orphan reveal itself before concluding it was killed.
 #:
@@ -1466,10 +1488,35 @@ def test_mcp_bootstrap_installs_the_child_log_setup() -> None:
     )
 
 
+def _fail_the_blocked_write_during_cleanup(
+    release: threading.Event, writer_done: threading.Event
+) -> Callable[[object, float], None]:
+    """Stand in for tree termination: let the blocked write fail, then wait until it has.
+
+    The real termination kills the child, which is what breaks a write still in
+    flight, and the transport then gives the writer thread 0.2s, twice, to get
+    out. A writer that misses that is reported as `timeout`. That is right for
+    a write that will not die, and wrong for these tests, where the write fails
+    the moment it is released and only has to be scheduled (graphite#78).
+
+    The writer closes its pipe after it has recorded the failure, so the fake
+    pipe's `close` is the signal that the recheck under test has something to
+    find. Waiting for it here keeps the failure where these tests want it --
+    after cleanup has started -- without racing the join.
+    """
+
+    def terminate(process: object, deadline: float) -> None:
+        release.set()
+        assert writer_done.wait(_HANG_GUARD_SECONDS), "the writer never closed its pipe"
+
+    return terminate
+
+
 def test_probe_transport_rechecks_late_writer_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import graphite.probe_process as transport
 
     release = threading.Event()
+    writer_done = threading.Event()
     class InputPipe:
         def write(self, data: bytes) -> int:
             release.wait(1)
@@ -1481,7 +1528,7 @@ def test_probe_transport_rechecks_late_writer_failure(monkeypatch: pytest.Monkey
             # after cleanup has started -- and that the raw text never leaks.
             raise OSError("RAW late input")
         def flush(self) -> None: pass
-        def close(self) -> None: pass
+        def close(self) -> None: writer_done.set()
     class OutputPipe:
         def read(self, size: int) -> bytes: return b""
         def close(self) -> None: pass
@@ -1494,9 +1541,18 @@ def test_probe_transport_rechecks_late_writer_failure(monkeypatch: pytest.Monkey
         def wait(self, timeout: float) -> int: return 0
         def kill(self) -> None: self.returncode = -9
     monkeypatch.setattr(transport, "_launch_process", lambda *a, **k: Process())
-    monkeypatch.setattr(transport, "_terminate_process_tree", lambda process, deadline: release.set())
+    monkeypatch.setattr(
+        transport,
+        "_terminate_process_tree",
+        _fail_the_blocked_write_during_cleanup(release, writer_done),
+    )
     with pytest.raises(transport.ProbeProcessError) as exc_info:
-        transport.run_bounded_process(["python"], cwd=tmp_path, stdin=b"small", timeout_seconds=1)
+        transport.run_bounded_process(
+            ["python"],
+            cwd=tmp_path,
+            stdin=b"small",
+            timeout_seconds=_ANSWERED_AT_ONCE_BUDGET_SECONDS,
+        )
     assert exc_info.value.code == "input_failed"
     assert "RAW" not in str(exc_info.value)
     # No number to report when the OSError carries none, and "unknown" must not
@@ -1522,6 +1578,7 @@ def test_probe_transport_reports_the_numeric_code_of_a_writer_failure(
     import graphite.probe_process as transport
 
     release = threading.Event()
+    writer_done = threading.Event()
 
     class InputPipe:
         def write(self, data: bytes) -> int:
@@ -1533,7 +1590,7 @@ def test_probe_transport_reports_the_numeric_code_of_a_writer_failure(
             raise OSError(13, "RAW strerror with a path in it")
 
         def flush(self) -> None: pass
-        def close(self) -> None: pass
+        def close(self) -> None: writer_done.set()
 
     class OutputPipe:
         def read(self, size: int) -> bytes: return b""
@@ -1549,9 +1606,18 @@ def test_probe_transport_reports_the_numeric_code_of_a_writer_failure(
         def kill(self) -> None: self.returncode = -9
 
     monkeypatch.setattr(transport, "_launch_process", lambda *a, **k: Process())
-    monkeypatch.setattr(transport, "_terminate_process_tree", lambda process, deadline: release.set())
+    monkeypatch.setattr(
+        transport,
+        "_terminate_process_tree",
+        _fail_the_blocked_write_during_cleanup(release, writer_done),
+    )
     with pytest.raises(transport.ProbeProcessError) as exc_info:
-        transport.run_bounded_process(["python"], cwd=tmp_path, stdin=b"small", timeout_seconds=1)
+        transport.run_bounded_process(
+            ["python"],
+            cwd=tmp_path,
+            stdin=b"small",
+            timeout_seconds=_ANSWERED_AT_ONCE_BUDGET_SECONDS,
+        )
 
     assert exc_info.value.code == "input_failed"
     assert exc_info.value.os_error == 13
@@ -1648,7 +1714,9 @@ def test_probe_transport_cleans_process_tree_after_success(monkeypatch: pytest.M
     monkeypatch.setattr(transport, "_launch_process", lambda *a, **k: Process())
     monkeypatch.setattr(transport, "_terminate_process_tree", lambda process, deadline: cleaned.append(process.pid))
 
-    result = transport.run_bounded_process(["python"], cwd=tmp_path, timeout_seconds=1)
+    result = transport.run_bounded_process(
+        ["python"], cwd=tmp_path, timeout_seconds=_ANSWERED_AT_ONCE_BUDGET_SECONDS
+    )
 
     assert result.returncode == 0
     assert cleaned == [UNCLAIMABLE_PID]
@@ -1854,7 +1922,9 @@ def test_probe_transport_cleanup_failure_never_returns_success(
     )
 
     with pytest.raises(transport.ProbeProcessError) as exc_info:
-        transport.run_bounded_process(["python"], cwd=tmp_path, timeout_seconds=1)
+        transport.run_bounded_process(
+            ["python"], cwd=tmp_path, timeout_seconds=_ANSWERED_AT_ONCE_BUDGET_SECONDS
+        )
 
     assert exc_info.value.code == "cleanup_failed"
 
@@ -1935,7 +2005,9 @@ def test_probe_transport_cleanup_failure_never_replaces_the_childs_own_verdict(
     _fake_process_group(monkeypatch, error=PermissionError)
 
     with pytest.raises(transport.ProbeProcessError) as exc_info:
-        transport.run_bounded_process(["python"], cwd=tmp_path, timeout_seconds=1)
+        transport.run_bounded_process(
+            ["python"], cwd=tmp_path, timeout_seconds=_ANSWERED_AT_ONCE_BUDGET_SECONDS
+        )
 
     assert exc_info.value.code == "nonzero"
     assert exc_info.value.cleanup_failed is True
@@ -4658,14 +4730,21 @@ class _QueuedProbeProcess:
 
 
 @pytest.mark.parametrize(
-    ("behavior", "expected_code"),
-    [("overflow", "output_limit"), ("timeout", "timeout")],
+    ("behavior", "expected_code", "budget"),
+    [
+        # The overflow is reported from the reader thread, the moment it has
+        # read the flood, so its budget only has to stay out of the way.
+        ("overflow", "output_limit", _ANSWERED_AT_ONCE_BUDGET_SECONDS),
+        # A timeout is waited out, so this arm keeps a short budget of its own.
+        ("timeout", "timeout", 0.35),
+    ],
 )
 def test_mcp_deep_probe_real_transport_bounds_failures_and_escalates_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     behavior: str,
     expected_code: str,
+    budget: float,
 ) -> None:
     import graphite.doctor_probes as probes
     import graphite.probe_process as transport
@@ -4683,12 +4762,24 @@ def test_mcp_deep_probe_real_transport_bounds_failures_and_escalates_cleanup(
         "_force_kill_process_tree",
         lambda target, deadline: target.kill(),
     )
+    if behavior == "overflow":
+        # POSIX asks the kernel whether the process group survived the graceful
+        # signal before it escalates, and this fake's pid names no group. Told
+        # "gone", the transport skips the kill and then waits out whatever is
+        # left of the budget for a process that only `kill` can finish. That
+        # was 0.35s unnoticed; with a budget that stays out of the way it is
+        # all of it (measured on Linux: `output_limit` after 15.0s, and the
+        # hang guard below fails). A group that is still there is what a real
+        # surviving child looks like, and it makes this arm escalate on every
+        # platform. The `timeout` arm has spent its budget by then and is left
+        # as it was.
+        monkeypatch.setattr(transport, "_posix_process_group_exists", lambda pgid: True)
 
     builder_runner = _bounded_manifest_builder_runner(tmp_path)
     started = time.monotonic()
     check = probes.probe_mcp(
         tmp_path,
-        timeout_seconds=0.35,
+        timeout_seconds=budget,
         _runner=transport.run_bounded_process,
         _builder_script="pass",
         _builder_runner=builder_runner,
@@ -4713,7 +4804,7 @@ def test_mcp_deep_probe_real_transport_handles_nonzero_without_hanging(
     started = time.monotonic()
     check = probes.probe_mcp(
         tmp_path,
-        timeout_seconds=0.35,
+        timeout_seconds=_ANSWERED_AT_ONCE_BUDGET_SECONDS,
         _runner=transport.run_bounded_process,
         _builder_script="pass",
         _builder_runner=builder_runner,
@@ -4736,7 +4827,7 @@ def test_mcp_deep_probe_real_transport_handles_closed_stdout_without_hanging(
     started = time.monotonic()
     check = probes.probe_mcp(
         tmp_path,
-        timeout_seconds=0.35,
+        timeout_seconds=_ANSWERED_AT_ONCE_BUDGET_SECONDS,
         _runner=transport.run_bounded_process,
         _builder_script="pass",
         _builder_runner=builder_runner,
