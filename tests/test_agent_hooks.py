@@ -1773,3 +1773,550 @@ def test_the_gate_without_a_usable_cwd_judges_the_process_directory(
 
     assert _decision(out) == "deny"
     assert "run graphite from" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+# ------------------------------------------- searches the gate did not see (#75) --
+# A search the gate refuses when it is written plainly passed when it sat behind
+# a newline, a wrapper command, a subshell, a regex escape fused to the name, or
+# a variable. Each shape has an arm here, read against the plain search as the
+# control, and each has an allow arm beside it: text that only looks like a
+# search, and searches the gate allows by design, must stay allowed.
+
+_HIDDEN_SEARCH = "grep -rn dependents src/"
+
+
+def test_the_plain_search_the_hidden_ones_are_read_against_is_refused(literal_repo: Path) -> None:
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, _HIDDEN_SEARCH), "strict")) == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("ls\ngrep -rn dependents src/", id="after-a-newline"),
+        pytest.param("echo hi\nrg dependents", id="rg-after-a-newline"),
+        pytest.param("ls\r\ngrep -rn dependents src/", id="after-a-crlf"),
+        pytest.param("ls\n\n  grep -rn dependents src/\ngit status", id="between-other-lines"),
+        pytest.param("ls -la \\\n  src\ngrep -rn dependents src/", id="after-a-continued-line"),
+        pytest.param("# don't stop here\ngrep -rn dependents src/", id="after-a-comment-with-a-quote"),
+        pytest.param("ls &&\n  grep -rn dependents src/", id="continued-after-and"),
+        pytest.param("cat <<EOF\nsome text\nEOF\ngrep -rn dependents src/", id="after-a-heredoc"),
+        pytest.param("wc -l < notes.md\ngrep -rn dependents src/", id="after-an-input-redirect"),
+        pytest.param("cat <<< 'EOF'\ngrep -rn dependents src/", id="after-a-here-string"),
+        pytest.param("echo it\\'s done\ngrep -rn dependents src/", id="after-an-escaped-quote"),
+        pytest.param('echo "a \\" b"\ngrep -rn dependents src/', id="after-an-escaped-double-quote"),
+        pytest.param("f() {\n  grep -rn dependents src/\n}\nf", id="in-a-function-body-on-lines-of-its-own"),
+    ],
+)
+def test_a_search_on_a_later_line_is_refused(literal_repo: Path, command: str) -> None:
+    """A newline starts a new command. The lexer read it as a space, so the
+    line's first word was the head of everything and nothing after it was
+    examined. Most multi-line commands have this shape."""
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("sudo grep -rn dependents src/", id="sudo"),
+        pytest.param("env LC_ALL=C grep -rn dependents src/", id="env"),
+        pytest.param("time grep -rn dependents src/", id="time"),
+        pytest.param("command grep -rn dependents src/", id="command"),
+        pytest.param("nice -n 5 grep -rn dependents src/", id="nice"),
+        pytest.param("nohup grep -rn dependents src/", id="nohup"),
+        pytest.param("timeout 5 grep -rn dependents src/", id="timeout"),
+        pytest.param("timeout 2.5m grep -rn dependents src/", id="timeout-with-a-duration"),
+        pytest.param("/usr/bin/grep -rn dependents src/", id="a-tool-named-by-its-path"),
+        pytest.param("grep.exe -rn dependents src/", id="a-tool-named-with-exe"),
+        pytest.param("sudo env LC_ALL=C time -p grep -rn dependents src/", id="several"),
+        pytest.param("if grep -rq dependents src/; then echo yes; fi", id="if"),
+        pytest.param("for f in a b; do grep -rn dependents src/; done", id="do"),
+        pytest.param("! grep -rq dependents src/", id="bang"),
+        pytest.param("{ grep -rn dependents src/; }", id="brace-group"),
+        pytest.param("ls src | xargs grep dependents", id="xargs"),
+        pytest.param("find src -type f | xargs -0 -n 1 grep -n dependents", id="xargs-with-options"),
+        pytest.param("find src -type f -exec grep dependents {} +", id="find-exec-plus"),
+        pytest.param("find src -name '*.py' -exec grep -n dependents {} \\;", id="find-exec-semicolon"),
+        pytest.param("find . -type f -execdir grep -n dependents {} +", id="find-execdir"),
+        pytest.param("find src -type f -ok grep -n dependents {} \\;", id="find-ok"),
+        pytest.param("find src -type f -okdir grep -n dependents {} \\;", id="find-okdir"),
+        pytest.param("find src -type f -exec env LC_ALL=C grep -n dependents {} +", id="find-exec-behind-a-wrapper"),
+        pytest.param("doas grep -rn dependents src/", id="doas"),
+        pytest.param("exec grep -rn dependents src/", id="exec"),
+        pytest.param("ionice -c 3 grep -rn dependents src/", id="ionice"),
+        pytest.param("stdbuf -oL grep -rn dependents src/", id="stdbuf"),
+        pytest.param("xargs -I {} grep -rn dependents {} < list.txt", id="xargs-with-a-placeholder"),
+        pytest.param("if false; then :; elif grep -rq dependents src/; then :; fi", id="elif"),
+        pytest.param("if true; then grep -rn dependents src/; fi", id="then"),
+        pytest.param("if false; then :; else grep -rn dependents src/; fi", id="else"),
+        pytest.param("while grep -rq dependents src/; do break; done", id="while"),
+        pytest.param("until grep -rq dependents src/; do break; done", id="until"),
+    ],
+)
+def test_a_search_behind_a_wrapper_is_refused(literal_repo: Path, command: str) -> None:
+    """A command was a search only when its own first word was a search tool.
+    `sudo`, `env`, `time`, a shell keyword, `xargs` and `find -exec` put
+    another word first."""
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("(grep -rn dependents src/)", id="subshell"),
+        pytest.param("(cd src && grep -rn dependents .)", id="subshell-with-cd"),
+        pytest.param("wc -l $(grep -rln dependents src/)", id="command-substitution"),
+        pytest.param('files="$(grep -rln dependents src/)"', id="substitution-in-double-quotes"),
+        pytest.param("wc -l `grep -rln dependents src/`", id="backticks"),
+        pytest.param("echo $(echo $(grep -rln dependents src/))", id="nested"),
+        pytest.param("case $x in\n  a) grep -rn dependents src/ ;;\nesac", id="case-arm"),
+    ],
+)
+def test_a_search_inside_a_subshell_is_refused(literal_repo: Path, command: str) -> None:
+    """`(` and `$(` were tokens of their own, so the head of the command was the
+    parenthesis or the outer command."""
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("P=dependents; grep -rn $P src/", id="same-line"),
+        pytest.param('P=dependents\ngrep -rn "$P" src/', id="next-line-quoted"),
+        pytest.param("P='dependents' && grep -rn ${P} src/", id="braces"),
+        pytest.param("export P=dependents; grep -rn $P src/", id="export"),
+        pytest.param("P=other; P=dependents; grep -rn $P src/", id="the-last-assignment-wins"),
+        # read as its text would be where it is used: `grep -rn "${X}dependents" src/` is refused
+        pytest.param('P="${X}dependents"; grep -rn "$P" src/', id="part-of-the-value-is-another-variable"),
+    ],
+)
+def test_a_pattern_in_a_variable_set_by_the_same_command_is_read(literal_repo: Path, command: str) -> None:
+    """The hook sees `$P` unexpanded, and `$P` holds no name to check. Where the
+    command itself assigns the variable, the hook can read what it holds."""
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("grep -rn $P src/", id="set-somewhere-else"),
+        pytest.param("P=$(cat name.txt); grep -rn $P src/", id="set-from-a-command"),
+        pytest.param("P=dependents grep -rn $P src/", id="a-prefix-is-not-yet-set-when-the-line-is-expanded"),
+    ],
+)
+def test_a_variable_the_hook_cannot_read_is_a_known_limit(literal_repo: Path, command: str) -> None:
+    """Not a design: a limit, pinned so that a change to it is seen. A variable
+    set by the user's profile, an earlier command or a command substitution
+    holds text the hook never sees. Such a search is not refused."""
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("D=docs; for D in src; do grep -rn round $D; done", id="rebound-by-a-loop"),
+        pytest.param("D=docs; read D; grep -rn round $D", id="rebound-by-read"),
+        pytest.param("D=docs; D+=/../src; grep -rn round $D", id="appended-to"),
+        pytest.param("D=docs; . ./env.sh; grep -rn round $D", id="after-a-sourced-file"),
+        pytest.param("D=docs; source ./env.sh; grep -rn round $D", id="after-source"),
+        # after `&&` and `||` an assignment runs or it does not, and the value is one of two
+        pytest.param("D=src; make && D=docs; grep -rn round $D", id="set-again-only-if-a-command-worked"),
+        pytest.param("D=docs; make && D=src; grep -rn round $D", id="the-earlier-value-is-not-kept-either"),
+        pytest.param("D=src; make || D=docs; grep -rn round $D", id="set-again-only-if-a-command-failed"),
+        pytest.param("make && D=docs; grep -rn round $D", id="set-only-if-a-command-worked"),
+        pytest.param('D=docs; eval "$setup"; grep -rn round $D', id="after-eval"),
+    ],
+)
+def test_a_variable_something_else_may_have_set_again_is_not_trusted(literal_repo: Path, command: str) -> None:
+    """A value the hook read earns an exemption: `docs/` holds no code. So the
+    value must still be the one the shell will use. A command that names the
+    variable, or that runs text the hook cannot see, may have set it again, and
+    from there it is read as written."""
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, "D=docs; grep -rn round $D"), "strict")) == "allow"
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "deny"
+
+
+@pytest.mark.parametrize(
+    ("command", "decision"),
+    [
+        ("cd docs && find . -type f | xargs grep round", "allow"),
+        ("cd src && find . -type f | xargs grep dependents", "deny"),
+        ("cd docs && ls | xargs grep round", "allow"),
+        ("cd docs && ls |& xargs grep round", "allow"),
+        # the stage before the pipe cannot move the shell the next stage runs in
+        ("cd docs && pushd ../src | xargs grep round", "allow"),
+    ],
+)
+def test_a_pipeline_runs_where_its_first_command_started(literal_repo: Path, command: str, decision: str) -> None:
+    """`cd docs && find . | xargs grep word` searches `docs/`. Every stage of a
+    pipeline starts in the directory the pipeline started in."""
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == decision, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("f() { grep -rn dependents src/; }; f", id="a-function-body"),
+        pytest.param("sudo -u someone grep -rn dependents src/", id="a-wrapper-flag-that-takes-a-word"),
+        pytest.param("$(which grep) -rn dependents src/", id="a-tool-named-by-a-substitution"),
+        pytest.param("bash -c 'grep -rn dependents src/'", id="a-command-in-a-string-for-another-shell"),
+        pytest.param("cat <<EOF\n$(grep -rn dependents src/)\nEOF", id="a-substitution-in-a-heredoc-body"),
+    ],
+)
+def test_shapes_the_hook_still_does_not_read_are_known_limits(literal_repo: Path, command: str) -> None:
+    """Pinned for the same reason. Each is written down in
+    `docs/agent-integration.md`, and each fails open."""
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "allow"
+
+
+@pytest.mark.parametrize(
+    ("pattern", "decision"),
+    [
+        ("dependents", "deny"),  # the control
+        ("\\bdependents\\b", "deny"),
+        ("\\sdependents", "deny"),
+        ("\\Bdependents", "deny"),
+        ("^\\s*def\\s+dependents\\b", "deny"),
+        ("\\wdependents", "deny"),
+        # the escape is blanked, not removed: `def` and the name stay two words
+        ("def\\sdependents", "deny"),
+        # an escaped backslash and then a word: `bdependents` is what it finds
+        ("\\\\bdependents", "allow"),
+        # the letter after the backslash is no regex escape, so the word is whole
+        ("\\qdependents", "allow"),
+        # the escape leaves nothing this repo defines
+        ("\\bdepend\\b", "allow"),
+    ],
+)
+def test_a_regex_escape_fused_to_a_name_does_not_hide_it(literal_repo: Path, pattern: str, decision: str) -> None:
+    """`\\bdependents` was read as the identifier `bdependents`, which is no
+    symbol. The escape is one letter; the name starts after it."""
+    out = handle_pre_tool_use(_grep_payload(literal_repo, pattern, path="src/"), "strict")
+
+    assert _decision(out) == decision, pattern
+
+
+@pytest.mark.parametrize("letter", list("bBdDsSwWAZznrtfv"))
+def test_each_escape_letter_is_split_from_the_name(literal_repo: Path, letter: str) -> None:
+    """One arm for every letter an escape is written with. A letter missing
+    from the list is one more way to hide a name."""
+    out = handle_pre_tool_use(_grep_payload(literal_repo, f"\\{letter}dependents", path="src/"), "strict")
+
+    assert _decision(out) == "deny"
+
+
+def test_a_fused_escape_is_split_off_in_a_shell_search_too(literal_repo: Path) -> None:
+    command = "grep -rnE '\\bdependents\\b' src/"
+
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "deny"
+
+
+_COMMIT_WITH_A_HEREDOC = (
+    'git commit -m "$(cat <<\'EOF\'\n'
+    "fix(hooks): use the graph\n"
+    "\n"
+    'The reminder said "run\n'
+    'grep -rn dependents src/" and it should not.\n'
+    "It's `grep -rn dependents src/` that is refused.\n"
+    "EOF\n"
+    ')"'
+)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("python - <<'EOF'\nimport re\ngrep -rn dependents src/\nEOF", id="heredoc-body"),
+        pytest.param("cat > notes.txt <<EOF\ngrep -rn dependents src/\nEOF\nls", id="heredoc-to-a-file"),
+        pytest.param("cat <<-EOF\n\tgrep -rn dependents src/\n\tEOF\nls", id="heredoc-with-tabs"),
+        pytest.param("cat <<EOF\ngrep -rn dependents src/", id="heredoc-never-closed"),
+        pytest.param("cat <<A <<'B'\ngrep -rn dependents src/\nA\ngrep -rn dependents src/\nB", id="two-heredocs"),
+        pytest.param(_COMMIT_WITH_A_HEREDOC, id="commit-message-in-a-heredoc"),
+        pytest.param("echo 'first\ngrep -rn dependents src/'", id="single-quoted-text"),
+        pytest.param('python -c "\nimport os\ngrep -rn dependents src/\n"', id="double-quoted-text"),
+        pytest.param("git commit -m 'run $(grep -rn dependents src/) by hand'", id="substitution-in-single-quotes"),
+        pytest.param("ls # then grep -rn dependents src/", id="in-a-comment"),
+        pytest.param("# grep -rn dependents src/\nls", id="a-comment-line"),
+        pytest.param('python -m graphite query "callers dependents" |\n  grep dependents', id="pipe-over-a-newline"),
+        pytest.param('python -m graphite query "callers dependents" | grep dependents', id="pipe"),
+        pytest.param('python -m graphite query "callers dependents" |& grep dependents', id="pipe-with-stderr"),
+        pytest.param("ls src | xargs wc -l", id="xargs-not-a-search"),
+        pytest.param("command -v grep", id="command-v"),
+        pytest.param("find src -name 'dependents*'", id="find-by-name"),
+        pytest.param("find docs -type f -exec grep round {} +", id="find-exec-where-no-code-is"),
+        pytest.param("ls\ngrep -n dependents src/pkg/core.py", id="one-file-on-a-later-line"),
+        pytest.param("sudo grep -n dependents src/pkg/core.py", id="one-file-behind-a-wrapper"),
+        pytest.param("(grep -n dependents src/pkg/core.py)", id="one-file-in-a-subshell"),
+        pytest.param("ls\ngrep -rn round docs/", id="a-later-line-where-no-code-is"),
+        pytest.param("ls\ngrep -rn Dependents src/", id="another-case-on-a-later-line"),
+        pytest.param("P=nothing_here; grep -rn $P src/", id="a-variable-that-names-no-symbol"),
+        pytest.param("D=docs; grep -rn round $D", id="a-variable-that-names-a-directory-with-no-code"),
+        pytest.param('S=docs; D="$S/schemas"; grep -rn round "$D"', id="a-variable-built-from-another"),
+        pytest.param("cd docs &&\n  grep -rn round .", id="cd-continued-onto-the-next-line"),
+        pytest.param("case $x in\n  a) grep -rn round docs/ ;;\nesac", id="a-case-arm-where-no-code-is"),
+        pytest.param("echo 'unclosed\ngrep -rn dependents src/", id="a-quote-that-never-closes"),
+    ],
+)
+def test_text_that_is_not_a_search_of_code_stays_allowed(literal_repo: Path, command: str) -> None:
+    """The other half. A heredoc body, a quoted string and a comment are text,
+    and a commit message may quote the very command this gate refuses. A pipe
+    still filters, one file is still one file, and `docs/` still holds no code."""
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "allow"
+
+
+def test_a_newline_does_not_carry_a_cd_the_way_and_does(literal_repo: Path) -> None:
+    """After a newline the search runs whether or not the `cd` worked, as after
+    `;`. The directory is then not followed, and `.` is the repository."""
+    refused = handle_pre_tool_use(_bash_payload(literal_repo, "cd docs\ngrep -rn round ."), "strict")
+    same_line = handle_pre_tool_use(_bash_payload(literal_repo, "cd docs; grep -rn round ."), "strict")
+
+    assert _decision(refused) == _decision(same_line) == "deny"
+
+    # Nor does it carry one that was followed on the line before: had that `cd`
+    # failed, this line would still run, and in the old directory.
+    followed = "cd docs && grep -n round notes.md"
+    refused = handle_pre_tool_use(_bash_payload(literal_repo, followed + "\ngrep -rn round ."), "strict")
+    carried = handle_pre_tool_use(_bash_payload(literal_repo, followed + " && grep -rn round ."), "strict")
+
+    assert (_decision(refused), _decision(carried)) == ("deny", "allow")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("env cd docs && grep -rn round .", id="env"),
+        pytest.param("sudo cd docs && grep -rn round .", id="sudo"),
+        pytest.param("ls | xargs cd docs && grep -rn round .", id="xargs"),
+        pytest.param("! cd docs && grep -rn round .", id="bang"),
+    ],
+)
+def test_a_cd_behind_a_wrapper_is_not_followed(literal_repo: Path, command: str) -> None:
+    """`env cd docs` runs a program that changes its own directory and exits,
+    and the shell stays where it was. `! cd docs && ...` goes on only when the
+    `cd` failed. Reading a search behind a wrapper must not read a `cd` behind
+    one, or `.` would pass as `docs/`."""
+    followed = handle_pre_tool_use(_bash_payload(literal_repo, "cd docs && grep -rn round ."), "strict")
+
+    assert _decision(followed) == "allow"
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("echo a#b; grep -rn dependents src/", id="a-hash-inside-a-word"),
+        pytest.param("if [ $# -gt 0 ]; then grep -rn dependents src/; fi", id="the-argument-count"),
+        pytest.param("curl -s http://localhost/x#top && grep -rn dependents src/", id="a-url-fragment"),
+        # `<#` opens a block comment in PowerShell and nowhere else
+        pytest.param("wc -l <#notes\ngrep -rn dependents src/", id="a-redirect-from-a-name-that-starts-with-one"),
+    ],
+)
+def test_a_hash_inside_a_word_does_not_end_the_line(literal_repo: Path, command: str) -> None:
+    """The lexer took any `#` for a comment and dropped the rest of the line,
+    search and all. A comment starts at a `#` that starts a word."""
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "deny"
+
+
+@pytest.mark.parametrize(
+    ("command", "decision"),
+    [
+        # it runs where the command that holds it runs
+        ("cd docs && (grep -rn round .)", "allow"),
+        ("cd docs && wc -l $(grep -rl round .)", "allow"),
+        ("cd src && (grep -rn round .)", "deny"),
+        # and reads the variables that command can read
+        ("P=dependents; echo $(grep -rn $P src/)", "deny"),
+        ("D=docs; (grep -rn round $D)", "allow"),
+        # what it sets, it sets for itself
+        ("D=docs; (D=src); grep -rn round $D", "allow"),
+        ("(D=docs); grep -rn round $D", "deny"),
+        # a command after a pipe is a filter, and what it substitutes is still a search
+        ("ls | head -n $(grep -c dependents -r src/)", "deny"),
+        ("ls | head -n $(grep -c round -r docs/)", "allow"),
+    ],
+)
+def test_a_subshell_is_read_where_it_stands(literal_repo: Path, command: str, decision: str) -> None:
+    """A subshell and a substitution start in the shell of the command that
+    holds them: its directory and its variables. What they change, they change
+    for themselves."""
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == decision, command
+
+
+@pytest.mark.parametrize(
+    ("command", "decision"),
+    [
+        ("(grep -rn round .)\ngrep -rn round .", "allow"),
+        ("(ls)\ngrep -rn round .", "allow"),
+        ("(cd ../src && ls)\ngrep -rn round .", "allow"),
+        ("now=$(date)\ngrep -rn round .", "allow"),
+        # the control: after a command the hook does not model, the shell may be anywhere
+        ("popd\ngrep -rn round .", "deny"),
+        # the other way round: the subshell starts where the shell has got to
+        ("cd ../src && (grep -rn round .)", "deny"),
+        ("ls; (grep -rn round .)", "deny"),
+    ],
+)
+def test_a_subshell_does_not_move_the_shell_it_ran_in(checkout: Path, command: str, decision: str) -> None:
+    """Below the root, where the shell is decides what `.` names (#80). A
+    subshell leaves the shell that ran it where it was, so the search after it
+    is still a search of `docs/`, which holds no code."""
+    out = handle_pre_tool_use(_bash_payload(checkout / "docs", command), "strict")
+
+    assert _decision(out) == decision, command
+
+
+@pytest.mark.parametrize("command", ["ls\ngit status", "(ls)\necho $(date)", "sudo ls", "find . -type f -exec wc -l {} +"])
+def test_commands_with_no_search_in_them_stay_silent(literal_repo: Path, command: str) -> None:
+    assert handle_pre_tool_use(_bash_payload(literal_repo, command), "strict") is None
+
+
+@pytest.mark.parametrize(
+    ("command", "decision"),
+    [
+        ("Get-ChildItem\nSelect-String -Pattern dependents -Path src", "deny"),
+        ("(Select-String -Pattern dependents -Path src)", "deny"),
+        ("$p = 'dependents'; Select-String -Pattern $p -Path src", "deny"),
+        ("$p='dependents'\nSelect-String -Pattern $P -Path src", "deny"),
+        ("$P = 'dependents'; Select-String -Pattern $p -Path src", "deny"),
+        # a variable names a directory with no code, until something may have set it again
+        ("$d = 'docs'; Select-String -Pattern round -Path $d", "allow"),
+        ("$d = 'docs'; $D += '/../src'; Select-String -Pattern round -Path $d", "deny"),
+        ("$d = 'docs'; Invoke-Expression $setup; Select-String -Pattern round -Path $d", "deny"),
+        ("$d = 'docs'; iex $setup; Select-String -Pattern round -Path $d", "deny"),
+        # a path that ends in a backslash does not join the next line to this one
+        ("Get-ChildItem C:\\tmp\\\nSelect-String -Pattern dependents -Path src", "deny"),
+        # a backtick continues the line: this is one search, of one file
+        ("Select-String -Pattern dependents `\n  -Path src/pkg/core.py", "allow"),
+        # a here-string is text, apostrophes and all
+        ("$m = @'\ngrep -rn dependents src/\nit's Select-String dependents src\n'@\ngit commit -m $m", "allow"),
+        ('$m = @"\nSelect-String dependents src\n"@\ngit commit -m $m', "allow"),
+        # and so is a block comment
+        ("<#\nSelect-String -Pattern dependents -Path src\n#>\nGet-ChildItem", "allow"),
+        ("<# a note #> Select-String -Pattern dependents -Path src", "deny"),
+        ("Get-ChildItem\nSelect-String -Pattern dependents -Path src/pkg/core.py", "allow"),
+    ],
+)
+def test_the_same_shapes_in_powershell(literal_repo: Path, command: str, decision: str) -> None:
+    assert _decision(handle_pre_tool_use(_ps_payload(literal_repo, command), "strict")) == decision, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("echo '${_0}'; grep -rn dependents src/", id="where-nothing-was-set-apart"),
+        pytest.param("echo $(echo '${_0}'); grep -rn dependents src/", id="inside-the-subshell-it-would-name"),
+    ],
+)
+def test_text_that_looks_like_a_stand_in_is_only_text(literal_repo: Path, command: str) -> None:
+    """`${_0}` is what the hook leaves where a subshell stood. Written by hand
+    it names no subshell, or names the one it is in, and the command is read
+    all the same."""
+    assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "deny"
+
+
+def test_files_piped_to_select_string_are_a_known_limit(literal_repo: Path) -> None:
+    """Pinned like the other limits. `Get-ChildItem -Recurse src | Select-String
+    name` searches the files it is handed. The hook reads every command after
+    a pipe as a filter, `xargs` apart, so this one is not refused."""
+    command = "Get-ChildItem -Recurse src | Select-String -Pattern dependents"
+
+    assert _decision(handle_pre_tool_use(_ps_payload(literal_repo, command), "strict")) == "allow"
+
+
+def test_a_powershell_tool_named_by_its_path_is_still_the_tool(literal_repo: Path) -> None:
+    command = "C:\\tools\\rg.exe dependents src"
+
+    assert _decision(handle_pre_tool_use(_ps_payload(literal_repo, command), "strict")) == "deny"
+
+
+def test_a_powershell_path_keeps_its_backslashes(literal_repo: Path) -> None:
+    """In PowerShell a backslash is part of a path, and the backtick is what
+    escapes. Read as a POSIX escape, `C:\\repo\\src\\pkg\\core.py` lost every
+    backslash, named no file, and a search of that one file was refused. With
+    later lines read as well, that would be most multi-line PowerShell.
+
+    The paths are written the way the platform writes them, so off Windows
+    this passes with or without the fix. The directory arm is the control."""
+    one_file = literal_repo / "src" / "pkg" / "core.py"
+    directory = literal_repo / "src"
+
+    plain = handle_pre_tool_use(
+        _ps_payload(literal_repo, f"Select-String -Path {one_file} -Pattern dependents"), "strict"
+    )
+    later = handle_pre_tool_use(
+        _ps_payload(literal_repo, f"Get-ChildItem\nSelect-String -Path {one_file} -Pattern dependents"), "strict"
+    )
+    control = handle_pre_tool_use(
+        _ps_payload(literal_repo, f"Select-String -Path {directory} -Pattern dependents"), "strict"
+    )
+
+    assert (_decision(plain), _decision(later), _decision(control)) == ("allow", "allow", "deny")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="a backslash separates path parts on Windows only")
+def test_a_relative_powershell_path_keeps_its_backslashes(literal_repo: Path) -> None:
+    out = handle_pre_tool_use(
+        _ps_payload(literal_repo, "Select-String -Path src\\pkg\\core.py -Pattern dependents"), "strict"
+    )
+
+    assert _decision(out) == "allow"
+
+
+@pytest.mark.parametrize(
+    ("command", "powershell", "lines"),
+    [
+        ("ls\ngrep x src/", False, ["ls", "grep x src/"]),
+        ("ls |\n  grep x", False, ["ls |   grep x"]),
+        ("a \\\n b\nc", False, ["a  b", "c"]),
+        ("cat <<'EOF' | wc\nbody\nEOF\nls", False, ["cat <<'EOF' | wc", "ls"]),
+        ("echo 'a\nb'", False, ["echo 'a\nb'"]),
+        ('echo "a\nb"\nls', False, ['echo "a\nb"', "ls"]),
+        ("cat <<\\EOF\nbody\nEOF\nls", False, ["cat <<\\EOF", "ls"]),
+        ("cat <<EOF\n\tEOF\nstill the body\nEOF\nls", False, ["cat <<EOF", "ls"]),
+        ("echo a@'\nb\n'@ c", False, ["echo a@'\nb\n'@ c"]),
+        ("a \\\r\n b\r\nc", False, ["a  b", "c"]),
+        ("a ||\n b", False, ["a ||  b"]),
+        ("a |&\n b", False, ["a |&  b"]),
+        ("echo a <<< 'b'\nls", False, ["echo a <<< 'b'", "ls"]),
+        ("wc < a\nls", False, ["wc < a", "ls"]),
+        ("cat <<A <<-'B'\none\nA\n\ttwo\n\tB\nls", False, ["cat <<A <<-'B'", "ls"]),
+        ("cat <<EOF\nnever closed\nls", False, ["cat <<EOF"]),
+        ("case $x in\n a) ls ;;\nesac", False, ["case $x in", "a", "ls ;;", "esac"]),
+        ("echo one`two", False, ["echo one`two"]),
+        ("ls # it's a comment\npwd", False, ["ls", "pwd"]),
+        ("echo a#b", False, ["echo a#b"]),
+        ("a `\n b\nc", True, ["a  b", "c"]),
+        ("ls <# it's\n a note #> src\npwd", True, ["ls  src", "pwd"]),
+        ("ls <# never closed\npwd", True, ["ls"]),
+        ("echo 'never closed\nls", False, []),
+    ],
+)
+def test_a_command_is_split_into_the_lines_a_shell_runs(command: str, powershell: bool, lines: list[str]) -> None:
+    """The step the shapes above rest on. A quote that never closes gives no
+    lines: the command is not read, and so not refused."""
+    from graphite.agent_hooks import _command_lines
+
+    assert _command_lines(command, powershell) == (lines, [])
+
+
+@pytest.mark.parametrize(
+    ("command", "powershell", "lines", "nested"),
+    [
+        ("wc -l $(grep -l x src/)", False, ["wc -l ${_0}"], [["grep -l x src/"]]),
+        ('x="$(grep -l x src/)"', False, ['x="${_0}"'], [["grep -l x src/"]]),
+        ("(cd a && ls)\npwd", False, ["${_0}", "pwd"], [["cd a && ls"]]),
+        ("echo `ls` \"`pwd`\" 'a`b'", False, ["echo ${_0} \"${_1}\" 'a`b'"], [["ls"], ["pwd"]]),
+        # the inner one is found first, and the outer one holds its stand-in
+        ("echo $(echo $(ls)\npwd)", False, ["echo ${_1}"], [["ls"], ["echo ${_0}", "pwd"]]),
+        ("echo $((1 + 2))", False, ["echo ${_1}"], [["1 + 2"], ["${_0}"]]),
+        # a here-string holds text and no commands
+        ("$m = @'\nit's text\n'@\nls", True, ["$m = ${_0}", "ls"], [[]]),
+    ],
+)
+def test_a_subshell_or_a_substitution_is_set_apart(
+    command: str, powershell: bool, lines: list[str], nested: list[list[str]]
+) -> None:
+    """Each holds lines of its own, kept by number, and `${_<number>}` stands
+    where it was. So it can be read in the shell of the command that holds it."""
+    from graphite.agent_hooks import _command_lines
+
+    assert _command_lines(command, powershell) == (lines, nested)

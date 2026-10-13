@@ -356,13 +356,61 @@ that merely mentions a symbol name. It does not fire when:
   (`graph-out`, `src/pkg`, `graph\.json`).
 
 A command line that holds several searches is refused if any one of them is.
+A search is read wherever the command runs one: on any line of a multi-line
+command, inside a subshell or a command substitution, behind a word that only
+runs the next command (`sudo`, `env`, `time`, `command`, `nice`, `nohup`,
+`timeout`, `if`, `do`), in what `xargs` and `find -exec` run, and with a regex
+escape fused to the name (`\bname`). The body of a heredoc, a PowerShell
+here-string, quoted text and comments are not commands, so a commit message
+that quotes a search is not one. A comment starts at a `#` that starts a word;
+a `#` inside one (`a#b`, `$#`) is part of it. After a pipe a search filters
+the output of the command before it and is not refused; `xargs` is the
+exception, because what it reads from the pipe is a list of files to search.
+Every stage of a pipeline is read in the directory the pipeline started in.
 
-Two of these rest on what the hook can see. It reads the command, not the
+A subshell or a substitution is read in the shell of the command that holds
+it: in the directory that command runs in, with the variables set before it.
+Where it moves and what it sets stay inside it, so the commands after it are
+read as if it had not run.
+
+Some of this rests on what the hook can see. It reads the command, not the
 shell that runs it: a `cd` is followed only as `cd <dir> && <search>`, and a
 search tool is taken to ignore case while `GREP_OPTIONS` or
 `RIPGREP_CONFIG_PATH` is set in the hook's own environment. That environment
 is not the shell's. The shell loads the user's profile and the hook does not,
-so an alias or a variable set there is invisible to it.
+so an alias or a variable set there is invisible to it. A `cd` behind a
+wrapper (`env cd docs`, `! cd docs`) is not followed either: it moves a
+program that then exits, or the search after it runs only when it failed.
+
+A variable is read only where the same command assigns it
+(`P=name; grep -rn $P src/`, or `$p = 'name'` in PowerShell), one assignment
+through another included. Its text is judged as it would be if it were written
+where the variable is used. The value is dropped once something the hook does
+not model may have set the variable again: a command that names it (`read P`,
+`for P in ...`), `source`, `.` and `eval`, or an assignment after `&&` or
+`||`, which runs or does not. A variable set in the profile, by an earlier
+command, from a command's output, or as a prefix to the search itself
+(`P=name grep $P`) is not expanded. A pattern in such a variable is not
+refused, since the hook has no name to check. A path in one is a path the hook
+cannot read, and a search for a symbol there is refused like any other search
+whose place is unknown.
+
+Some shapes are not seen at all, and a search in them is not refused:
+
+- a wrapper flag that takes a word of its own (`sudo -u someone grep ...`),
+  and a tool named by a substitution (`$(which grep) ...`);
+- a command handed to another shell as a string (`bash -c 'grep ...'`,
+  `eval`);
+- a shell function written on one line (`f() { grep ...; }`). A body on lines
+  of its own is read, whether or not the function is called;
+- a substitution inside the body of a heredoc. The body is text to the hook,
+  and where the delimiter is not quoted the shell runs a `$(...)` in it;
+- in PowerShell, files piped to `Select-String`
+  (`Get-ChildItem -Recurse src | Select-String name`), which is read as the
+  filter any other command after a pipe is.
+
+A command the hook cannot read at all, such as one with a quote that never
+closes, is not refused either.
 
 When a genuine history/existence question is still denied, that is the
 heuristic misfiring, not a scope violation.

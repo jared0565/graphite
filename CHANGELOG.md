@@ -61,6 +61,93 @@ These are fields added to a JSON output that carries `schema_version`, which
 `docs/agent-integration.md` and in the `query-result` schema that said a
 `no_path` is not graded are replaced with what it now carries.
 
+### Fixed
+
+**The strict graph-first hook sees a search behind a newline, a wrapper, a
+subshell, a fused regex escape or a variable (#75).** Each of these passed a
+search the hook refuses when it is written plainly. On a fixture with a
+function `dependents` in `src/`, `grep -rn dependents src/` was refused and
+every one of these was allowed:
+
+- **A later line.** `ls`, then `grep -rn dependents src/` on the next line. A
+  newline was read as a space, so the first word of the first line was the
+  head of the whole command. Most multi-line commands have this shape.
+- **A wrapper.** `sudo`, `env LC_ALL=C`, `time` and `command` before the
+  search; `ls src | xargs grep dependents`; `find src -type f -exec grep
+  dependents {} +`. Also read now: `nice`, `nohup`, `timeout`, and the shell
+  keywords a search follows (`if`, `then`, `do`, `!`, `{`). A `cd` behind one
+  of these is not followed: `env cd docs` moves a program that then exits, and
+  the shell stays where it was.
+- **A subshell.** `(grep -rn dependents src/)` and
+  `wc -l $(grep -rln dependents src/)`, in backticks and inside double quotes
+  as well. A subshell is read in the shell of the command that holds it. After
+  `cd docs && (...)` it searches `docs/`, and it reads the variables set
+  before it. Where it moves and what it sets stay inside it.
+- **A fused escape.** The Grep tool with `\bdependents\b` or `\sdependents`.
+  The escape and the name were read as one word, `bdependents`.
+- **A variable.** `P=dependents; grep -rn $P src/`. The hook now reads a
+  variable where the same command assigns it: through a chain
+  (`S=src; D="$S/pkg"; grep -rn dependents $D`) and in PowerShell
+  (`$p = 'dependents'`) as well. The value is dropped once something the hook
+  does not model may have set the variable again: a command that names it
+  (`read P`, `for P in ...`, `P+=...`), `source`, `.` and `eval`, or an
+  assignment after `&&` or `||`, which runs or does not.
+
+One more was not in the issue, and it hid a search on a single line too:
+
+- **A `#` inside a word.** `echo a#b; grep -rn dependents src/`, and
+  `[ $# -gt 0 ] && grep -rn dependents src/`. The lexer took any `#` for the
+  start of a comment and dropped the rest of the line, search and all. A
+  comment starts only at a `#` that starts a word.
+
+Three things changed with these, because reading every line made them matter:
+
+- **A pipeline runs where it started.** `cd docs && find . -type f | xargs
+  grep word` searches `docs/`. Every stage of a pipeline is read in the
+  directory the pipeline started in.
+- **A PowerShell path keeps its backslashes.** A PowerShell command was read
+  with the POSIX escape, so `-Path src\pkg\core.py` lost its backslashes,
+  named no file, and a search of that one file was refused. The backtick is
+  the escape there now.
+- **A PowerShell block comment is text.** What stands between `<#` and `#>`
+  is not read as commands.
+
+What is text stays text: the body of a heredoc, a PowerShell here-string,
+quoted strings and comments are not read as commands, so
+`git commit -m "$(cat <<'EOF' ... EOF)"` with a search quoted in the message
+is allowed as before. `graphite query ... | grep name` still filters. A search
+of one file, of a directory with no code, of a path outside the repository,
+and of a word that differs in case from the symbol are allowed on a later
+line and behind a wrapper exactly as they are when written plainly.
+
+A search on a later line is held to the rules a plain one is. One of them is
+that a search whose path the hook cannot read is refused when its pattern
+names a symbol: a path in a variable the hook could not expand, or a path
+after a `cd` it could not follow. Such a search on a later line was allowed
+only because the line was not read.
+
+Limits, stated in `docs/agent-integration.md`. Each of these is allowed, as it
+was:
+
+- a pattern in a variable set in the user's profile, by an earlier command,
+  from a command's output or as a prefix to the search itself
+  (`P=name grep $P`). The variable is not expanded, so the hook has no name
+  to check. A path in such a variable is the refused case above;
+- a search behind a wrapper flag that takes a word
+  (`sudo -u someone grep ...`), or with its tool named by a substitution
+  (`$(which grep) ...`);
+- a search in a command handed to another shell as a string
+  (`bash -c 'grep ...'`, `eval`);
+- a search in a shell function written on one line (`f() { grep ...; }`). A
+  body on lines of its own is read, whether or not the function is called;
+- a substitution inside the body of a heredoc. The body is read as text, and
+  where its delimiter is not quoted the shell runs a `$(...)` in it;
+- in PowerShell, files piped to `Select-String`
+  (`Get-ChildItem -Recurse src | Select-String name`). A command after a pipe
+  is read as a filter, `xargs` apart.
+
+The hook still fails open on a command it cannot read.
+
 ## [1.2.1] — 2026-10-11
 
 A patch release. It carries one fix, to the agent hooks (#80). No stable
