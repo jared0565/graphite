@@ -15,7 +15,15 @@ from ..config import Config
 from ..graph import normalize_id
 from ..ingest import LANGUAGE_BY_EXT, FileEntry
 from ..resolve import SourceIndex, should_keep_call_target
-from .pyscope import Resolution, ScopeTable, collect_scopes, resolve, stated_receiver
+from .pyscope import (
+    PyScope,
+    Resolution,
+    ScopeTable,
+    collect_scopes,
+    resolve,
+    resolving_scope,
+    stated_receiver,
+)
 
 
 @dataclass
@@ -1539,7 +1547,33 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                 walk_children(node, did, did)
                 return
             class_ids.add(did)
-            result.nodes.append(_node(did, "class", name, rel_path, _line(node), {"qualname": qualname}))
+            class_node = _node(did, "class", name, rel_path, _line(node), {"qualname": qualname})
+            body_scope = table.class_scope.get(node.id)
+            if body_scope is not None and body_scope.parent is not None:
+                # For the dispatch post-pass (#73), which takes all five off
+                # again: the bases in order, the names the body binds in some
+                # other way than one `def` written straight in it (a `def`
+                # under an `if` is there only if the `if` ran it, and one
+                # under `global` or `nonlocal` binds the name somewhere
+                # else), the names its methods assign on the instance, the
+                # names set on the class outside its body, and how the class
+                # is made beyond its body and bases. With them `self.m()` and
+                # `super().m()` are bound to the method Python finds, not to
+                # every method called `m`.
+                class_node["_bases"] = _python_class_bases(node, body_scope.parent, table, ids)
+                class_node["_stops"] = sorted(
+                    {
+                        bound for bound, binders in body_scope.binders.items()
+                        if not (len(binders) == 1 and binders[0].kind == "def")
+                    }
+                    | table.conditional.get(id(body_scope), set())
+                    | body_scope.globals
+                    | body_scope.nonlocals
+                )
+                class_node["_self_binds"] = sorted(table.instance_binds.get(id(body_scope), ()))
+                class_node["_class_binds"] = sorted(table.class_binds.get(id(body_scope), ()))
+                class_node["_made"] = _python_class_making(node, body_scope.parent, table)
+            result.nodes.append(class_node)
             if parent_id:
                 result.edges.append(_edge(parent_id, did, "contains", rel_path, _line(node)))
             # Inheritance
@@ -1647,6 +1681,11 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                             # `Beta()`: the post-pass binds to that class's own `m`
                             # where it has one, and by name where it has not.
                             edge["_receiver"] = _python_definition_id(definition, ids)
+                            if stated is not None and stated.walk is not None:
+                                # `self.m()` or `super().m()`: the class named is
+                                # the one the call is written in, and `m` is looked
+                                # for along its bases (#73).
+                                edge["_walk"] = stated.walk
             if edge is not None:
                 result.edges.append(edge)
             walk_children(node, parent_id, scope_id)
@@ -2129,6 +2168,188 @@ def extract_all(entries: list[FileEntry], cfg: Config, cache: Cache | None = Non
 # edge is left untouched (pre-fix behavior).
 _MAX_METHOD_DISPATCH_CANDIDATES = 3
 
+
+def _python_class_bases(
+    node: Any, scope: PyScope, table: ScopeTable, ids: dict[tuple[str, bool], str]
+) -> list[str | None]:
+    """Each base of a class statement, in order: the id of the class it names, or None.
+
+    A base is resolved where the source states it: a bare name that denotes a
+    definition of this file or an import that resolved inside the repository.
+    Anything else -- a builtin, an attribute (`models.Model`), a call, a
+    subscript (`Generic[T]`), a splat -- is None: a base that was not read.
+    It may bind any name, and it may derive from a class that was read.
+    `object` is left out: it is last in every linearisation and defines no
+    method of the repository. Class keywords (`metaclass=...`) are not bases.
+    """
+    bases: list[str | None] = []
+    arguments = node.child_by_field_name("superclasses")
+    for arg in arguments.named_children if arguments is not None else ():
+        if arg.type in ("comment", "keyword_argument", "dictionary_splat"):
+            continue
+        found = resolve(scope, arg.text.decode("utf-8", errors="ignore")) if arg.type == "identifier" else None
+        if found is not None and found.kind in ("def", "symbol"):
+            bases.append(_python_definition_id(found, ids))
+        elif (
+            found is not None and found.kind == "none"
+            and arg.text == b"object" and not table.module.star_import
+        ):
+            continue
+        else:
+            bases.append(None)
+    return bases
+
+
+def _python_class_making(node: Any, scope: PyScope, table: ScopeTable) -> list[str]:
+    """What makes a class besides its body and its bases: "decorator",
+    "keyword", "rebound".
+
+    Each puts methods on a class that no `def` in its body wrote.
+
+    A decorator is handed the class and returns what the name is bound to:
+    `@dataclass` makes `__init__`, and any decorator may set or replace a
+    name. Which ones do not is not read here.
+
+    A keyword is `metaclass=M`, or an argument for a metaclass or for an
+    `__init_subclass__`. A metaclass makes the class and every class derived
+    from it, and may set anything on each. `metaclass=type`, where `type` is
+    the builtin, is the one keyword that says nothing: `type` makes every
+    class.
+
+    Rebound: the scope the class statement is in binds the class's name more
+    than once. `Mid = marks(Mid)` is a decorator under another spelling. A
+    class written twice (`if FLAG: class Mid ... else: class Mid ...`) is two
+    classes, and one node of the graph. Either way the name does not say
+    which class it is.
+    """
+    made: list[str] = []
+    parent = node.parent
+    if parent is not None and parent.type == "decorated_definition":
+        if any(child.type == "decorator" for child in parent.children):
+            made.append("decorator")
+    name_node = node.child_by_field_name("name")
+    own_name = name_node.text.decode("utf-8", errors="ignore") if name_node is not None and name_node.text else ""
+    home = resolving_scope(scope, own_name)
+    if home is None or len(home.binders[own_name]) != 1:
+        made.append("rebound")
+    arguments = node.child_by_field_name("superclasses")
+    for arg in arguments.named_children if arguments is not None else ():
+        if arg.type == "keyword_argument":
+            name, value = arg.child_by_field_name("name"), arg.child_by_field_name("value")
+            if (
+                name is not None and name.text == b"metaclass"
+                and value is not None and value.type == "identifier" and value.text == b"type"
+                and resolve(scope, "type").kind == "none" and not table.module.star_import
+            ):
+                continue
+        elif arg.type != "dictionary_splat":
+            continue
+        made.append("keyword")
+        break
+    return made
+
+
+def _c3_linearisation(
+    cls: str,
+    bases_of: dict[str, list[str | None]],
+    memo: dict[str, tuple[str, ...] | None],
+    stack: frozenset[str] = frozenset(),
+) -> tuple[str, ...] | None:
+    """Python's method resolution order (C3) for a class whose every base was read.
+
+    It is Python's order only then: see `_python_class_order` for what a base
+    that could not be read does to it. None for classes that derive from each
+    other and for bases that admit no order: Python refuses both.
+    """
+    if cls in memo:
+        return memo[cls]
+    if cls in stack:
+        return None
+    parents = [base for base in bases_of[cls] if base is not None]
+    sequences: list[list[str]] = []
+    for parent in parents:
+        line = _c3_linearisation(parent, bases_of, memo, stack | {cls})
+        if line is None:
+            memo[cls] = None
+            return None
+        sequences.append(list(line))
+    sequences.append(list(parents))
+    out = [cls]
+    while any(sequences):
+        head = next(
+            (
+                sequence[0] for sequence in sequences
+                if sequence and not any(sequence[0] in other[1:] for other in sequences)
+            ),
+            None,
+        )
+        if head is None:
+            memo[cls] = None
+            return None
+        out.append(head)
+        for sequence in sequences:
+            if sequence and sequence[0] == head:
+                del sequence[0]
+    memo[cls] = tuple(out)
+    return memo[cls]
+
+
+def _python_class_order(
+    cls: str, bases_of: dict[str, list[str | None]]
+) -> tuple[list[str], dict[Any, set[Any]], set[Any]]:
+    """What the source states about the order of `cls`'s linearisation.
+
+    Returns the classes `cls` derives from through bases that were read
+    (itself among them), what is certain to come AFTER each, and one marker
+    per base that was not read.
+
+    The order of the classes that were read is NOT Python's order when a base
+    was not: that base may derive from one of them, and Python then puts that
+    one later. `class Child(Left, Right)`, `Left(Top)`, `Right(Unread)` reads
+    as Child, Left, Top, Right, and is Child, Left, Right, Unread, Top when
+    `Unread` derives from `Top`. Two things do hold whatever was not read,
+    because C3 keeps them in a class and in everything derived from it: a
+    class comes before each of its bases, and the bases of a class keep the
+    order they are written in. `after` is those two, for every class here. A
+    base that was not read is in it as a marker of its own, `(class, position)`;
+    whatever stands behind that base comes after the marker.
+    """
+    classes: list[str] = []
+    after: dict[Any, set[Any]] = {}
+    unread: set[Any] = set()
+    pending = [cls]
+    while pending:
+        current = pending.pop()
+        if current in classes:
+            continue
+        classes.append(current)
+        earlier: Any = current
+        for position, base in enumerate(bases_of[current]):
+            written: Any = base
+            if base is None or base not in bases_of:
+                written = (current, position)
+                unread.add(written)
+            else:
+                pending.append(base)
+            # After the class for its first base, after the base before it for
+            # the others: which is after the class as well.
+            after.setdefault(earlier, set()).add(written)
+            earlier = written
+    return classes, after, unread
+
+
+def _comes_before_all(first: Any, others: Collection[Any], after: dict[Any, set[Any]]) -> bool:
+    """Whether `after` puts `first` before every one of `others`."""
+    reached: set[Any] = set()
+    pending = [first]
+    while pending:
+        for later in after.get(pending.pop(), ()):
+            if later not in reached:
+                reached.add(later)
+                pending.append(later)
+    # A class that comes after itself is one Python refuses to make.
+    return first not in reached and all(other in reached for other in others)
+
 # Languages where the reachability gate has been MEASURED. Deliberately just
 # Python -- see `_dispatch_is_gated` for why this is not simply "every language
 # whose imports bind to a file node".
@@ -2251,8 +2472,43 @@ def _resolve_method_dispatch(
     name is not consulted. Where it has none (the method is inherited, or the id
     is not a class at all) the call is bound by name as above.
 
-    ``_member`` and ``_receiver`` are stripped from every returned edge so
-    neither leaks into the graph.
+    A call on `self` or on a bare `super()` carries ``_walk`` as well, and
+    ``_receiver`` is then the class the call is WRITTEN in (#73). Python says
+    which method runs for an object of that class: the first one in the
+    class's linearisation, from the class for `self` and after it for
+    `super()`. It is read off what the Python extractor left on each class
+    node -- ``_bases``, ``_stops``, ``_self_binds``, ``_class_binds``,
+    ``_made``:
+
+    * where every base of the class and of its bases was read, the
+      linearisation is computed as Python computes it;
+    * where one was not, a method is bound only if what is written puts its
+      class before every other class that binds the name and before every
+      base that was not read (`_python_class_order`);
+    * a class that binds the name some other way than one `def` can be the
+      first, and then nothing is bound; so can a method that assigns
+      `self.<name>`, for a call on `self`;
+    * a class is not only the `def`s in its body. A decorated class may have
+      any name, so it too can be the first, and then nothing is bound.
+      Nothing is bound at all where a class among those read is made with a
+      keyword (a metaclass), where one above the class has an
+      `__init_subclass__`, where the name is set on one of them from outside
+      its body or by a class method, or, for a call on `self`, where one has
+      a `__getattribute__`;
+    * a class whose NAME its scope binds more than once (`Mid = marks(Mid)`,
+      or the class written twice under an `if`) is not read: nothing is bound
+      in it, and for a class derived from it, it is a base that was not read.
+
+    Everywhere else the call is bound by name as above. The reachability gate
+    and the cap are not applied to a method found this way: the bases are the
+    evidence.
+
+    None of that is read behind a base that was NOT read: a metaclass or an
+    `__init_subclass__` there can set a name on the class itself, over its own
+    `def`. So "bound" says what the classes that were read state, and not more.
+
+    ``_member``, ``_receiver`` and ``_walk`` are stripped from every returned
+    edge, and the five class tags from every node, so none leaks into the graph.
     """
     # method name (casefolded) -> set of definition node ids. A set collapses the
     # same method appearing twice in the pre-dedup node list, so the cap counts
@@ -2271,6 +2527,102 @@ def _resolve_method_dispatch(
     for e in edges:
         if e.get("relation") == "contains" and e.get("target") in method_names:
             own_methods.setdefault(e["source"], {})[method_names[e["target"]]] = e["target"]
+
+    # What the Python walk left on each class node (#73), taken off again here.
+    bases_of: dict[str, list[str | None]] = {}
+    stops_of: dict[str, frozenset[str]] = {}
+    instance_binds_of: dict[str, frozenset[str]] = {}
+    class_binds_of: dict[str, frozenset[str]] = {}
+    made_of: dict[str, frozenset[str]] = {}
+    for n in nodes:
+        bases = n.pop("_bases", None)
+        stops = n.pop("_stops", None)
+        instance_binds = n.pop("_self_binds", None)
+        class_binds = n.pop("_class_binds", None)
+        made = n.pop("_made", None)
+        if bases is not None:
+            bases_of[n["id"]] = bases
+            stops_of[n["id"]] = frozenset(stops or ())
+            instance_binds_of[n["id"]] = frozenset(instance_binds or ())
+            class_binds_of[n["id"]] = frozenset(class_binds or ())
+            made_of[n["id"]] = frozenset(made or ())
+    # A class whose name its scope binds more than once. The name does not
+    # say which class it is, and two statements of one name are one node
+    # here. Nothing is bound by class in it, and for a class derived from it,
+    # it is a base that was not read.
+    rebound = {cls for cls, made in made_of.items() if "rebound" in made}
+    for cls, written in bases_of.items():
+        bases_of[cls] = [None if base in rebound else base for base in written]
+    linearisations: dict[str, tuple[str, ...] | None] = {}
+    orders: dict[str, tuple[list[str], dict[Any, set[Any]], set[Any]]] = {}
+
+    def body_binds(cls: str, name: str) -> bool:
+        return name in stops_of[cls] or name in own_methods.get(cls, {})
+
+    def class_method(cls: str, method: str, walk: str) -> str | None:
+        """The `method` that runs for `self.method()` (or `super().method()`)
+        written in `cls`, for an object of `cls` itself; None where the source
+        does not state it."""
+        if cls not in bases_of or cls in rebound:
+            return None
+        if cls not in orders:
+            orders[cls] = _python_class_order(cls, bases_of)
+        classes, after, unread = orders[cls]
+        # A class is not only the `def`s in its body. Where the source shows
+        # one of the roads by which a class gets a method no `def` wrote, the
+        # `def`s do not say which method runs.
+        # A metaclass makes the class it is named on and every class derived
+        # from it, and may set anything on each.
+        if any("keyword" in made_of[current] for current in classes):
+            return None
+        # `__init_subclass__` runs when a class BELOW the one that has it is
+        # made, and may set anything on that class.
+        if any(body_binds(current, "__init_subclass__") for current in classes if current != cls):
+            return None
+        # The name is set on a class of the chain from outside its body
+        # (`K.name = ...`), or by a class method (`cls.name = ...`), which sets
+        # it on its own class or on one derived from it.
+        if any(method in class_binds_of[current] for current in classes):
+            return None
+        if walk == "self":
+            # A function is not a data descriptor: an instance attribute of
+            # the name, set by any class of the chain, is what `self.name`
+            # finds. And every `self.name` goes through `__getattribute__`.
+            # `super()` looks on the classes itself: neither applies to it.
+            if any(
+                method in instance_binds_of[current] or body_binds(current, "__getattribute__")
+                for current in classes
+            ):
+                return None
+        # Every class that binds the name, by one `def` or some other way. A
+        # decorated class may have any name, whatever its body says. `super()`
+        # does not look in the class it is written in. `__name` is mangled
+        # with that class, so no other class can provide it.
+        private = method.startswith("__") and not method.endswith("__")
+        binders = [
+            current for current in classes
+            if (walk == "self" if current == cls else not private)
+            and ("decorator" in made_of[current] or body_binds(current, method))
+        ]
+        if not unread:
+            # Every base was read, so the order is Python's own.
+            line = _c3_linearisation(cls, bases_of, linearisations) or ()
+            first = next((current for current in line if current in binders), None)
+        else:
+            # Some base was not. What stands behind it may bind the name, and
+            # may reorder the classes that were read; so the class must come
+            # before every unread base and before every other binder by what
+            # is written alone.
+            first = next(
+                (
+                    current for current in binders
+                    if _comes_before_all(current, [*unread, *(b for b in binders if b != current)], after)
+                ),
+                None,
+            )
+        if first is None or "decorator" in made_of[first] or method in stops_of[first]:
+            return None
+        return own_methods.get(first, {}).get(method)
 
     # Which file each definition lives in, and which files each file imports
     # DIRECTLY. Both are needed to answer "could this caller have reached that
@@ -2300,6 +2652,7 @@ def _resolve_method_dispatch(
     for e in edges:
         method = e.pop("_member", None)  # strip from every edge, resolved or not
         receiver = e.pop("_receiver", None)
+        walk = e.pop("_walk", None)
         if not method or e.get("relation") != "calls":
             out.append(e)
             continue
@@ -2307,7 +2660,12 @@ def _resolve_method_dispatch(
         # method (#79): bound there, with no guess to gate. Bound by name this
         # was also a call to every other method of the name in reach, so
         # `callers Alpha.setup` listed a function that only builds a `Beta`.
-        own = own_methods.get(receiver, {}).get(method) if receiver else None
+        if receiver and walk:
+            # `self.m()` / `super().m()`: the first `m` along the bases of the
+            # class the call is written in (#73).
+            own = class_method(receiver, method, walk)
+        else:
+            own = own_methods.get(receiver, {}).get(method) if receiver else None
         if own is not None:
             e["target"] = own
             out.append(e)

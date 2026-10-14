@@ -228,14 +228,14 @@ A name is "bound only from" a value when every statement that binds it in its
 scope says the same; `None` is skipped, because it has no method to call.
 Flow is not followed.
 
-Bound by name as before: `self.m()` and `super().m()` (#73); a parameter,
+Bound by name as before: a parameter,
 annotated or not, because an annotation admits a subclass; an attribute
 (`self.x.m()`); what any other call returns; a method the stated class
 inherits and does not define; `a = b = Beta()` (only `b` is read);
 `(x := Beta())`; `y = x`; what `with Beta() as x` hands over; a builtin's
 name in a file with a star import, which may bind it; and `str(x)`,
 `repr(x)`, `format(x)` and `bytes(x)`, which return whatever the argument's
-own method returned.
+own method returned. `self.m()` and `super().m()` are the next entry.
 
 Measured on Django 5.2.7 (2,224 Python files), with every member call of the
 1.2.1 engine set beside the same call under this change, and each receiver
@@ -264,6 +264,160 @@ answer carries the new caveat `python-member-call-bound-by-name`, next to
 `python-member-call-over-dispatch-cap`, which is the same pass over the cap.
 A new caveat code is an addition to a JSON output that carries
 `schema_version`.
+
+**`self.m()` and `super().m()` are bound by class, where the classes say
+which method runs (#73).** A call on `self` or on a bare `super()` was bound
+like any other member call, by the name `m` alone: to every method of that
+name in the caller's file and the files it imports when there are at most
+three, and to nothing when there are more. So `self.get_queryset()` in a
+class with a `get_queryset` of its own was a call to two other classes' as
+well; `super().__init__()` was a call to the `__init__` it is written in; and
+for the names many classes share (`__init__`, `get_queryset`, `to_dict`) the
+call had no edge at all. That last part is the issue as filed: since every
+method has a node of its own (1.2.0), more names are over the three.
+
+Python says which method runs: the first `m` in the linearisation of the
+object's class, from the class for `self` and after it for `super()`. The
+call is now bound to that method, for an object of the class the call is
+written in, where the classes graphite reads state which it is:
+
+- **Every base read.** Where each base of the class, and of its bases, is a
+  class graphite can read (a name that is a class of the file, or one
+  imported by name from the file that defines it), the linearisation is
+  computed as Python computes it (C3).
+- **A base not read.** A builtin, a dotted name (`models.Model`), a name
+  that reaches the file through a re-export, a call, a subscript. Such a
+  base may have an `m` of its own. It may also derive from a class that WAS
+  read, and Python then puts that class later than the readable bases
+  suggest: `class Child(Left, Right)`, `Left(Top)`, `Right(Unread)` reads as
+  Child, Left, Top, Right, and is Child, Left, Right, Unread, Top when
+  `Unread` derives from `Top`. So a method is bound only if what is written
+  puts its class before every other class that binds `m` and before every
+  base that was not read. What is written is two things Python keeps
+  whatever the rest is: a class comes before its bases, and the bases of a
+  class keep their order. So the class's own `m` is bound, and the first
+  base's (`class Child(Mixin, models.Model)`: `self.m()` is `Mixin.m`), and
+  a single chain up to the class whose base was not read.
+
+A method found this way is bound whatever file it is in and however many
+methods share its name. The reach rule and the cap of three exist to limit a
+guess by name, and here the bases are the evidence.
+
+**A class is more than the `def`s in its body.** Where the source shows
+another way for a class to get a method, the `def`s do not say which method
+runs, and the call is bound by name as before:
+
+- a decorated class on the way, its own `def` included. `@dataclass` makes
+  `__init__`, and any decorator may set or replace a name. No list of
+  decorators that leave a class alone is kept, and that has a price: an
+  engine that trusts every decorator binds 419 more calls on Django and 6
+  more on this repository. Telling such decorators from the rest is a
+  follow-up;
+- a class made with a keyword (`metaclass=M`, or any other but
+  `metaclass=type`) among the classes read, or an `__init_subclass__` on one
+  above the class: either runs for every class below it;
+- a class whose name its scope binds more than once: `C = deco(C)`, an
+  import of the name beside the class, or the class written twice under an
+  `if`, which is two classes and one node of the graph. Nothing is bound in
+  such a class, and for a class derived from it, it is a base that was not
+  read;
+- `m` set on one of the classes from outside its body in the same file
+  (`K.m = ...`, `del K.m`), or by one of its class methods (`cls.m = ...`);
+- a first class that binds `m` some other way than one `def` written
+  straight in its body: an assignment, a property object, two `def`s, a
+  `def` under an `if`, a `try`, a loop or a `with`, or under `global`;
+- for `self`: a method of any class read assigns `self.m`, because an
+  instance attribute shadows a method; or one of them has a
+  `__getattribute__`;
+- `m` behind a base that was not read, or nowhere among the bases:
+  `super().__init__()` under `class E(Exception)` is still a call to
+  whichever `__init__` methods are in reach;
+- a `__private` name, except on the class the call is written in;
+- `super(X, obj)` with arguments; `cls.m()` in a class method, in `__new__`,
+  `__init_subclass__` and `__class_getitem__`; a `self` that is given another
+  value; `super()` in a lambda, a nested function or a comprehension; a
+  `super` the file binds.
+
+**What is not read.** A call bound by class is bound to the method that
+runs where none of the following applies. graphite does not see these, and
+binds all the same:
+
+- anything behind a base that was not read. A metaclass, an
+  `__init_subclass__` or a decorator there can replace even the class's own
+  `def`, and a method there can assign `self.m`;
+- `setattr`, `K.__dict__`, `type(self).m = ...`, `self.__class__ = ...`, and
+  an assignment made in another file;
+- an alias: `me = self; me.m = f`, or `K = C; K.m = f`. Flow is not followed;
+- a decorator on a method. The call is bound to the `def`, whatever the
+  decorator returns, and the method the call is written in is taken to be
+  handed the instance, whatever decorates it;
+- a class decorator that returns a class with other bases than the one it
+  was handed;
+- a star import written after the class statement, which may bind its name
+  again.
+
+**Not followed: what runs for an object of a subclass.** For such an object
+`self.m()` runs an override below the class, and `super().m()` can reach a
+class the subclass added to its bases. Those edges are missing, and every
+Python `calls` answer says so with the new caveat
+`python-self-call-bound-for-enclosing-class`. Bound by name, an override was
+listed only where its file happened to be within reach, beside methods of
+unrelated classes. `python-member-call-over-dispatch-cap` and
+`python-member-call-bound-by-name` stay: calls on any other receiver are
+bound by name, and so are these wherever the classes do not state the
+method.
+
+Measured on Django 5.2.7 (2,224 Python files; 47,654 calls on `self` and
+1,705 on `super()`). Each of them under the engine before this change was
+set beside the same call after it, and the method that runs, for an object
+of the class the call is written in, was worked out from a fuller reading
+than the engine has: re-exports and dotted bases followed, builtin and
+standard-library classes taken as Python holds them, and "not known"
+wherever a class of the tree may get the method without a `def`.
+
+- 1,742 calls changed. 1,262 are now bound to exactly the method that runs.
+  425 are bound to the method the classes state under a standard-library
+  class whose own hook sets no method: 420 under `unittest.TestCase`, which
+  has an `__init_subclass__` since Python 3.11, and 5 under `abc.ABCMeta`.
+  For 55 the fuller reading still has a base it cannot read, or finds a
+  metaclass behind one, so what runs is not known, and they are bound as the
+  rule above says. Where the method that runs is known, no call bound by
+  class is bound to another.
+- 659 of them had no edge (609 with more than three methods of the name);
+  1,065 were bound to two or three methods and keep one; 18 were bound to
+  one method and are bound to another.
+- 1,332 bindings went. 271 were a `super()` call bound to the method it is
+  written in; 714 were methods of a class neither above nor below; 178 were
+  a base class's method behind the one that runs. 168 were an override in a
+  subclass, which does run for an object of that subclass: that is the loss
+  the new caveat names. One was a method whose name differs by case.
+- Of the 12,570 calls for which the fuller reading names a method of the
+  tree and no class on the way may get one without a `def`, 7,258 were bound
+  to exactly it before and 8,945 are now. 3,541 have no edge, and for 3,443
+  of those the one thing in the way is a base imported through a re-export
+  (`from django.test import TestCase`), which graphite does not read as a
+  class.
+
+The issue's table, on Django's `django/` package alone (15,563 member
+calls): calls with more than three methods of the name and no edge, 3,413
+before and 2,872 after; among them `self` calls 327 and 128, `super()` calls
+772 and 435. On this repository: 192 and 191, `self` calls 4 and 4. Those
+four are `self.to_dict()` in `@dataclass` classes: the price above, at home.
+
+`graphite impact <symbol>`, every definition asked of both graphs: on Django
+304 of 27,513 methods answer differently (89 lose an impacted file, 160 gain
+one; 32 lose a likely test, 47 gain one), with 9 of 10,546 class nodes and 9
+of 2,751 functions; on this repository 4 of 809 methods and nothing else.
+`impact <file>` is unchanged for every file of both. The built graphs keep
+their nodes: Django 854 edges gone and 653 new, this repository 15 and 1.
+The Python `calls` ratio is 0.697 before and 0.696 after on Django, because
+an edge bound by name to the wrong method counted as bound, and 0.976 on
+both sides here.
+
+Also in the test suite: classes made at random, some behind names graphite
+cannot read, some given a method by a decorator, a metaclass, a hook or an
+assignment, are run by Python itself, and each call graphite binds by class
+is held against the method that ran.
 
 ## [1.2.1] — 2026-10-11
 

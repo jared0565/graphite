@@ -156,8 +156,15 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         # `impact` lost a likely test for 8 of 1,803 definitions (graphite) and
         # 236 of 8,439 (Django); file-level `impact` was unchanged for every
         # file. A scope disclosure: the harm is in NON-EMPTY answers. The cap is
-        # language-agnostic, but only Python was measured. Retires with
-        # class-aware `self.`/`super()` dispatch (#73).
+        # language-agnostic, but only Python was measured.
+        #
+        # #73 made `self.`/`super()` dispatch class-aware, and this entry does
+        # NOT retire with it: such a call is bound by class only where the
+        # classes that were read state which method runs. Behind a base that
+        # could not be read (an attribute such as `models.Model`, a re-export,
+        # a builtin), and under a decorated class, a metaclass, an
+        # `__init_subclass__` or a class whose name is bound twice, it is
+        # still bound by name, cap and all. So is every other receiver.
     },
     {
         "code": "python-member-call-bound-by-name",
@@ -178,15 +185,42 @@ CAVEAT_REGISTRY: tuple[dict[str, Any], ...] = (
         # object, the class itself, and a local bound only from such a call are
         # bound to that class's own method; a literal, the result of a builtin
         # that returns a builtin type, and a local bound only from those get no
-        # edge. What is left is what the source does not state: a parameter,
-        # `self`, `super()`, an attribute, the result of any other call, and a
-        # method the stated class inherits.
+        # edge. `self.m()` and `super().m()` are bound along the bases of the
+        # class they are written in, where the classes that were read state
+        # which method runs (#73). What is left is what the source does not
+        # state: a parameter, an attribute, the result of any other call, a
+        # method the stated class inherits, and a `self` or `super()` call
+        # whose classes do not state the method (a base that could not be
+        # read, a decorated class, a metaclass).
         #
         # A scope disclosure, like the entry above and for its reason: the harm
         # is a caller that is not one, in a NON-EMPTY answer. It is on every
         # Python `calls` answer because an edge does not record how it was
-        # bound, so no answer can tell whether it holds one. Narrows when
-        # `self.`/`super()` dispatch becomes class-aware (#73).
+        # bound, so no answer can tell whether it holds one.
+    },
+    {
+        "code": "python-self-call-bound-for-enclosing-class",
+        "relations": ("calls",),
+        "languages": ("python",),
+        "summary": (
+            "self.m() and super().m() are bound to the method that runs for an object of "
+            "the class they are written in: an override of m in a subclass, and what "
+            "super() reaches when a subclass adds another base, are not listed, so a "
+            "callers or impact result on such a method may be missing a real caller"
+        ),
+        "since": "2026-10-13",
+        # #73. `_resolve_method_dispatch` binds a `self.` or `super().` call to
+        # the method that is first, for the name, in the linearisation of the
+        # class the call is written in. That is what runs for an object of
+        # exactly that class. For an object of a subclass Python may run
+        # something else: an override below the class, or, through `super()`,
+        # a sibling the subclass put into the chain. Neither is followed.
+        #
+        # A scope disclosure: the harm is a MISSING caller in a non-empty
+        # answer, which no ratio can see. Before this entry the same calls were
+        # bound by name, which listed an override only where its file happened
+        # to be in the caller's reach, beside methods of unrelated classes.
+        # Narrows if the binding is ever extended down to subclasses.
     },
     {
         "code": "ts-external-calls-unclassified",

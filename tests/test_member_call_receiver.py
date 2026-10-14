@@ -16,8 +16,8 @@ Where the source states the receiver, that now decides:
   of the repository, and the call gets no edge.
 
 Everything else is bound by name as before, and the tests at the bottom pin
-that: a parameter, `self`, `super()`, a function's result, a method the class
-inherits, a name bound two ways.
+that: a parameter, a function's result, a method the class inherits, a name
+bound two ways. (`self` and `super()` were on that list until #73.)
 """
 from __future__ import annotations
 
@@ -376,8 +376,9 @@ def test_a_method_the_class_inherits_is_still_bound_by_name(tmp_path: Path) -> N
     assert _one_file(tmp_path, "def use():\n    return Child().setup()\n", head=head) == {"Child", "Base.setup"}
 
 
-def test_self_and_super_receivers_are_left_as_they_were(tmp_path: Path) -> None:
-    """#73 owns these two receivers; this change must not move them."""
+def test_self_and_super_receivers_are_bound_along_the_class_s_bases(tmp_path: Path) -> None:
+    """Bound by name until #73, and pinned so here while #79 was made. Now the
+    class the call is written in decides; tests/test_self_super_dispatch.py."""
     body = (
         "class Gamma(Beta):\n"
         "    def one(self):\n"
@@ -388,8 +389,8 @@ def test_self_and_super_receivers_are_left_as_they_were(tmp_path: Path) -> None:
     )
     _write(tmp_path / "app" / "code.py", TWO_CLASSES + body)
     result = _result(tmp_path)
-    assert _called(result, "Gamma.one") == BY_NAME
-    assert _called(result, "Gamma.two") == BY_NAME
+    assert _called(result, "Gamma.one") == {"Beta.setup"}
+    assert _called(result, "Gamma.two") == {"Beta.setup"}
 
 
 @pytest.mark.parametrize(

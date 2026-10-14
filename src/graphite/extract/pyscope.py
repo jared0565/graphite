@@ -34,6 +34,9 @@ _TARGET_CONTAINERS = frozenset({
     "expression_list", "parenthesized_expression", "list_splat_pattern", "as_pattern_target",
 })
 _SPLATS = frozenset({"list_splat_pattern", "dictionary_splat_pattern", "splat_pattern"})
+#: Methods that are handed the class as their first argument without a
+#: decorator saying so.
+_CLASS_FIRST_METHODS = frozenset({"__new__", "__init_subclass__", "__class_getitem__"})
 #: Expressions whose value is an instance of a builtin type whatever they hold.
 #: `none` is absent on purpose: `None` has no method to call, so it says nothing.
 _BUILTIN_LITERALS = frozenset({
@@ -73,6 +76,12 @@ class Binder:
     #: `_value_origin`) and the scope that statement is evaluated in. None where
     #: the statement does not say: a parameter, a loop target, an unpacking.
     origin: tuple[str, str, PyScope] | None = None
+    #: For the first parameter of a method: the class scope the method is
+    #: written in, so the name is an instance of that class (#73).
+    instance_of: PyScope | None = None
+    #: For the first parameter of a class method: the class scope it is written
+    #: in, so the name is that class or one derived from it (#73).
+    class_of: PyScope | None = None
 
 
 _VALUE = Binder("value")
@@ -120,6 +129,10 @@ class Receiver:
     """
 
     definition: Resolution | None = None
+    #: "self" or "super" where `definition` is the class the CALL is written in
+    #: and the method is to be looked for along that class's bases (#73). None
+    #: where `definition` is the receiver's own class and nothing is walked.
+    walk: str | None = None
 
 
 _BUILTIN_RECEIVER = Receiver()
@@ -130,6 +143,20 @@ class ScopeTable:
     module: PyScope
     call_scope: dict[int, PyScope]
     definitions: dict[int, tuple[str, bool]]
+    #: class definition node id -> the scope of its body
+    class_scope: dict[int, PyScope] = field(default_factory=dict)
+    #: id() of a class scope -> the names its methods assign on the instance
+    #: (`self.name = ...`). An instance attribute shadows a method of the name.
+    instance_binds: dict[int, set[str]] = field(default_factory=dict)
+    #: id() of a class scope -> the names set on the CLASS outside its body:
+    #: `K.name = ...` anywhere in the file, and `cls.name = ...` in one of its
+    #: class methods, which sets it on the class or on one derived from it.
+    class_binds: dict[int, set[str]] = field(default_factory=dict)
+    #: id() of a class scope -> the names a `def` or `class` binds under an
+    #: `if`, a `try`, a loop or a `with` of the class body: there only if that
+    #: statement ran it. And the names a `type` statement of the body binds,
+    #: which are recorded nowhere else: no other reader asks for them.
+    conditional: dict[int, set[str]] = field(default_factory=dict)
 
     def scope_of_call(self, call_node: Any) -> PyScope:
         return self.call_scope.get(call_node.id, self.module)
@@ -215,6 +242,57 @@ def _parameter_names(params: Any) -> Iterator[str]:
             yield from (_text(c) for c in child.named_children if c.type == "identifier")
 
 
+def _instance_parameter(params: Any) -> str | None:
+    """The name of a method's first parameter, where it is a plain one.
+
+    `def m(self, ...)` and `def m(self: Self, ...)`. A method that starts with
+    `*args`, or with a parameter that has a default, has no parameter that is
+    sure to be the instance.
+    """
+    first = next((child for child in params.named_children if child.type != "comment"), None)
+    if first is not None and first.type == "typed_parameter":
+        first = next(iter(first.named_children), None)
+    return _text(first) if first is not None and first.type == "identifier" else None
+
+
+def _first_parameter_is(node: Any, name: str) -> str | None:
+    """What the first parameter of a `def` in a class body is handed:
+    "instance", "class", or None for a static method."""
+    parent = node.parent
+    decorators: set[str] = set()
+    if parent is not None and parent.type == "decorated_definition":
+        decorators = {_text(child).lstrip("@").strip() for child in parent.children if child.type == "decorator"}
+    if name in _CLASS_FIRST_METHODS or "classmethod" in decorators:
+        return "class"
+    return None if "staticmethod" in decorators else "instance"
+
+
+def _straight_in_class_body(node: Any) -> bool:
+    """A `def` or `class` that is one of a class body's own statements, and
+    not one under an `if`, a `try`, a loop or a `with` of that body."""
+    statement = node
+    if node.parent is not None and node.parent.type == "decorated_definition":
+        statement = node.parent
+    block = statement.parent
+    return block is not None and block.parent is not None and block.parent.type == "class_definition"
+
+
+def _attribute_targets(node: Any) -> Iterator[tuple[str, str]]:
+    """(name, attribute) for every `name.attribute` a binding target assigns."""
+    if node is None:
+        return
+    if node.type == "attribute":
+        obj = node.child_by_field_name("object")
+        # `*self.name, rest = ...` parses as the attribute `name` of a splat of `self`.
+        if obj is not None and obj.type == "list_splat" and obj.named_child_count == 1:
+            obj = obj.named_children[0]
+        if obj is not None and obj.type == "identifier":
+            yield _text(obj), _text(node.child_by_field_name("attribute"))
+    elif node.type in _TARGET_CONTAINERS:
+        for child in node.named_children:
+            yield from _attribute_targets(child)
+
+
 def _parameter_expressions(params: Any) -> Iterator[Any]:
     """Defaults and annotations: evaluated where the def or lambda itself is."""
     for child in params.named_children:
@@ -268,15 +346,24 @@ def collect_scopes(root: Any, import_bindings: ImportBindings, name_of: NameOf) 
     call_scope: dict[int, PyScope] = {}
     definitions: dict[int, tuple[str, bool]] = {}
     scopes: list[PyScope] = [module]
+    class_scope: dict[int, PyScope] = {}
+    #: id() of the binder a class statement makes -> the scope of that class's body
+    class_body: dict[int, PyScope] = {}
+    conditional: dict[int, set[str]] = {}
+    #: (scope the statement is in, name, attribute) for each `name.attribute`
+    #: that a statement assigns or deletes
+    attribute_binds: list[tuple[PyScope, str, str]] = []
 
     def open_scope(kind: str, parent: PyScope, qualname: str) -> PyScope:
         inner = PyScope(kind, parent, qualname)
         scopes.append(inner)
         return inner
 
-    def bind_parameters(params: Any, inner: PyScope, outer: PyScope) -> None:
+    def bind_parameters(params: Any, inner: PyScope, outer: PyScope, first: Binder | None = None) -> None:
+        """`first` is what a method's first parameter is, where the def says."""
+        handed = _instance_parameter(params) if first is not None else None
         for name in _parameter_names(params):
-            inner.bind(name, _VALUE)
+            inner.bind(name, first if first is not None and name == handed else _VALUE)
         for expression in _parameter_expressions(params):
             visit(expression, outer)
 
@@ -291,14 +378,30 @@ def collect_scopes(root: Any, import_bindings: ImportBindings, name_of: NameOf) 
         qualname = f"{scope.prefix}{segment}"
         module_level = scope.kind == "module"
         definitions[node.id] = (qualname, module_level)
-        scope.bind(raw, Binder("def" if is_function else "class", qualname=qualname, module_level=module_level))
+        binder = Binder("def" if is_function else "class", qualname=qualname, module_level=module_level)
+        scope.bind(raw, binder)
+        if scope.kind == "class" and not _straight_in_class_body(node):
+            conditional.setdefault(id(scope), set()).add(raw)
         inner = open_scope("function" if is_function else "class", scope, qualname)
+        if not is_function:
+            class_scope[node.id] = inner
+            class_body[id(binder)] = inner
+        # A method: a def written directly in a class body. Its first parameter
+        # is the instance, or the class for a class method and the few methods
+        # that are handed it without a decorator; a static method has neither.
+        first: Binder | None = None
+        if is_function and scope.kind == "class":
+            handed = _first_parameter_is(node, raw)
+            if handed == "instance":
+                first = Binder("value", instance_of=scope)
+            elif handed == "class":
+                first = Binder("value", class_of=scope)
         for index, child in enumerate(node.children):
             field_name = node.field_name_for_child(index)
             if field_name == "body":
                 visit(child, inner)
             elif field_name == "parameters":
-                bind_parameters(child, inner, scope)
+                bind_parameters(child, inner, scope, first)
             elif field_name != "name":
                 # bases, the return annotation, type parameters: evaluated in the
                 # enclosing scope (decorators sit outside this node already)
@@ -369,9 +472,14 @@ def collect_scopes(root: Any, import_bindings: ImportBindings, name_of: NameOf) 
                     binder = _VALUE  # an unpacking: which part each name gets is not read
                 for name in _target_names(left):
                     scope.bind(name, binder)
+                if right is not None:
+                    attribute_binds.extend((scope, name, attr) for name, attr in _attribute_targets(left))
         elif kind == "augmented_assignment":
             for name in _target_names(node.child_by_field_name("left")):
                 scope.bind(name, _VALUE)
+            attribute_binds.extend(
+                (scope, name, attr) for name, attr in _attribute_targets(node.child_by_field_name("left"))
+            )
         elif kind == "named_expression":
             # PEP 572: a walrus binds in the nearest scope that is not a comprehension.
             home = scope
@@ -382,6 +490,9 @@ def collect_scopes(root: Any, import_bindings: ImportBindings, name_of: NameOf) 
         elif kind == "for_statement":
             for name in _target_names(node.child_by_field_name("left")):
                 scope.bind(name, _VALUE)
+            attribute_binds.extend(
+                (scope, name, attr) for name, attr in _attribute_targets(node.child_by_field_name("left"))
+            )
         elif kind == "as_pattern" and node.parent is not None and node.parent.type != "case_pattern":
             # `with ... as x` and `except E as x`. A case pattern's `as` is a capture.
             alias = node.child_by_field_name("alias")
@@ -394,21 +505,48 @@ def collect_scopes(root: Any, import_bindings: ImportBindings, name_of: NameOf) 
                 binder = _value_binder(node.named_children[0], scope, handed_over=True)
             for name in _target_names(alias):
                 scope.bind(name, binder)
+            attribute_binds.extend((scope, name, attr) for name, attr in _attribute_targets(alias))
         elif kind == "delete_statement":
             for child in node.named_children:
                 for name in _target_names(child):
                     scope.bind(name, _VALUE)
+                # `del K.name`: the class has the name no longer, whatever its body says.
+                attribute_binds.extend((scope, name, attr) for name, attr in _attribute_targets(child))
         elif kind == "case_clause":
             for child in node.named_children:
                 if child.type == "case_pattern":
                     for name in _pattern_captures(child):
                         scope.bind(name, _VALUE)
+        elif kind == "type_alias_statement" and scope.kind == "class":
+            # `type step = int` in a class body binds `step` there, over a
+            # `def step` written before it. Kept for the class alone (#73).
+            alias = node.child_by_field_name("left")
+            while alias is not None and alias.type != "identifier":
+                alias = next(iter(alias.named_children), None)
+            if alias is not None:
+                conditional.setdefault(id(scope), set()).add(_text(alias))
         for child in node.children:
             visit(child, scope)
 
     visit(root, module)
     _relocate_declarations(scopes, module)
-    return ScopeTable(module, call_scope, definitions)
+    # `self.name = ...`: an attribute set on a name that is a method's instance
+    # parameter is an instance attribute of that method's class. Read after the
+    # declarations have moved, so the name is looked up where it is bound.
+    # `cls.name = ...` in a class method, and `K.name = ...` where `K` is a
+    # class statement of this file, set the name on a CLASS: on `K`, or on the
+    # class the method is written in or one derived from it.
+    instance_binds: dict[int, set[str]] = {}
+    class_binds: dict[int, set[str]] = {}
+    for scope, name, attr in attribute_binds:
+        home = resolving_scope(scope, name)
+        for binder in home.binders[name] if home is not None else ():
+            if binder.instance_of is not None:
+                instance_binds.setdefault(id(binder.instance_of), set()).add(attr)
+            on_class = binder.class_of if binder.class_of is not None else class_body.get(id(binder))
+            if on_class is not None:
+                class_binds.setdefault(id(on_class), set()).add(attr)
+    return ScopeTable(module, call_scope, definitions, class_scope, instance_binds, class_binds, conditional)
 
 
 def _relocate_declarations(scopes: list[PyScope], module: PyScope) -> None:
@@ -553,6 +691,36 @@ def stated_receiver(node: Any, scope: PyScope) -> Receiver | None:
         found = _outcome(home.binders[name])
         if found.kind in ("def", "symbol"):
             return Receiver(found)
+        (only,) = home.binders[name] if len(home.binders[name]) == 1 else (None,)
+        if only is not None and only.instance_of is not None:
+            # A method's first parameter, bound nowhere else: an instance of
+            # the class the method is written in (#73).
+            return Receiver(_class_of(only.instance_of), walk="self")
         return _held_by(home.binders[name])
+    if scope.parent is not None and _is_bare_super(node, scope):
+        return Receiver(_class_of(scope.parent), walk="super")
     origin = _value_origin(node)
     return _origin_receiver(*origin, scope) if origin is not None else None
+
+
+def _class_of(class_scope: PyScope) -> Resolution:
+    """The class whose body `class_scope` is, as a bare name in the file denotes it."""
+    parent = class_scope.parent
+    return Resolution("def", qualname=class_scope.qualname, module_level=parent is not None and parent.kind == "module")
+
+
+def _is_bare_super(node: Any, scope: PyScope) -> bool:
+    """`super()` with no argument, written directly in a method, `super` being the builtin.
+
+    With arguments the class is whatever they say. In a lambda, a nested
+    function or a comprehension inside the method the call sits in another
+    scope, and is left alone.
+    """
+    if node is None or node.type != "call" or _text(node.child_by_field_name("function")) != "super":
+        return False
+    arguments = node.child_by_field_name("arguments")
+    if arguments is None or any(child.type != "comment" for child in arguments.named_children):
+        return False
+    if scope.kind != "function" or scope.parent is None or scope.parent.kind != "class":
+        return False
+    return resolve(scope, "super").kind == "none" and not _module_of(scope).star_import

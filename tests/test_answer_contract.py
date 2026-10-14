@@ -222,6 +222,35 @@ def test_binding_a_member_call_by_name_is_declared_on_every_python_calls_answer(
     assert imports is None or BY_NAME_CODE not in {c["code"] for c in imports["caveats"]}
 
 
+ENCLOSING_CLASS_CODE = "python-self-call-bound-for-enclosing-class"
+
+
+def test_binding_self_for_the_enclosing_class_is_declared_on_every_python_calls_answer():
+    """Declared with #73, which binds `self.m()` and `super().m()` to the
+    method that runs for an object of the enclosing class itself.
+
+    An override in a subclass, and what `super()` reaches when a subclass adds
+    another base, are not listed: a MISSING callee in a non-empty answer at
+    decision_grade, which no ratio can see. A scope disclosure, like the cap's.
+    """
+    entry = {e["code"]: e for e in active_caveats()}[ENCLOSING_CLASS_CODE]
+    assert entry["relations"] == ("calls",)
+    assert entry["languages"] == ("python",)
+    assert not entry.get("only_when_empty")
+
+    g = _graph_ratio(".py", 10, 0)
+    for total in (0, 3):
+        block = build_answer_block(g, relations=("calls",), languages=["python"], total=total)
+        assert ENCLOSING_CLASS_CODE in {c["code"] for c in block["caveats"]}
+
+    ts = build_answer_block(
+        _graph_ratio(".ts", 10, 0), relations=("calls",), languages=["typescript"], total=3
+    )
+    assert ENCLOSING_CLASS_CODE not in {c["code"] for c in ts["caveats"]}
+    imports = build_answer_block(g, relations=("imports",), languages=["python"], total=3)
+    assert imports is None or ENCLOSING_CLASS_CODE not in {c["code"] for c in imports["caveats"]}
+
+
 def test_scoped_cells_ignore_other_languages():
     """The firescraper regression: healthy python must not mask degraded ts."""
     g = _merged(_graph_ratio(".py", 9, 1), _graph_ratio(".ts", 1, 9))
@@ -319,6 +348,9 @@ def test_registry_initial_entries():
         # #79, declared 2026-10-13: the same pass, under the cap. A member call
         # whose receiver the source does not state is bound by its name.
         "python-member-call-bound-by-name",
+        # #73: `self.m()` and `super().m()` are bound for an object of the
+        # enclosing class itself; what a subclass makes them reach is not listed.
+        "python-self-call-bound-for-enclosing-class",
         # Channel round 317, declared 2026-10-10: the matcher's pick between
         # spellings. Conditional, so it is on an answer only where that pick
         # was made.

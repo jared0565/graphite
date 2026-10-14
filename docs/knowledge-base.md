@@ -148,15 +148,18 @@ upgrades; re-read them from the new graph, or key on paths and qualified
 names (`graphite query "callers Worker.run"` resolves a qualname).
 
 **`callers` or `impact` on a Python method misses a caller that calls it as
-`self.m()`, `super().m()` or `obj.m()`, and the answer still says
-`decision_grade`.** → Member calls are dispatched by method name. When more
-than three methods of that name are defined in the caller's file and the
-files it imports, the call gets no edge, and the dropped site also leaves
-the ratio. Since Python methods got their own nodes, common names (`__init__`,
+`obj.m()`, and the answer still says `decision_grade`.** → A member call is
+dispatched by method name unless the source states the class. When more than
+three methods of that name are defined in the caller's file and the files it
+imports, the call gets no edge, and the dropped site also leaves the ratio.
+Since Python methods got their own nodes, common names (`__init__`,
 `get_queryset`, `to_dict`) hit this more often. The answer's caveats list
 `python-member-call-over-dispatch-cap`. → Confirm with grep for `.m(`. File
 input was unaffected where measured: on graphite and on Django, no file's
-`impact <file>` result changed. Class-aware dispatch is #73.
+`impact <file>` result changed. Up to 1.2.1 this was every `self.m()` and
+`super().m()` as well. From the release that follows, those two are bound by
+class where the classes say which method runs (#73, the entry after next),
+and come here only where they do not.
 
 **`callers` on a Python method lists a function that calls another class's
 method of the same name, and the answer says `decision_grade`.** → A member
@@ -164,14 +167,54 @@ call is bound by the method's NAME unless the source states what it is called
 on: to every method of that name, up to three, in the caller's file and the
 files it imports. Each such edge counts as bound, so the ratio cannot see
 it. The answer's caveats list `python-member-call-bound-by-name`. → Read the
-caller's line. Still bound by name: a parameter, `self`, `super()`, an
-attribute, what another call returns, a method the class inherits. Bound by
+caller's line. Still bound by name: a parameter, an attribute, what another
+call returns, a method the class inherits. For `self` and `super()` see the
+next entry. Bound by
 what the receiver is, from the release that follows 1.2.1: a class called to
 build the object (`Beta().m()`), the class itself (`Beta.m()`), a local name
 bound only from such a call; and a literal, `open(...)` and other builtins
 that return a builtin type, or a local bound only from those, which get no
 edge. Before that release `f.read()` on an opened file was a call to the
 repository's `read` method wherever only one was in reach (#79).
+
+**`callers` on a Python method misses a `self.m()` or `super().m()` written
+in a base class, and the answer says `decision_grade`.** → From the release
+that follows 1.2.1 a call on `self` or on a bare `super()` is bound to the
+method Python runs for an object of the class the call is WRITTEN in: the
+first `m` in that class's linearisation. For an object of a subclass,
+`self.m()` runs the subclass's override, and `super().m()` can reach a class
+the subclass added to its bases. Those edges are not in the graph. The
+answer's caveats list `python-self-call-bound-for-enclosing-class`. → For an
+override `Sub.m`, ask `callers` of the `m` it overrides as well: a `self.m()`
+bound to `Base.m` is a call that runs `Sub.m` for a `Sub`. Before that
+release every such call was bound by name: `super().__init__()` was a call
+to the `__init__` it is written in, and to nothing once more than three
+classes in reach had one (#73).
+
+**A `self.m()` or `super().m()` is still bound by name, to several methods
+or to none.** → The binding is by class only where the classes say which
+method runs. It falls back to the name (`python-member-call-bound-by-name`,
+and `python-member-call-over-dispatch-cap` over three methods) where a base
+on the way is not a class graphite reads (a builtin, a
+dotted base such as `models.Model`, a name imported through a re-export);
+where a class on the way is decorated, is made with a keyword
+(`metaclass=...`), has its name bound a second time (`C = deco(C)`, or the
+class written twice under an `if`), or sits under an `__init_subclass__`;
+where `m` is set on a class from outside its body (`K.m = ...`,
+`cls.m = ...` in a class method) or assigned on the instance
+(`self.m = ...`); and where the class that would provide `m` binds it some
+other way than one `def` written straight in its body. → Nothing to work
+around: these are the cases where the `def`s do not decide. Read the line.
+
+**A `self.m()` bound by class points at a method that does not run.** → The
+binding reads class statements and the assignments written on `self`, `cls`
+and a class's own name. It does not see `setattr`, an alias (`me = self`,
+then `me.m = f`), an assignment made in another file, a decorator on a method
+that replaces it or hands it another object, a class decorator that returns a
+class with other bases, or anything a base that was not read does to its
+subclasses (a metaclass or an `__init_subclass__` behind `models.Model` can
+replace a class's own `def`). → Where a class is patched at run time, read
+the patching code; the graph holds what the class statements say (#73).
 
 **`callers Verdict` lists the callers of a function `verdict`.** → Matching
 ignores case, and among the matches a shallower path wins before exact case
