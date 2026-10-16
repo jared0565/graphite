@@ -100,6 +100,22 @@ checkout and an installed wheel, say), and each keeps its own reachable
 partition; `rm -r .cache/graphite` is always safe — the next build
 re-extracts.
 
+**From a subfolder every query says `graph unavailable: graph_missing`,
+`check .` says the graph is stale, and `build .` says "nested Git roots are
+unsupported".** → The CLI took the directory it was typed in for the
+repository (#81; the agent hooks had the same defect, #80, fixed in 1.2.1).
+Each such run also left a `.graphite/` in the subfolder, and the refused
+build a `.cache/graphite/`. → Fixed in the release that follows 1.2.1: reads
+follow the repository root, and a build or a check of a path below it stops
+before writing anything and names the root. On older versions run graphite
+from the root. The leftover `.graphite/` and `.cache/` in subfolders are no
+longer written or read by any of those commands, and can be deleted.
+
+**`graphite build <path>` exits with "`<path>` is below the root of its Git
+repository".** → A repository is built and checked from its root, and the
+path given lies inside one. → Run the command from the directory the message
+names. A folder that should be a project of its own needs its own `.git`.
+
 ## Reading answers
 
 **`callers X` returns nothing, and the aggregate health says `healthy:

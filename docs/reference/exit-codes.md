@@ -16,8 +16,8 @@ never on the exit code.
 
 | Command | 0 | 1 | Other |
 |---|---|---|---|
-| `scan`, `build`, `report` | completed | error | `build` under the daemon (`GRAPHITE_BUILD_LOCK_REPORT_REFUSAL` set): `75` when another builder holds the lock (`EX_TEMPFAIL`); outside the daemon a held lock is a skipped build and exits 0 |
-| `check` | graph is fresh | graph is stale; `--json` names the reason (`engine_changed` vs source changes) | |
+| `scan`, `build`, `report` | completed | error, including a path below a repository's root | `build` under the daemon (`GRAPHITE_BUILD_LOCK_REPORT_REFUSAL` set): `75` when another builder holds the lock (`EX_TEMPFAIL`); outside the daemon a held lock is a skipped build and exits 0 |
+| `check` | graph is fresh | graph is stale; `--json` names the reason (`engine_changed` vs source changes, or `below_repository_root` for a path below a repository's root, which is not checked) | |
 | `validate` | `graph.json` is valid | integrity violation | |
 | `query`, `search`, `capabilities` | executed (including zero matches) | — | not-found and plan errors are reported inside the JSON with exit 0 |
 | `impact`, `context` | executed | input could not be resolved | |

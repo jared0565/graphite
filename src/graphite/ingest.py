@@ -10,6 +10,7 @@ from typing import Callable, Iterable
 from .cache import file_hash
 from .config import Config
 from .git import GitError, GitRunner
+from .hook_entry import MARKER as _SETUP_MARKER
 
 
 MAX_GIT_FILE_RECORDS = 100_000
@@ -168,6 +169,33 @@ def enclosing_git_root(path: Path) -> Path | None:
         if os.path.lexists(directory / ".git"):
             return directory
     return None
+
+
+def repository_root(directory: Path) -> Path:
+    """The repository a session or a command in `directory` is about.
+
+    Taking the directory itself for the root made the graph "missing" one
+    `cd` below it: for the agent hooks (#80) and for every read command of
+    the CLI (#81). The repository is the nearest directory upward that holds
+    `.git`, the one place a build of it can run (`enclosing_git_root`).
+
+    That directory is used only where graphite is already set up: it has a
+    graph, or the `GRAPHITE.md` that `init` commits. Anywhere else
+    `directory` stands, as it did before, so a session that wanders into a
+    subfolder of some other checkout does not hand the daemon that whole
+    project to build.
+
+    Never raises: a directory that cannot be read stands for itself.
+    """
+    try:
+        top = enclosing_git_root(directory)
+        if top is None or top == directory:
+            return directory
+        if (top / "graph-out" / "graph.json").is_file() or (top / _SETUP_MARKER).is_file():
+            return top
+    except OSError:
+        pass
+    return directory
 
 
 def _git_ls_files(

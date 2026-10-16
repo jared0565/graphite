@@ -53,7 +53,7 @@ from .graph_io import MAX_GRAPH_BYTES, GraphReadError, load_validated_graph_bund
 from .health import persisted_resolution, ratio_percent, resolution_health
 from . import hookinstall
 from .incident_ledger import record_incident, repo_ledger_dir
-from .ingest import collect_files
+from .ingest import collect_files, enclosing_git_root, repository_root
 from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
 from .listing import listing_lines
@@ -261,6 +261,9 @@ def _scan(args: argparse.Namespace, cfg: Config) -> tuple[dict[str, Any], list[A
     if not root.exists():
         print(f"[graphite] path not found: {root}", file=sys.stderr)
         raise SystemExit(1)
+    top = _root_above(root)
+    if top is not None:
+        raise ValueError(_below_a_root(root, top))
 
     start = time.time()
     entries = collect_files(root, cfg)
@@ -391,13 +394,17 @@ def _build_project(path: Path, cfg: Config) -> None:
     _report(cfg, manifest, graph_data, clusters, analysis)
 
 
-def _load_graph(path: Path, *, root: Path | None = None) -> Any:
+def _load_graph(path: Path, *, root: Path | None = None, ledger_root: Path | None = None) -> Any:
     selected_root = (root or Path.cwd()).resolve()
     try:
         _, graph = load_validated_graph_bundle(path, root=selected_root)
     except GraphReadError as exc:
         record_incident(
-            repo_ledger_dir(selected_root),
+            # Where a graph is looked for and where a failure to read it is
+            # written down are two questions (#81): a graph named on the
+            # command line is checked against the working directory, and
+            # the record still belongs to the repository.
+            repo_ledger_dir(ledger_root or selected_root),
             klass="build",
             code="graph_load_failed",
             subject="graph-out/graph.json",
@@ -407,13 +414,112 @@ def _load_graph(path: Path, *, root: Path | None = None) -> Any:
     return graph
 
 
+class _LeftOut(str):
+    """The default of `--graph-json`, as a type of its own (#81).
+
+    The option has always shown `graph-out/graph.json` as its default, and
+    `docs/reference/cli.md` is a stable surface, so that text stays. What
+    a plain string cannot say is whether the caller typed it. Left out,
+    the path is the repository's; typed, it is a path from the working
+    directory, as it always was.
+    """
+
+
+_DEFAULT_GRAPH_JSON = _LeftOut("graph-out/graph.json")
+
+
+def _named_graph(args: argparse.Namespace) -> str | None:
+    """The graph the caller named with `--graph-json`, or None if it was left out."""
+    given = getattr(args, "graph_json", None)
+    return None if given is None or isinstance(given, _LeftOut) else given
+
+
+def _cli_root() -> Path:
+    """The repository a command typed in this directory is about (#81).
+
+    The working directory was taken for it. One `cd` below the root every
+    read reported the graph missing, and wrote its ledger into the subfolder.
+    """
+    return repository_root(Path.cwd().resolve())
+
+
+def _load_cli_graph(args: argparse.Namespace) -> Any:
+    """The graph a read command answers from.
+
+    No `--graph-json`: the repository's own graph, wherever below its root
+    the command is typed. A path that IS given means what it always meant,
+    relative to the working directory and checked against it; quietly
+    reading the root's graph instead would answer from a file the caller
+    did not name. Either way a graph that cannot be read is recorded in
+    the repository's ledger, never in a folder below its root.
+    """
+    given = _named_graph(args)
+    root = _cli_root()
+    if given is None:
+        return _load_graph(Path(_DEFAULT_GRAPH_JSON), root=root)
+    return _load_graph(Path(given), root=Path.cwd(), ledger_root=root)
+
+
+def _file_arguments(args: argparse.Namespace) -> list[str]:
+    """The arguments of `context` and `impact`, as the graph names files.
+
+    The graph names a file by its path from the root. A shell names it
+    from the working directory: `core.py` typed in `app/` is `app/core.py`,
+    and `./app/core.py` typed at the root is `app/core.py`. An argument
+    that names a file that way is turned into its path from the root.
+    Anything else is left as typed: a path from the root typed below it,
+    which is what worked before, and a node id or a name. Where both
+    readings name a file, the working directory's wins, as in a shell.
+
+    The path is worked out from the text typed. No link is followed and
+    no spelling is taken from the disk, so the file asked about is the
+    one named, and an argument that worked before is handed on as it was.
+
+    Beside `--graph-json` the arguments are left as typed. A graph that
+    is named is read as it always was, and so are the files asked of it:
+    its paths are from wherever it was built, which is not known here.
+    """
+    files = list(args.files)
+    if _named_graph(args) is not None:
+        return files
+    cwd = Path.cwd().resolve()
+    root = repository_root(cwd)
+    mapped: list[str] = []
+    for argument in files:
+        try:
+            candidate = Path(os.path.normpath(cwd / argument))
+            if candidate.is_file():
+                mapped.append(candidate.relative_to(root).as_posix())
+                continue
+        except (OSError, ValueError):
+            pass
+        mapped.append(argument)
+    return mapped
+
+
+def _root_above(directory: Path) -> Path | None:
+    """The repository root `directory` lies BELOW, or None."""
+    top = enclosing_git_root(directory)
+    return top if top is not None and top != directory else None
+
+
+def _below_a_root(directory: Path, top: Path) -> str:
+    """What `build` and `check` say when the path they are given is below a
+    repository's root. They name that path, so they do not follow the root;
+    they say where it is."""
+    return (
+        f"{directory} is below the root of its Git repository; graphite builds and "
+        f"checks a repository from its root: run it from {top}"
+    )
+
+
 def _record_canonical_usage(cmd: str, result: Any, started: float) -> None:
     """Best-effort usage recording for the savings display; never fatal."""
     try:
         from . import usage_ledger
 
         usage_ledger.record_usage(
-            Path.cwd(),
+            _cli_root(),
             cmd=cmd,
             wall_ms=int((time.perf_counter() - started) * 1000),
             result=result,
@@ -461,7 +567,7 @@ def _record_inconclusive(subject: str, result: Any) -> None:
         detail = ", ".join(details)
 
         record_incident(
-            repo_ledger_dir(Path.cwd()),
+            repo_ledger_dir(_cli_root()),
             klass="query",
             code="query_inconclusive",
             subject=subject,
@@ -603,6 +709,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> int:
+    # Refused here, before the lock below makes a cache directory in a folder
+    # no build can run in (#81), and makes that folder if it is not there.
+    # `_scan` refuses again for `scan`, which takes no lock.
+    asked = Path(args.path).resolve()
+    top = _root_above(asked)
+    if top is not None:
+        raise ValueError(_below_a_root(asked, top))
     if getattr(args, "detach", False):
         root = Path(args.path).resolve()
         # Deliberately omits --detach: the child must build, not re-spawn.
@@ -642,6 +755,24 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
+    # Below a repository's root there is no graph to be fresh or stale, and
+    # "stale (missing manifest)" sends the caller to a build that is refused
+    # (#81). JSON callers still get JSON, with a reason of its own.
+    top = _root_above(root)
+    if top is not None:
+        if not args.json:
+            raise ValueError(_below_a_root(root, top))
+        status: dict[str, Any] = {
+            "stale": True,
+            "reason": "below_repository_root",
+            "repository_root": top.as_posix(),
+            "added": [],
+            "changed": [],
+            "removed": [],
+            "resolution_health": None,
+        }
+        print(json.dumps(status, ensure_ascii=False, indent=2))
+        return 1
     # Anchored to the repo (#26): otherwise `check <path>` compared the CWD's
     # graph against the target's files, which reported every file in the
     # current repo as "removed".
@@ -721,7 +852,10 @@ def _incidents_ledger_dir(args: argparse.Namespace) -> Path:
         else:
             base = default_projects_root().resolve()  # same import doctor uses
         return base / ".graphite-daemon"
-    return repo_ledger_dir(Path(args.path).resolve())
+    # The ledger of the repository the path is in (#81). A read typed below
+    # the root records at the root, so a listing asked for in the same folder
+    # has to look there; the folder's own ledger is one nothing writes.
+    return repo_ledger_dir(repository_root(Path(args.path).resolve()))
 
 
 def cmd_incidents_list(args: argparse.Namespace) -> int:
@@ -1111,7 +1245,9 @@ def cmd_audit_replacement(args: argparse.Namespace) -> int:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    graph_path = Path(args.graph_json)
+    # As for the reads (#81): left out, it is the repository's own graph.
+    named = _named_graph(args)
+    graph_path = Path(named) if named is not None else _cli_root() / _DEFAULT_GRAPH_JSON
     if not graph_path.exists():
         print(f"[graphite] graph not found: {graph_path}", file=sys.stderr)
         return 1
@@ -1152,7 +1288,7 @@ def cmd_query(args: argparse.Namespace) -> int:
         if args.plan_only or not needs_graph:
             print(json.dumps(translated, ensure_ascii=False, indent=2))
             return 0
-        g = _load_graph(Path(args.graph_json), root=Path.cwd())
+        g = _load_cli_graph(args)
         result = answer_natural(g, args.query)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         # As for a plain query below: the flag decides, error or not (#76).
@@ -1163,7 +1299,7 @@ def cmd_query(args: argparse.Namespace) -> int:
     if args.plan_only:
         print(json.dumps(plan_preview(args.query), ensure_ascii=False, indent=2))
         return 0
-    g = _load_graph(Path(args.graph_json), root=Path.cwd())
+    g = _load_cli_graph(args)
     result = query(g, args.query)
     if args.show_plan:
         plan = build_plan(args.query)
@@ -1180,7 +1316,7 @@ def cmd_query(args: argparse.Namespace) -> int:
 
 def cmd_search(args: argparse.Namespace) -> int:
     started = time.perf_counter()
-    g = _load_graph(Path(args.graph_json), root=Path.cwd())
+    g = _load_cli_graph(args)
     result = search_graph(g, args.text, limit=args.limit)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -1435,7 +1571,7 @@ def cmd_savings(args: argparse.Namespace) -> int:
     from . import savings as savings_model
     from . import usage_ledger
 
-    root = Path.cwd()
+    root = _cli_root()
     if args.action in ("on", "off"):
         usage_ledger.set_savings_display(root, args.action == "on")
     if args.action in ("on", "off", "status"):
@@ -1565,8 +1701,8 @@ def _answer_lines(block: dict[str, Any] | None, *, empty: bool) -> list[str]:
 
 def cmd_impact(args: argparse.Namespace) -> int:
     started = time.perf_counter()
-    g = _load_graph(Path(args.graph_json), root=Path.cwd())
-    result = _impact(g, args.files, args.depth)
+    g = _load_cli_graph(args)
+    result = _impact(g, _file_arguments(args), args.depth)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
@@ -1721,8 +1857,8 @@ def cmd_review_changes(args: argparse.Namespace) -> int:
 
 def cmd_context(args: argparse.Namespace) -> int:
     started = time.perf_counter()
-    g = _load_graph(Path(args.graph_json), root=Path.cwd())
-    result = build_context(g, args.files, depth=args.depth, neighbor_limit=args.neighbor_limit)
+    g = _load_cli_graph(args)
+    result = build_context(g, _file_arguments(args), depth=args.depth, neighbor_limit=args.neighbor_limit)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
@@ -3064,7 +3200,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_audit_replacement.set_defaults(func=cmd_audit_replacement)
 
     p_validate = sub.add_parser("validate", help="Validate graph.json integrity")
-    p_validate.add_argument("--graph-json", default="graph-out/graph.json", help="Path to graph.json")
+    p_validate.add_argument(
+        "--graph-json",
+        default=_DEFAULT_GRAPH_JSON,
+        help="Path to graph.json",
+    )
     p_validate.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_validate.set_defaults(func=cmd_validate)
     verb_lines = []
@@ -3083,7 +3223,11 @@ def build_parser() -> argparse.ArgumentParser:
         + " (fixed deterministic grammar; list it via graphite capabilities --json)",
     )
     p_query.add_argument("query", help="Query string, e.g. 'depends-on db.ts'")
-    p_query.add_argument("--graph-json", default="graph-out/graph.json", help="Path to graph.json")
+    p_query.add_argument(
+        "--graph-json",
+        default=_DEFAULT_GRAPH_JSON,
+        help="Path to graph.json",
+    )
     p_query.add_argument(
         "--show-plan", action="store_true",
         help="Include the canonical query plan in the JSON output",
@@ -3100,7 +3244,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_search = sub.add_parser("search", help="Deterministic ranked node search by symbol, path, or concept")
     p_search.add_argument("text", help="Symbol, path, or concept to search for")
-    p_search.add_argument("--graph-json", default="graph-out/graph.json", help="Path to graph.json")
+    p_search.add_argument(
+        "--graph-json",
+        default=_DEFAULT_GRAPH_JSON,
+        help="Path to graph.json",
+    )
     p_search.add_argument("--limit", type=int, default=DEFAULT_SEARCH_LIMIT, help="Maximum results")
     p_search.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_search.set_defaults(func=cmd_search)
@@ -3171,7 +3319,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_impact = sub.add_parser("impact", help="Suggest impacted files and tests for changed files")
     p_impact.add_argument("files", nargs="+", help="Changed file paths or graph node fragments")
-    p_impact.add_argument("--graph-json", default="graph-out/graph.json", help="Path to graph.json")
+    p_impact.add_argument(
+        "--graph-json",
+        default=_DEFAULT_GRAPH_JSON,
+        help="Path to graph.json",
+    )
     p_impact.add_argument("--depth", type=int, default=2, help="Reverse dependency traversal depth")
     p_impact.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_impact.set_defaults(func=cmd_impact)
@@ -3213,7 +3365,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_context = sub.add_parser("context", help="Print compact graph context for files or nodes")
     p_context.add_argument("files", nargs="+", help="File paths, node ids, or graph node fragments")
-    p_context.add_argument("--graph-json", default="graph-out/graph.json", help="Path to graph.json")
+    p_context.add_argument(
+        "--graph-json",
+        default=_DEFAULT_GRAPH_JSON,
+        help="Path to graph.json",
+    )
     p_context.add_argument("--depth", type=int, default=2, help="Reverse dependency impact depth")
     p_context.add_argument("--neighbor-limit", type=int, default=20, help="Maximum direct neighbors and community peers per matched node")
     p_context.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
@@ -3406,8 +3562,17 @@ def main(argv: list[str] | None = None) -> int:
     # `agent-hook` because it marks activation itself with the real agent name.
     # Daemon-spawned builds are excluded inside mark_active via
     # GRAPHITE_DAEMON_CHILD, without which activation would never expire.
+    #
+    # What is registered is the REPOSITORY the command is typed in, not the
+    # directory (#81): its root where graphite is set up there, and nothing at
+    # all for a folder below some other checkout's root. No build can run
+    # below a root, so the daemon would fail on such a marker at every
+    # discovery cycle for as long as it lived. `agent_hooks._activate` has
+    # made the same two choices since #80.
     if args.command not in _ACTIVATION_EXEMPT_COMMANDS and not _is_scratch_workspace(Path.cwd()):
-        activation.mark_active(Path.cwd(), "cli")
+        opened = repository_root(Path.cwd())
+        if _root_above(opened) is None:
+            activation.mark_active(opened, "cli")
 
     try:
         return int(args.func(args) or 0)

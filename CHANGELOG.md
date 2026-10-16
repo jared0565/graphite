@@ -61,6 +61,16 @@ These are fields added to a JSON output that carries `schema_version`, which
 `docs/agent-integration.md` and in the `query-result` schema that said a
 `no_path` is not graded are replaced with what it now carries.
 
+**`check --json` says when it was asked about a folder below a repository's
+root (#81).** The answer for such a folder, below the root of any Git
+repository whether graphite is set up in it or not, is `"reason":
+"below_repository_root"`, with one new field, `"repository_root"`: the
+directory to run it from. `stale` is `true` and the exit status is 1, as they
+were for that folder, and `added`, `changed`, `removed` and
+`resolution_health` are still there. `manifest` is not: it belongs to the
+reason `missing manifest`, which this answer replaces for such a folder, and
+no other reason carries it. The fix this belongs to is below.
+
 ### Fixed
 
 **The strict graph-first hook sees a search behind a newline, a wrapper, a
@@ -418,6 +428,77 @@ Also in the test suite: classes made at random, some behind names graphite
 cannot read, some given a method by a decorator, a metaclass, a hook or an
 assignment, are run by Python itself, and each call graphite binds by class
 is held against the method that ran.
+
+**The CLI works from a folder below the repository root (#81).** A command
+took the directory it was typed in for the repository. One `cd` below the
+root, with the graph fresh at the root:
+
+- `query`, `search`, `context` and `impact` exited 1 with `graph unavailable:
+  graph_missing`, and `validate` with `graph not found`.
+- Each of those runs wrote a `.graphite/local/` ledger into the subfolder and
+  registered the subfolder as an open project, which no build can run in (the
+  failure 1.2.1 describes for the hooks).
+- `check .` said the graph was stale (`missing manifest`), which sends the
+  caller to a build. `build .` made `.cache/graphite/` in the subfolder and
+  was then refused with "nested Git roots are unsupported".
+
+The repository is now found by the rule the agent hooks have used since
+1.2.1 (#80): the nearest directory upward that holds `.git`, taken only where
+graphite is set up there (a `graph-out/graph.json`, or the `GRAPHITE.md` that
+`init` commits). The rule is in one place, `ingest.repository_root`, and the
+hooks call it. In a folder of no checkout, and below a checkout graphite is
+not set up in, a read uses its own directory, as it did. A repository inside
+the repository, with its own `.git`, stays its own root.
+
+Below the root of a repository that is set up:
+
+- **Reads follow the root.** `query`, `search`, `context`, `impact`,
+  `validate` and `savings` answer from the repository's graph and say what
+  they say at the root.
+- **`--graph-json` left out is the repository's graph.** The option shows the
+  default it always showed, `graph-out/graph.json`, and
+  `docs/reference/cli.md` does not change. What changes is where that path is
+  looked for when the option is left out: at the repository's root, not in the
+  directory the command is typed in. Typed out, the option means what it
+  meant: a path from the directory it is typed in, which must lie inside that
+  directory. The root's graph is never read in place of a file that was named.
+- **A file argument is read the way a shell reads it.** `context core.py`
+  typed in `app/` is `app/core.py`. A path from the root typed below it
+  (`context app/core.py` in `app/`) still works, and so does a node id or a
+  name; where both readings name a file, the one from the working directory
+  wins. Only a file is read this way, and from the text typed: no link is
+  followed. Beside `--graph-json` the arguments are left as typed.
+- **What a read records goes to the repository**: the usage ledger and the
+  `query_inconclusive` and `graph_load_failed` incidents. `incidents list`,
+  `ack` and `resolve` work on the ledger of the repository their path is in.
+  A `.graphite/` that these commands left in a subfolder under an earlier
+  version is no longer written or read by them, and can be deleted.
+- **A run registers the repository**, not the subfolder. Below a checkout
+  graphite is not set up in, a run now registers nothing, where it registered
+  a folder no build can run in.
+
+**`build`, `report`, `scan` and `check` name a path and do not follow the
+root.** Given a path below the root of any Git repository, set up for graphite
+or not, they stop before anything is written and say where the root is:
+"`<path>` is below the root of its Git repository; graphite builds and checks
+a repository from its root: run it from `<root>`". `check --json` still
+answers in JSON (see Added). Below a checkout graphite is not set up in, this
+too is new: `check .` used to say the graph was stale (`missing manifest`),
+and `build .` left `.cache/graphite/` behind before it was refused.
+
+One thing changes at the root as well, because a file argument is read by one
+rule wherever it is typed: `context ./app/core.py`, and `context` given a
+whole path, did not find the file and now do. `impact` likewise.
+
+The agent hooks told a session below the root to run graphite from the root,
+every command of it. They now say that queries work from where the session
+is, and that a build or a check is run from the root.
+
+Not changed, and still wrong below a root: `doctor` given such a folder
+reports on the folder ("Graph artifact is missing", with `graphite build .`
+as the remedy), and its incident line reads the folder's own ledger, which
+nothing writes any more. `watch`, `review-changes` and the MCP server take
+the path or the directory they are given, as before.
 
 ## [1.2.1] — 2026-10-11
 

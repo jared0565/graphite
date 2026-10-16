@@ -21,9 +21,8 @@ from .config import Config
 from .freshness import check_graph_freshness
 from .graph_io import load_validated_graph_bundle
 from .health import _edge_language, is_placeholder, persisted_resolution
-from .hook_entry import MARKER as _SETUP_MARKER
 from .incident_ledger import record_incident, repo_ledger_dir
-from .ingest import enclosing_git_root
+from .ingest import enclosing_git_root, repository_root
 
 SESSION_CONTRACT = (
     "graphite-first: this repo uses a shared code graph. For cross-file questions "
@@ -48,35 +47,28 @@ def _repo_root(cwd: Path) -> Path:
     """The repository a session in `cwd` belongs to: where its graph is.
 
     Taking the session's directory for the root made the graph "missing" one
-    `cd` below it, and switched the gate off there (#80). The repository is the
-    nearest directory upward that holds `.git`, the one place a build of it can
-    run (`ingest.enclosing_git_root`).
-
-    That directory is used only where graphite is already set up: it has a
-    graph, or the `GRAPHITE.md` that `init` commits. Anywhere else `cwd` stands,
-    as it did before, so a session that wanders into a subfolder of some other
-    checkout does not hand the daemon that whole project to build.
+    `cd` below it, and switched the gate off there (#80). The rule is
+    `ingest.repository_root`, which the CLI uses too (#81): one definition,
+    so a hook and the command it tells the agent to run agree on the root.
     """
-    top = enclosing_git_root(cwd)
-    if top is None or top == cwd:
-        return cwd
-    if (top / "graph-out" / "graph.json").is_file() or (top / _SETUP_MARKER).is_file():
-        return top
-    return cwd
+    return repository_root(cwd)
 
 
 def _where_to_run(root: Path, cwd: Path) -> str:
     """One sentence for a session below the repository root, else nothing.
 
-    The commands these hooks print are run where the agent is, and the CLI
-    looks for the graph in its own working directory. Below the root `query`,
-    `context` and `check .` report the graph missing and `build .` is refused,
-    so a status or a refusal that names no directory sends the agent to a
-    command that fails.
+    The commands these hooks print are run where the agent is. The reads
+    (`query`, `search`, `context`, `impact`) find the repository's graph from
+    below its root (#81). `build .` and `check .` name the directory they are
+    typed in and are refused there, so a status that says "rebuild" and names
+    no directory sends the agent to a command that fails.
     """
     if cwd == root:
         return ""
-    return f" This session is below the repository root: run graphite from `{root}`."
+    return (
+        " This session is below the repository root: queries work from here;"
+        f" to build or check the graph, run graphite from `{root}`."
+    )
 
 
 def _activate(root: Path) -> None:

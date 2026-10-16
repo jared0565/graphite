@@ -68,6 +68,13 @@ engine. A moved file is parsed again where it now is.
 (files added, changed, removed) or `engine_changed` (graphite itself was
 upgraded). `--ignore-engine` reports source drift only.
 
+**From a subfolder.** `build`, `report`, `scan` and `check` name the
+directory to work on, and a repository is built and checked from its root.
+Given a directory below the root of a Git repository (the nearest directory
+upward that holds `.git`, whether graphite is set up there or not) they stop
+before writing anything and say where the root is. The questions in the next
+section are different: they can be asked from anywhere in the repository.
+
 ## 3. Ask questions
 
 ```bash
@@ -105,6 +112,19 @@ Three habits make the answers trustworthy:
 3. **Use the candidates.** A not-found error includes `candidates` — close
    matches by id, name or path suffix. Retry with one of them rather than
    inventing an identifier.
+
+**From a subfolder.** `query`, `search`, `context`, `impact` and `validate`
+answer from the repository's graph wherever below its root they are typed,
+and say what they say at the root. A file is named the way a shell names it:
+`graphite context core.py` typed in `app/` is `app/core.py`, and a path from
+the root (`app/core.py` typed in `app/`) still works. `--graph-json` is the
+exception by design: a graph you name is looked for from the directory you
+are in, and the files you ask of it are taken as typed. What these commands
+record (usage, incidents) goes to the repository's `.graphite/`, and
+`graphite incidents list` reads it from a subfolder too. Here the root is the
+nearest directory upward that holds `.git`, where graphite is set up there (it
+has a graph, or the `GRAPHITE.md` that `init` commits); anywhere else a
+command reads the directory it is typed in, as before.
 
 The [agent integration guide](agent-integration.md) walks the
 discover → search → query → validate workflow and explains resolution
