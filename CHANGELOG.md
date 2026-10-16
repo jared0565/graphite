@@ -15,6 +15,48 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-10-16
+
+A minor release, with a security fix: from a folder below a repository's
+root, the agent hooks of 1.2.1 could take a directory another account made
+for the repository (see Security). Upgrade.
+
+JSON outputs that carry `schema_version` gain fields and codes, which are
+additions under `docs/compatibility.md`: a `no_path` result is graded
+(`answer`, `resolution`, `inconclusive`; #76); `check --json` gains the
+reason `below_repository_root` and the field `repository_root` (#81); and a
+Python `calls` answer may carry the caveats `python-member-call-bound-by-name`
+(#79) and `python-self-call-bound-for-enclosing-class` (#73). `--graph-json`
+left out below a repository root is now looked for at the root, and
+`docs/compatibility.md` records why that is a fix and not a change of
+default. `docs/reference/exit-codes.md` names the new failure and the new
+reason. No field is removed or renamed, `Requires-Dist` and the entry points
+are those of 1.2.1, and `graphite init` writes what it wrote (`DOC_VERSION`
+15).
+
+The graph changes in this release, in its edges only. On this repository,
+measured against the deployed 1.2.1 engine, with the same interpreter, from
+one tree:
+
+- all 9,030 node ids survive, each naming the same definition, file or
+  placeholder, and none is new;
+- `calls` goes from 15,807 to 15,767: 44 call triples are gone and 4 are
+  new. `contains` (6,501), `imports` (2,383) and `inherits` (120) are
+  unchanged, and 24,767 of 24,811 edge triples are unchanged;
+- `analysis` (20 cycles, entry points, god nodes, orphans) is identical, and
+  so is the community count (171);
+- the Python `calls` ratio is 0.976 before and after. The cell counts 40
+  fewer call sites (11,997 where there were 12,037), and 40 fewer bound, so
+  every site that left it had been bound.
+
+Two builds of this tree with either engine are byte-identical (`graph.json`,
+`GRAPH_REPORT.md`, `graph.html`). On a tree where two files of one language
+have the same content, the graph gains the file that had no node, with what
+it defines (#74).
+
+The entries below quote figures measured when each change was made, on
+earlier commits of this tree, so they differ from the ones above.
+
 ### Added
 
 **A "no path" answer is graded (#76).** `reaches` and `path` answer an
