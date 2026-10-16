@@ -8,7 +8,11 @@ fixes are patches. `CHANGELOG.md` names every change to a stable surface.
 
 - **CLI.** Every subcommand and option in `docs/reference/cli.md`. Options and
   subcommands may be added in a minor; removing or renaming one, changing a
-  default, or changing what an option means is a major.
+  default, or changing what an option means is a major. A fix that turns a
+  case that could only fail into an answer, while the option shows and
+  documents the same default, is not a change of default: from 1.3.0,
+  `--graph-json` left out below a repository root is looked for at the
+  root, since graphite builds a repository only from its root (#81).
 - **JSON outputs that carry `schema_version`**: `query`, `search`,
   `capabilities`, `doctor --json`, `check --json`, `validate --json`,
   `daemon-health --json`, `review-changes`. Fields are added in minors. A

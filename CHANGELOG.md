@@ -459,7 +459,8 @@ Below the root of a repository that is set up:
   default it always showed, `graph-out/graph.json`, and
   `docs/reference/cli.md` does not change. What changes is where that path is
   looked for when the option is left out: at the repository's root, not in the
-  directory the command is typed in. Typed out, the option means what it
+  directory the command is typed in. `docs/compatibility.md` now records why
+  that is a fix and not a change of default. Typed out, the option means what it
   meant: a path from the directory it is typed in, which must lie inside that
   directory. The root's graph is never read in place of a file that was named.
 - **A file argument is read the way a shell reads it.** `context core.py`
