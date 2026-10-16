@@ -286,9 +286,10 @@ graphite incidents ack <fingerprint> [path] [-m MESSAGE] [--global] [--daemon-ba
 graphite incidents resolve <fingerprint> [path] [-m MESSAGE] [--global] [--daemon-base BASE] [--state-dir DIR]
 ```
 
-  `path` is the repository, and in a repository graphite is set up in, a
-  folder below its root stands for it: the ledger read is the one at the
-  root, which is where a query typed in a subfolder records (#81).
+  `path` is the repository, and in a repository graphite is set up in, and
+  whose root and `.git` the user owns, a folder below its root stands for
+  it: the ledger read is the one at the root, which is where a query typed
+  in a subfolder records (#81).
 
   `--global` reads the daemon-wide ledger instead of the current repo's; it
   resolves from `--state-dir` (a custom daemon `--state-dir`, taking

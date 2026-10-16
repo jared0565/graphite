@@ -53,7 +53,7 @@ from .graph_io import MAX_GRAPH_BYTES, GraphReadError, load_validated_graph_bund
 from .health import persisted_resolution, ratio_percent, resolution_health
 from . import hookinstall
 from .incident_ledger import record_incident, repo_ledger_dir
-from .ingest import collect_files, enclosing_git_root, repository_root
+from .ingest import collect_files, enclosing_git_root, repository_root, trusted_root
 from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
 from .listing import listing_lines
@@ -506,7 +506,18 @@ def _root_above(directory: Path) -> Path | None:
 def _below_a_root(directory: Path, top: Path) -> str:
     """What `build` and `check` say when the path they are given is below a
     repository's root. They name that path, so they do not follow the root;
-    they say where it is."""
+    they say where it is.
+
+    A `.git` above that the user does not own, or one at a drive or
+    filesystem root, still refuses, as it did before #81, but is not offered
+    as the place to run: whoever made it chose where that would send them
+    (`ingest.trusted_root`)."""
+    if not trusted_root(top):
+        return (
+            f"{directory} is below {top}, which holds .git but is not a repository root "
+            "graphite takes: it is not owned by the current user, or it is a drive or "
+            "filesystem root"
+        )
     return (
         f"{directory} is below the root of its Git repository; graphite builds and "
         f"checks a repository from its root: run it from {top}"
@@ -757,7 +768,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
     # Below a repository's root there is no graph to be fresh or stale, and
     # "stale (missing manifest)" sends the caller to a build that is refused
-    # (#81). JSON callers still get JSON, with a reason of its own.
+    # (#81). JSON callers still get JSON, with a reason of its own. The root
+    # is named only where it is one graphite takes (`_below_a_root`).
     top = _root_above(root)
     if top is not None:
         if not args.json:
@@ -765,7 +777,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         status: dict[str, Any] = {
             "stale": True,
             "reason": "below_repository_root",
-            "repository_root": top.as_posix(),
+            "repository_root": top.as_posix() if trusted_root(top) else None,
             "added": [],
             "changed": [],
             "removed": [],

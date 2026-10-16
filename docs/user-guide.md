@@ -72,8 +72,10 @@ upgraded). `--ignore-engine` reports source drift only.
 directory to work on, and a repository is built and checked from its root.
 Given a directory below the root of a Git repository (the nearest directory
 upward that holds `.git`, whether graphite is set up there or not) they stop
-before writing anything and say where the root is. The questions in the next
-section are different: they can be asked from anywhere in the repository.
+before writing anything and say where the root is. Below a `.git` that is not
+yours, or one at a drive or filesystem root, they stop as well and name no
+place to run. The questions in the next section are different: they can be
+asked from anywhere in the repository.
 
 ## 3. Ask questions
 
@@ -123,8 +125,9 @@ are in, and the files you ask of it are taken as typed. What these commands
 record (usage, incidents) goes to the repository's `.graphite/`, and
 `graphite incidents list` reads it from a subfolder too. Here the root is the
 nearest directory upward that holds `.git`, where graphite is set up there (it
-has a graph, or the `GRAPHITE.md` that `init` commits); anywhere else a
-command reads the directory it is typed in, as before.
+has a graph, or the `GRAPHITE.md` that `init` commits) and where that
+directory and its `.git` are yours, owned by the user graphite runs as;
+anywhere else a command reads the directory it is typed in, as before.
 
 The [agent integration guide](agent-integration.md) walks the
 discover → search → query → validate workflow and explains resolution

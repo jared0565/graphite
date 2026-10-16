@@ -65,7 +65,8 @@ These are fields added to a JSON output that carries `schema_version`, which
 root (#81).** The answer for such a folder, below the root of any Git
 repository whether graphite is set up in it or not, is `"reason":
 "below_repository_root"`, with one new field, `"repository_root"`: the
-directory to run it from. `stale` is `true` and the exit status is 1, as they
+directory to run it from, or `null` where the `.git` above is not one graphite
+takes (see Security). `stale` is `true` and the exit status is 1, as they
 were for that folder, and `added`, `changed`, `removed` and
 `resolution_health` are still there. `manifest` is not: it belongs to the
 reason `missing manifest`, which this answer replaces for such a folder, and
@@ -445,8 +446,9 @@ root, with the graph fresh at the root:
 The repository is now found by the rule the agent hooks have used since
 1.2.1 (#80): the nearest directory upward that holds `.git`, taken only where
 graphite is set up there (a `graph-out/graph.json`, or the `GRAPHITE.md` that
-`init` commits). The rule is in one place, `ingest.repository_root`, and the
-hooks call it. In a folder of no checkout, and below a checkout graphite is
+`init` commits) and, new in this release for the hooks as well, only where it
+is the user's own (see Security). The rule is in one place,
+`ingest.repository_root`, and the hooks call it. In a folder of no checkout, and below a checkout graphite is
 not set up in, a read uses its own directory, as it did. A repository inside
 the repository, with its own `.git`, stays its own root.
 
@@ -485,7 +487,9 @@ or not, they stop before anything is written and say where the root is:
 a repository from its root: run it from `<root>`". `check --json` still
 answers in JSON (see Added). Below a checkout graphite is not set up in, this
 too is new: `check .` used to say the graph was stale (`missing manifest`),
-and `build .` left `.cache/graphite/` behind before it was refused.
+and `build .` left `.cache/graphite/` behind before it was refused. Below a
+`.git` that is not the user's own, or one at a drive or filesystem root, they
+refuse as well but name no place to run (see Security).
 
 One thing changes at the root as well, because a file argument is read by one
 rule wherever it is typed: `context ./app/core.py`, and `context` given a
@@ -500,6 +504,34 @@ reports on the folder ("Graph artifact is missing", with `graphite build .`
 as the remedy), and its incident line reads the folder's own ledger, which
 nothing writes any more. `watch`, `review-changes` and the MCP server take
 the path or the directory they are given, as before.
+
+### Security
+
+**A repository root is taken from below it only when it is the user's own.**
+From a folder below a repository's root, the agent hooks since 1.2.1 and, in
+this release, the CLI's reads take the nearest directory upward that holds
+`.git` for the repository: they read its graph, write its ledger, and
+register it with the daemon, which then builds it. Nothing checked who owned
+that directory or its `.git`, so one made by another account on the same
+machine, anywhere above the folder, could be taken. Such a directory is now
+taken only when the user running graphite owns it and its `.git`, and never
+when it is a drive or filesystem root. Anywhere else the folder stands for
+itself, as it did before 1.2.1 for the hooks and before this release for the
+CLI. `build`, `report`, `scan` and `check` still refuse below such a `.git`,
+and no longer name it as the place to run; `check --json` gives
+`"repository_root": null` there.
+
+Who owns a path is asked of the operating system (`graphite.ownership`): on
+POSIX the effective uid; on Windows the owner SID, which must be the user's,
+or the Administrators group while graphite runs with an elevated
+administrator's token. Where the owner cannot be read or is not the local
+user, as can happen on network shares and on volumes without permissions,
+or where a repository belongs to the Administrators group and the token is
+not elevated, or where graphite runs under `sudo`, the folder stands for
+itself: queries below the root then fail as they did before #81, and are run
+from the root instead.
+
+Found by aramid's review of #81, before release.
 
 ## [1.2.1] — 2026-10-11
 

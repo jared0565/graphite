@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 
+from . import ownership
 from .cache import file_hash
 from .config import Config
 from .git import GitError, GitRunner
@@ -171,6 +172,27 @@ def enclosing_git_root(path: Path) -> Path | None:
     return None
 
 
+def _is_set_up(top: Path) -> bool:
+    """Whether graphite is set up at `top`: it has a graph, or the
+    `GRAPHITE.md` that `init` commits."""
+    return (top / "graph-out" / "graph.json").is_file() or (top / _SETUP_MARKER).is_file()
+
+
+def trusted_root(top: Path) -> bool:
+    """Whether `top`, a directory holding `.git`, may be taken for the
+    repository from below it: the user running graphite owns it and its
+    `.git`, and it is not a drive or filesystem root.
+
+    A directory and a `.git` in it can be made by whoever may write to its
+    parent. Taken from below, the root is where graphite reads a graph,
+    writes its ledger and points the daemon, so one made by someone else is
+    not taken (`ownership`).
+    """
+    if top.parent == top:
+        return False
+    return ownership.owned_by_current_user(top) and ownership.owned_by_current_user(top / ".git")
+
+
 def repository_root(directory: Path) -> Path:
     """The repository a session or a command in `directory` is about.
 
@@ -179,11 +201,12 @@ def repository_root(directory: Path) -> Path:
     the CLI (#81). The repository is the nearest directory upward that holds
     `.git`, the one place a build of it can run (`enclosing_git_root`).
 
-    That directory is used only where graphite is already set up: it has a
-    graph, or the `GRAPHITE.md` that `init` commits. Anywhere else
-    `directory` stands, as it did before, so a session that wanders into a
-    subfolder of some other checkout does not hand the daemon that whole
-    project to build.
+    That directory is used only where graphite is already set up there (it
+    has a graph, or the `GRAPHITE.md` that `init` commits) and it is the
+    user's own (`trusted_root`). Anywhere else `directory` stands, as it did
+    before, so a session that wanders into a subfolder of some other
+    checkout does not hand the daemon that whole project to build. Ownership
+    is asked last: the hooks ask for the root at every tool call.
 
     Never raises: a directory that cannot be read stands for itself.
     """
@@ -191,7 +214,7 @@ def repository_root(directory: Path) -> Path:
         top = enclosing_git_root(directory)
         if top is None or top == directory:
             return directory
-        if (top / "graph-out" / "graph.json").is_file() or (top / _SETUP_MARKER).is_file():
+        if _is_set_up(top) and trusted_root(top):
             return top
     except OSError:
         pass
