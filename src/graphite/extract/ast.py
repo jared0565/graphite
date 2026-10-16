@@ -2638,6 +2638,18 @@ def _resolve_method_dispatch(
     for e in edges:
         if e.get("relation") == "imports" and e.get("source") and e.get("target"):
             imports_by_file.setdefault(e["source"], set()).add(e["target"])
+    # The definitions of each name by the file they are in, so the reachability
+    # gate below reads the caller's file and the files it imports rather than
+    # every definition of the name, once per call. That walk was quadratic in a
+    # tree where many classes share a method name (`__init__`, `step`): each
+    # call bound by name cost one lookup per definition of it.
+    methods_by_name_and_file: dict[str, dict[str | None, set[str]]] = {}
+    for name, ids in methods_by_name.items():
+        by_file = methods_by_name_and_file.setdefault(name, {})
+        for node_id in ids:
+            by_file.setdefault(file_of_node.get(node_id), set()).add(node_id)
+    # The interop-family gate turns on the name and the caller's family alone.
+    same_family: dict[tuple[str, str], frozenset[str]] = {}
 
     # This gate reads import edges literally, which is only sound while they are
     # complete. It once carried its own ancestor-package expansion, because
@@ -2685,10 +2697,11 @@ def _resolve_method_dispatch(
         # The #54 gate below cannot catch these: the import that makes the
         # definition "reachable" is real and irrelevant, because the receiver is
         # `os`. Externality is evidence that gate never consults.
+        name = method.casefold()
         if e.get("confidence") == "EXTERNAL_CALL":
-            candidates: set[str] | None = None
+            candidates: Collection[str] | None = None
         else:
-            candidates = methods_by_name.get(method.casefold())
+            candidates = methods_by_name.get(name)
         # Interop-family gate (#56). An EXACT invariant rather than a proxy:
         # graphite models no FFI, so a JavaScript call site cannot reach a Python
         # `def` under any typing discipline. Measured live before this existed --
@@ -2703,10 +2716,12 @@ def _resolve_method_dispatch(
         if candidates:
             caller_family = _interop_family(e.get("source_file"))
             if caller_family is not None:
-                candidates = {
-                    c for c in candidates
-                    if family_of_node.get(c) in (None, caller_family)
-                }
+                if (name, caller_family) not in same_family:
+                    same_family[name, caller_family] = frozenset(
+                        c for c in candidates
+                        if family_of_node.get(c) in (None, caller_family)
+                    )
+                candidates = same_family[name, caller_family]
         # Reachability gate (#54). A name-only match let `Path(...).resolve()` bind
         # to a test double's `resolve`, and `f.write(text)` to a `write` defined in
         # a test file -- 232 and 30 false callers respectively, graded
@@ -2720,9 +2735,11 @@ def _resolve_method_dispatch(
         if candidates and _dispatch_is_gated(e.get("source_file")):
             caller_file = _file_node_id(e["source_file"])
             reachable: set[str] | frozenset[str] = imports_by_file.get(caller_file, frozenset())
+            in_file = methods_by_name_and_file[name]
             candidates = {
-                c for c in candidates
-                if file_of_node.get(c) == caller_file or file_of_node.get(c) in reachable
+                c
+                for file in (caller_file, *reachable) if file in in_file
+                for c in in_file[file] if c in candidates
             }
         if not candidates or len(candidates) > _MAX_METHOD_DISPATCH_CANDIDATES:
             # Member call that resolves to no known definition -- or one the

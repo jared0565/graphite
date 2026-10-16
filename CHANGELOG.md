@@ -38,15 +38,15 @@ The graph changes in this release, in its edges only. On this repository,
 measured against the deployed 1.2.1 engine, with the same interpreter, from
 one tree:
 
-- all 9,030 node ids survive, each naming the same definition, file or
+- all 9,031 node ids survive, each naming the same definition, file or
   placeholder, and none is new;
-- `calls` goes from 15,807 to 15,767: 44 call triples are gone and 4 are
-  new. `contains` (6,501), `imports` (2,383) and `inherits` (120) are
-  unchanged, and 24,767 of 24,811 edge triples are unchanged;
-- `analysis` (20 cycles, entry points, god nodes, orphans) is identical, and
-  so is the community count (171);
+- `calls` goes from 15,811 to 15,771: 44 call triples are gone and 4 are
+  new. `contains` (6,502), `imports` (2,383) and `inherits` (120) are
+  unchanged, and 24,772 of 24,816 edge triples are unchanged;
+- `analysis` (20 cycles, entry points, god nodes, orphans) is identical. The
+  community count goes from 169 to 170;
 - the Python `calls` ratio is 0.976 before and after. The cell counts 40
-  fewer call sites (11,997 where there were 12,037), and 40 fewer bound, so
+  fewer call sites (12,001 where there were 12,041), and 40 fewer bound, so
   every site that left it had been bound.
 
 Two builds of this tree with either engine are byte-identical (`graph.json`,
@@ -471,6 +471,28 @@ Also in the test suite: classes made at random, some behind names graphite
 cannot read, some given a method by a decorator, a metaclass, a hook or an
 assignment, are run by Python itself, and each call graphite binds by class
 is held against the method that ran.
+
+**A call bound by name looks only in the files it can reach.** A Python
+call bound by name goes to the methods of that name in the caller's file and
+the files it imports. The engine found them by testing every method of the
+name, wherever it was, against that reach, and did so again for every call:
+in a tree where many classes share a name (`__init__`, `get`, `step`), what
+one call cost grew with the whole tree. The methods of a name are now held by
+the file they are in, and a call looks in its own file and the files it
+imports. The filter that keeps a call among the methods of its own language
+family, in every language, is worked out once for each name and family
+instead of once for each call.
+
+What a call is bound to is unchanged. The extraction of this repository, of
+two generated trees of 400 Python files of class hierarchies, and of a small
+tree that calls one name from Python and from TypeScript, which is now a
+test, is identical, node for node and edge for edge, under the engine before
+this change and after it. Measured once each, on one machine: extracting
+either generated tree takes 2.9 or 3.1 seconds where it took 4.3 or 4.5; and
+the test that holds each call bound by class against the method Python runs,
+which extracts such a tree, ran past the 120 seconds the CI run allows one
+test under Linux, Python 3.12 and coverage with branch measurement, and now
+takes 7 to 9 seconds there.
 
 **The CLI works from a folder below the repository root (#81).** A command
 took the directory it was typed in for the repository. One `cd` below the

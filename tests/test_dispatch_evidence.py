@@ -283,6 +283,48 @@ def test_javascript_and_typescript_are_one_interop_family(tmp_path: Path) -> Non
     assert ("src_use_js_use", "src_store_ts_load") in _calls(tmp_path)
 
 
+def test_one_name_called_from_two_families_binds_within_each(tmp_path: Path) -> None:
+    """One method name, called from Python and from TypeScript in one tree.
+
+    The family filter is worked out once for each name and caller family rather
+    than once for each call. Keyed on the name alone, it handed the second
+    family the first one's methods: the TypeScript call was bound to the Python
+    `A.run`, and lost `B.run`. A tree in one language cannot see that, and
+    neither can this repository's own graph.
+    """
+    _write(
+        tmp_path / "py_a.py",
+        "class A:\n"
+        "    def run(self):\n"
+        "        return 1\n"
+        "\n"
+        "\n"
+        "def go(x):\n"
+        "    return x.run()\n",
+    )
+    _write(
+        tmp_path / "ts_b.ts",
+        "export class B {\n"
+        "  run(): number {\n"
+        "    return 2;\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "export function go2(x: any): number {\n"
+        "  return x.run();\n"
+        "}\n",
+    )
+
+    result = _result(tmp_path)
+    py_go, py_run = _def_id(result, "py_a.py", "go"), _def_id(result, "py_a.py", "A.run")
+    ts_go, ts_run = _def_id(result, "ts_b.ts", "go2"), _def_id(result, "ts_b.ts", "run")
+    pairs = _pairs(result)
+    assert (py_go, py_run) in pairs
+    assert (ts_go, ts_run) in pairs
+    assert (py_go, ts_run) not in pairs
+    assert (ts_go, py_run) not in pairs
+
+
 def test_the_family_table_is_derived_from_the_extractors_language_table() -> None:
     """Every language the extractor can produce must have a family, or fail open.
 
