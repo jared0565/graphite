@@ -514,12 +514,14 @@ this release, the CLI's reads take the nearest directory upward that holds
 register it with the daemon, which then builds it. Nothing checked who owned
 that directory or its `.git`, so one made by another account on the same
 machine, anywhere above the folder, could be taken. Such a directory is now
-taken only when the user running graphite owns it and its `.git`, and never
-when it is a drive or filesystem root. Anywhere else the folder stands for
-itself, as it did before 1.2.1 for the hooks and before this release for the
-CLI. `build`, `report`, `scan` and `check` still refuse below such a `.git`,
-and no longer name it as the place to run; `check --json` gives
-`"repository_root": null` there.
+taken only when the user running graphite owns it and its `.git`, both as
+named and where a link to either leads (the owner of a link is whoever made
+it, and the hooks name the directory as the session does, links and all),
+and never when either is a drive or filesystem root. Anywhere else the
+folder stands for itself, as it did before 1.2.1 for the hooks and before
+this release for the CLI. `build`, `report`, `scan` and `check` still refuse
+below such a `.git`, and no longer name it as the place to run;
+`check --json` gives `"repository_root": null` there.
 
 Who owns a path is asked of the operating system (`graphite.ownership`): on
 POSIX the effective uid; on Windows the owner SID, which must be the user's,

@@ -38,8 +38,10 @@ def owner_is_current_user(owner: str, user: str, *, elevated_admin: bool) -> boo
 
 
 def owned_by_current_user(path: Path) -> bool:
-    """Whether `path` (a directory or a file, not followed if it is a link on
-    POSIX) belongs to the user running this process. Never raises."""
+    """Whether `path` (a directory or a file) belongs to the user running
+    this process. A link is asked about itself, never where it leads, on
+    every platform: its owner is whoever made it (`ingest.trusted_root`
+    asks about both). Never raises."""
     try:
         if sys.platform == "win32":
             return owner_is_current_user(

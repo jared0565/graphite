@@ -126,8 +126,9 @@ record (usage, incidents) goes to the repository's `.graphite/`, and
 `graphite incidents list` reads it from a subfolder too. Here the root is the
 nearest directory upward that holds `.git`, where graphite is set up there (it
 has a graph, or the `GRAPHITE.md` that `init` commits) and where that
-directory and its `.git` are yours, owned by the user graphite runs as;
-anywhere else a command reads the directory it is typed in, as before.
+directory and its `.git` are yours, owned by the user graphite runs as,
+and so is wherever a link to either leads; anywhere else a command reads
+the directory it is typed in, as before.
 
 The [agent integration guide](agent-integration.md) walks the
 discover → search → query → validate workflow and explains resolution

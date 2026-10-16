@@ -119,7 +119,8 @@ names. A folder that should be a project of its own needs its own `.git`.
 **`build` or `check` exits with "`<path>` is below `<dir>`, which holds .git but
 is not a repository root graphite takes", and queries from a subfolder say
 `graph_missing`.** → The nearest `.git` above the folder is in a directory
-the user running graphite does not own, or at a drive or filesystem root.
+the user running graphite does not own, or at a drive or filesystem root,
+either as named or where a link to it or to its `.git` leads.
 graphite takes a repository root from below it only where that directory
 and its `.git` are the user's own. → If `<dir>` is not a repository you
 made, find out who did: nothing there should be built or trusted on your

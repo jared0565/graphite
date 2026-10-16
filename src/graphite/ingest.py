@@ -178,6 +178,11 @@ def _is_set_up(top: Path) -> bool:
     return (top / "graph-out" / "graph.json").is_file() or (top / _SETUP_MARKER).is_file()
 
 
+def _resolved(path: Path) -> Path:
+    """Where `path` leads, every link on the way followed."""
+    return Path(os.path.realpath(path))
+
+
 def trusted_root(top: Path) -> bool:
     """Whether `top`, a directory holding `.git`, may be taken for the
     repository from below it: the user running graphite owns it and its
@@ -187,10 +192,22 @@ def trusted_root(top: Path) -> bool:
     parent. Taken from below, the root is where graphite reads a graph,
     writes its ledger and points the daemon, so one made by someone else is
     not taken (`ownership`).
+
+    Each of the two is asked about as named and as resolved. The owner of a
+    link is whoever made the link, but what graphite reads, writes and
+    registers is where it leads; the hooks name the directory as the
+    session does, links and all. Never raises: a root that cannot be
+    resolved is not taken.
     """
-    if top.parent == top:
+    try:
+        real = _resolved(top)
+        if top.parent == top or real.parent == real:
+            return False
+        git = top / ".git"
+        named_and_resolved = (top, real, git, _resolved(git))
+    except OSError:
         return False
-    return ownership.owned_by_current_user(top) and ownership.owned_by_current_user(top / ".git")
+    return all(ownership.owned_by_current_user(path) for path in named_and_resolved)
 
 
 def repository_root(directory: Path) -> Path:

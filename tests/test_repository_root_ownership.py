@@ -7,7 +7,7 @@ nearest directory upward that holds `.git`. Nothing asked who made that
 directory or its `.git`.
 
 An ancestor is now taken only when the current user owns it and its `.git`,
-and never a drive or filesystem root. Anywhere else the folder stands for
+each as named and where a link leads, and never a drive or filesystem root. Anywhere else the folder stands for
 itself, as it did before #81. `build`, `report`, `scan` and `check` are still
 refused below such a `.git`, but no longer name it as the place to run.
 
@@ -98,6 +98,28 @@ def test_a_directory_of_the_system_is_not_the_users() -> None:
             pytest.skip("this process runs as root, which owns /")
         system = Path("/")
     assert ownership.owned_by_current_user(system) is False
+
+
+def test_the_owner_of_a_link_is_whoever_made_it(tmp_path: Path) -> None:
+    """What `_owned_as_named_except` models: a link is asked about itself.
+    One made here to a directory of the system is the user's, though where
+    it leads is not."""
+    if sys.platform == "win32":
+        system = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    else:
+        if os.geteuid() == 0:
+            pytest.skip("this process runs as root, which owns /")
+        system = Path("/")
+    link = tmp_path / "link"
+    _link(link, system)
+    try:
+        assert ownership.owned_by_current_user(link) is True
+        assert ownership.owned_by_current_user(system) is False
+    finally:
+        if sys.platform == "win32":
+            os.rmdir(link)  # the junction itself, never what it leads to
+        else:
+            link.unlink()
 
 
 def test_the_elevated_token_is_read_as_windows_reads_it() -> None:
@@ -195,6 +217,121 @@ def test_a_drive_or_filesystem_root_is_never_taken(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(ingest, "enclosing_git_root", lambda path: top)
     monkeypatch.setattr(ingest, "_is_set_up", lambda path: True)
     assert ingest.repository_root(below) == below
+
+
+def _link(link: Path, target: Path) -> None:
+    """A link to the directory `target`: a junction on Windows, which any
+    user may make, a symbolic link elsewhere."""
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def _owned_as_named_except(monkeypatch: pytest.MonkeyPatch, *not_owned: Path) -> None:
+    """Ownership as the operating system answers it: of the path named, a
+    link included, never of where a link leads (measured on Windows for a
+    junction and both kinds of symbolic link; `lstat` on POSIX)."""
+    refused = {os.path.normcase(os.path.abspath(path)) for path in not_owned}
+    monkeypatch.setattr(
+        ownership,
+        "owned_by_current_user",
+        lambda path: os.path.normcase(os.path.abspath(path)) not in refused,
+    )
+
+
+def test_a_root_reached_through_a_link_is_asked_about_where_it_leads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner of a link is whoever made it, but what graphite reads,
+    writes and registers is where the link leads. The hooks take their
+    directory as the session names it, links and all: a link of the user's
+    own into a checkout someone else owns is not taken."""
+    target = _set_up(tmp_path / "theirs").resolve()
+    link = tmp_path.resolve() / "mine"
+    _link(link, target)
+    _owned_as_named_except(monkeypatch, target)
+    assert ingest.trusted_root(link) is False
+    assert ingest.repository_root(link / "app") == link / "app"
+    assert agent_hooks._repo_root(link / "app") == link / "app"
+
+
+def test_a_root_reached_through_a_link_to_the_users_own_checkout_is_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _set_up(tmp_path / "real").resolve()
+    link = tmp_path.resolve() / "mine"
+    _link(link, target)
+    _owned_as_named_except(monkeypatch)
+    assert ingest.repository_root(link / "app") == link
+
+
+def test_a_link_someone_else_made_to_the_users_own_checkout_is_not_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where it leads is the user's, but whoever made the link can point it
+    elsewhere between the question and the use."""
+    target = _set_up(tmp_path / "mine").resolve()
+    link = tmp_path.resolve() / "theirs"
+    _link(link, target)
+    _owned_as_named_except(monkeypatch, link)
+    assert ingest.trusted_root(link) is False
+    assert ingest.repository_root(link / "app") == link / "app"
+
+
+def test_a_git_someone_else_linked_to_a_git_of_the_users_is_not_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve() / "repo"
+    (root / "app").mkdir(parents=True)
+    (root / "GRAPHITE.md").write_text("set up\n", encoding="utf-8")
+    mine = tmp_path.resolve() / "mine.git"
+    mine.mkdir()
+    _link(root / ".git", mine)
+    _owned_as_named_except(monkeypatch, root / ".git")
+    assert ingest.trusted_root(root) is False
+    assert ingest.repository_root(root / "app") == root / "app"
+
+
+def test_a_git_that_is_a_link_is_asked_about_where_it_leads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The directory is the user's, and its `.git` is a link to one that is not."""
+    root = tmp_path.resolve() / "repo"
+    (root / "app").mkdir(parents=True)
+    (root / "GRAPHITE.md").write_text("set up\n", encoding="utf-8")
+    theirs = tmp_path.resolve() / "theirs.git"
+    theirs.mkdir()
+    _link(root / ".git", theirs)
+    _owned_as_named_except(monkeypatch, theirs)
+    assert ingest.trusted_root(root) is False
+    assert ingest.repository_root(root / "app") == root / "app"
+
+
+@pytest.mark.parametrize("spelling", ["named", "resolved"])
+def test_a_drive_or_filesystem_root_is_not_taken_under_either_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spelling: str
+) -> None:
+    """A link, or a drive substituted for a directory, makes a drive root and
+    a directory two spellings of one place. Neither may be the root."""
+    _owned_except(monkeypatch)
+    anchor = Path(tmp_path.resolve().anchor)
+    here = tmp_path.resolve()
+    top, leads_to = (anchor, here) if spelling == "named" else (here, anchor)
+    monkeypatch.setattr(ingest, "_resolved", lambda path: leads_to if Path(path) == top else Path(path))
+    assert ingest.trusted_root(top) is False
+
+
+def test_a_root_that_cannot_be_resolved_is_not_taken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _set_up(tmp_path / "repo").resolve()
+    _owned_except(monkeypatch)
+
+    def unresolvable(path: Path) -> Path:
+        raise OSError("cannot be resolved")
+
+    monkeypatch.setattr(ingest, "_resolved", unresolvable)
+    assert ingest.trusted_root(root) is False
+    assert ingest.repository_root(root / "app") == root / "app"
 
 
 def test_ownership_is_asked_only_where_the_root_would_be_taken(
