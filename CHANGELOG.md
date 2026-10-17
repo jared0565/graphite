@@ -33,6 +33,14 @@ machine-checkable identity; the version is for humans.
   shared one placeholder. A base that is a bare name the file binds by a
   class statement or imports by name now ends at that class's node; a
   builtin, a dotted name or a call keeps its placeholder.
+- Python: a call through a local alias binds to what the alias names (#90).
+  `t = mod.target` followed by `t(x)` used to end at a placeholder named for
+  the local, so `callers target` left that function out and still answered
+  `decision_grade`. A name bound by one assignment of a bare name or of
+  `module.attr` is read as that name or attribute, as the call written
+  directly is, also through a chain of such assignments. A name bound a
+  second time in its scope, a `with ... as` name, a cycle, and a longer chain
+  such as `a.b.c` stay as they were.
 
 ## [1.3.0] — 2026-10-16
 

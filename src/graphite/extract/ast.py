@@ -1462,6 +1462,9 @@ def _python_bare_call(
         return ids[(resolution.qualname, resolution.module_level)], confidence
     if resolution.kind == "symbol" and resolution.target is not None:
         return resolution.target, confidence
+    if resolution.kind == "member" and resolution.target is not None and resolution.qualname is not None:
+        # `t = mod.attr; t()`: the call `mod.attr()` makes (#90).
+        return _make_id(resolution.target, resolution.qualname), confidence
     if resolution.kind in ("value", "alias", "ambiguous-import") and table.module_defines(name):
         return ids[(f"<local>.{name}", False)], confidence
     return _resolve_call(file_id, name), confidence

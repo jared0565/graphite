@@ -112,7 +112,8 @@ class PyScope:
 class Resolution:
     """What a bare name denotes at one call site."""
 
-    kind: str  # "def" | "symbol" | "alias" | "external" | "ambiguous-import" | "value" | "none"
+    #: "member" is `qualname`, an attribute of the in-repo module file `target` (#90).
+    kind: str  # "def" | "symbol" | "alias" | "member" | "external" | "ambiguous-import" | "value" | "none"
     qualname: str | None = None
     module_level: bool = False
     target: str | None = None
@@ -211,6 +212,25 @@ def _value_origin(node: Any) -> tuple[str, str] | None:
     return None
 
 
+def _alias_origin(node: Any) -> tuple[str, str] | None:
+    """("name", text) for a bare name, ("attr", "obj.attr") for one attribute of a name.
+
+    What an assignment of such an expression binds is the thing the expression
+    names, so a call of the new name is a call of that thing (#90). Anything
+    longer (`a.b.c`, `f().x`, a subscript) says too little and gives None.
+    """
+    node = _unparenthesized(node)
+    if node is None:
+        return None
+    if node.type == "identifier":
+        return ("name", _text(node))
+    if node.type == "attribute":
+        obj, attr = node.child_by_field_name("object"), node.child_by_field_name("attribute")
+        if obj is not None and obj.type == "identifier" and attr is not None:
+            return ("attr", f"{_text(obj)}.{_text(attr)}")
+    return None
+
+
 def _value_binder(value: Any, scope: PyScope, handed_over: bool = False) -> Binder:
     """The binder of a name one statement binds to `value`, evaluated in `scope`.
 
@@ -219,7 +239,8 @@ def _value_binder(value: Any, scope: PyScope, handed_over: bool = False) -> Bind
     """
     origin = _value_origin(value)
     if origin is None:
-        return _VALUE
+        alias = None if handed_over else _alias_origin(value)
+        return _VALUE if alias is None else Binder("value", origin=(alias[0], alias[1], scope))
     how, name = origin
     return Binder("value", origin=("with" if handed_over and how == "call" else how, name, scope))
 
@@ -599,20 +620,44 @@ def resolving_scope(scope: PyScope, name: str) -> PyScope | None:
     return None
 
 
-def resolve(scope: PyScope, name: str) -> Resolution:
+def resolve(scope: PyScope, name: str, _following: frozenset[int] = frozenset()) -> Resolution:
     """What a bare `name` denotes when called from `scope`."""
     home = resolving_scope(scope, name)
-    return Resolution("none") if home is None else _outcome(home.binders[name])
+    return Resolution("none") if home is None else _outcome(home.binders[name], _following)
 
 
-def _outcome(binders: list[Binder]) -> Resolution:
+def _aliased(binder: Binder, origin: tuple[str, str, PyScope], following: frozenset[int]) -> Resolution:
+    """What the one assignment `name = <name or module.attr>` makes the name denote (#90).
+
+    A definition or an imported symbol stays what it is. `module.attr` is
+    "member": the attribute of an in-repo module, bound as the call
+    `module.attr()` is. Anything else, and a name that leads back to itself, is
+    a value as before.
+    """
+    how, text, scope = origin
+    if id(binder) in following:
+        return Resolution("value")
+    following = following | {id(binder)}
+    if how == "name":
+        found = resolve(scope, text, following)
+        return found if found.kind in ("def", "symbol", "member") else Resolution("value")
+    module_name, attr = text.split(".", 1)
+    root = resolve(scope, module_name, following)
+    if root.kind == "alias" and root.target:
+        return Resolution("member", qualname=attr, target=root.target)
+    return Resolution("value")
+
+
+def _outcome(binders: list[Binder], following: frozenset[int] = frozenset()) -> Resolution:
     """§4.2's outcome table, for the binders of one name in its resolving scope."""
-    distinct: dict[tuple[str | None, ...], Binder] = {}
+    distinct: dict[tuple[str | int | None, ...], Binder] = {}
     for binder in binders:
         if binder.kind in ("def", "class"):
-            key: tuple[str | None, ...] = ("def", binder.qualname)
+            key: tuple[str | int | None, ...] = ("def", binder.qualname)
         elif binder.kind == "import":
             key = ("import", binder.import_kind, binder.target)
+        elif binder.origin is not None and binder.origin[0] in ("name", "attr"):
+            key = ("alias", binder.origin[0], binder.origin[1], id(binder.origin[2]))
         else:
             key = ("value",)
         distinct.setdefault(key, binder)
@@ -622,6 +667,8 @@ def _outcome(binders: list[Binder]) -> Resolution:
             return Resolution("def", qualname=binder.qualname, module_level=binder.module_level)
         if binder.kind == "import" and binder.import_kind is not None and binder.import_kind != "unknown":
             return Resolution(binder.import_kind, target=binder.target)
+        if binder.origin is not None and binder.origin[0] in ("name", "attr"):
+            return _aliased(binder, binder.origin, following)
         return Resolution("value")
     # Unresolved imports of one name (`try: import ujson as json` /
     # `except ImportError: import json`) leave the repo whichever one runs. So
@@ -643,6 +690,9 @@ def _origin_receiver(how: str, name: str, scope: PyScope) -> Receiver | None:
     """What a value of this origin is, with the name it calls resolved in `scope`."""
     if how == "literal":
         return _BUILTIN_RECEIVER
+    if how in ("name", "attr"):
+        # An alias (#90) is the thing it names, not what that thing returns.
+        return None
     found = resolve(scope, name)
     if found.kind == "none":
         # Bound nowhere in the file, so the name is the builtin's own -- unless
