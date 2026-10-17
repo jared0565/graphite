@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from graphite.cache import Cache
 from graphite.config import Config
 from graphite.extract.ast import extract_all
 from graphite.ingest import collect_files
@@ -22,8 +23,12 @@ def _write(path: Path, text: str) -> None:
 
 
 def _extract(tmp_path: Path):
+    # A real cache, shared by the calls of one test the way the builds of one
+    # repository share theirs: without it every extraction is fresh and these
+    # tests pass whatever the cache key holds (#83).
     cfg = Config(workers=1, cache_dir=tmp_path / ".cache" / "graphite")
-    return extract_all(collect_files(tmp_path, cfg), cfg)
+    cache = Cache(cfg.cache_dir, cfg.cache_version, engine="test-engine")
+    return extract_all(collect_files(tmp_path, cfg), cfg, cache)
 
 
 def _import_targets(result, source_file: str) -> set[str]:
