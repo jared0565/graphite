@@ -255,12 +255,17 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     atomic_write_json(path, data, indent=2)
 
 
-def _scan(args: argparse.Namespace, cfg: Config) -> tuple[dict[str, Any], list[Any]]:
-    cfg = cfg.canonical_graph()
-    root = Path(args.path).resolve()
+def _require_existing(root: Path) -> None:
+    """Exit 1 with `path not found` for a path that is not there."""
     if not root.exists():
         print(f"[graphite] path not found: {root}", file=sys.stderr)
         raise SystemExit(1)
+
+
+def _scan(args: argparse.Namespace, cfg: Config) -> tuple[dict[str, Any], list[Any]]:
+    cfg = cfg.canonical_graph()
+    root = Path(args.path).resolve()
+    _require_existing(root)
     top = _root_above(root)
     if top is not None:
         raise ValueError(_below_a_root(root, top))
@@ -727,6 +732,9 @@ def cmd_build(args: argparse.Namespace) -> int:
     top = _root_above(asked)
     if top is not None:
         raise ValueError(_below_a_root(asked, top))
+    # A path that is not there is refused as `scan` refuses it (#88): the lock
+    # below would otherwise make it, and a detached child could not start in it.
+    _require_existing(asked)
     if getattr(args, "detach", False):
         root = Path(args.path).resolve()
         # Deliberately omits --detach: the child must build, not re-spawn.

@@ -53,6 +53,12 @@ machine-checkable identity; the version is for humans.
   `Error` or a function `make` had no callers in the graph and its call sites
   were absent from the `calls` ratio. A listed name that nothing in the file
   binds still gets no edge.
+- CLI: `build` and `report` of a path that is not there say `path not found`
+  and exit 1, as `scan` does, and create nothing (#88). The build lock made
+  its cache directory first, which made the path, and a complete empty
+  `graph-out/` was written into it with exit 0. `build --detach` is refused
+  the same way. Below a repository root the message is still the one that
+  names the root.
 
 ## [1.3.0] — 2026-10-16
 
