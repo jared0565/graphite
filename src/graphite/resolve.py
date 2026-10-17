@@ -185,6 +185,10 @@ class SourceIndex:
     # (#87). Read from the files themselves, so extraction of an importer that
     # did not change depends on it: see `python_reexport_digest`.
     python_reexports: ReexportTable = field(default_factory=dict, compare=False, repr=False)
+    # rel path -> file node id, for the paths of the tree whose plain id another
+    # path has too (#82). Empty for a tree without such a pair. Set by
+    # `extract_all`, which owns how a file node id is made.
+    file_ids: dict[str, str] = field(default_factory=dict, compare=False, repr=False)
 
     @classmethod
     def from_entries(cls, entries: Iterable[FileEntry], cfg: Config | None = None) -> "SourceIndex":

@@ -6,9 +6,10 @@ import importlib
 import re
 import sys
 import unicodedata
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Collection, Final, Sequence
+from typing import Any, Collection, Final, Iterable, Sequence
 
 from ..cache import Cache
 from ..config import Config
@@ -214,8 +215,10 @@ def _make_id(*parts: str) -> str:
     Known residual: two DIFFERENT part tuples can still produce one id when the
     only difference is a separator versus a literal underscore — `a/b.py` and
     `a_b.py` both reach `a_b_py`, and both are ambiguity-free by this test.
-    Closing it would mean discriminating every path containing an underscore,
-    which is most of `tests/`. Measured occurrences in this repo: zero.
+    Closing it here would mean discriminating every path containing an
+    underscore, which is most of `tests/`. For FILE ids it is closed another
+    way (#82): `_colliding_file_ids` marks the paths of a tree that actually
+    collide and no others. For a definition's id within one file it remains.
     """
     kept = [p for p in parts if p]
     combined = unicodedata.normalize("NFKC", "_".join(p.strip("_.") for p in kept))
@@ -262,7 +265,52 @@ def _scoped_id(file_id: str, qualname: str, salt: int = 0) -> str:
     return f"{readable[: _MAX_ID_LEN - len(marker) - 1].rstrip('_')}_{marker}"
 
 
-def _file_node_id(rel_path: str) -> str:
+def _file_node_id(rel_path: str, source_index: SourceIndex | None = None) -> str:
+    """The id of a file's node: its plain id, or the one the tree gave it (#82).
+
+    A path whose plain id another path of the tree also has is given a marker
+    by `_colliding_file_ids`, which `extract_all` records on the source index.
+    Everything else keeps its plain id.
+    """
+    if source_index is not None and source_index.file_ids:
+        marked = source_index.file_ids.get(rel_path)
+        if marked is not None:
+            return marked
+    return _plain_file_node_id(rel_path)
+
+
+def _colliding_file_ids(rel_paths: Iterable[str]) -> dict[str, str]:
+    """rel path -> file node id, for each path whose plain id another path has.
+
+    `a/b.py`, `a_b.py` and `a/b_py` all slug to `a_b_py`, a loss `_make_id`
+    cannot see from one path. Every member of such a group is marked, with a
+    hash of its own exact path, so no id depends on which of them is listed
+    first or on whether the others are still there. A path that collides with
+    nothing is not in the result: ids of files without a twin do not move.
+    """
+    groups: dict[str, list[str]] = {}
+    for rel_path in rel_paths:
+        groups.setdefault(_plain_file_node_id(rel_path), []).append(rel_path)
+    taken = set(groups)
+    marked: dict[str, str] = {}
+    for plain, members in sorted(groups.items()):
+        if len(members) < 2:
+            continue
+        for rel_path in sorted(members):
+            salt = 0
+            while True:
+                tag = f"file-path\x00{rel_path}" + (f"\x00{salt}" if salt else "")
+                marker = hashlib.blake2s(tag.encode("utf-8"), digest_size=_ID_DISCRIMINATOR_LEN // 2).hexdigest()
+                candidate = f"{plain[: _MAX_ID_LEN - len(marker) - 1].rstrip('_')}_{marker}"
+                if candidate not in taken:
+                    break
+                salt += 1
+            taken.add(candidate)
+            marked[rel_path] = candidate
+    return marked
+
+
+def _plain_file_node_id(rel_path: str) -> str:
     """Stable node id for a file: a slug of the FULL repo-relative path AND name.
 
     Two claims this docstring used to make were false, and both were disproved
@@ -517,7 +565,7 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
                     result.edges.append(
                         _edge(
                             file_id,
-                            _file_node_id(resolved.rel_path),
+                            _file_node_id(resolved.rel_path, source_index),
                             "imports",
                             rel_path,
                             _line(node),
@@ -540,7 +588,7 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
                     result.edges.append(
                         _edge(
                             file_id,
-                            _file_node_id(required.rel_path),
+                            _file_node_id(required.rel_path, source_index),
                             "imports",
                             rel_path,
                             _line(node),
@@ -646,7 +694,7 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
             result.edges.append(
                 _edge(
                     file_id,
-                    _file_node_id(edge.target),
+                    _file_node_id(edge.target, source_index),
                     edge.relation,
                     rel_path,
                     edge.line,
@@ -724,7 +772,7 @@ def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceInd
         # Resolved module: every name it binds is proven in-repo, regardless
         # of binding form -- must win over an _EXTERNAL_GLOBALS collision.
         in_repo.update(_iter_bound_local_names(clause))
-        target_file_id = _file_node_id(resolved.rel_path)
+        target_file_id = _file_node_id(resolved.rel_path, source_index)
         for local, original in _iter_named_imports(clause):
             symbols[local] = _make_id(target_file_id, original)
         for child in clause.children:
@@ -766,7 +814,7 @@ def _collect_ts_import_symbols(root: Any, rel_path: str, source_index: SourceInd
             external.update(bound)
             return
         in_repo.update(bound)
-        target_file_id = _file_node_id(resolved.rel_path)
+        target_file_id = _file_node_id(resolved.rel_path, source_index)
         if pairs:
             for local, original in pairs:
                 symbols[local] = _make_id(target_file_id, original)
@@ -1314,7 +1362,7 @@ def _python_import_bindings(
                     out.append((root, "unknown", None))
                 elif "." not in module:
                     resolved = source_index.resolve_python_module(rel_path, module)
-                    out.append((module, "alias", _file_node_id(resolved)) if resolved else (module, "external", None))
+                    out.append((module, "alias", _file_node_id(resolved, source_index)) if resolved else (module, "external", None))
                 elif source_index.resolve_python_module(rel_path, root) is None:
                     # `import pkg.sub` binds only the root name `pkg`. Mark it
                     # external ONLY if that root does not resolve in-repo -- a
@@ -1331,7 +1379,7 @@ def _python_import_bindings(
                     out.append((local, "unknown", None))
                     continue
                 resolved = source_index.resolve_python_module(rel_path, module)
-                out.append((local, "alias", _file_node_id(resolved)) if resolved else (local, "external", None))
+                out.append((local, "alias", _file_node_id(resolved, source_index)) if resolved else (local, "external", None))
     elif node.type == "import_from_statement":
         modules = _python_import_modules(node)
         if not modules:
@@ -1359,14 +1407,14 @@ def _python_import_bindings(
             sub = f"{base_module}.{original}" if base_module else original
             as_module = source_index.resolve_python_module(rel_path, sub, dots)
             if as_module:
-                out.append((local, "alias", _file_node_id(as_module)))
+                out.append((local, "alias", _file_node_id(as_module, source_index)))
                 continue
             parent = source_index.resolve_python_module(rel_path, base_module, dots)
             if parent:
                 # A package that only re-exports the name does not define it:
                 # bind to the file that does (#87).
                 defining, defined_as = source_index.follow_python_reexport(parent, original)
-                out.append((local, "symbol", _make_id(_file_node_id(defining), defined_as)))
+                out.append((local, "symbol", _make_id(_file_node_id(defining, source_index), defined_as)))
             else:
                 out.append((local, "external", None))
     return out
@@ -1607,7 +1655,7 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                 )
                 if resolved:
                     result.edges.append(_edge(
-                        file_id, _file_node_id(resolved), "imports", rel_path,
+                        file_id, _file_node_id(resolved, source_index), "imports", rel_path,
                         _line(node), confidence="EXACT_IMPORT",
                     ))
                     # `import pkg.sub` also imports `pkg` (#55). Deliberately NOT
@@ -1620,7 +1668,7 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                         if node.type == "import_statement" else ()
                     ):
                         result.edges.append(_edge(
-                            file_id, _file_node_id(ancestor), "imports", rel_path,
+                            file_id, _file_node_id(ancestor, source_index), "imports", rel_path,
                             _line(node), confidence="EXACT_IMPORT",
                         ))
                 else:
@@ -1630,7 +1678,7 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                     ))
             for sub in _python_from_import_submodules(node, rel_path, source_index):
                 result.edges.append(_edge(
-                    file_id, _file_node_id(sub), "imports", rel_path,
+                    file_id, _file_node_id(sub, source_index), "imports", rel_path,
                     _line(node), confidence="EXACT_IMPORT",
                 ))
             walk_children(node, parent_id, scope_id)
@@ -1901,7 +1949,7 @@ def _extract_rust(
                         result.edges.append(
                             _edge(
                                 file_id,
-                                _file_node_id(resolved),
+                                _file_node_id(resolved, source_index),
                                 "imports",
                                 rel_path,
                                 _line(node),
@@ -1927,7 +1975,7 @@ def _extract_rust(
                         result.edges.append(
                             _edge(
                                 file_id,
-                                _file_node_id(resolution.rel_path),
+                                _file_node_id(resolution.rel_path, source_index),
                                 "imports",
                                 rel_path,
                                 _line(node),
@@ -2077,6 +2125,13 @@ def extract_file(entry: FileEntry, cfg: Config, cache: Cache | None = None, sour
             # package's `__init__.py` re-exports it from, and that file's bytes
             # are not the importer's (#87).
             cache_language = f"{cache_language}:rx{source_index.python_reexport_digest()}"
+    if source_index is not None and source_index.file_ids:
+        # A file node id is the plain one unless another path shares it, and an
+        # import edge names its target by that id; so a cached extraction is
+        # good only for the same set of marked ids (#82). A tree with no such
+        # pair adds nothing here, and its keys are what they were.
+        marked = "\0".join(f"{path}\0{file_id}" for path, file_id in sorted(source_index.file_ids.items()))
+        cache_language = f"{cache_language}:fid{hashlib.blake2s(marked.encode('utf-8'), digest_size=8).hexdigest()}"
     # What is cached names the file: every node id and `source_file` in it is
     # built from the path. Keyed on the bytes and the language alone, two files
     # with the same bytes shared one entry, so one of them was answered with
@@ -2089,7 +2144,7 @@ def extract_file(entry: FileEntry, cfg: Config, cache: Cache | None = None, sour
             return _result_from_dict(cached)
 
     rel_path = entry.rel_path
-    file_id = _file_node_id(rel_path)
+    file_id = _file_node_id(rel_path, source_index)
 
     try:
         with open(entry.abs_path, "rb") as f:
@@ -2153,6 +2208,9 @@ def extract_all(entries: list[FileEntry], cfg: Config, cache: Cache | None = Non
     results: list[ExtractionResult] = []
     error_records: list[dict[str, Any]] = []
     source_index = SourceIndex.from_entries(entries, cfg)
+    file_ids = _colliding_file_ids(entry.rel_path for entry in entries)
+    if file_ids:
+        source_index = dataclasses.replace(source_index, file_ids=file_ids)
     if cfg.workers <= 1:
         for entry in entries:
             result = extract_file(entry, cfg, cache, source_index)
@@ -2646,8 +2704,17 @@ def _resolve_method_dispatch(
     # Which file each definition lives in, and which files each file imports
     # DIRECTLY. Both are needed to answer "could this caller have reached that
     # definition at all" -- see the reachability filter below (#54).
+    # The id a path's file node was given is read off that node: a path whose
+    # plain id another path has was given another (#82).
+    file_node_of_path: dict[str, str] = {
+        n["source_file"]: n["id"] for n in nodes if n.get("kind") == "file" and n.get("source_file")
+    }
+
+    def file_node_id_of(path: str) -> str:
+        return file_node_of_path.get(path) or _file_node_id(path)
+
     file_of_node: dict[str, str] = {
-        n["id"]: _file_node_id(n["source_file"]) for n in nodes if n.get("source_file")
+        n["id"]: file_node_id_of(n["source_file"]) for n in nodes if n.get("source_file")
     }
     # Which interop family each definition belongs to, for the family gate below.
     family_of_node: dict[str, str | None] = {
@@ -2752,7 +2819,7 @@ def _resolve_method_dispatch(
         # reachable definition now resolves instead of being abandoned as
         # "too generic to guess".
         if candidates and _dispatch_is_gated(e.get("source_file")):
-            caller_file = _file_node_id(e["source_file"])
+            caller_file = file_node_id_of(e["source_file"])
             reachable: set[str] | frozenset[str] = imports_by_file.get(caller_file, frozenset())
             in_file = methods_by_name_and_file[name]
             candidates = {

@@ -41,6 +41,12 @@ machine-checkable identity; the version is for humans.
   directly is, also through a chain of such assignments. A name bound a
   second time in its scope, a `with ... as` name, a cycle, and a longer chain
   such as `a.b.c` stay as they were.
+- Build: two paths that differ only by `/`, `.` or `_` keep a file node each
+  (#82). `a/b.py` and `a_b.py` both made `a_b_py`, so one had no node and its
+  definitions hung off the other's. Only the paths of the tree that actually
+  collide are marked, each with a hash of its exact path; every other file
+  node id is what it was. A tree with such a pair re-extracts once, because
+  the marked ids are folded into the cache key.
 
 ## [1.3.0] — 2026-10-16
 
