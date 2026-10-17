@@ -396,7 +396,7 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
     root = tree.root_node
 
     def _line(node: Any) -> int:
-        return (node.start_point[0] + 1) if node.start_point else 1
+        return node.start_point[0] + 1
 
     def _name(node: Any) -> str | None:
         # identifiers, property_identifier, type_identifier, etc.
@@ -424,7 +424,7 @@ def _extract_ts_js(file_id: str, rel_path: str, source: bytes, tree: Any, source
     def _anon_scope(node: Any) -> _Scope:
         syn = _safe_label(_synthetic_fn_name(node, source))
         line = _line(node)
-        col = (node.start_point[1] + 1) if node.start_point else 1
+        col = node.start_point[1] + 1
         mid = _make_id(file_id, syn, f"l{line}", f"c{col}")
         pending = _node(mid, "function", syn, rel_path, line, extra={"anonymous": True})
         return _Scope(mid, pending=pending)
@@ -1510,7 +1510,7 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
     root = tree.root_node
 
     def _line(node: Any) -> int:
-        return (node.start_point[0] + 1) if node.start_point else 1
+        return node.start_point[0] + 1
 
     result.nodes.append(_node(file_id, "file", Path(rel_path).name, rel_path))
 
@@ -1716,7 +1716,7 @@ def _extract_go(file_id: str, rel_path: str, source: bytes, tree: Any) -> Extrac
     root = tree.root_node
 
     def _line(node: Any) -> int:
-        return (node.start_point[0] + 1) if node.start_point else 1
+        return node.start_point[0] + 1
 
     def _text(node: Any) -> str | None:
         return node.text.decode("utf-8", errors="ignore") if node is not None and node.text else None
@@ -1814,7 +1814,7 @@ def _extract_rust(
     root = tree.root_node
 
     def _line(node: Any) -> int:
-        return (node.start_point[0] + 1) if node.start_point else 1
+        return node.start_point[0] + 1
 
     def _text(node: Any) -> str | None:
         return node.text.decode("utf-8", errors="ignore") if node is not None and node.text else None
