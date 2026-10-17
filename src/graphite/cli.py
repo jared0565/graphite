@@ -847,6 +847,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
     if not root.is_dir():
         raise ValueError("doctor path must be an existing directory")
+    # The report is about the repository the folder is in (#89), as the read
+    # commands are: from a subfolder the graph is the root's, and so are the
+    # incidents. A root graphite does not take (`repository_root`) is not followed.
+    root = repository_root(root)
     cfg = _project_scoped_config(args, root)
     report = run_doctor(
         root,

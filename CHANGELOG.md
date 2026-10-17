@@ -59,6 +59,12 @@ machine-checkable identity; the version is for humans.
   `graph-out/` was written into it with exit 0. `build --detach` is refused
   the same way. Below a repository root the message is still the one that
   names the root.
+- CLI: `doctor` typed below a repository's root reports on the repository
+  (#89). It took the folder for the repository, so in a subfolder of a
+  repository with a fresh graph it said `Graph artifact is missing` and
+  offered a build that is refused there, and its incident line read a ledger
+  nothing writes. It now follows the root, as the read commands do (#81); a
+  `.git` above that graphite does not take is not followed.
 
 ## [1.3.0] — 2026-10-16
 
