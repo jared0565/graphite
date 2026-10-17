@@ -1690,8 +1690,14 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
             bare, obj_name, attr = _python_call_target(func) if func is not None else (None, None, None)
             edge = None
             scope = table.scope_of_call(node)
-            if bare and bare not in _LANGUAGE_BUILTIN_GLOBALS:
-                resolution = resolve(scope, bare)
+            # The list holds the builtins of every language, so a name on it is
+            # left without an edge only where the file binds nothing by that
+            # name: a class `Error` or a function `make` of this file or one it
+            # imports is called like any other (#85).
+            resolution = resolve(scope, bare) if bare else None
+            if bare and resolution is not None and (
+                bare not in _LANGUAGE_BUILTIN_GLOBALS or resolution.kind != "none"
+            ):
                 target, confidence = _python_bare_call(file_id, bare, resolution, table, ids)
                 edge = _edge(scope_id, target, "calls", rel_path, _line(node), confidence=confidence)
             elif attr:

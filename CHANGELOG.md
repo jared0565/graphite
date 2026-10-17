@@ -47,6 +47,12 @@ machine-checkable identity; the version is for humans.
   collide are marked, each with a hash of its exact path; every other file
   node id is what it was. A tree with such a pair re-extracts once, because
   the marked ids are folded into the cache key.
+- Python: a bare call of a name the file binds gets its edge also when the
+  name is a builtin of another language (#85). The list that drops calls of
+  builtins holds JavaScript, Go and Rust names beside Python's, so a class
+  `Error` or a function `make` had no callers in the graph and its call sites
+  were absent from the `calls` ratio. A listed name that nothing in the file
+  binds still gets no edge.
 
 ## [1.3.0] — 2026-10-16
 
