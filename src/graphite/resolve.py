@@ -1,11 +1,12 @@
 """Source resolution helpers for Graphite extraction."""
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import posixpath
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final, Iterable
@@ -30,6 +31,94 @@ def _rel_path_set_digest(rel_paths: frozenset[str]) -> str:
         digest.update(rel.encode("utf-8", errors="replace"))
         digest.update(b"\0")
     return digest.hexdigest()
+
+#: How many re-exports one name is followed through. A real package chain is a
+#: hop or two; the bound only has to be finite beside the cycle guard.
+_MAX_REEXPORT_HOPS: Final = 8
+
+#: `(package __init__ path, name it binds) -> (module, leading dots, name there)`
+ReexportTable = dict[tuple[str, str], tuple[str, int, str]]
+
+
+def _module_level_bindings(body: list[ast.stmt]) -> dict[str, list[ast.stmt]]:
+    """Every statement that binds each name at module level, nested ones included.
+
+    A name bound under `if` or `try` counts as bound there, and so does a
+    name an `import` or `def` binds: the statement list is what lets the caller
+    tell a name bound exactly once, by one `from X import name`, from a name
+    the package binds some other way too.
+    """
+    bound: dict[str, list[ast.stmt]] = {}
+
+    def add(name: str, stmt: ast.stmt) -> None:
+        bound.setdefault(name, []).append(stmt)
+
+    def visit(stmts: list[ast.stmt]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                add(stmt.name, stmt)
+            elif isinstance(stmt, ast.Import):
+                for alias in stmt.names:
+                    add((alias.asname or alias.name).split(".", 1)[0], stmt)
+            elif isinstance(stmt, ast.ImportFrom):
+                for alias in stmt.names:
+                    if alias.name != "*":
+                        add(alias.asname or alias.name, stmt)
+            else:
+                for node in ast.walk(stmt):
+                    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                        add(node.id, stmt)
+                    elif isinstance(node, ast.ExceptHandler) and node.name:
+                        add(node.name, stmt)
+                    elif isinstance(node, ast.alias):
+                        add((node.asname or node.name).split(".", 1)[0], stmt)
+                    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        add(node.name, stmt)
+
+    visit(body)
+    return bound
+
+
+def _package_reexports(rel_path: str, source: bytes) -> ReexportTable:
+    """The names one `__init__.py` binds only by a top-level `from X import name`.
+
+    A name the file binds any other way too (assigned, defined, imported a
+    second time, imported under a condition) is left out, and so is a file that
+    does not parse: `from pkg import name` then stays bound to the package, as
+    it was before re-exports were followed.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError):
+        return {}
+    bound = _module_level_bindings(tree.body)
+    table: ReexportTable = {}
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.ImportFrom) or not stmt.module:
+            # `from . import sub` binds a submodule, which has its own path.
+            continue
+        for alias in stmt.names:
+            local = alias.asname or alias.name
+            if alias.name == "*" or len(bound.get(local, ())) != 1:
+                continue
+            table[(rel_path, local)] = (stmt.module, stmt.level, alias.name)
+    return table
+
+
+def _python_reexports(entries: Iterable[FileEntry]) -> ReexportTable:
+    """The re-export table of every package `__init__.py` among the entries."""
+    table: ReexportTable = {}
+    for entry in entries:
+        rel_path = PurePosixPath(entry.rel_path).as_posix()
+        if PurePosixPath(rel_path).name != "__init__.py":
+            continue
+        try:
+            source = Path(entry.abs_path).read_bytes()
+        except OSError:
+            continue
+        table.update(_package_reexports(rel_path, source))
+    return table
+
 
 _TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 _INDEX_NAMES = tuple(f"index{ext}" for ext in _TS_EXTENSIONS)
@@ -92,6 +181,10 @@ class SourceIndex:
     # (crate dir, declared idents) per manifest -- the authoritative answer to
     # "did THIS file's crate declare that dependency". See issue #38.
     cargo_crate_dependencies: tuple[tuple[str, frozenset[str]], ...] = ()
+    # What each package `__init__.py` re-exports by a plain `from X import name`
+    # (#87). Read from the files themselves, so extraction of an importer that
+    # did not change depends on it: see `python_reexport_digest`.
+    python_reexports: ReexportTable = field(default_factory=dict, compare=False, repr=False)
 
     @classmethod
     def from_entries(cls, entries: Iterable[FileEntry], cfg: Config | None = None) -> "SourceIndex":
@@ -116,7 +209,41 @@ class SourceIndex:
             cargo_crates=_load_cargo_crates(root, frozenset(rel_paths)),
             cargo_dependencies=_load_cargo_dependencies(root, frozenset(rel_paths)),
             cargo_crate_dependencies=_load_cargo_crate_dependencies(root, frozenset(rel_paths)),
+            python_reexports=_python_reexports(entries),
         )
+
+    def python_reexport_digest(self) -> str:
+        """Digest of the re-export table, for the cache key of a Python file.
+
+        An importer binds `from pkg import name` to whatever `pkg/__init__.py`
+        re-exports, and its bytes do not change when that does.
+        """
+        digest = hashlib.blake2b(digest_size=8)
+        for (rel_path, name), (module, level, original) in sorted(self.python_reexports.items()):
+            digest.update(f"{rel_path}\0{name}\0{level}\0{module}\0{original}\0".encode("utf-8", errors="replace"))
+        return digest.hexdigest()
+
+    def follow_python_reexport(self, rel_path: str, name: str) -> tuple[str, str]:
+        """The file and name that define `name` as `rel_path` exports it.
+
+        Follows `from X import name` statements the package `__init__.py`
+        makes, for as many steps as the source states. It stops where a hop does
+        not resolve to a file of the tree, where a name is bound some other way,
+        at a cycle, and at `_MAX_REEXPORT_HOPS`; each returns the last place
+        reached, which is `(rel_path, name)` itself when nothing is followed.
+        """
+        seen = {(rel_path, name)}
+        for _ in range(_MAX_REEXPORT_HOPS):
+            hop = self.python_reexports.get((rel_path, name))
+            if hop is None:
+                break
+            module, level, original = hop
+            target = self.resolve_python_module(rel_path, module, level)
+            if target is None or (target, original) in seen:
+                break
+            seen.add((target, original))
+            rel_path, name = target, original
+        return rel_path, name
 
     def file_set_digest(self) -> str:
         """Stable digest of the repo's file set.

@@ -1363,7 +1363,10 @@ def _python_import_bindings(
                 continue
             parent = source_index.resolve_python_module(rel_path, base_module, dots)
             if parent:
-                out.append((local, "symbol", _make_id(_file_node_id(parent), original)))
+                # A package that only re-exports the name does not define it:
+                # bind to the file that does (#87).
+                defining, defined_as = source_index.follow_python_reexport(parent, original)
+                out.append((local, "symbol", _make_id(_file_node_id(defining), defined_as)))
             else:
                 out.append((local, "external", None))
     return out
@@ -2058,6 +2061,11 @@ def extract_file(entry: FileEntry, cfg: Config, cache: Cache | None = None, sour
         # Only resolver-consulting languages pay this invalidation: Go and Rust
         # extraction is file-local and cannot go stale this way.
         cache_language = f"{cache_language}:fs{source_index.file_set_digest()}"
+        if entry.language == "python":
+            # A name imported through a package is bound to the file the
+            # package's `__init__.py` re-exports it from, and that file's bytes
+            # are not the importer's (#87).
+            cache_language = f"{cache_language}:rx{source_index.python_reexport_digest()}"
     # What is cached names the file: every node id and `source_file` in it is
     # built from the path. Keyed on the bytes and the language alone, two files
     # with the same bytes shared one entry, so one of them was answered with

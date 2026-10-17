@@ -15,6 +15,19 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Fixed
+
+- Python: a name a package re-exports is followed to the file that defines it
+  (#87). `from pkg import Base` used to bind to `pkg/__init__.py`, so a call of
+  a re-exported function ended at a placeholder, and a `self.m()` in a class
+  whose base was re-exported had no edge and was not counted, which let
+  `callers` answer `decision_grade` without that caller. Only a plain
+  top-level `from X import name` in an `__init__.py` is followed, for as many
+  steps as the source states; a name the package binds some other way, a cycle,
+  and a module other than `__init__.py` stay as they were. The Python cache key
+  gains a digest of the re-exports, so an unchanged importer is re-resolved
+  when an `__init__.py` changes.
+
 ## [1.3.0] — 2026-10-16
 
 A minor release, with a security fix: from a folder below a repository's
