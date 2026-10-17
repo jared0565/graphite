@@ -968,6 +968,54 @@ def _forget_what_may_be_set_again(assigned: dict[str, str], argv: list[str], pow
             assigned.pop(named.group().lower() if powershell else named.group(), None)
 
 
+# PowerShell commands whose output is the files (or folders) of a path, so that a
+# `Select-String` after a pipe searches what they hand it (#84).
+_FILE_LISTINGS = frozenset({"get-childitem", "gci", "ls", "dir"})
+# The searches that take files from the pipeline. `grep` does not: it reads the
+# lines of what is piped, so `ls | grep name` filters a list of names.
+_POWERSHELL_SEARCHES = frozenset({"select-string", "sls"})
+# What may stand between such a listing and the search and still hand the search
+# files: a stage that only keeps or orders them. Any other stage (`ForEach-Object`,
+# `Out-String`, `Select-Object -ExpandProperty`) may make text, and ends the chain.
+_FILE_KEEPING_STAGES = frozenset({
+    "where-object", "where", "?", "select-object", "select", "sort-object", "sort",
+})
+# Listing flags that take a word, so the word is not a path. `-Path` and
+# `-LiteralPath` are the exceptions: their word IS one.
+_LISTING_VALUE_FLAGS = frozenset({
+    "-filter", "-include", "-exclude", "-depth", "-attributes",
+})
+_LISTING_PATH_FLAGS = frozenset({"-path", "-literalpath"})
+
+
+def _listed_paths(name: str, rest: list[str]) -> list[str] | None:
+    """The paths a file listing names, else None where `name` lists no files.
+
+    An empty list is a listing of the current directory. `-Name` makes the
+    listing text, and what is piped on is then a filter of it.
+    """
+    if name not in _FILE_LISTINGS:
+        return None
+    paths: list[str] = []
+    expecting = False
+    skipping = False
+    for token in rest:
+        lowered = token.lower()
+        if expecting or skipping:
+            if expecting:
+                paths.append(token)
+            expecting = skipping = False
+        elif lowered == "-name" or lowered == "-n":
+            return None
+        elif lowered in _LISTING_PATH_FLAGS:
+            expecting = True
+        elif lowered in _LISTING_VALUE_FLAGS:
+            skipping = True
+        elif not token.startswith("-"):
+            paths.append(token)
+    return paths
+
+
 def _bash_searches(
     command: str, root: Path, msys: bool = False, cwd: Path | None = None, powershell: bool = False
 ) -> list[_Search]:
@@ -1024,9 +1072,11 @@ def _bash_searches(
         base, placed = start, start_placed  # `base` is where the shell is
         moved = False  # a `cd`, or a command the hook does not model, has run in this shell
         pipeline_base, pipeline_placed = base, placed  # where the pipeline being read started
+        listed: list[str] | None = None  # the paths of the file listing whose output the stage before gives
         for head in _bash_command_heads(lines, powershell):
             piped = head.before in ("|", "|&")  # `||` is or-else, not a pipe
             if not piped:
+                listed = None
                 if head.before != "&&":
                     base, placed = (None, False) if moved else (start, start_placed)
                 pipeline_base, pipeline_placed = base, placed
@@ -1040,6 +1090,16 @@ def _bash_searches(
             if len(head.argv) == 1 and _NESTED_RE.fullmatch(head.argv[0]):
                 continue  # a subshell standing alone
             if piped and _command_name(head.argv[0]) != "xargs":
+                stage = _command_name(head.argv[0])
+                if listed is not None and stage in _POWERSHELL_SEARCHES:
+                    # `Get-ChildItem -Recurse src | Select-String name` searches
+                    # the files it is handed (#84), as `xargs grep` does.
+                    found = _search_in(stage, [_expanded(t, assigned, powershell) for t in head.argv[1:]], here, msys)
+                    if found is not None:
+                        found = found._replace(paths=_located(listed, here, msys))
+                        searches.append(found if here_placed or cwd is None else _unplaced(found, cwd))
+                if stage not in _FILE_KEEPING_STAGES:
+                    listed = None
                 continue  # a filter: it reads what the command before it wrote
             assignments = _assignments(head.argv, powershell)
             if assignments is not None:
@@ -1063,6 +1123,7 @@ def _bash_searches(
                 continue
             name = _command_name(argv[0])
             rest = [_expanded(token, assigned, powershell) for token in argv[1:]]
+            listed = _listed_paths(name, rest) if len(argv) == len(written) else None
             # A `cd` behind a wrapper is not the shell's: `env cd docs` moves a
             # program that then exits, and `! cd docs && ...` goes on only when
             # the `cd` failed. It is read below, as a command that may move.

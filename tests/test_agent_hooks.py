@@ -675,8 +675,10 @@ def test_grep_dash_e_pattern_is_read_explicitly(built_repo: Path) -> None:
 @pytest.mark.parametrize(
     "command",
     [
-        "Get-ChildItem -Recurse | Select-String target_symbol",
         "git log | sls target_symbol",
+        # A listing handed to `Select-String` is a search of its files (#84); the
+        # same listing made into text is a filter again.
+        "Get-ChildItem -Recurse -Name | Select-String target_symbol",
     ],
 )
 def test_select_string_downstream_of_a_pipe_is_filtering(built_repo: Path, command: str) -> None:
@@ -2213,12 +2215,58 @@ def test_text_that_looks_like_a_stand_in_is_only_text(literal_repo: Path, comman
     assert _decision(handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")) == "deny"
 
 
-def test_files_piped_to_select_string_are_a_known_limit(literal_repo: Path) -> None:
-    """Pinned like the other limits. `Get-ChildItem -Recurse src | Select-String
-    name` searches the files it is handed. The hook reads every command after
-    a pipe as a filter, `xargs` apart, so this one is not refused."""
-    command = "Get-ChildItem -Recurse src | Select-String -Pattern dependents"
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("Get-ChildItem -Recurse src | Select-String -Pattern dependents", id="get-childitem"),
+        pytest.param("gci -r src | sls dependents", id="aliases"),
+        pytest.param("ls src | Select-String dependents", id="ls"),
+        pytest.param("dir -Recurse | Select-String dependents", id="dir-with-no-path"),
+        pytest.param("Get-ChildItem -Path src -Recurse | Select-String dependents", id="the-path-flag"),
+        pytest.param(
+            "Get-ChildItem -Recurse src | Where-Object { $_.Extension -eq '.py' } | Select-String dependents",
+            id="through-where-object",
+        ),
+        pytest.param(
+            "Get-ChildItem -Recurse src | Select-Object -First 5 | Select-String dependents",
+            id="through-select-object",
+        ),
+        pytest.param("cd src; Get-ChildItem | Select-String dependents", id="after-a-cd"),
+    ],
+)
+def test_files_piped_to_select_string_are_a_search_of_them(literal_repo: Path, command: str) -> None:
+    """`Get-ChildItem -Recurse src | Select-String name` searches the files it is
+    handed, as `xargs grep` does after a pipe in a POSIX shell (#84)."""
+    assert _decision(handle_pre_tool_use(_ps_payload(literal_repo, command), "strict")) == "deny"
 
+
+@pytest.mark.parametrize("path", ["src", "docs", "notes.md", "."])
+def test_files_piped_to_select_string_are_judged_as_the_path_form_is(literal_repo: Path, path: str) -> None:
+    piped = _decision(handle_pre_tool_use(
+        _ps_payload(literal_repo, f"Get-ChildItem {path} | Select-String -Pattern dependents"), "strict"
+    ))
+    named = _decision(handle_pre_tool_use(
+        _ps_payload(literal_repo, f"Select-String -Pattern dependents -Path {path}"), "strict"
+    ))
+
+    assert piped == named
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("git log | Select-String dependents", id="another-commands-output"),
+        pytest.param("Get-ChildItem -Name src | Select-String dependents", id="names-are-text"),
+        pytest.param("Get-Content notes.md | Select-String dependents", id="get-content"),
+        pytest.param(
+            "Get-ChildItem src | ForEach-Object { $_.Name } | Select-String dependents",
+            id="a-stage-that-makes-text",
+        ),
+        pytest.param("Get-ChildItem src; 'x' | Select-String dependents", id="a-listing-before-a-semicolon"),
+        pytest.param("Get-ChildItem src | Out-String | Select-String dependents", id="out-string"),
+    ],
+)
+def test_a_select_string_that_filters_other_output_stays_a_filter(literal_repo: Path, command: str) -> None:
     assert _decision(handle_pre_tool_use(_ps_payload(literal_repo, command), "strict")) == "allow"
 
 

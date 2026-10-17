@@ -369,9 +369,13 @@ escape fused to the name (`\bname`). The body of a heredoc, a PowerShell
 here-string, quoted text and comments are not commands, so a commit message
 that quotes a search is not one. A comment starts at a `#` that starts a word;
 a `#` inside one (`a#b`, `$#`) is part of it. After a pipe a search filters
-the output of the command before it and is not refused; `xargs` is the
+the output of the command before it and is not refused; `xargs` is an
 exception, because what it reads from the pipe is a list of files to search.
-Every stage of a pipeline is read in the directory the pipeline started in.
+So is `Select-String` in PowerShell, when the command before it lists files
+(`Get-ChildItem`, `gci`, `ls`, `dir`, with or without `-Recurse`; not with
+`-Name`, which makes text) and only `Where-Object`, `Select-Object` or
+`Sort-Object` stand between them: it is judged as a search of the paths
+listed. Every stage of a pipeline is read in the directory the pipeline started in.
 
 A subshell or a substitution is read in the shell of the command that holds
 it: in the directory that command runs in, with the variables set before it.
@@ -410,9 +414,10 @@ Some shapes are not seen at all, and a search in them is not refused:
   of its own is read, whether or not the function is called;
 - a substitution inside the body of a heredoc. The body is text to the hook,
   and where the delimiter is not quoted the shell runs a `$(...)` in it;
-- in PowerShell, files piped to `Select-String`
-  (`Get-ChildItem -Recurse src | Select-String name`), which is read as the
-  filter any other command after a pipe is.
+- in PowerShell, files that reach `Select-String` through a stage other than
+  `Where-Object`, `Select-Object` or `Sort-Object`
+  (`Get-ChildItem src | ForEach-Object { $_ } | Select-String name`), which is
+  read as the filter any other command after a pipe is.
 
 A command the hook cannot read at all, such as one with a quote that never
 closes, is not refused either.

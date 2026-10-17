@@ -65,6 +65,14 @@ machine-checkable identity; the version is for humans.
   offered a build that is refused there, and its incident line read a ledger
   nothing writes. It now follows the root, as the read commands do (#81); a
   `.git` above that graphite does not take is not followed.
+- Agent hooks: the strict hook reads files piped to `Select-String` as a
+  search of them (#84). `Get-ChildItem -Recurse src | Select-String name` was
+  let through as a filter, while `Select-String name -Path src` was refused.
+  A listing (`Get-ChildItem`, `gci`, `ls`, `dir`) now hands its paths to a
+  `Select-String` after it, also across `Where-Object`, `Select-Object` and
+  `Sort-Object`, and the search is judged as the path form is. `-Name`
+  listings, other commands' output and any other stage between them stay
+  filters.
 
 ## [1.3.0] — 2026-10-16
 
