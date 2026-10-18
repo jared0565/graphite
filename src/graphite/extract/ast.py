@@ -1585,7 +1585,15 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                     for arg in base.children:
                         if arg.type.endswith("identifier") and arg.text:
                             base_name = arg.text.decode("utf-8", errors="ignore")
-                            result.edges.append(_edge(did, _make_id(base_name), "inherits", rel_path, _line(arg)))
+                            base_target = _make_id(base_name)
+                            if body_scope is not None and body_scope.parent is not None:
+                                # Where the source states which class the name
+                                # is, the edge ends at that class (#86); any
+                                # other base keeps its placeholder.
+                                named = resolve(body_scope.parent, base_name)
+                                if named.kind in ("def", "symbol"):
+                                    base_target = _python_definition_id(named, ids) or base_target
+                            result.edges.append(_edge(did, base_target, "inherits", rel_path, _line(arg)))
             walk_children(node, did, scope_id)
         elif node.type in ("import_statement", "import_from_statement"):
             for module, dots in _python_import_modules(node):

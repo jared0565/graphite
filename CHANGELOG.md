@@ -27,6 +27,12 @@ machine-checkable identity; the version is for humans.
   and a module other than `__init__.py` stay as they were. The Python cache key
   gains a digest of the re-exports, so an unchanged importer is re-resolved
   when an `__init__.py` changes.
+- Python: an `inherits` edge ends at the class its base names (#86). Its far
+  end was always a node made from the base's bare name, of kind `unknown`, so
+  the graph held no link from a class to its base and every class of one name
+  shared one placeholder. A base that is a bare name the file binds by a
+  class statement or imports by name now ends at that class's node; a
+  builtin, a dotted name or a call keeps its placeholder.
 
 ## [1.3.0] — 2026-10-16
 
