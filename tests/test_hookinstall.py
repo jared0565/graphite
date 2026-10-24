@@ -175,6 +175,41 @@ def test_uninstall_leaves_relocated_foreign_hooks_alone(tmp_path: Path) -> None:
     assert (root / ".githooks" / "pre-push").read_bytes() == body.encode()
 
 
+# --- where another tool's hook belongs (channel rounds 323, 324) ---------------
+
+
+def test_chain_slots_name_the_file_each_trampoline_runs_first(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    install_hooks(root, INTERP)
+
+    slots = hookinstall.chain_slots(hooks_dir(root))
+
+    assert set(slots) == set(TRIGGERS)
+    for hook in TRIGGERS:
+        assert slots[hook] == {"file": f"{hook}.local", "present": False}
+
+
+@pytest.mark.parametrize("chained", TRIGGERS)
+def test_chain_slots_report_only_a_chained_hook_as_present(tmp_path: Path, chained: str) -> None:
+    root = _repo(tmp_path)
+    _write_hook(root, chained, "#!/bin/sh\n# >>> aramid managed >>>\nexit 0\n")
+    install_hooks(root, INTERP)
+
+    slots = hookinstall.chain_slots(hooks_dir(root))
+
+    for hook in TRIGGERS:
+        assert slots[hook]["present"] is (hook == chained)
+
+
+def test_a_directory_in_a_chain_slot_is_not_a_chained_hook(tmp_path: Path) -> None:
+    """The trampoline runs the slot only when `[ -f "$CHAINED" ]` holds."""
+    root = _repo(tmp_path)
+    install_hooks(root, INTERP)
+    (hooks_dir(root) / "post-commit.local").mkdir()
+
+    assert hookinstall.chain_slots(hooks_dir(root))["post-commit"]["present"] is False
+
+
 # --- which git `init` launches (channel round 304) -----------------------------
 
 

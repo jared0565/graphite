@@ -309,9 +309,15 @@ under `.githooks/` embed an absolute interpreter path; they are machine-local
 and gitignored on purpose. → Run `graphite init` on the new machine.
 
 **A vendored hook manager (aramid, pre-commit) and graphite both want the
-same hook.** → They chain: graphite writes trampolines that call into the
-other manager's hook when one is present. → See `docs/interop/` for the
-measured chaining behaviour; do not hand-edit either side's hook.
+same hook.** → They chain: each graphite trampoline (`post-commit`,
+`post-merge`, `post-rewrite`) first runs `<hook>.local` beside it in the
+hooks directory. A hook already in the slot when graphite installs is moved
+there; a tool installing after graphite writes its hook there itself.
+`graphite doctor --json` names the file per trigger under `chain_slots` and
+says whether one is present. Hooks graphite does not trigger on
+(`pre-commit`, `pre-push`) are moved unchanged and never wrapped. → See
+`docs/interop/` for the measured chaining behaviour; do not hand-edit either
+side's hook.
 
 ## Releases and verification
 

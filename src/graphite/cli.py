@@ -1216,6 +1216,11 @@ def cmd_init(args: argparse.Namespace) -> int:
             extra += f", reason={hooks['reason']}"
         if hooks.get("relocated"):
             extra += f", relocated={', '.join(hooks['relocated'])}"
+        if hooks.get("chain_slots"):
+            # Said in either install order: with graphite first nothing is in
+            # these slots yet, and this is where another tool's hook goes.
+            files = ", ".join(slot["file"] for slot in hooks["chain_slots"].values())
+            extra += f"; another tool's hook for the same event belongs in {files} there, run first"
         print(f"  - hooks: {hooks.get('action')} ({hooks.get('path')}{extra})")
         allowlist = result["allowlist"]
         if allowlist.get("changed"):

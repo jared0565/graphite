@@ -397,6 +397,7 @@ def init_project(
             "path": str(hookinstall.hooks_dir(root)),
             "action": "installed",
             "relocated": relocated,
+            "chain_slots": hookinstall.chain_slots(hookinstall.hooks_dir(root)),
         }
     elif install_hooks:
         # Not a git repo (yet). `hookinstall.install_hooks` would still write

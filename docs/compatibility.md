@@ -28,7 +28,12 @@ fixes are patches. `CHANGELOG.md` names every change to a stable surface.
 - **Exit codes** in `docs/reference/exit-codes.md`.
 - **The launch and hook contract.** `graphite agent-hook` always exits 0;
   the `.githooks/` trampolines and every generated launcher run the
-  interpreter as `python -P -m graphite …`; `init` rewrites only the
+  interpreter as `python -P -m graphite …`; each trampoline (`post-commit`,
+  `post-merge`, `post-rewrite`) first runs `<hook>.local` beside it in the
+  hooks directory when that file exists, and does not pass its exit status
+  on, as git ignores it for these hooks. That name is where another tool's
+  hook for the same event belongs, and `doctor --json` reports it as
+  `chain_slots`; `init` rewrites only the
   graphite-managed sections of `GRAPHITE.md`, `AGENTS.md`, `CLAUDE.md`,
   `.mcp.json` and `.vscode/tasks.json` and preserves foreign content.
 - **MCP tool names** served by `graphite-mcp`.

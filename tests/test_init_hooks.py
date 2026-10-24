@@ -96,6 +96,42 @@ def test_init_reports_what_it_relocated(tmp_path: Path, capsys) -> None:
     assert (root / ".githooks" / "pre-push").read_bytes() == body.encode()
 
 
+def test_init_reports_where_another_tools_hook_belongs(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+
+    result = init_project(root, platforms=["claude"]).to_dict()
+
+    slots = result["hooks"]["chain_slots"]
+    for hook in TRIGGERS:
+        assert slots[hook]["file"] == f"{hook}.local"
+
+
+def test_init_names_the_chain_slots_on_its_hook_line(tmp_path: Path, capsys) -> None:
+    """In either install order (channel rounds 323, 324): with graphite first,
+    nothing is in its slots yet, and this line is the only place `init` says
+    where another tool's hook for the same event goes."""
+    root = _repo(tmp_path)
+
+    result = main(["init", str(root), "--platform", "claude", "--no-build", "--no-validate"])
+    out = capsys.readouterr().out
+
+    assert result == 0
+    line = next(text for text in out.splitlines() if text.startswith("  - hooks: "))
+    for hook in TRIGGERS:
+        assert f"{hook}.local" in line
+
+
+def test_a_skipped_hook_install_names_no_chain_slot(tmp_path: Path, capsys) -> None:
+    root = _repo(tmp_path)
+
+    result = main(["init", str(root), "--platform", "claude", "--no-hooks", "--no-build", "--no-validate"])
+    out = capsys.readouterr().out
+
+    assert result == 0
+    line = next(text for text in out.splitlines() if text.startswith("  - hooks: "))
+    assert ".local" not in line
+
+
 def test_init_on_a_non_git_directory_does_not_claim_hooks_are_installed(tmp_path: Path) -> None:
     """`hookinstall.install_hooks` would happily write trampolines into
     `.githooks/` even with no `.git` for `core.hooksPath` to live in -- git

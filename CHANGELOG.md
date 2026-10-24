@@ -15,6 +15,24 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Added
+
+**Where another tool's git hook goes is declared, not only written in
+shell.** Each of graphite's trampolines (`post-commit`, `post-merge`,
+`post-rewrite`) runs `<hook>.local` beside it first when that file exists. The
+name was stated only inside the trampoline's text. When graphite was installed
+first, nothing was in that slot, and a hook manager that would not chain to
+graphite's trampoline left its own hook out entirely (channel rounds 322 to
+324). The name is now part of the hook contract in `docs/compatibility.md`.
+It is reported in two places:
+
+- the `hooks` check of `doctor --json`, as `chain_slots`: for each trigger,
+  the `file` relative to the hooks directory and whether it is `present`;
+- the hook line of `graphite init`, in either install order.
+
+An empty slot is not a finding. The trampolines are byte for byte those of
+1.3.0. This adds a field to `doctor --json`, so the next release is a minor.
+
 ### Fixed
 
 - Python: a name a package re-exports is followed to the file that defines it

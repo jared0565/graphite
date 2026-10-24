@@ -20,7 +20,7 @@ from .daemon import read_daemon_status
 from .daemon_health import HealthOptions, evaluate_daemon_health
 from .freshness import FreshnessLimitError, check_graph_freshness
 from .git import GitError, GitRunner
-from .hookinstall import DEFAULT_HOOKS_DIRNAME, hook_shim_present, hooks_dir
+from .hookinstall import DEFAULT_HOOKS_DIRNAME, chain_slots, hook_shim_present, hooks_dir
 from .init import gitignored_managed_paths, managed_doc_paths
 from .hookshim import TRIGGERS
 from .llm import canonical_provider_name
@@ -179,7 +179,7 @@ def check_hooks(root: Path) -> DoctorCheck:
     installed = all(hook_shim_present(hdir / hook) for hook in TRIGGERS)
     configured = _hooks_path_configured(root)
     custom_hooks_dir = hdir != root / DEFAULT_HOOKS_DIRNAME
-    details = {"onboarded": True, "custom_hooks_dir": custom_hooks_dir, "hookspath_configured": configured, "trampolines_installed": installed}
+    details = {"onboarded": True, "custom_hooks_dir": custom_hooks_dir, "hookspath_configured": configured, "trampolines_installed": installed, "chain_slots": chain_slots(hdir)}
 
     if configured and installed:
         return DoctorCheck("hooks", "Hooks", "ready", "Git hooks are installed and enforced.", details)

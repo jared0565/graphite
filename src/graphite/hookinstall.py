@@ -159,6 +159,23 @@ def install_hooks(root: Path, interpreter: Path) -> list[str]:
     return relocated
 
 
+def chain_slots(hdir: Path) -> dict[str, dict[str, str | bool]]:
+    """Where another tool's hook for each trigger goes, and whether one is there.
+
+    Each trampoline runs `<hook>.local` beside it first when that file exists,
+    so that is where another tool's hook for the same event belongs, in either
+    install order. The name is part of the hook contract (docs/compatibility.md);
+    `doctor --json` and `init` report it so another tool need not read it out of
+    the trampoline's shell (channel rounds 323, 324). It is named relative to
+    the hooks directory, which `core.hooksPath` may put outside the repository,
+    so the report carries no path. `present` is the trampoline's own `[ -f ]`.
+    """
+    return {
+        hook: {"file": f"{hook}{CHAINED_SUFFIX}", "present": (hdir / f"{hook}{CHAINED_SUFFIX}").is_file()}
+        for hook in TRIGGERS
+    }
+
+
 def uninstall_hooks(root: Path) -> list[str]:
     """Remove graphite's trampolines, restoring anything they chained.
 
