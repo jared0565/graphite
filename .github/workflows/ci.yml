@@ -430,9 +430,17 @@ jobs:
         if: always()
         with:
           name: aramid-gate-reports
+          # The tests slot's own log is the only record that names a failing
+          # test: prepush.json says just `tests-failed` and prepush.err holds
+          # progress lines. Run 39113691834 (PR #99, 2026-10-18) failed its
+          # suite once, passed on re-run, and the test was never named,
+          # because the log went with the runner. `.aramid/` is a dot
+          # folder, which upload-artifact leaves out unless told otherwise.
           path: |
             precommit.json
             prepush.json
+            .aramid/logs/python*.log
+          include-hidden-files: true
 
   # ONE number for the whole matrix, with a floor that can only rise.
   #
