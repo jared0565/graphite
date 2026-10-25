@@ -15,6 +15,39 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-10-25
+
+A patch release: three fixes, two to the Python graph (#106, #107) and one
+to the agent hooks' savings line (#108). No field, command or option is
+added, removed or renamed, and `Requires-Dist` and the entry points are
+those of 1.4.0.
+
+The graph changes in this release. On this repository, measured against the
+deployed 1.4.0 engine, with the same interpreter, from one tree:
+
+- every definition and file node id survives (6,691 and 429), each naming
+  the same definition or file, and none is new; 10 placeholder nodes are
+  gone, so 9,231 nodes become 9,221;
+- 59 call sites that ended at a placeholder for a name a module only
+  imports now end at the function or class that name is (#107);
+- 14 calls edges at 10 sites are gone: each was a `super().__init__` in an
+  error class over a builtin exception, bound by name to an unrelated
+  constructor (#106). `calls` goes from 16,265 to 16,251 edges, and the
+  Python `calls` ratio from 0.978 to 0.983: 12,236 of 12,452 call sites
+  are bound, where 12,191 of 12,466 were;
+- `contains` (6,689), `imports` (2,457) and `inherits` (120) are
+  unchanged;
+- `analysis` lists 18 cycles where it listed 20: the two it no longer lists
+  ran through those edges. Entry points, god nodes, orphans, surprising
+  connections and top files are identical; the community count goes from
+  174 to 179.
+
+Two builds of this tree with either engine are byte-identical (`graph.json`,
+`GRAPH_REPORT.md`, `graph.html`).
+
+The entries below quote figures measured when each change was made, on
+earlier commits of this tree, so they differ from the ones above.
+
 ### Fixed
 
 - Python: a name a module only imports is followed to the file that defines
