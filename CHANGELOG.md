@@ -17,6 +17,31 @@ machine-checkable identity; the version is for humans.
 
 ### Fixed
 
+- Python: a name a module only imports is followed to the file that defines
+  it (#107). Where `front.py` binds `target` by `from pkg.impl import target`
+  and nothing else, `front.target(x)` from another file, the local alias
+  `t = front.target; t(x)` (#90) and `from pkg.front import target` each
+  ended at a placeholder `pkg_front_py_target` that no file defines, so
+  `callers target` left the caller out while `callees` of the caller
+  answered `decision_grade` with that placeholder. #87 followed such a name
+  through a package's `__init__.py` only, and only for `from pkg import
+  name`: `import pkg; pkg.name()` stayed at the package. Each Python module
+  now records the names it binds only by one top-level `from X import name`,
+  by the rule #87 applies, and the dispatch post-pass follows them across
+  files for as many hops as the source states: a call or `inherits` target,
+  a stated receiver (`Base().step()`) and the bases a `self.m()` or
+  `super().m()` is looked up along all end at the definition. A name the
+  module binds any other way too is not followed, and neither is a
+  submodule (`from pkg import sub`); a name a function of the module
+  rebinds under `global` is no longer followed either, through
+  `__init__.py` as elsewhere. A star import is not read: a name it could
+  rebind is followed all the same. What a module records is on its own
+  cached extraction, so a change to it reaches an unchanged caller with no
+  new cache key. On this repository, the #106 engine against this one with
+  one interpreter, from one tree: 59 calls edges, at 59 sites, move from
+  10 placeholders to the functions and classes they name, and nothing else
+  changes. Those placeholder nodes are gone, every definition id is the same,
+  and the Python `calls` ratio goes from 0.978 to 0.983.
 - Python: `super().m()` has no edge where the method it finds is a builtin's
   (#106). In `class StepError(AppError)` with `AppError(RuntimeError)`,
   `super().__init__(message)` runs `RuntimeError.__init__`, but the binding by
@@ -30,15 +55,17 @@ machine-checkable identity; the version is for humans.
   has no edge, as a call of a builtin has none. A name no builtin of the chain
   has, a base that cannot be read beside the builtin, a class with no base,
   and `self.m()` are bound as before.
-- Agent hooks: a session's savings line counts only the session's own use
-  (#108). The usage ledger holds every session's entries, and a session the
-  stop cursor had not seen started reading it at byte 0, so its first Stop
-  reported all earlier sessions' use as saved "this turn" and its session
-  total carried that history from then on. SessionStart now opens the
-  session's books where the ledger ends, and keeps a known session's books on
-  a resume or a compact. A Stop for a session with no books (its start was
+- Agent hooks: a session's savings line no longer counts the use of the
+  sessions before it (#108). The usage ledger holds every session's
+  entries, and a session the stop cursor had not seen started reading it at
+  byte 0, so its first Stop reported all earlier sessions' use as saved
+  "this turn" and its session total carried that history from then on.
+  SessionStart now opens the session's books where the ledger ends, and
+  keeps a known session's books on a resume or a compact. A Stop for a session with no books (its start was
   not seen, or it was pruned from the cursor) starts at the ledger's end too:
-  that turn's own use is not counted, and no other session's is.
+  that turn's own use is not counted, and no other session's is. Two sessions
+  open in one repository at once still each count what the other ran between
+  two of their turns: a ledger entry does not say which session made it.
 
 ## [1.4.0] — 2026-10-25
 

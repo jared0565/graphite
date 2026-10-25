@@ -16,7 +16,7 @@ from ..cache import Cache
 from ..config import Config
 from ..graph import normalize_id
 from ..ingest import LANGUAGE_BY_EXT, FileEntry
-from ..resolve import SourceIndex, should_keep_call_target
+from ..resolve import MAX_REEXPORT_HOPS, SourceIndex, python_reexports_of, should_keep_call_target
 from .pyscope import (
     PyScope,
     Resolution,
@@ -1421,6 +1421,30 @@ def _python_import_bindings(
     return out
 
 
+def _python_module_reexports(
+    file_id: str, rel_path: str, source: bytes, source_index: SourceIndex
+) -> dict[str, str]:
+    """`<module>.<name>` -> where the module's own `from X import name` says it is (#107).
+
+    The key is the id a call of `module.name` gets, `_make_id(<file id>,
+    <name>)`; the value is the id of `name` in the file `X` resolves to. Only
+    a name the module binds by that one statement is recorded (the rule #87
+    applies to a package's `__init__.py`), and one that names a submodule
+    (`from pkg import sub`) is not: `pkg.sub` is the module, not a name of
+    `pkg`. The dispatch post-pass follows these across files, so a value
+    depends on the module's own bytes and the file set alone, as its cache
+    key does.
+    """
+    out: dict[str, str] = {}
+    for (_, local), (module, level, original) in python_reexports_of(rel_path, source).items():
+        if source_index.resolve_python_module(rel_path, f"{module}.{original}", level):
+            continue
+        defining = source_index.resolve_python_module(rel_path, module, level)
+        if defining:
+            out[_make_id(file_id, local)] = _make_id(_file_node_id(defining, source_index), original)
+    return out
+
+
 def _python_definition_name(node: Any) -> str | None:
     """A def/class node's name exactly as its graph node records it."""
     name_node = node.child_by_field_name("name")
@@ -1560,14 +1584,21 @@ def _python_attribute_root(node: Any) -> str | None:
     return None
 
 
-def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, source_index: SourceIndex | None = None) -> ExtractionResult:
+def _extract_python(file_id: str, rel_path: str, source: bytes, tree: Any, source_index: SourceIndex | None = None) -> ExtractionResult:
     result = ExtractionResult()
     root = tree.root_node
 
     def _line(node: Any) -> int:
         return node.start_point[0] + 1
 
-    result.nodes.append(_node(file_id, "file", Path(rel_path).name, rel_path))
+    file_node = _node(file_id, "file", Path(rel_path).name, rel_path)
+    if source_index is not None:
+        # For the dispatch post-pass, which takes it off again: what a call of
+        # `<this module>.<name>` reaches where the module only imports the name.
+        reexports = _python_module_reexports(file_id, rel_path, source, source_index)
+        if reexports:
+            file_node["_reexports"] = reexports
+    result.nodes.append(file_node)
 
     # One pass builds every Python scope and what each binds (#70, #71). The walk
     # below reads it: each def/class gets its scope-qualified identity, and each
@@ -2563,6 +2594,46 @@ def _dispatch_is_gated(source_file: str | None) -> bool:
     return language in _DISPATCH_GATED_LANGUAGES
 
 
+def _follow_python_reexports(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> None:
+    """Re-point each id of a name a Python module only imports to its definition (#107).
+
+    `front.target(x)`, where `front.py` binds `target` only by `from pkg.impl
+    import target`, was extracted as a call of `pkg_front_py_target`, which no
+    file defines; so were `t = front.target; t(x)`, `from pkg.front import
+    target` and a base class or receiver named that way. Each module's own
+    imports are on its file node (`_reexports`); here they are followed across
+    files, for as many hops as the source states, to the id the last module
+    names. A definition is never moved: a module that defines a name binds it
+    twice, and such a name is not recorded. A cycle stops at
+    `MAX_REEXPORT_HOPS`, on an id no file defines.
+
+    Edge targets of every relation are re-pointed, and so are ``_receiver``
+    on an edge and ``_bases`` on a class node, the other two places a
+    definition id is read; ``_reexports`` is taken off every node.
+    """
+    hops: dict[str, str] = {}
+    for n in nodes:
+        hops.update(n.pop("_reexports", None) or {})
+    if not hops:
+        return
+
+    def follow(target: str) -> str:
+        for _ in range(MAX_REEXPORT_HOPS):
+            hop = hops.get(target)
+            if hop is None:
+                break
+            target = hop
+        return target
+
+    for e in edges:
+        e["target"] = follow(e["target"])
+        if e.get("_receiver") is not None:
+            e["_receiver"] = follow(e["_receiver"])
+    for n in nodes:
+        if n.get("_bases") is not None:
+            n["_bases"] = [None if base is None else follow(base) for base in n["_bases"]]
+
+
 def _resolve_method_dispatch(
     nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -2634,9 +2705,15 @@ def _resolve_method_dispatch(
     edge, as a call of a builtin gets none. Bound by name, it was a call to
     every method of the name in reach.
 
+    Before any of it, a name a Python module only imports is followed to its
+    definition (`_follow_python_reexports`, #107), so the ids read below are
+    the definitions' own.
+
     ``_member``, ``_receiver`` and ``_walk`` are stripped from every returned
-    edge, and the six class tags from every node, so none leaks into the graph.
+    edge, and the six class tags and ``_reexports`` from every node, so none
+    leaks into the graph.
     """
+    _follow_python_reexports(nodes, edges)
     # method name (casefolded) -> set of definition node ids. A set collapses the
     # same method appearing twice in the pre-dedup node list, so the cap counts
     # distinct definitions.

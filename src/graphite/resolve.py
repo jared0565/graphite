@@ -34,9 +34,9 @@ def _rel_path_set_digest(rel_paths: frozenset[str]) -> str:
 
 #: How many re-exports one name is followed through. A real package chain is a
 #: hop or two; the bound only has to be finite beside the cycle guard.
-_MAX_REEXPORT_HOPS: Final = 8
+MAX_REEXPORT_HOPS: Final = 8
 
-#: `(package __init__ path, name it binds) -> (module, leading dots, name there)`
+#: `(module path, name it binds) -> (module, leading dots, name there)`
 ReexportTable = dict[tuple[str, str], tuple[str, int, str]]
 
 
@@ -46,7 +46,9 @@ def _module_level_bindings(body: list[ast.stmt]) -> dict[str, list[ast.stmt]]:
     A name bound under `if` or `try` counts as bound there, and so does a
     name an `import` or `def` binds: the statement list is what lets the caller
     tell a name bound exactly once, by one `from X import name`, from a name
-    the package binds some other way too.
+    the module binds some other way too. So does a `global` declaration of the
+    name in any function or class of the module, which binds it from there
+    (#107).
     """
     bound: dict[str, list[ast.stmt]] = {}
 
@@ -76,16 +78,22 @@ def _module_level_bindings(body: list[ast.stmt]) -> dict[str, list[ast.stmt]]:
                         add(node.name, stmt)
 
     visit(body)
+    for stmt in body:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Global):
+                for name in node.names:
+                    add(name, node)
     return bound
 
 
-def _package_reexports(rel_path: str, source: bytes) -> ReexportTable:
-    """The names one `__init__.py` binds only by a top-level `from X import name`.
+def python_reexports_of(rel_path: str, source: bytes) -> ReexportTable:
+    """The names one module binds only by a top-level `from X import name`.
 
     A name the file binds any other way too (assigned, defined, imported a
-    second time, imported under a condition) is left out, and so is a file that
-    does not parse: `from pkg import name` then stays bound to the package, as
-    it was before re-exports were followed.
+    second time, imported under a condition, rebound under `global`) is left
+    out, and so is a file that does not parse: the name then stays bound to
+    the module, as it was before re-exports were followed. A star import is
+    not read.
     """
     try:
         tree = ast.parse(source)
@@ -116,7 +124,7 @@ def _python_reexports(entries: Iterable[FileEntry]) -> ReexportTable:
             source = Path(entry.abs_path).read_bytes()
         except OSError:
             continue
-        table.update(_package_reexports(rel_path, source))
+        table.update(python_reexports_of(rel_path, source))
     return table
 
 
@@ -233,11 +241,11 @@ class SourceIndex:
         Follows `from X import name` statements the package `__init__.py`
         makes, for as many steps as the source states. It stops where a hop does
         not resolve to a file of the tree, where a name is bound some other way,
-        at a cycle, and at `_MAX_REEXPORT_HOPS`; each returns the last place
+        at a cycle, and at `MAX_REEXPORT_HOPS`; each returns the last place
         reached, which is `(rel_path, name)` itself when nothing is followed.
         """
         seen = {(rel_path, name)}
-        for _ in range(_MAX_REEXPORT_HOPS):
+        for _ in range(MAX_REEXPORT_HOPS):
             hop = self.python_reexports.get((rel_path, name))
             if hop is None:
                 break
