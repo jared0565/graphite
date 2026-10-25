@@ -426,21 +426,31 @@ jobs:
           )
           PY
           [ "$status" -eq 0 ]
+      # The tests slot's own log is the only record that names a failing test:
+      # prepush.json says just `tests-failed` and prepush.err holds progress
+      # lines. Run 39113691834 (PR #99, 2026-10-18) failed its suite once,
+      # passed on re-run, and the test was never named, because the log went
+      # with the runner. It lives in `.aramid/logs/`, a dot folder; it is
+      # copied into a plain one so the upload needs no `include-hidden-files`,
+      # a flag that would cover every path of the step (aramid 4720a1de).
+      - name: Stage the tests slot's log
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p gate-logs
+          shopt -s nullglob
+          logs=(.aramid/logs/python*.log)
+          if [ ${#logs[@]} -gt 0 ]; then cp "${logs[@]}" gate-logs/; fi
+          ls -l gate-logs
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: aramid-gate-reports
-          # The tests slot's own log is the only record that names a failing
-          # test: prepush.json says just `tests-failed` and prepush.err holds
-          # progress lines. Run 39113691834 (PR #99, 2026-10-18) failed its
-          # suite once, passed on re-run, and the test was never named,
-          # because the log went with the runner. `.aramid/` is a dot
-          # folder, which upload-artifact leaves out unless told otherwise.
           path: |
             precommit.json
             prepush.json
-            .aramid/logs/python*.log
-          include-hidden-files: true
+            gate-logs/python*.log
+          retention-days: 14
 
   # ONE number for the whole matrix, with a floor that can only rise.
   #

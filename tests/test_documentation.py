@@ -2022,6 +2022,29 @@ def test_security_policy_names_every_scanner_ci_requires() -> None:
     )
 
 
+def test_the_gate_reports_artifact_uploads_no_dot_path() -> None:
+    """The `aramid-gate-reports` artifact carries the tests slot's log, the one
+    record that names a failing test. It was taken from `.aramid/logs/` with
+    `include-hidden-files: true`, a flag that covers every path of the step, so
+    a broader pattern added there later would publish other dot files with it
+    (aramid 4720a1de). The log is copied into a plain folder first."""
+    ci = read_document(".github/workflows/ci.yml")
+    at = ci.index("name: aramid-gate-reports")
+    step = ci[ci.rindex("- uses: actions/upload-artifact", 0, at) : ci.index("\n\n", at)]
+    listed = re.search(r"^(\s*)path: \|\n((?:\1  .*\n?)+)", step, re.MULTILINE)
+    # A parser that finds nothing would pass every rule below.
+    assert listed, "the aramid-gate-reports step no longer lists its paths"
+    paths = [line.strip() for line in listed.group(2).splitlines() if line.strip()]
+
+    assert "include-hidden-files" not in step
+    dotted = [p for p in paths if p.startswith(".") or "/." in p]
+    assert not dotted, f"the gate reports upload names dot paths: {dotted}"
+    assert "gate-logs/python*.log" in paths, paths
+    assert re.search(r"^\s*retention-days: \d+$", step, re.MULTILINE), "the gate reports keep no short retention"
+    stage = ci[ci.index("- name: Stage the tests slot's log") : at]
+    assert ".aramid/logs/python*.log" in stage and "gate-logs/" in stage, stage
+
+
 def test_benchmarks_table_has_no_placeholders_and_backs_the_declared_size() -> None:
     """`capabilities` declares supported_repo_files on the strength of a row in
     docs/benchmarks.md; a row with an angle-bracket placeholder is not a
