@@ -51,6 +51,17 @@ def test_a_base_imported_by_name_ends_at_the_file_that_defines_it(tmp_path: Path
     assert _inherits(result, _class_id(result, "other.py", "Circle")) == {_class_id(result, "shapes.py", "Base")}
 
 
+def test_a_base_a_package_re_exports_ends_at_the_file_that_defines_it(tmp_path: Path) -> None:
+    """`from pkg import Base` names `pkg/__init__.py`, which only re-exports it:
+    the edge ends where `Base` is defined (#87), not at a node of the package."""
+    _write(tmp_path / "pkg" / "__init__.py", "from pkg.shapes import Base\n")
+    _write(tmp_path / "pkg" / "shapes.py", _SHAPES)
+    _write(tmp_path / "other.py", "from pkg import Base\n\n\nclass Circle(Base):\n    pass\n")
+    result = _extract(tmp_path)
+
+    assert _inherits(result, _class_id(result, "other.py", "Circle")) == {_class_id(result, "pkg/shapes.py", "Base")}
+
+
 def test_two_bases_of_one_name_are_two_ends(tmp_path: Path) -> None:
     _write(tmp_path / "one.py", "class Base:\n    pass\n\n\nclass A(Base):\n    pass\n")
     _write(tmp_path / "two.py", "class Base:\n    pass\n\n\nclass B(Base):\n    pass\n")
