@@ -29,8 +29,8 @@ def _event(root: Path, event: str, session: str) -> dict:
     return {"session_id": session, "cwd": str(root), "hook_event_name": event}
 
 
-def _start(root: Path, session: str) -> None:
-    handle_session_start(_event(root, "SessionStart", session))
+def _start(root: Path, session: str, source: str = "startup") -> None:
+    handle_session_start({**_event(root, "SessionStart", session), "source": source})
 
 
 def _stop(root: Path, session: str) -> dict | None:
@@ -86,18 +86,48 @@ def test_a_stop_for_a_session_nothing_recorded_counts_no_history(repo: Path) -> 
     assert _session_tokens(repo, "C") == _one_entry_tokens(repo)
 
 
-def test_a_session_started_again_keeps_its_books(repo: Path) -> None:
+@pytest.mark.parametrize("source", ["resume", "compact"])
+def test_a_session_started_again_keeps_its_books(repo: Path, source: str) -> None:
     """SessionStart fires again for the same session on a resume or a compact.
     The session's books must not start over then."""
     _start(repo, "A")
     _use(repo)
     assert _stop(repo, "A") is not None
 
-    _start(repo, "A")
+    _start(repo, "A", source)
     _use(repo)
     assert _stop(repo, "A") is not None
 
     assert _session_tokens(repo, "A") == 2 * _one_entry_tokens(repo)
+
+
+def test_a_resumed_session_does_not_count_what_others_ran_while_it_was_away(repo: Path) -> None:
+    """A session stopped, another ran and stopped, and the first was resumed,
+    a day later perhaps. What the ledger gained meanwhile is the other
+    session's; counted from where the first stopped, it was reported as saved
+    on the first's next turn."""
+    _start(repo, "A")
+    _use(repo)
+    assert _stop(repo, "A") is not None
+    _start(repo, "B")
+    _use(repo)
+    _use(repo)
+    assert _stop(repo, "B") is not None
+
+    _start(repo, "A", "resume")
+
+    assert _stop(repo, "A") is None
+    assert _session_tokens(repo, "A") == _one_entry_tokens(repo)
+
+
+def test_a_compact_keeps_the_use_of_the_turn_it_falls_in(repo: Path) -> None:
+    """A compact happens inside a session, between a turn's use and its Stop."""
+    _start(repo, "A")
+    _use(repo)
+    _start(repo, "A", "compact")
+
+    assert _stop(repo, "A") is not None
+    assert _session_tokens(repo, "A") == _one_entry_tokens(repo)
 
 
 def test_session_start_without_a_session_id_writes_no_books(repo: Path) -> None:

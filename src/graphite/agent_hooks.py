@@ -136,7 +136,7 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
         cwd = _payload_cwd(payload)
         root = _repo_root(cwd)
         _activate(root)
-        _open_session_books(root, str(payload.get("session_id") or ""))
+        _open_session_books(root, str(payload.get("session_id") or ""), str(payload.get("source") or ""))
         if (root / "graph-out" / "graph.json").is_file():
             state, reason = _freshness_within_budget(root)
             if state == "stale":
@@ -1301,12 +1301,16 @@ def _keep_newest_sessions(sessions: dict[str, Any]) -> None:
         sessions.pop(next(iter(sessions)))
 
 
-def _open_session_books(root: Path, session_id: str) -> None:
+def _open_session_books(root: Path, session_id: str, source: str) -> None:
     """Start a new session's savings books where the usage ledger ends now.
 
     The ledger holds every session's entries, so a session that counted from
     byte 0 took all of them as its own (#108). A session the cursor already
-    knows keeps its books: SessionStart fires again on a resume or a compact.
+    knows keeps its totals: SessionStart fires again on a resume or a compact.
+    On a resume its books move to the ledger's end as well: what the ledger
+    gained while it was away is other sessions' use, and a turn of its own
+    whose Stop never fired is not counted. A compact falls inside a turn, so
+    the books stay where they are.
     """
     try:
         if not session_id:
@@ -1314,16 +1318,15 @@ def _open_session_books(root: Path, session_id: str) -> None:
         sessions = usage_ledger.read_cursor(root).get("sessions")
         if not isinstance(sessions, dict):
             sessions = {}
-        if isinstance(sessions.get(session_id), dict):
+        known = sessions.pop(session_id, None)
+        if isinstance(known, dict) and source != "resume":
             return
         ledger = usage_ledger.ledger_path(root)
         ledger_stat = ledger.stat() if ledger.is_file() else None
-        sessions[session_id] = {
-            "offset": ledger_stat.st_size if ledger_stat is not None else 0,
-            "tokens": 0,
-            "seconds": 0.0,
-            "ino": ledger_stat.st_ino if ledger_stat is not None else None,
-        }
+        books = known if isinstance(known, dict) else {"tokens": 0, "seconds": 0.0}
+        books["offset"] = ledger_stat.st_size if ledger_stat is not None else 0
+        books["ino"] = ledger_stat.st_ino if ledger_stat is not None else None
+        sessions[session_id] = books
         _keep_newest_sessions(sessions)
         usage_ledger.write_cursor(root, {"sessions": sessions})
     except Exception:

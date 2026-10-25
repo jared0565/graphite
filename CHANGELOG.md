@@ -55,17 +55,22 @@ machine-checkable identity; the version is for humans.
   has no edge, as a call of a builtin has none. A name no builtin of the chain
   has, a base that cannot be read beside the builtin, a class with no base,
   and `self.m()` are bound as before.
-- Agent hooks: a session's savings line no longer counts the use of the
-  sessions before it (#108). The usage ledger holds every session's
-  entries, and a session the stop cursor had not seen started reading it at
-  byte 0, so its first Stop reported all earlier sessions' use as saved
-  "this turn" and its session total carried that history from then on.
-  SessionStart now opens the session's books where the ledger ends, and
-  keeps a known session's books on a resume or a compact. A Stop for a session with no books (its start was
-  not seen, or it was pruned from the cursor) starts at the ledger's end too:
-  that turn's own use is not counted, and no other session's is. Two sessions
-  open in one repository at once still each count what the other ran between
-  two of their turns: a ledger entry does not say which session made it.
+- Agent hooks: a session's savings line no longer counts what other
+  sessions ran before it started or while it was away (#108). The usage
+  ledger holds every session's entries, and a session the stop cursor had
+  not seen started reading it at byte 0, so its first Stop reported all
+  earlier sessions' use as saved "this turn" and its session total carried
+  that history from then on, and
+  a resumed session counted everything other sessions had run since its
+  last turn. SessionStart now opens a new session's books where the ledger
+  ends, and on a resume moves a known session's books there, keeping its
+  totals; a compact falls inside a turn and leaves them where they are. A
+  Stop for a session with no books (its start was not seen, or it was
+  pruned from the cursor) starts at the ledger's end too: that turn's own
+  use is not counted, and no other session's is; neither is the use of a
+  turn whose Stop never fired before a resume. Two sessions open in one
+  repository at once still each count what the other ran between two of
+  their turns: a ledger entry does not say which session made it.
 
 ## [1.4.0] — 2026-10-25
 
