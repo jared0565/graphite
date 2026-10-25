@@ -2252,6 +2252,20 @@ def test_files_piped_to_select_string_are_judged_as_the_path_form_is(literal_rep
     assert piped == named
 
 
+@pytest.mark.parametrize("flag", ["-Exclude", "-Filter", "-Include", "-Attributes"])
+def test_the_word_after_a_listing_filter_is_not_a_listed_path(literal_repo: Path, flag: str) -> None:
+    """`Get-ChildItem -Exclude src docs` lists `docs`: `src` is the filter's word.
+    The search after the pipe is of `docs` alone, judged as `-Path docs` is."""
+    piped = _decision(handle_pre_tool_use(
+        _ps_payload(literal_repo, f"Get-ChildItem {flag} src docs | Select-String -Pattern dependents"), "strict"
+    ))
+    named = _decision(handle_pre_tool_use(
+        _ps_payload(literal_repo, "Select-String -Pattern dependents -Path docs"), "strict"
+    ))
+
+    assert (piped, named) == ("allow", "allow")
+
+
 @pytest.mark.parametrize(
     "command",
     [
