@@ -15,6 +15,49 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-10-25
+
+A minor release: eight fixes, to the Python graph, the build, the CLI and the
+agent hooks, and one addition to the hook contract (#101).
+
+The `hooks` check of `doctor --json` gains the field `chain_slots`, and
+`graphite init` reports the same slots beside the hooks it installs; both are
+additions under `docs/compatibility.md`. No field is removed or renamed,
+`Requires-Dist` and the entry points are those of 1.3.0, and `graphite init`
+writes what it wrote (`DOC_VERSION` 15): in a new repository, `init --all`
+leaves 17 files, the three trampolines among them, and a `.git/config`, each
+byte for byte as 1.3.0 leaves it.
+
+The graph changes in this release. On this repository, measured against the
+deployed 1.3.0 engine, with the same interpreter, from one tree:
+
+- every definition and file node id survives (6,616 and 425), each naming
+  the same definition or file, and none is new. This tree has no pair of
+  paths that #82 tells apart;
+- 24 placeholder nodes are gone and 4 are new, so 9,164 nodes become 9,144;
+- 32 of the 120 `inherits` edges ended at a placeholder and now end at the
+  class the base names (#86);
+- `calls` goes from 16,065 to 16,066. 21 call sites through a local alias
+  ended at a placeholder named for the local: 16 now end at a definition,
+  and 5 at a placeholder for a name the module only imports, which is where
+  a direct call of it already ended (#90; that gap is #107). One call site is
+  new (#85). `contains` (6,614) and `imports` (2,431) are unchanged, and
+  25,177 of the 25,230 edge triples are unchanged;
+- the Python `calls` ratio goes from 0.976 to 0.978: 12,001 of 12,276 call
+  sites are bound, where 11,984 of 12,275 were;
+- `analysis` lists 20 cycles before and after, and one entry is new, in
+  `git.py`: the new `inherits` edge closes a loop through a
+  `super().__init__` call that both engines bind to the wrong `__init__`
+  (#106). The entry it displaced is still a cycle in the graph. Entry
+  points, god nodes, orphans, surprising connections and top files are
+  identical, and so is the community count (177).
+
+Two builds of this tree with either engine are byte-identical (`graph.json`,
+`GRAPH_REPORT.md`, `graph.html`).
+
+The entries below quote figures measured when each change was made, on
+earlier commits of this tree, so they differ from the ones above.
+
 ### Added
 
 **Where another tool's git hook goes is declared, not only written in
