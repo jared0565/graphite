@@ -17,6 +17,19 @@ machine-checkable identity; the version is for humans.
 
 ### Fixed
 
+- Python: `super().m()` has no edge where the method it finds is a builtin's
+  (#106). In `class StepError(AppError)` with `AppError(RuntimeError)`,
+  `super().__init__(message)` runs `RuntimeError.__init__`, but the binding by
+  class read the builtin base as one it cannot read, found no class of the
+  repository with an `__init__`, and left the call to the name: it was a call
+  to every `__init__` in reach, up to three, at `decision_grade`. On this
+  repository 14 such edges went to constructors of unrelated classes, and two
+  entries of `analysis.cycles` ran through them. Where no class the source
+  states binds the name, every other base on the way is a builtin class the
+  file does not bind, and a builtin (or `object`) has the name, the call now
+  has no edge, as a call of a builtin has none. A name no builtin of the chain
+  has, a base that cannot be read beside the builtin, a class with no base,
+  and `self.m()` are bound as before.
 - Agent hooks: a session's savings line counts only the session's own use
   (#108). The usage ledger holds every session's entries, and a session the
   stop cursor had not seen started reading it at byte 0, so its first Stop

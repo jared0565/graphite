@@ -1,6 +1,7 @@
 """Deterministic structural extraction via tree-sitter."""
 from __future__ import annotations
 
+import builtins
 import hashlib
 import importlib
 import re
@@ -1604,8 +1605,9 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
             class_node = _node(did, "class", name, rel_path, _line(node), {"qualname": qualname})
             body_scope = table.class_scope.get(node.id)
             if body_scope is not None and body_scope.parent is not None:
-                # For the dispatch post-pass (#73), which takes all five off
-                # again: the bases in order, the names the body binds in some
+                # For the dispatch post-pass (#73), which takes all six off
+                # again: the bases in order, which of them are builtin classes
+                # (#106), the names the body binds in some
                 # other way than one `def` written straight in it (a `def`
                 # under an `if` is there only if the `if` ran it, and one
                 # under `global` or `nonlocal` binds the name somewhere
@@ -1614,7 +1616,9 @@ def _extract_python(file_id: str, rel_path: str, _source: bytes, tree: Any, sour
                 # is made beyond its body and bases. With them `self.m()` and
                 # `super().m()` are bound to the method Python finds, not to
                 # every method called `m`.
-                class_node["_bases"] = _python_class_bases(node, body_scope.parent, table, ids)
+                class_node["_bases"], class_node["_builtin_bases"] = _python_class_bases(
+                    node, body_scope.parent, table, ids
+                )
                 class_node["_stops"] = sorted(
                     {
                         bound for bound, binders in body_scope.binders.items()
@@ -2254,7 +2258,7 @@ _MAX_METHOD_DISPATCH_CANDIDATES = 3
 
 def _python_class_bases(
     node: Any, scope: PyScope, table: ScopeTable, ids: dict[tuple[str, bool], str]
-) -> list[str | None]:
+) -> tuple[list[str | None], list[str | None]]:
     """Each base of a class statement, in order: the id of the class it names, or None.
 
     A base is resolved where the source states it: a bare name that denotes a
@@ -2264,15 +2268,26 @@ def _python_class_bases(
     It may bind any name, and it may derive from a class that was read.
     `object` is left out: it is last in every linearisation and defines no
     method of the repository. Class keywords (`metaclass=...`) are not bases.
+
+    The second list is as long as the first: the name of the builtin class a
+    base is, where it is one (a bare name the file does not bind), and None
+    elsewhere. Only `super()` reads it (#106): no class of the repository
+    stands behind a builtin, so where the method `super()` finds is a
+    builtin's, it is none of the repository's. A star import may bind the
+    name; `super()` itself is not read beside one (`_is_bare_super`), so the
+    list needs no check of its own for it.
     """
     bases: list[str | None] = []
+    builtin_bases: list[str | None] = []
     arguments = node.child_by_field_name("superclasses")
     for arg in arguments.named_children if arguments is not None else ():
         if arg.type in ("comment", "keyword_argument", "dictionary_splat"):
             continue
-        found = resolve(scope, arg.text.decode("utf-8", errors="ignore")) if arg.type == "identifier" else None
+        written = arg.text.decode("utf-8", errors="ignore")
+        found = resolve(scope, written) if arg.type == "identifier" else None
         if found is not None and found.kind in ("def", "symbol"):
             bases.append(_python_definition_id(found, ids))
+            builtin_bases.append(None)
         elif (
             found is not None and found.kind == "none"
             and arg.text == b"object" and not table.module.star_import
@@ -2280,7 +2295,28 @@ def _python_class_bases(
             continue
         else:
             bases.append(None)
-    return bases
+            builtin = (
+                found is not None and found.kind == "none"
+                and isinstance(getattr(builtins, written, None), type)
+            )
+            builtin_bases.append(written if builtin else None)
+    return bases, builtin_bases
+
+
+#: What `class_method` answers where the method `super()` finds is a builtin's (#106).
+_A_BUILTIN_S_METHOD = "<builtin>"
+
+
+def _a_builtin_has(builtin_names: Collection[str], method: str) -> bool:
+    """Whether a method lookup that reaches these builtin classes finds `method`
+    in one of them or in a class they derive from (`object` among them).
+
+    Each class's own namespace is read, not `hasattr`: `hasattr(dict, "mro")`
+    is true because `type` defines `mro`, and `super()` never looks there.
+    """
+    return any(
+        method in vars(cls) for name in builtin_names for cls in getattr(builtins, name).__mro__
+    )
 
 
 def _python_class_making(node: Any, scope: PyScope, table: ScopeTable) -> list[str]:
@@ -2590,8 +2626,16 @@ def _resolve_method_dispatch(
     `__init_subclass__` there can set a name on the class itself, over its own
     `def`. So "bound" says what the classes that were read state, and not more.
 
+    One case of a base that was not read is read for `super()` alone (#106):
+    a builtin class, named in ``_builtin_bases``. No class of the repository
+    stands behind a builtin. So where no class that was read binds the name,
+    every base that was not read is a builtin, and a builtin (or `object`)
+    has the name, what `super()` finds is the builtin's, and the call gets no
+    edge, as a call of a builtin gets none. Bound by name, it was a call to
+    every method of the name in reach.
+
     ``_member``, ``_receiver`` and ``_walk`` are stripped from every returned
-    edge, and the five class tags from every node, so none leaks into the graph.
+    edge, and the six class tags from every node, so none leaks into the graph.
     """
     # method name (casefolded) -> set of definition node ids. A set collapses the
     # same method appearing twice in the pre-dedup node list, so the cap counts
@@ -2617,14 +2661,17 @@ def _resolve_method_dispatch(
     instance_binds_of: dict[str, frozenset[str]] = {}
     class_binds_of: dict[str, frozenset[str]] = {}
     made_of: dict[str, frozenset[str]] = {}
+    builtin_bases_of: dict[str, list[str | None]] = {}
     for n in nodes:
         bases = n.pop("_bases", None)
+        builtin_bases = n.pop("_builtin_bases", None)
         stops = n.pop("_stops", None)
         instance_binds = n.pop("_self_binds", None)
         class_binds = n.pop("_class_binds", None)
         made = n.pop("_made", None)
         if bases is not None:
             bases_of[n["id"]] = bases
+            builtin_bases_of[n["id"]] = list(builtin_bases or ())
             stops_of[n["id"]] = frozenset(stops or ())
             instance_binds_of[n["id"]] = frozenset(instance_binds or ())
             class_binds_of[n["id"]] = frozenset(class_binds or ())
@@ -2687,6 +2734,21 @@ def _resolve_method_dispatch(
             if (walk == "self" if current == cls else not private)
             and ("decorator" in made_of[current] or body_binds(current, method))
         ]
+        if walk == "super" and not binders and unread:
+            # No class that was read binds the name. Where every base that
+            # was not read is a builtin, no class of the repository stands
+            # behind any of them, and one of them has the name, `super()`
+            # finds a builtin's method (#106).
+            builtin_names: list[str] = []
+            for current, position in unread:
+                named = builtin_bases_of.get(current, [])
+                builtin = named[position] if position < len(named) else None
+                if builtin is None:
+                    break
+                builtin_names.append(builtin)
+            else:
+                if _a_builtin_has(builtin_names, method):
+                    return _A_BUILTIN_S_METHOD
         if not unread:
             # Every base was read, so the order is Python's own.
             line = _c3_linearisation(cls, bases_of, linearisations) or ()
@@ -2768,6 +2830,10 @@ def _resolve_method_dispatch(
             # `self.m()` / `super().m()`: the first `m` along the bases of the
             # class the call is written in (#73).
             own = class_method(receiver, method, walk)
+            if own == _A_BUILTIN_S_METHOD:
+                # What runs is a builtin's method: no edge, as a call of a
+                # builtin has none (#106).
+                continue
         else:
             own = own_methods.get(receiver, {}).get(method) if receiver else None
         if own is not None:
