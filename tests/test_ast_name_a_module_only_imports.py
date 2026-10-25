@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import graphite.extract.ast as ast_module
 from graphite.cache import Cache
 from graphite.config import Config
 from graphite.extract.ast import extract_all
@@ -244,7 +245,9 @@ def test_a_second_build_from_the_cache_binds_the_same_calls(tmp_path: Path) -> N
     assert sorted(map(repr, first.edges)) == sorted(map(repr, second.edges))
 
 
-def test_changing_only_the_module_re_points_an_unchanged_caller_through_the_cache(tmp_path: Path) -> None:
+def test_changing_only_the_module_re_points_an_unchanged_caller_through_the_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _package(tmp_path, "def target(x):\n    return -x\n")
     _write(tmp_path / "user.py", _DIRECT)
     cache = _cache(tmp_path)
@@ -256,5 +259,16 @@ def test_changing_only_the_module_re_points_an_unchanged_caller_through_the_cach
     _write(tmp_path / "pkg" / "front.py", "from pkg.impl import target\n")
     assert (tmp_path / "user.py").read_bytes() == caller_bytes
 
+    # The caller's extraction is the cached one: what moved its call is the
+    # follow after the merge, not a new extraction of the caller.
+    extracted: list[str] = []
+    real = ast_module._extract_python
+
+    def counting(file_id, rel_path, *args, **kwargs):
+        extracted.append(rel_path)
+        return real(file_id, rel_path, *args, **kwargs)
+
+    monkeypatch.setattr(ast_module, "_extract_python", counting)
     after = _extract(tmp_path, cache)
+    assert extracted == ["pkg/front.py"]
     assert _targets(after, "direct", "user.py") == {_def_id(after, "target", "pkg/impl.py")}
