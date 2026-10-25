@@ -136,6 +136,7 @@ def handle_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
         cwd = _payload_cwd(payload)
         root = _repo_root(cwd)
         _activate(root)
+        _open_session_books(root, str(payload.get("session_id") or ""))
         if (root / "graph-out" / "graph.json").is_file():
             state, reason = _freshness_within_budget(root)
             if state == "stale":
@@ -1295,6 +1296,40 @@ def _strict_denial(payload: dict[str, Any], root: Path, cwd: Path | None = None)
 MAX_CURSOR_SESSIONS = 20
 
 
+def _keep_newest_sessions(sessions: dict[str, Any]) -> None:
+    while len(sessions) > MAX_CURSOR_SESSIONS:
+        sessions.pop(next(iter(sessions)))
+
+
+def _open_session_books(root: Path, session_id: str) -> None:
+    """Start a new session's savings books where the usage ledger ends now.
+
+    The ledger holds every session's entries, so a session that counted from
+    byte 0 took all of them as its own (#108). A session the cursor already
+    knows keeps its books: SessionStart fires again on a resume or a compact.
+    """
+    try:
+        if not session_id:
+            return
+        sessions = usage_ledger.read_cursor(root).get("sessions")
+        if not isinstance(sessions, dict):
+            sessions = {}
+        if isinstance(sessions.get(session_id), dict):
+            return
+        ledger = usage_ledger.ledger_path(root)
+        ledger_stat = ledger.stat() if ledger.is_file() else None
+        sessions[session_id] = {
+            "offset": ledger_stat.st_size if ledger_stat is not None else 0,
+            "tokens": 0,
+            "seconds": 0.0,
+            "ino": ledger_stat.st_ino if ledger_stat is not None else None,
+        }
+        _keep_newest_sessions(sessions)
+        usage_ledger.write_cursor(root, {"sessions": sessions})
+    except Exception:
+        return
+
+
 def _entries_between(path: Path, start: int, end: int) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     with open(path, "rb") as handle:
@@ -1348,7 +1383,11 @@ def handle_stop(payload: dict[str, Any]) -> dict[str, Any] | None:
             sessions = {}
         state = sessions.pop(session_id, None)
         if not isinstance(state, dict):
-            state = {"offset": 0, "tokens": 0, "seconds": 0.0, "ino": current_ino}
+            # No books were opened for this session: its SessionStart was not
+            # seen, or the session was pruned from the cursor. What the ledger
+            # holds now is other sessions' history (#108), so the books start
+            # at its end. This turn's own entries are lost; none are invented.
+            state = {"offset": size, "tokens": 0, "seconds": 0.0, "ino": current_ino}
         offset = state.get("offset", 0)
         stored_ino = state.get("ino")
         # A stored `ino` that isn't an int (missing key on the older 3-key cursor
@@ -1378,8 +1417,7 @@ def handle_stop(payload: dict[str, Any]) -> dict[str, Any] | None:
         state["tokens"] = _cursor_number(state.get("tokens", 0), int) + turn_tokens
         state["seconds"] = _cursor_number(state.get("seconds", 0.0), float) + turn_seconds
         sessions[session_id] = state  # re-insert -> newest position
-        while len(sessions) > MAX_CURSOR_SESSIONS:
-            sessions.pop(next(iter(sessions)))
+        _keep_newest_sessions(sessions)
         usage_ledger.write_cursor(root, {"sessions": sessions})
         if not new_entries or not usage_ledger.savings_display_enabled(root):
             return None

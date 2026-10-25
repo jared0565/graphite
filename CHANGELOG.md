@@ -15,6 +15,18 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Fixed
+
+- Agent hooks: a session's savings line counts only the session's own use
+  (#108). The usage ledger holds every session's entries, and a session the
+  stop cursor had not seen started reading it at byte 0, so its first Stop
+  reported all earlier sessions' use as saved "this turn" and its session
+  total carried that history from then on. SessionStart now opens the
+  session's books where the ledger ends, and keeps a known session's books on
+  a resume or a compact. A Stop for a session with no books (its start was
+  not seen, or it was pruned from the cursor) starts at the ledger's end too:
+  that turn's own use is not counted, and no other session's is.
+
 ## [1.4.0] — 2026-10-25
 
 A minor release: eight fixes, to the Python graph, the build, the CLI and the

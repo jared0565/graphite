@@ -274,7 +274,14 @@ def _use_graphite(root: Path, cmd: str = "context") -> None:
     record_usage(root, cmd=cmd, wall_ms=50, result={"files": [{"path": "alpha.py"}]})
 
 
+def _open_session(root: Path, session: str = "s1") -> None:
+    """The session's SessionStart, which opens its savings books (#108). A Stop
+    for a session with no books counts nothing already in the ledger."""
+    handle_session_start({"session_id": session, "cwd": str(root), "hook_event_name": "SessionStart"})
+
+
 def test_stop_emits_summary_after_usage(built_repo: Path) -> None:
+    _open_session(built_repo)
     _use_graphite(built_repo)
     out = handle_stop(_stop_payload(built_repo))
     message = out["systemMessage"]
@@ -284,12 +291,14 @@ def test_stop_emits_summary_after_usage(built_repo: Path) -> None:
 
 
 def test_stop_silent_with_no_new_usage(built_repo: Path) -> None:
+    _open_session(built_repo)
     _use_graphite(built_repo)
     assert handle_stop(_stop_payload(built_repo)) is not None  # consumes entries
     assert handle_stop(_stop_payload(built_repo)) is None  # nothing new this turn
 
 
 def test_stop_session_totals_accumulate(built_repo: Path) -> None:
+    _open_session(built_repo)
     _use_graphite(built_repo)
     first = handle_stop(_stop_payload(built_repo))["systemMessage"]
     _use_graphite(built_repo)
@@ -299,6 +308,7 @@ def test_stop_session_totals_accumulate(built_repo: Path) -> None:
 
 
 def test_stop_respects_toggle_but_cursor_still_advances(built_repo: Path) -> None:
+    _open_session(built_repo)
     set_savings_display(built_repo, False)
     _use_graphite(built_repo)
     assert handle_stop(_stop_payload(built_repo)) is None
@@ -314,6 +324,7 @@ def test_stop_without_session_id_is_silent(built_repo: Path) -> None:
 def test_stop_survives_ledger_rotation_between_turns(built_repo: Path, monkeypatch) -> None:
     from graphite import usage_ledger as ul
 
+    _open_session(built_repo)
     _use_graphite(built_repo)
     assert handle_stop(_stop_payload(built_repo)) is not None
     monkeypatch.setattr(ul, "MAX_LEDGER_BYTES", 1)  # force rotation on the next record
@@ -337,6 +348,7 @@ def test_stop_prunes_cursor_to_max_sessions(built_repo: Path) -> None:
 def test_stop_self_heals_corrupted_cursor_tokens(built_repo: Path) -> None:
     from graphite.usage_ledger import read_cursor, write_cursor
 
+    _open_session(built_repo)
     _use_graphite(built_repo)
     assert handle_stop(_stop_payload(built_repo)) is not None
     cursor = read_cursor(built_repo)
@@ -359,6 +371,7 @@ def test_stop_self_heals_corrupted_cursor_tokens(built_repo: Path) -> None:
 def test_stop_missing_ino_key_falls_back_to_offset_check(built_repo: Path) -> None:
     from graphite.usage_ledger import read_cursor, write_cursor
 
+    _open_session(built_repo)
     _use_graphite(built_repo)
     assert handle_stop(_stop_payload(built_repo)) is not None
     cursor = read_cursor(built_repo)
@@ -371,6 +384,7 @@ def test_stop_missing_ino_key_falls_back_to_offset_check(built_repo: Path) -> No
 
 
 def test_cli_stop_event_emits_summary(built_repo, monkeypatch, capsys) -> None:
+    _open_session(built_repo)
     _use_graphite(built_repo)
     code, out = _run_cli_hook(
         monkeypatch, capsys, ["agent-hook", "stop"], _stop_payload(built_repo)
@@ -1542,6 +1556,7 @@ def test_a_session_below_the_root_renews_the_repository(checkout: Path, tmp_path
 def test_stop_below_the_root_keeps_its_books_at_the_root(checkout: Path, tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     shutil.copytree(checkout, repo)
+    _open_session(repo / "docs")
     record_usage(repo, cmd="context", wall_ms=50, result={"files": [{"path": "src/pkg/core.py"}]})
 
     out = handle_stop(_stop_payload(repo / "docs"))
