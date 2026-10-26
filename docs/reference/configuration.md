@@ -57,6 +57,9 @@ These are read outside `Config`, each by the module named.
 | `GRAPHITE_BUILD_LOCK_REPORT_REFUSAL` | `buildlock` | Set by the daemon for its child builds: a build that cannot take the lock exits 75 (`EX_TEMPFAIL`) instead of 0, so the daemon can tell "another builder owns the repo" from a failed build. |
 | `GRAPHITE_PACKAGE_VALIDATOR` | `typescript_activation`, `cli` | Absolute path to the trusted package validator that must approve an optional TypeScript activation install. Unset, relative or resolving inside the repository fails closed. |
 | `GRAPHITE_DEBUG` | `cli` | When set, an unexpected exception prints its traceback instead of the redacted one-line error. |
+| `GRAPHITE_SESSION_ID` | `usage_ledger` | The session the current process belongs to. A usage-ledger entry records it, so that where two sessions are open in one repository each one's savings line counts only its own use (#110). Unset means the entry is recorded untagged, and is counted by every session, as it was. Set it by hand only if your harness runs graphite outside an agent that sets it. |
+| `CLAUDE_CODE_SESSION_ID` | `usage_ledger` | The session id Claude Code puts in the environment of the processes it spawns. Read when `GRAPHITE_SESSION_ID` is unset, and the same value the Stop hook is given, so an entry and the hook that counts it name the same session. Set by the harness; never set it by hand. |
+| `CODEX_COMPANION_SESSION_ID` | `usage_ledger` | The session id the Codex companion puts in the environment of the processes it spawns. Read when neither `GRAPHITE_SESSION_ID` nor `CLAUDE_CODE_SESSION_ID` is set. Set by the harness; never set it by hand. |
 
 The daemon strips every variable starting with `GRAPHITE_LLM`, `GRAPHITE_PROVIDER_`
 or `GRAPHITE_ROUTE_` (and the provider vendors' own prefixes) from the

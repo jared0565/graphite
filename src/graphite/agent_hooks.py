@@ -1348,6 +1348,21 @@ def _entries_between(path: Path, start: int, end: int) -> list[dict[str, Any]]:
     return entries
 
 
+def _entry_is_this_session(entry: dict[str, Any], session_id: str) -> bool:
+    """Whether a ledger entry is this session's own use.
+
+    An entry that names no session is counted, as it was: a person running
+    graphite in a terminal in the same repository is real use, and dropping
+    it would understate what the graph saved. An entry that names another
+    session is that session's, and where two sessions are open at once each
+    one's Stop would otherwise claim the other's use as its own (#110).
+    """
+    tag = entry.get("session")
+    if not isinstance(tag, str) or not tag:
+        return True
+    return tag == session_id
+
+
 def _cursor_number(value: Any, cast: type) -> Any:
     """Coerce a possibly-corrupted cursor field; non-numeric (or bool) -> 0.
 
@@ -1409,9 +1424,12 @@ def handle_stop(payload: dict[str, Any]) -> dict[str, Any] | None:
         if not isinstance(offset, int) or offset > size or rotated:
             offset = 0  # ledger rotated or cursor damaged; resync
         new_entries = _entries_between(ledger, offset, size) if size > offset else []
+        # The ledger holds every session's entries, and where two sessions are
+        # open at once each one's Stop must claim only its own use (#110).
+        own_entries = [entry for entry in new_entries if _entry_is_this_session(entry, session_id)]
         turn_tokens = 0
         turn_seconds = 0.0
-        for entry in new_entries:
+        for entry in own_entries:
             est = savings_model.estimate_entry(entry)
             turn_tokens += est["tokens_saved"]
             turn_seconds += est["seconds_saved"]
@@ -1422,7 +1440,7 @@ def handle_stop(payload: dict[str, Any]) -> dict[str, Any] | None:
         sessions[session_id] = state  # re-insert -> newest position
         _keep_newest_sessions(sessions)
         usage_ledger.write_cursor(root, {"sessions": sessions})
-        if not new_entries or not usage_ledger.savings_display_enabled(root):
+        if not own_entries or not usage_ledger.savings_display_enabled(root):
             return None
         turn_text = savings_model.format_compact(turn_tokens, turn_seconds)
         session_text = savings_model.format_compact(state["tokens"], state["seconds"])
