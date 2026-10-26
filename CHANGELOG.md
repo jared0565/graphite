@@ -35,8 +35,9 @@ deployed 1.4.0 engine, with the same interpreter, from one tree:
   constructor (#106). `calls` goes from 16,265 to 16,251 edges, and the
   Python `calls` ratio from 0.978 to 0.983: 12,236 of 12,452 call sites
   are bound, where 12,191 of 12,466 were;
-- `contains` (6,689), `imports` (2,457) and `inherits` (120) are
-  unchanged;
+- `contains` is unchanged: 6,519 edges, and 6,689 relation triples, the
+  difference being 170 edges that carry `contains` as a second relation
+  beside `calls`. `imports` (2,457) and `inherits` (120) are unchanged;
 - `analysis` lists 18 cycles where it listed 20: the two it no longer lists
   ran through those edges. Entry points, god nodes, orphans, surprising
   connections and top files are identical; the community count goes from
@@ -131,7 +132,9 @@ deployed 1.3.0 engine, with the same interpreter, from one tree:
   ended at a placeholder named for the local: 16 now end at a definition,
   and 5 at a placeholder for a name the module only imports, which is where
   a direct call of it already ended (#90; that gap is #107). One call site is
-  new (#85). `contains` (6,614) and `imports` (2,431) are unchanged, and
+  new (#85). `contains` is 6,446 edges where 1.3.0 held 6,447, and 6,614
+  relation triples on both sides: 168 edges carry `contains` as a second
+  relation beside `calls` where 167 did. `imports` (2,431) is unchanged, and
   25,177 of the 25,230 edge triples are unchanged;
 - the Python `calls` ratio goes from 0.976 to 0.978: 12,001 of 12,276 call
   sites are bound, where 11,984 of 12,275 were;
@@ -251,8 +254,10 @@ one tree:
 - all 9,031 node ids survive, each naming the same definition, file or
   placeholder, and none is new;
 - `calls` goes from 15,811 to 15,771: 44 call triples are gone and 4 are
-  new. `contains` (6,502), `imports` (2,383) and `inherits` (120) are
-  unchanged, and 24,772 of 24,816 edge triples are unchanged;
+  new. `contains` is unchanged: 6,337 edges, and 6,502 relation triples, the
+  difference being 165 edges that carry `contains` as a second relation
+  beside `calls`. `imports` (2,383) and `inherits` (120) are unchanged, and
+  24,772 of 24,816 edge triples are unchanged;
 - `analysis` (20 cycles, entry points, god nodes, orphans) is identical. The
   community count goes from 169 to 170;
 - the Python `calls` ratio is 0.976 before and after. The cell counts 40
