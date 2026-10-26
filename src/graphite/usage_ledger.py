@@ -20,6 +20,30 @@ MAX_FILES_PER_ENTRY = 100
 _FILE_KEYS = frozenset({"source_file", "file", "path"})
 _FILE_LIST_KEYS = frozenset({"impacted_files", "likely_tests", "files"})
 
+# The session a process belongs to, looked for in this order: graphite's own
+# name first, then the harness's. The first one that is set wins.
+ENV_SESSION_ID = "GRAPHITE_SESSION_ID"
+SESSION_ENV_VARS = (
+    ENV_SESSION_ID,
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_COMPANION_SESSION_ID",
+)
+
+
+def current_session_id() -> str:
+    """The session this process belongs to, or "" when it cannot know one.
+
+    The Stop hook's payload carries the session id, and the environment every
+    process the agent spawns carries the same string, so a command can record
+    which session made it. Where no variable is set -- a person at a
+    terminal -- the entry stays untagged and is counted as it was.
+    """
+    for name in SESSION_ENV_VARS:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
 
 def local_dir(root: Path) -> Path:
     return root / ".graphite" / "local"
@@ -94,6 +118,9 @@ def record_usage(root: Path, *, cmd: str, wall_ms: int, result: Any) -> None:
             "output_bytes": output_bytes,
             "files": collect_answer_files(result, root),
         }
+        session = current_session_id()
+        if session:
+            entry["session"] = session
         path = ledger_path(root)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size > MAX_LEDGER_BYTES:

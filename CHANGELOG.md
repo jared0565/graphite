@@ -15,6 +15,28 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Fixed
+
+**Two sessions open in one repository no longer count each other's use**
+(#110). The usage ledger is per repository and every session appends to it,
+and an entry said nothing about who made it. So where two sessions were open
+at once each one's Stop counted the other's queries as its own: the second
+session's Stop saw the first session's query, because that query was written
+after the second session's books were opened, and the first session's next
+Stop saw the second's. Each session reported the other's use as saved "this
+turn", and both session totals ended at both.
+
+An entry now records the session that made it, and a Stop counts only the
+entries that name its own session. The tag is what the process can know:
+`GRAPHITE_SESSION_ID` first, then `CLAUDE_CODE_SESSION_ID`, then
+`CODEX_COMPANION_SESSION_ID`, the first that is set -- the same value the
+Stop hook is given, so an entry and the hook that counts it name one session.
+An entry no session can be attributed to -- a person running graphite in a
+terminal in the same repository -- is counted as it was, so no real use is
+dropped. The ledger's other fields, the hook's wire format and
+`graphite savings` are unchanged: that command reports the repository's
+totals, which is what it is for.
+
 ## [1.4.1] — 2026-10-25
 
 A patch release: three fixes, two to the Python graph (#106, #107) and one

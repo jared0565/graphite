@@ -17,7 +17,7 @@ from typing import Callable
 
 import pytest
 
-from graphite import activation
+from graphite import activation, usage_ledger
 
 
 # --- every sqlite connection this repo opens must be explicitly closed -------
@@ -116,6 +116,22 @@ def _isolate_activation_state(tmp_path_factory: pytest.TempPathFactory, monkeypa
     monkeypatch.setenv(activation.ENV_STATE_DIR, str(state))
     monkeypatch.delenv(activation.ENV_DAEMON_CHILD, raising=False)
     return state
+
+
+@pytest.fixture(autouse=True)
+def _isolate_session_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test may inherit the machine's own session identity.
+
+    A usage-ledger entry records the session that made it, read from the
+    environment (#110), and the Stop hook counts only the entries naming its
+    own session. A test that inherited this machine's session id would tag
+    its entries with it, and the hook -- which a test gives a made-up session
+    id -- would count none of them. The suite would then pass on a machine
+    whose environment carries no session and fail on one that does: a green
+    run that proved nothing on the machine that made it.
+    """
+    for name in usage_ledger.SESSION_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
