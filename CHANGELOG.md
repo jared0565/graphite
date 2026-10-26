@@ -15,6 +15,51 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-10-26
+
+A minor release: one fix to the agent hooks' savings line (#110), and with
+it one environment variable added to the configuration surface. No command,
+option, JSON field, exit code or entry point is added, removed or renamed,
+the ledger's other fields and the hook's wire format are unchanged, and
+`Requires-Dist` and the entry points are those of 1.4.1.
+
+The graph changes by what this fix adds. Measured on this repository: the
+1.4.1 release tree and this one, each built by the same interpreter with the
+same parsers, into fresh output, cache and state directories:
+
+- 9,221 nodes become 9,244 and 25,347 edges become 25,415. The 23 new
+  nodes are the two functions this fix adds (`current_session_id`,
+  `_entry_is_this_session`), the fixture that keeps the suite hermetic, the
+  eighteen functions and the file of the new test file, and the
+  `os.environ.get` call site;
+- 6,664 of 6,691 definition ids survive naming the same definition at the
+  same line, and 27 survive by id but move line -- every one of them in the
+  three files this change touches (`agent_hooks.py` 3, `usage_ledger.py` 13,
+  `conftest.py` 11). No definition id is removed and 21 are new;
+- `contains` goes from 6,689 relation triples to 6,710 and `imports` from
+  2,457 to 2,465; `calls` goes from 16,251 to 16,290; `inherits` (120) is
+  unchanged. 25,517 relation triples become 25,585, with none removed;
+- 18 cycles where there were 18, the same ones, and 177 communities where
+  there were 179;
+- two builds of this tree are byte-identical.
+
+`metadata.engine.fingerprint` moves, as it does whenever the engine's
+environment changes: it folds in the parser versions present, and the
+interpreter's tree-sitter-python moved from 0.25.2 to 0.26.0 since 1.4.1's
+build. The graph is unchanged by that: the same tree built by both parser
+versions gives the same ids, the same edges and the same triples, node for
+node.
+
+### Added
+
+**`GRAPHITE_SESSION_ID` names the session a usage-ledger entry belongs to**
+(#110). This release adds to the configuration surface, so
+`docs/reference/configuration.md` now lists the new variable together with
+the two harness variables graphite falls back to when it is unset --
+`CLAUDE_CODE_SESSION_ID` and `CODEX_COMPANION_SESSION_ID`. The first of the
+three that is set is the one an entry records. Unset means the entry is
+recorded untagged and every session counts it, as it did before.
+
 ### Fixed
 
 **Two sessions open in one repository no longer count each other's use**
