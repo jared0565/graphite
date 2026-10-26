@@ -25,11 +25,26 @@ bake_started = "2026-07-28"
 # ~65% and a linear budget bump does not scale. The durable answer is to make it
 # faster (parallel execution), not to keep raising this. Revisit when the
 # measured max passes ~900s rather than raising again by reflex.
+#
+# Raised 1200 -> 1800 on 2026-10-26, at that trigger. The measured max had
+# passed 900s: 1,008s for 4,975 tests in 1.4.1's tag-push gate, and 1,353s
+# for 4,986 locally the same day. The push of the #110 fix was REFUSED twice
+# by this budget -- "python.exe (timeout after 1201 s)" at 34% of the suite --
+# and the cause was measured, not assumed: the same slow test took 5.03s with
+# the change and 5.64s without it, so it was not the change. The suite is
+# slower than it was, and the channel's own tests are where: 758.91s for the
+# thirteen channel files against the ~300s recorded here on 2026-09-04, after
+# the channel's 10-03/10-04 work (absolute-path launches, the PATH refusals,
+# lock recovery). Those are real fixes, not a weakened test.
+#
+# This raises the symptom's price, not the trend's: the suite has outgrown
+# this budget for good, and the durable answer above is still parallel
+# execution, which is the next thing to do rather than another number.
 [timeouts]
-pre_push = 1500
+pre_push = 2100
 
 [tests]
-timeout_s = 1200
+timeout_s = 1800
 # Points at the dev venv, and this is load-bearing as of v0.3.0.
 #
 # Consumers now install graphite as a WHEEL rather than importing this tree
