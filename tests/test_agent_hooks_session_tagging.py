@@ -15,6 +15,7 @@ terminal in the same repository is real use too.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -170,3 +171,64 @@ def test_a_command_run_by_a_session_is_tagged_with_that_session(tmp_path: Path, 
     capsys.readouterr()
 
     assert [entry.get("session") for entry in iter_entries(tmp_path)] == ["A"]
+
+
+def _write_entry_with_tag(root: Path, tag: str) -> None:
+    """Write one ledger entry by hand, carrying a tag the recorder cannot.
+
+    `record_usage` writes the session tag only when it is truthy, so an EMPTY
+    tag can only reach the ledger from outside -- a hand-edited file, or one
+    half-written by something else. That is exactly the case
+    `_entry_is_this_session` is defensive about, so the fixture writes the
+    entry in the recorder's own shape.
+    """
+    entry = {
+        "ts": "2026-01-01T00:00:00+00:00",
+        "cmd": "context",
+        "wall_ms": 50,
+        "output_bytes": 30,
+        "files": [{"path": "alpha.py", "bytes": (root / "alpha.py").stat().st_size}],
+        "session": tag,
+    }
+    path = usage_ledger.ledger_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+
+def test_an_entry_whose_session_tag_is_empty_counts_for_every_session(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An EMPTY tag names no session, exactly as no tag at all does.
+
+    `_entry_is_this_session` accepts an entry that names no session, and the
+    condition that does it is `not isinstance(tag, str) or not tag`. Read as
+    `and`, an empty tag would fall through to `tag == session_id` and be
+    counted for NOBODY -- so a person running graphite in a terminal, whose
+    tag was written empty, would have their real use dropped. This pins the
+    `or`.
+    """
+    _start(repo, "A")
+    _start(repo, "B")
+    _write_entry_with_tag(repo, "")
+
+    assert _stop(repo, "A") is not None
+    assert _stop(repo, "B") is not None
+
+    unit = _one_entry_tokens(repo)
+    assert _session_tokens(repo, "A") == unit
+    assert _session_tokens(repo, "B") == unit
+
+
+def test_a_stop_with_no_ledger_file_leaves_the_cursor_at_offset_zero(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No ledger means no bytes to read, so the cursor starts at zero.
+
+    `handle_stop` takes the ledger's byte length as `size`, and zero when
+    there is no ledger. That number is the cursor's offset, and the offset is
+    where the NEXT Stop reads from -- so a one-byte offset would mean
+    starting one byte into a ledger that did not exist yet, and the first
+    entry in it would be read from the wrong place. This pins the zero.
+    """
+    assert not usage_ledger.ledger_path(repo).exists()
+
+    assert _stop(repo, "A") is None
+
+    assert read_cursor(repo)["sessions"]["A"]["offset"] == 0
