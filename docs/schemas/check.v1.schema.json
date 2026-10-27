@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jared0565/graphite/docs/schemas/check.v1.schema.json",
+  "title": "graphite check --json envelope (v1)",
+  "description": "Response of `graphite check <path> --json`: whether the graph matches the working tree. stale:false means it does; stale:true carries a reason (source changes, engine_changed, missing manifest, ...). Top-level additional keys are allowed (additive evolution; additionalProperties:true is explicit because graphite's subset validator treats absence as closed); the keys listed as required here are the stable v1 surface. Note for consumers reusing graphite's subset validator (routing/schema_validation.py): it treats ABSENT additionalProperties as closed, so every deliberately open object in this file says additionalProperties:true explicitly.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "stale", "added", "changed", "removed"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "stale": {"type": "boolean"},
+    "reason": {"type": "string"},
+    "repository_root": {"type": ["string", "null"]},
+    "added": {"type": "array", "items": {"type": "string"}},
+    "changed": {"type": "array", "items": {"type": "string"}},
+    "removed": {"type": "array", "items": {"type": "string"}},
+    "resolution_health": {"type": ["object", "null"], "additionalProperties": true}
+  }
+}

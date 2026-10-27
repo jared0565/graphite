@@ -15,6 +15,18 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Added
+
+- `check --json`, `validate --json` and `daemon-health --json` now carry
+  `schema_version`, which `docs/compatibility.md` already listed them as
+  carrying, and a schema for each is published under `docs/schemas/`. The
+  three outputs were the only ones in that list without the field, so a
+  consumer branching on it had nothing to branch on. A field is added to
+  three stable surfaces, so this is a minor by the rule in
+  `docs/compatibility.md` -- "Fields are added in minors" -- and the
+  published schemas are deliberately open at the top level, because the
+  same rule lets a later minor add fields to them.
+
 ### Fixed
 
 - The daemon's log now says WHICH way enumerating a repository failed.

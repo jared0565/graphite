@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jared0565/graphite/docs/schemas/validate.v1.schema.json",
+  "title": "graphite validate --json envelope (v1)",
+  "description": "Response of `graphite validate --json`: the integrity verdict for one graph bundle. ok:false carries errors, and the counts mirror the lists. Top-level additional keys are allowed (additive evolution; additionalProperties:true is explicit because graphite's subset validator treats absence as closed); the keys listed as required here are the stable v1 surface. Note for consumers reusing graphite's subset validator (routing/schema_validation.py): it treats ABSENT additionalProperties as closed, so every deliberately open object in this file says additionalProperties:true explicitly.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "ok", "error_count", "warning_count", "node_count", "edge_count", "errors", "warnings"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "error_count": {"type": "integer"},
+    "warning_count": {"type": "integer"},
+    "node_count": {"type": "integer"},
+    "edge_count": {"type": "integer"},
+    "errors": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "warnings": {"type": "array", "items": {"type": "object", "additionalProperties": true}}
+  }
+}

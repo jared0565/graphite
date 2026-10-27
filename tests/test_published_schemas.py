@@ -26,6 +26,9 @@ _ALL_SCHEMAS = (
     "search-result.v1.schema.json",
     "capabilities.v1.schema.json",
     "incidents.v1.schema.json",
+    "check.v1.schema.json",
+    "validate.v1.schema.json",
+    "daemon-health.v1.schema.json",
 )
 
 
@@ -176,6 +179,57 @@ def test_capabilities_output_matches_published_schema(capsys) -> None:
     assert main(["capabilities", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert matches_schema(payload, _load("capabilities.v1.schema.json")) is True
+
+
+def test_check_output_matches_published_schema(tmp_path, capsys) -> None:
+    """`check --json` is a versioned output, and the promise is kept.
+
+    `docs/compatibility.md` names `check --json` among the outputs that
+    carry `schema_version`, so a consumer may rely on the field being
+    there. A repository with no graph is the interesting case: it is the
+    shape a consumer sees first.
+    """
+    assert main(["check", str(tmp_path), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 1
+    assert matches_schema(payload, _load("check.v1.schema.json")) is True
+
+
+def test_validate_output_matches_published_schema(tmp_path, capsys) -> None:
+    """`validate --json` is a versioned output, and the promise is kept."""
+    bundle = {
+        "nodes": [
+            {"id": "src_app", "kind": "file", "name": "app.ts", "source_file": "src/app.ts"},
+            {"id": "src_store", "kind": "file", "name": "store.ts", "source_file": "src/store.ts"},
+        ],
+        "edges": [
+            {"source": "src_app", "target": "src_store", "relation": "imports",
+             "source_file": "src/app.ts"}
+        ],
+        "clusters": [{"id": 1, "members": ["src_app", "src_store"]}],
+        "analysis": {},
+        "metadata": {"node_count": 2, "edge_count": 1, "community_count": 1},
+    }
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps(bundle), encoding="utf-8")
+    assert main(["validate", "--graph-json", str(graph), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 1
+    assert matches_schema(payload, _load("validate.v1.schema.json")) is True
+
+
+def test_daemon_health_output_matches_published_schema(tmp_path, capsys) -> None:
+    """`daemon-health --json` is a versioned output, and the promise is kept.
+
+    An empty directory is the DEGRADED shape, and it is the one a consumer
+    is most likely to parse: the report says the daemon is not running,
+    and the fields it needs to say why must still be there.
+    """
+    assert main(["daemon-health", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["schema_version"] == 1
+    assert matches_schema(payload, _load("daemon-health.v1.schema.json")) is True
 
 
 def test_incidents_envelope_matches_published_schema(tmp_path, capsys):
