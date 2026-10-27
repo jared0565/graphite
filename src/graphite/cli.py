@@ -783,6 +783,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         if not args.json:
             raise ValueError(_below_a_root(root, top))
         status: dict[str, Any] = {
+            "schema_version": 1,
             "stale": True,
             "reason": "below_repository_root",
             "repository_root": top.as_posix() if trusted_root(top) else None,
@@ -799,6 +800,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     cfg = _project_scoped_config(args, root, canonical=True)
     status = check_graph_freshness(root, cfg, ignore_engine=args.ignore_engine)
     if args.json:
+        status["schema_version"] = 1
         status["resolution_health"] = persisted_resolution(
             root,
             on_error=lambda exc: record_incident(
@@ -1288,7 +1290,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         return 1
     report = validate_graph_bundle(bundle)
     if args.json:
-        print(json.dumps(report, ensure_ascii=False, indent=2))
+        print(json.dumps({"schema_version": 1, **report}, ensure_ascii=False, indent=2))
     else:
         if report["ok"]:
             print(
@@ -2048,7 +2050,7 @@ def cmd_daemon_health(args: argparse.Namespace) -> int:
     )
     report = evaluate_daemon_health(base, state_dir=state_dir, options=options)
     if args.json:
-        print(json.dumps(report, ensure_ascii=False, indent=2))
+        print(json.dumps({"schema_version": 1, **report}, ensure_ascii=False, indent=2))
     else:
         print(format_health_text(report), end="")
     return 1 if args.fail_on_error and not report["ok"] else 0
