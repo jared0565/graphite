@@ -132,6 +132,51 @@ jobs:
     # slower under the tracer, so this is ~2x headroom over the slowest.
     # It caps a HANG; `--timeout` below caps a TEST. Raise it only after
     # re-measuring the distribution, not on instinct.
+    #
+    # The 6-9 minutes above is STALE, and the headroom is bigger than this
+    # comment claims. Measured per leg from run 40508619182 (2026-10-27):
+    # ubuntu 3.4-3.7 min, macos 4.8-5.9 min, windows 7.6-13.0 min. The
+    # suite has grown, and the windows legs are now the slow ones.
+    #
+    # The legs below therefore run the suite in PARALLEL, with the same
+    # command aramid's own pre-push gate runs, because the suite is
+    # WAIT-bound rather than CPU-bound: the channel tests alone spend about
+    # 760s sleeping on locks and broker round trips, so serial execution
+    # pays for nothing. Measured on this machine, same tree, same
+    # interpreter, same day:
+    #
+    #   serial     4,955 passed, 55 skipped   958s   coverage 84%
+    #   parallel   4,961 passed, 55 skipped   323s   coverage 84%
+    #
+    # The coverage figure is UNCHANGED, and that is the part worth
+    # checking: the parallel run covered a larger tree (25,465 statements
+    # against 25,464) for the same fraction, so parallelism does not
+    # under-report. CI's own serial figure is 85% across the three
+    # combined OS legs against a floor of 83, so this spends no headroom.
+    #
+    # `--dist loadfile` keeps a FILE's tests in one worker, and
+    # `--no-loadscope-reorder` keeps the queue in collection order --
+    # xdist's `--loadscope-reorder` is ON BY DEFAULT and reorders the work
+    # queue by test count, which is how the parallel suite came to depend
+    # on file order in the first place (#113). With the reorder off, the
+    # parallel run's ORDER is the serial run's order.
+    #
+    # Six workers is the gate's own number, and it is not arbitrary: the
+    # `security` job below already runs it, on a windows-latest runner
+    # with fewer cores than that, on every push. The suite is wait-bound,
+    # so oversubscribing a runner's cores costs nothing.
+    #
+    # What a SMALL runner does to this, measured by pinning the whole run
+    # to three logical cores -- the shape of a macOS runner: 4,961 passed,
+    # 55 skipped in 512s (8m32s), against 323s (5m23s) on 12 cores. Four
+    # times fewer cores costs 1.6x the wall time, and 8m32s is well inside
+    # the 30-minute timeout above.
+    #
+    # The contention does raise the tail, though: a cold interpreter start
+    # under the parallel suite has a 302 ms median and a 974 ms p90,
+    # against 0.27 s measured unloaded. One test's wall-clock windows were
+    # derived from that unloaded figure, so this change is what makes them
+    # stale; they are re-derived from the loaded one alongside it.
     timeout-minutes: 30
     steps:
       # These majors track the runner's Node runtime, so they need a periodic
@@ -179,7 +224,7 @@ jobs:
         run: python -m pytest tests/test_doctor.py -k real_server -rA -q
       - name: Test
         if: matrix.python != '3.12'
-        run: python -m pytest -q -rs --timeout=120 --timeout-method=thread
+        run: python -m pytest -q -rs --timeout=120 --timeout-method=thread -n 6 --dist loadfile --no-loadscope-reorder
       # Coverage is collected on ONE Python per OS -- the tracer costs ~1.5x
       # wall time, and the line-coverage question is not a version question.
       # 3.12 on every OS so the platform-only code (windows_task, systemd,
@@ -188,7 +233,7 @@ jobs:
         if: matrix.python == '3.12'
         env:
           COVERAGE_FILE: .coverage.${{ matrix.os }}
-        run: python -m pytest -q -rs --timeout=120 --timeout-method=thread --cov --cov-branch --cov-report=
+        run: python -m pytest -q -rs --timeout=120 --timeout-method=thread --cov --cov-branch --cov-report= -n 6 --dist loadfile --no-loadscope-reorder
       - name: Upload coverage data
         if: matrix.python == '3.12'
         uses: actions/upload-artifact@v7
