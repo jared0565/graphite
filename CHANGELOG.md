@@ -32,22 +32,23 @@ The graph changes by what this fix adds. Measured on this repository: the
 1.5.0 release tree built by the installed 1.5.0 engine, and this tree built
 by this engine, each into fresh output, cache and state directories:
 
-- 9,244 nodes become 9,293 and 25,415 edges become 25,589. The 49 new nodes
+- 9,244 nodes become 9,298 and 25,415 edges become 25,599. The 54 new nodes
   are the functions and classes this change adds, the file of the new test
   file, and the fixtures and helpers that go with them;
-- every node id survives: 9,244 of 9,244 are in both, 49 are new and none
+- every node id survives: 9,244 of 9,244 are in both, 54 are new and none
   is removed;
-- 6,712 definition ids become 6,750: 6,512 survive naming the same
-  definition at the same line, and 200 survive by id but move line -- every
-  one of them in the seven files this change touches (`cli.py` 43,
-  `doctor.py` 37, `daemon.py` 31, `daemon_health.py` 18, `git.py` 12,
+- 6,712 definition ids become 6,752: 6,495 survive naming the same
+  definition at the same line, and 217 survive by id but move line -- every
+  one of them in the eight files this change touches (`cli.py` 43,
+  `doctor.py` 37, `daemon.py` 31, `daemon_health.py` 18,
+  `tests/test_typescript_activation.py` 17, `git.py` 12,
   `ingest.py` 2, `tests/test_hardening.py` 57). No definition id is
-  removed and 38 are new;
-- `contains` goes from 6,710 relation triples to 6,748 and `imports` from
-  2,465 to 2,480; `calls` goes from 16,290 to 16,410; `inherits` (120)
-  becomes 121. 25,585 relation triples become 25,759, with none removed;
+  removed and 40 are new;
+- `contains` goes from 6,710 relation triples to 6,750 and `imports` from
+  2,465 to 2,480; `calls` goes from 16,290 to 16,418; `inherits` (120)
+  becomes 121. 25,585 relation triples become 25,769, with none removed;
 - 18 cycles where there were 18, the same ones, and 177 communities where
-  there were 178. Orphans and surprising connections are identical; the
+  there were 175. Orphans and surprising connections are identical; the
   entry points, the god nodes and the top files by links differ, because
   the new code adds and moves them.
 
@@ -56,13 +57,14 @@ files change -- and they do: the identity hashes every `.py` and `.mjs`
 file in the package, so a change to the daemon, the health report, the
 ingest or the Git wrapper moves it whether or not the extraction changed.
 
-The two builds above used different `tree-sitter-python` versions (0.25.2
-for the installed 1.5.0 and 0.26.0 for the dev environment), so the
-difference was controlled for rather than assumed away: the SAME tree built
-by both parser versions gives the same ids, the same edges and the same
-triples, node for node -- 9,293 nodes, 25,589 edges and all 25,759 relation
-triples identical, with no id moved and none removed. The figures above
-are therefore attributable to this change and not to the parsers.
+The two builds above used different `tree-sitter` versions (0.25.2 for the
+installed 1.5.0 and 0.26.0 for the dev environment; `tree-sitter-python`
+is 0.25.0 in both), so the difference was controlled for rather than
+assumed away: the SAME tree built by both engines gives the same ids, the
+same edges and the same triples, node for node -- 9,298 nodes, 25,599
+edges and all 25,769 relation triples identical, with no id moved and none
+removed, and the same resolution health. The figures above are therefore
+attributable to this change and not to the parsers.
 
 ### Fixed
 
@@ -104,6 +106,24 @@ are therefore attributable to this change and not to the parsers.
   was never captured, but the exit status is an integer and is the only
   thing left that says which failure this was -- previously that error
   carried no cause at all.
+- Tests: a stubbed module no longer outlives the test that made it. The
+  boundary test in `tests/test_typescript_activation.py` installs fake `mcp`
+  modules -- `mcp.types.Tool = object` -- to check that importing the MCP
+  server never reaches activation orchestration, and then imports
+  `graphite.mcp` against them. `monkeypatch.delitem(sys.modules, name,
+  raising=False)` records NOTHING when the key is absent, so the
+  `graphite.mcp` / `graphite.mcp_server` imported against the stubs stayed
+  reachable after the test: in `sys.modules`, and as the ATTRIBUTE the import
+  system sets on the parent package, which `from graphite import mcp_server`
+  returns without importing anything. A later test in the same worker that
+  read the module got the stub, and died with `AttributeError: type object
+  'object' has no attribute 'model_validate'`. The serial suite never saw
+  it, because every file that reads `graphite.mcp_server` sorts before the
+  one that stubs it; the parallel suite does, because `--dist loadfile`
+  reorders the work queue by test count per file (`--loadscope-reorder`
+  defaults to on) and the stubbing file is the largest in the suite. The
+  import is now undone in a `finally`, from both places it was reachable, and
+  a regression test pins that.
 
 ### Changed
 
@@ -120,6 +140,12 @@ are therefore attributable to this change and not to the parsers.
   for the difference. No assertion changes; only how many of them run at
   once. The gate's budgets are re-derived from that measurement rather than
   left stale: `timeout_s` 1800 -> 1200 and `pre_push` 2100 -> 1800.
+  The gate also runs it with `--no-loadscope-reorder`, because `--dist
+  loadfile` alone does NOT keep the suite's order: pytest-xdist reorders the
+  work queue by test count per file unless that is turned off, so the
+  parallel run stops matching the serial one. Measured on this machine, same
+  tree, same interpreter: 412.5s with the reorder on, 329.9s with it off --
+  not slower, because the suite is WAIT-bound rather than CPU-bound.
 
 ## [1.5.0] — 2026-10-26
 

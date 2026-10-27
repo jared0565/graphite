@@ -103,10 +103,10 @@ Focused tests shorten the feedback loop; they do not replace the full Ruff, mypy
 The suite is WAIT-bound, not CPU-bound — the channel tests alone spend most of their time sleeping on locks and broker round trips — so `pytest-xdist` is a declared dev dependency and the suite can be run across processes:
 
 ```bash
-python -m pytest -q -rs -n 6 --dist loadfile
+python -m pytest -q -rs -n 6 --dist loadfile --no-loadscope-reorder
 ```
 
-`--dist loadfile` keeps a file's tests in one worker, which preserves the per-file semantics the suite has today; plain `-n` balances better but splits a file's tests across workers. The pre-push gate runs the suite this way, and `aramid.toml` records the measurement.
+`--dist loadfile` keeps a file's tests in one worker, which preserves the per-file semantics the suite has today; plain `-n` balances better but splits a file's tests across workers. `--no-loadscope-reorder` is needed because `--dist loadfile` alone does NOT keep the suite's order: pytest-xdist reorders the work queue by test count per file (descending) unless that is turned off, so the biggest file runs first and the parallel run stops matching the serial one. A test that depends on which file ran first is then order-dependent in a way the serial suite never was — which is how a stub-imported module in `tests/test_typescript_activation.py` reached a later test in the same worker and failed it. The pre-push gate runs the suite this way, and `aramid.toml` records the measurement.
 
 What CI enforces on every push and pull request (`.github/workflows/ci.yml`): a `lint` job (ruff, mypy, the generated CLI reference in sync); a `test` matrix of Windows, Linux and macOS × Python 3.11–3.14 in which **every cell gates**; a `security` job that runs the same aramid pre-commit and pre-push gates as the local hooks (gitleaks, semgrep, ruff security rules, the repo-root shadow check, mypy, the suite) and asserts from the gate's JSON report that each scanner actually ran; the `coverage` floor; a `benchmark` job against the synthetic corpus; and an `artifact` job that builds the distribution twice and requires byte-identical results. The local git hooks are installed by `aramid` from the committed `aramid.toml`; do not push with `--no-verify`.
 

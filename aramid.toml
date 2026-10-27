@@ -53,10 +53,14 @@ bake_started = "2026-07-28"
 #
 #   serial                          1,190s   4,942 passed, 55 skipped
 #   6 workers, --dist loadfile        323s   4,948 passed, 55 skipped
+#   6 workers, loadfile, no reorder   330s   4,949 passed, 55 skipped
 #
 # 3.7x faster, and green. Plain `-n` (test-level distribution) balances
 # better and was NOT adopted: it buys little over 323s and costs the
-# guarantee that a file's tests share a process.
+# guarantee that a file's tests share a process. The third row is the
+# command this gate actually runs, measured after the stub-leak fix below
+# -- which is where its one extra passing test comes from -- and it is the
+# same time, because the suite is WAIT-bound rather than CPU-bound.
 #
 # The budgets are re-derived from that measurement rather than left stale,
 # which is what the note above asks for ("Revisit when the measured max
@@ -127,9 +131,38 @@ timeout_s = 1200
 # trade a cosmetic false alarm for a gate that tests the released wheel
 # instead of the tree, which is the one failure mode this key exists to
 # prevent.
+#
+# `--no-loadscope-reorder` is load-bearing, and it is the OPPOSITE of what
+# `--dist loadfile` alone does. `loadfile` groups a FILE's tests into one
+# work unit, but pytest-xdist's `--loadscope-reorder` -- ON BY DEFAULT --
+# then orders the work queue by test count per file, DESCENDING. The
+# parallel run therefore does NOT keep the suite's collection order, and
+# xdist's own help says so: "the partial order of tests might not be
+# retained".
+#
+# That reorder is what put `tests/test_typescript_activation.py` (the
+# largest file in the suite) BEFORE `tests/test_channel_kind.py` on the same
+# worker, where a stub-imported `graphite.mcp_server` leaked into it and
+# failed the gate with `AttributeError: type object 'object' has no
+# attribute 'model_validate'`. The leak is fixed at its source, in
+# `tests/test_typescript_activation.py`; this flag removes the ORDER
+# dependence that exposed it. With the reorder off, the work queue keeps
+# the collection order, so the parallel run is order-equivalent to the
+# serial one at file granularity -- which is the guarantee the file
+# grouping was chosen for in the first place.
+#
+# Measured 2026-10-27 on this machine, same tree, same interpreter:
+#
+#   --dist loadfile                          4,948 passed, 55 skipped, 412.5s
+#   --dist loadfile --no-loadscope-reorder   4,949 passed, 55 skipped, 329.9s
+#
+# The counts differ by the one regression test the leak fix added; the
+# second run is the one that includes it. The reorder-off run is not
+# slower -- the suite is WAIT-bound, not CPU-bound, so the queue order
+# buys nothing here -- and it keeps the suite's own ordering.
 command = [
   "../.venvs/graphite-dev/Scripts/python.exe", "-m", "pytest",
-  "-n", "6", "--dist", "loadfile",
+  "-n", "6", "--dist", "loadfile", "--no-loadscope-reorder",
 ]
 
 # [mutation].baseline_timeout_s is deliberately NOT set. Measured 2026-08-11,

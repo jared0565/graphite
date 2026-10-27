@@ -6272,10 +6272,51 @@ def _install_mcp_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, name, module)
 
 
-def _import_mcp_for_boundary_test(monkeypatch: pytest.MonkeyPatch):
-    for module_name in ("graphite.mcp", "graphite.mcp_server"):
-        monkeypatch.delitem(sys.modules, module_name, raising=False)
-    return importlib.import_module("graphite.mcp")
+def _forget_module(name: str) -> None:
+    """Remove a module from `sys.modules` AND from its parent package.
+
+    The import system sets a submodule as an ATTRIBUTE on its parent package.
+    Removing only the `sys.modules` entry leaves the attribute behind, and
+    `from graphite import mcp_server` then returns that stale module WITHOUT
+    importing anything -- so a module imported against a stub can outlive the
+    test that made it, and a later test reads the stub.
+    """
+    sys.modules.pop(name, None)
+    parent, _, leaf = name.rpartition(".")
+    package = sys.modules.get(parent)
+    if package is not None:
+        package.__dict__.pop(leaf, None)
+
+
+def _import_mcp_for_boundary_test():
+    """Import `graphite.mcp` against the stubbed mcp modules, and leave the
+    interpreter as it was found.
+
+    `monkeypatch.delitem(sys.modules, name, raising=False)` records NOTHING
+    when the key is absent, so the modules imported against the stubs -- which
+    captured the stubs' `Tool = object` -- stayed reachable and broke a later
+    test in the same worker. They are saved and restored here instead, in a
+    `finally`, so the import cannot escape even if it raises.
+    """
+    names = ("graphite.mcp", "graphite.mcp_server")
+    saved_modules = {name: sys.modules[name] for name in names if name in sys.modules}
+    saved_attributes: dict[str, object] = {}
+    for name in names:
+        parent, _, leaf = name.rpartition(".")
+        package = sys.modules.get(parent)
+        if package is not None and hasattr(package, leaf):
+            saved_attributes[name] = getattr(package, leaf)
+    for name in names:
+        _forget_module(name)
+    try:
+        return importlib.import_module("graphite.mcp")
+    finally:
+        for name in names:
+            _forget_module(name)
+        sys.modules.update(saved_modules)
+        for name, value in saved_attributes.items():
+            parent, _, leaf = name.rpartition(".")
+            setattr(sys.modules[parent], leaf, value)
 
 
 def test_mcp_import_never_reaches_activation_or_executes_a_process(monkeypatch):
@@ -6296,7 +6337,7 @@ def test_mcp_import_never_reaches_activation_or_executes_a_process(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
     monkeypatch.setattr(subprocess, "Popen", forbidden_process)
-    imported = _import_mcp_for_boundary_test(monkeypatch)
+    imported = _import_mcp_for_boundary_test()
 
     assert callable(imported.main)
 
@@ -6313,9 +6354,51 @@ def test_mcp_import_internal_import_error_is_never_treated_as_optional(monkeypat
     monkeypatch.setattr(builtins, "__import__", fail_internal_import)
 
     with pytest.raises(ImportError, match="internal MCP import failure") as error:
-        _import_mcp_for_boundary_test(monkeypatch)
+        _import_mcp_for_boundary_test()
 
     assert error.value.name == "graphite.internal"
+
+
+def test_the_boundary_import_leaves_no_stubbed_module_behind(monkeypatch):
+    """The stubbed import must not escape the test that made it.
+
+    `monkeypatch.delitem(sys.modules, name, raising=False)` records NOTHING
+    when the key is absent, so the `graphite.mcp` / `graphite.mcp_server`
+    imported against the stubs -- which captured the stubs' `Tool = object` --
+    stayed reachable after the test. A later test in the same worker that
+    imported `graphite.mcp_server` got that module and died with
+    `AttributeError: type object 'object' has no attribute 'model_validate'`.
+
+    Two routes carried it, and both have to be closed: the `sys.modules`
+    entry, and the ATTRIBUTE the import system sets on the parent package
+    (`from graphite import mcp_server` returns that attribute without
+    importing anything).
+
+    Under `--dist loadfile` pytest-xdist reorders the work queue by test count
+    per file (`--loadscope-reorder` defaults to on), so the file holding the
+    stubs can run BEFORE the file that reads the module. That is how it
+    reached the release gate, and the ordering is not something a test may
+    rely on.
+    """
+    _install_mcp_import_stubs(monkeypatch)
+    _import_mcp_for_boundary_test()
+
+    for name in ("graphite.mcp", "graphite.mcp_server"):
+        module = sys.modules.get(name)
+        assert getattr(module, "Tool", None) is not object, (
+            f"{name} was left in sys.modules holding the stub's Tool = object"
+        )
+        # The import system also sets a submodule as an ATTRIBUTE on its
+        # parent package, and `from graphite import mcp_server` returns that
+        # attribute WITHOUT importing anything. Dropping the `sys.modules`
+        # entry alone therefore leaves the stub reachable.
+        parent, _, leaf = name.rpartition(".")
+        package = sys.modules.get(parent)
+        attribute = getattr(package, leaf, None)
+        assert getattr(attribute, "Tool", None) is not object, (
+            f"{name} was left as an attribute of the {parent} package holding "
+            f"the stub's Tool = object"
+        )
 
 
 def test_importing_graphite_and_mcp_in_clean_interpreter_has_no_external_side_effect(
