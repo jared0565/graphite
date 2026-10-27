@@ -234,8 +234,8 @@ jobs:
           python -m venv ../.venvs/graphite-dev
           ../.venvs/graphite-dev/Scripts/python.exe -m pip install -e ".[dev,mcp]"
       - name: Install aramid and the tools its typecheck slot resolves on PATH
-        # aramid 0.20.0 is what this machine runs (its installed files match
-        # the wheel whose sha256 PyPI publishes, 6372e69b...3464; 0.7.1
+        # aramid 0.20.10 is what this machine runs (its installed files match
+        # the wheel whose sha256 PyPI publishes, 59fe6cbe...5c50; 0.7.1
         # honours [tool.mypy] files/exclude in the typecheck slot and reports
         # `fresh_ledger_baseline`/`grandfathered`, 0.7.2 keeps registry keys
         # out of `expected` and stamps `run_id`/`recorded` in the report,
@@ -305,12 +305,36 @@ jobs:
         # CLAUDE.md / AGENTS.md block, none touches a tracked file. The
         # `aramid init` re-runs they needed changed ARAMID.md alone
         # (2026-10-03) and ARAMID.md, CLAUDE.md and AGENTS.md (2026-10-04,
-        # additions only). Bump this
+        # additions only).
+        #
+        # 0.20.1 - 0.20.10 add the INLINE scanners, and this is the reason
+        # the pin moved on 2026-10-27 rather than on the day they shipped.
+        # The version here and the version on this machine had diverged by
+        # TEN patch releases, and the divergence was invisible: CI was
+        # green because the scanners the newer aramid runs do not exist in
+        # the pinned one. Measured, both whole-repo, same tree:
+        #
+        #   0.20.0  (CI run 40508619182, precommit.json)
+        #            tools_ran: gitleaks, ruff, shadow
+        #            inline-marker findings: 0       gitleaks findings: 0
+        #   0.20.10 (this machine, same --all scope)
+        #            tools_ran: gitleaks, gitleaks-inline, ruff, ruff-inline,
+        #                       shadow      (and semgrep-inline at pre-push)
+        #            inline-marker findings: 29      gitleaks findings: 4
+        #
+        # So this is not a version bump for its own sake: it brings CI up to
+        # the aramid this repository is actually gated by locally, and it
+        # makes the 33 findings the newer aramid raises VISIBLE in CI
+        # instead of invisible on one machine. They are closed first -- 29
+        # inline markers adjudicated in .aramid-suppressions.toml, and 4
+        # gitleaks blocks fixed at the source -- so this lands green.
+        #
+        # Bump this
         # pin BY HAND: dependabot has never proposed it (zero aramid PRs
         # across 0.5.1 -> 0.17.9; the pin is a `run:` string, not a manifest).
         # mypy is installed for THIS interpreter because aramid's typecheck slot
         # runs it from PATH, not from the dev venv.
-        run: python -m pip install "aramid==0.20.0" "mypy>=1.14"
+        run: python -m pip install "aramid==0.20.10" "mypy>=1.14"
       - name: CI-only keys the repository leaves unset
         shell: bash
         # aramid merges defaults <- ~/.aramid/config.toml <- <root>/aramid.toml.
