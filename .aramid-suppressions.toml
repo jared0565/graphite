@@ -487,3 +487,10 @@ tool = "semgrep-inline"
 rule = "inline-suppressed-block"
 path = "tests/test_routing_storage.py"
 reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from the `preserved_tables` literal tuple defined above -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "ae8f8c7ec61e43954e6d060e0c94cb6aacb893ac62bdefac2b65b0b2507a35d5"
+tool = "red-proof"
+rule = "test-not-red"
+path = "tests/test_agent_hooks_session_tagging.py"
+reason = "The two tests this file gained kill two recorded mutation survivors: the `or` in `_entry_is_this_session`, and the zero offset `handle_stop` takes when there is no ledger. The production code they cover was ALREADY correct on the pre-change tree, so both tests are green there and CANNOT be red against it -- that is what a mutation-kill test is, and it is why the evidence for these two is the mutation proof (each mutant applied, each test watched to fail) rather than a red-before. A test that was red against the pre-change tree would be pinning behaviour that changed, which is not what this commit does. The sibling file tests/test_daemon_snapshot_failure.py carries no such finding, because the test it gained for the enumeration causes is red against the pre-change tree."
