@@ -15,6 +15,63 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Fixed
+
+- Daemon: the health report no longer reads `ok` while every snapshot of an
+  activated project fails (#113). A project the daemon could not snapshot
+  was logged as `project_snapshot_failed` and then dropped: it never entered
+  the supervised set, so it was absent from `status.json`, nothing counted
+  it as failing, and `daemon-health` read `ok, 0 projects, 0 failing` while
+  no graph was being maintained at all. On 2026-10-27 the daemon failed every
+  snapshot of an activated repository -- ten failures across nine discovery
+  cycles, 01:50:22Z to 02:03:59Z -- and the report said `ok` throughout. The
+  daemon now keeps each failure -- its root and its reason -- under
+  `snapshot_failures` in `status.json`, counts the project as failing, and
+  names it with the reason in `daemon-health` and `daemon-status`. A
+  `status.json` written before this key existed is read unchanged, and a
+  failure whose reason is missing is still counted and named: the reason is
+  absent, not the failure. A project whose snapshot failed is still never
+  built -- with no snapshot there is no change set, and building on an empty
+  one would publish an empty graph over a working one -- and one broken
+  repository no longer blinds the daemon to the healthy ones beside it.
+  Measured on this machine against a repository whose `.git` is not a valid
+  repository, the failure the daemon hit on 2026-10-27: the health report
+  goes from `ok`, `0 total, 0 failing` to `degraded`, `2 total, 1 failing`,
+  naming the project and the reason, while the healthy repository beside it
+  is still built.
+- Daemon: a snapshot failure now logs the cause, not just the sentence
+  (#113's follow-up). The daemon logged `str(exc)`, which for a failed
+  enumeration is the constant `unable to enumerate Git repository safely` and
+  nothing else: which step failed and which errno it was lived in the
+  exception's `__cause__` chain, and the chain was discarded. On 2026-10-27
+  the daemon failed every snapshot of an activated repository for thirteen
+  minutes, and the log could not say why. The `project_snapshot_failed` and
+  `project_scan_failed` events now carry a `cause`: the exception and its
+  chain, rendered path-free -- a `GitError` by its own `diagnostic()` (class,
+  step, errno) and every other exception by its class name alone, so no path
+  and no Git text can reach the log. The chain is bounded and a cycle cannot
+  make it loop. A Git command that runs and exits non-zero now leaves a
+  cause too: Git's own text is discarded on purpose, and the run's stderr
+  was never captured, but the exit status is an integer and is the only
+  thing left that says which failure this was -- previously that error
+  carried no cause at all.
+
+### Changed
+
+- The test suite runs in parallel. The suite is WAIT-bound, not CPU-bound
+  -- the channel tests alone spend about 760s mostly sleeping on locks and
+  broker round trips -- so serial execution paid for nothing.
+  `pytest-xdist` is a declared dev dependency, which adds one
+  `Requires-Dist` line to the wheel's metadata for the `dev` extra alone,
+  and the pre-push gate runs the suite across six processes, distributed by
+  file so that a file's tests share one process and the suite keeps the
+  per-file semantics it has today. Measured on this machine, same
+  interpreter, the same tree six tests apart: **1,190s serial becomes
+  323s**, 3.7x faster, and green either way -- six tests cannot account
+  for the difference. No assertion changes; only how many of them run at
+  once. The gate's budgets are re-derived from that measurement rather than
+  left stale: `timeout_s` 1800 -> 1200 and `pre_push` 2100 -> 1800.
+
 ## [1.5.0] — 2026-10-26
 
 A minor release: one fix to the agent hooks' savings line (#110), and with

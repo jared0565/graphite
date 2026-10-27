@@ -187,7 +187,8 @@ def test_every_listing_lines_call_site_is_accounted_for():
 
     expected_calls_per_surface = {
         "cli.cmd_impact": 2,  # impacted_files half + likely_tests half
-        "cli.cmd_daemon_status": 1,
+        # supervised projects half + snapshot-failure half (#113)
+        "cli.cmd_daemon_status": 2,
         "cli.cmd_validate": 1,
         "cli._print_watch_impact": 2,  # impacted_files half + likely_tests half
         "context.impacted_files": 1,
