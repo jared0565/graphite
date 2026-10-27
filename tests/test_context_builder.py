@@ -118,7 +118,7 @@ def test_safe_text_decodes_utf8() -> None:
     [
         b"binary\x00payload",
         b"\xff\xfe not utf-8",
-        b"api_key = sk-live-0123456789abcdef\n",
+        b"api_key = sk-" + b"live-0123456789abcdef\n",
         b"Authorization: Bearer abcdefghijklmnop\n",
         b"-----BEGIN RSA PRIVATE KEY-----\n",
         # Assembled so the source holds no credential-shaped literal.
@@ -271,7 +271,7 @@ def test_build_context_hashes_the_public_manifest_and_carries_source_only_when_a
 def test_build_context_counts_every_kind_of_exclusion(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_bytes(b"x = 1\n")
-    (tmp_path / "src" / "secret.py").write_bytes(b"api_key = sk-live-0123456789abcdef\n")
+    (tmp_path / "src" / "secret.py").write_bytes(b"api_key = sk-" + b"live-0123456789abcdef\n")
     (tmp_path / ".env").write_bytes(b"A=1\n")
     graph = nx.DiGraph()
     graph.add_node("app", source_file="src/app.py")

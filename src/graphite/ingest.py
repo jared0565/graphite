@@ -21,6 +21,28 @@ class IngestError(RuntimeError):
     """Raised when repository files cannot be enumerated safely."""
 
 
+class IngestEnumerationError(RuntimeError):
+    """Which way enumerating a repository failed, in one path-free word.
+
+    `IngestError` says WHAT failed and not WHY, and every enumeration
+    failure raises the same message, so a daemon that could not snapshot a
+    repository logged "IngestError" and could not say which failure it was
+    -- the same loss #113 fixed for Git's exit status. This is the CAUSE
+    those sites now raise, and it carries the reason.
+
+    The reason is a fixed token, never a path and never Git's own text, so
+    the chain the daemon logs stays path-free.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+    def diagnostic(self) -> str:
+        """Path-free identity: the class and the reason, nothing else."""
+        return f"{type(self).__name__}:{self.reason}"
+
+
 @dataclass(frozen=True)
 class FileEntry:
     rel_path: str  # posix-style relative path
@@ -248,7 +270,9 @@ def _git_ls_files(
     enclosing = enclosing_git_root(root)
     if enclosing != root:
         if enclosing is not None:
-            raise IngestError("nested Git roots are unsupported")
+            raise IngestError("nested Git roots are unsupported") from (
+                IngestEnumerationError("nested_git_root")
+            )
         return None
     try:
         result = GitRunner(root).run(
@@ -271,7 +295,9 @@ def _git_ls_files(
     if not output:
         return []
     if not output.endswith("\x00"):
-        raise IngestError("unable to enumerate Git repository safely")
+        raise IngestError("unable to enumerate Git repository safely") from (
+            IngestEnumerationError("output_not_nul_terminated")
+        )
 
     selected: list[str] = []
     start = 0
@@ -281,13 +307,24 @@ def _git_ls_files(
     ):
         end = output.find("\x00", start)
         if end < 0:
-            raise IngestError("unable to enumerate Git repository safely")
+            # Unreachable while the invariant above holds: the output ends
+            # with NUL, and the loop only runs while `start` is inside it,
+            # so there is always a NUL at or after `start`. Kept, because
+            # the invariant is a property of the parser and not of the
+            # caller.
+            raise IngestError("unable to enumerate Git repository safely") from (
+                IngestEnumerationError("record_not_nul_terminated")
+            )
         record_count += 1
         if record_count > MAX_GIT_FILE_RECORDS:
-            raise IngestError("unable to enumerate Git repository safely")
+            raise IngestError("unable to enumerate Git repository safely") from (
+                IngestEnumerationError("too_many_records")
+            )
         normalized = _normalize_git_path(root, output[start:end])
         if normalized is None:
-            raise IngestError("unable to enumerate Git repository safely")
+            raise IngestError("unable to enumerate Git repository safely") from (
+                IngestEnumerationError("path_not_contained")
+            )
         if is_eligible is None or is_eligible(normalized):
             selected.append(normalized)
         start = end + 1
