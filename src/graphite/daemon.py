@@ -187,10 +187,11 @@ def describe_exception_chain(exc: BaseException) -> str:
 
     `str(exc)` says WHAT failed and not WHY, and for the daemon's snapshot
     path that difference is the whole diagnosis: seven distinct sites raise
-    `GitLaunchError`, and only its step token and errno separate them. On
-    2026-10-27 the daemon failed every snapshot of an activated repository
-    for fourteen minutes and the log could not say why -- the cause was in
-    the exception's chain, and the chain was discarded.
+    `GitLaunchError` inside `_run_bounded` alone, and only its step token
+    and errno separate them. On 2026-10-27 the daemon failed every snapshot
+    of an activated repository for thirteen minutes and the log could not
+    say why -- the cause was in the exception's chain, and the chain was
+    discarded.
     """
     parts: list[str] = []
     seen: set[int] = set()

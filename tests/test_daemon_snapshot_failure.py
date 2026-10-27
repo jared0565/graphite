@@ -378,10 +378,11 @@ def test_the_snapshot_failure_log_carries_the_chained_cause(
 ) -> None:
     """`str(exc)` alone says what failed, not why.
 
-    Seven distinct sites raise `GitLaunchError`; its step token and errno are
-    what separate them. On 2026-10-27 the daemon failed every snapshot for
-    fourteen minutes and the log could not say why -- the cause was in the
-    exception's chain and the chain was discarded.
+    Seven distinct sites raise `GitLaunchError` inside `_run_bounded` alone;
+    its step token and errno are what separate them. On 2026-10-27 the
+    daemon failed every snapshot for thirteen minutes and the log could not
+    say why -- the cause was in the exception's chain and the chain was
+    discarded.
     """
     base = tmp_path / "projects"
     base.mkdir()
