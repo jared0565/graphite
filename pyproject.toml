@@ -116,7 +116,18 @@ mcp = ["mcp>=1.0,<3"]
 # here because that job installs `[dev]`, and a `--timeout` flag without the
 # plugin is an unknown-argument error -- which would turn a hang into a
 # different silent failure rather than naming it. See #45.
-dev = ["pytest>=8.0", "ruff>=0.5", "pytest-timeout>=2.3", "pytest-cov>=5.0", "mypy>=1.14"]
+# `pytest-xdist` runs the suite across processes. It is here because the
+# suite is WAIT-bound, not CPU-bound: the channel tests alone spend about
+# 760s mostly sleeping on locks and broker round trips, so serial execution
+# pays for nothing. 6 workers is this machine's physical core count.
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.5",
+  "pytest-timeout>=2.3",
+  "pytest-cov>=5.0",
+  "pytest-xdist>=3.5",
+  "mypy>=1.14",
+]
 
 # Without these the package advertises no way back to its own source. A
 # distribution page with no repository link is the shape a typosquat has, and it

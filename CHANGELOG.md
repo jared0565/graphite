@@ -56,6 +56,22 @@ machine-checkable identity; the version is for humans.
   thing left that says which failure this was -- previously that error
   carried no cause at all.
 
+### Changed
+
+- The test suite runs in parallel. The suite is WAIT-bound, not CPU-bound
+  -- the channel tests alone spend about 760s mostly sleeping on locks and
+  broker round trips -- so serial execution paid for nothing.
+  `pytest-xdist` is a declared dev dependency, which adds one
+  `Requires-Dist` line to the wheel's metadata for the `dev` extra alone,
+  and the pre-push gate runs the suite across six processes, distributed by
+  file so that a file's tests share one process and the suite keeps the
+  per-file semantics it has today. Measured on this machine, same
+  interpreter, the same tree six tests apart: **1,190s serial becomes
+  323s**, 3.7x faster, and green either way -- six tests cannot account
+  for the difference. No assertion changes; only how many of them run at
+  once. The gate's budgets are re-derived from that measurement rather than
+  left stale: `timeout_s` 1800 -> 1200 and `pre_push` 2100 -> 1800.
+
 ## [1.5.0] — 2026-10-26
 
 A minor release: one fix to the agent hooks' savings line (#110), and with
