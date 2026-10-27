@@ -242,6 +242,37 @@ def test_non_git_directory_still_uses_filesystem_walk(tmp_path: Path) -> None:
     ]
 
 
+def test_a_git_command_that_fails_leaves_a_cause_naming_the_exit_status(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Git's own text is discarded on purpose -- it embeds paths.
+
+    The exit status is not a path, and it is the only thing left that says
+    WHICH failure this was. Without it the enumeration error carried no
+    cause at all, and a daemon that failed every snapshot could not say why
+    (#113).
+    """
+    root = tmp_path / "repository"
+    (root / ".git").mkdir(parents=True)
+    _write(root / "src" / "app.py", "value = 1\n")
+
+    class FakeRunner:
+        def __init__(self, project_root):
+            assert project_root == root.resolve()
+
+        def run(self, arguments, *, timeout_seconds, **kwargs):
+            return subprocess.CompletedProcess(arguments, 128, b"", b"")
+
+    monkeypatch.setattr(ingest_module, "GitRunner", FakeRunner)
+
+    with pytest.raises(RuntimeError, match="unable to enumerate Git repository safely") as caught:
+        collect_files(root, Config())
+
+    cause = caught.value.__cause__
+    assert cause is not None
+    assert "exit_128" in cause.diagnostic()
+
+
 def test_nested_path_inside_git_repository_fails_closed_without_walk(
     tmp_path: Path, monkeypatch
 ) -> None:

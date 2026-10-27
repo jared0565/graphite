@@ -10,7 +10,7 @@ from typing import Callable, Iterable
 from . import ownership
 from .cache import file_hash
 from .config import Config
-from .git import GitError, GitRunner
+from .git import GitCommandFailedError, GitError, GitRunner
 from .hook_entry import MARKER as _SETUP_MARKER
 
 
@@ -258,7 +258,12 @@ def _git_ls_files(
     except GitError as exc:
         raise IngestError("unable to enumerate Git repository safely") from exc
     if result.returncode != 0:
-        raise IngestError("unable to enumerate Git repository safely")
+        # The message stays the path-free constant it has always been; the
+        # cause carries the exit status, which is an integer and is the only
+        # thing left that says which failure this was (#113).
+        raise IngestError("unable to enumerate Git repository safely") from GitCommandFailedError(
+            "git command failed", reason=f"exit_{result.returncode}"
+        )
     try:
         output = result.stdout.decode("utf-8")
     except UnicodeDecodeError as exc:

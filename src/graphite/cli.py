@@ -2021,6 +2021,18 @@ def cmd_daemon_status(args: argparse.Namespace) -> int:
             more_hint=" — use --json for the full list",
         ):
             print(line)
+        # A project the daemon could not snapshot is not in `projects` -- it
+        # never entered the supervised set -- but it is a project the daemon
+        # is failing to maintain, so it is named here too (#113).
+        failures = status.get("snapshot_failures", [])
+        for line in listing_lines(
+            failures if isinstance(failures, list) else [],
+            lambda f: f"{f.get('root')} | snapshot failed: {f.get('error')}",
+            cap=_DAEMON_STATUS_PROJECT_CAP,
+            empty=None,
+            more_hint=" — use --json for the full list",
+        ):
+            print(line)
     return 0
 
 

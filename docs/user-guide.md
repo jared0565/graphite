@@ -193,6 +193,13 @@ are the ground truth when `daemon-status` looks fine but a graph is stale.
 Set `GRAPHITE_PROJECTS_ROOT` once to make `~/Projects` the default base for
 all daemon commands.
 
+A repository the daemon cannot snapshot — an unreadable or invalid `.git`,
+say — is reported, not dropped: `daemon-health` counts it as failing and
+names it with the reason, and `daemon-status` lists it under
+`snapshot_failures`. The daemon does not build it, because with no snapshot
+there is no change set to build; the other repositories under the base are
+unaffected.
+
 Install it as a supervised service so it starts with your session — same
 daemon, same bounded defaults, one command per platform:
 

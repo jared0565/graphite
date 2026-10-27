@@ -16,6 +16,7 @@ from . import activation, buildlock
 from .config import Config
 from .engine_identity import EngineIdentityError, engine_identity
 from .freshness import graph_engine_changed
+from .git import GitError
 from .incident_ledger import record_incident, repo_ledger_dir
 from .io import atomic_write_json
 from .provider_observer import ProviderObservationSummary
@@ -162,6 +163,65 @@ class BuildResult:
         Not a failure: the cycle books it as `build_skipped_locked` and retries.
         """
         return self.returncode == buildlock.REFUSED_EXIT_STATUS
+
+
+_MAX_CAUSE_DEPTH = 5
+
+
+def _exception_identity(exc: BaseException) -> str:
+    """One exception's path-free identity.
+
+    A `GitError` carries its own: `diagnostic()` names the class, the step
+    that failed and the errno, and is built from fixed tokens and an integer
+    so no path and no Git text can ride along. Every other exception
+    contributes its class name and nothing else -- the message may name a
+    path, and the class is what separates the causes.
+    """
+    if isinstance(exc, GitError):
+        return exc.diagnostic()
+    return type(exc).__name__
+
+
+def describe_exception_chain(exc: BaseException) -> str:
+    """An exception and whatever caused it, in one path-free line.
+
+    `str(exc)` says WHAT failed and not WHY, and for the daemon's snapshot
+    path that difference is the whole diagnosis: seven distinct sites raise
+    `GitLaunchError`, and only its step token and errno separate them. On
+    2026-10-27 the daemon failed every snapshot of an activated repository
+    for fourteen minutes and the log could not say why -- the cause was in
+    the exception's chain, and the chain was discarded.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and len(parts) < _MAX_CAUSE_DEPTH and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(_exception_identity(current))
+        current = current.__cause__
+    return " <- ".join(parts)
+
+
+@dataclass(frozen=True)
+class SnapshotFailure:
+    """An activated project the daemon could not snapshot (#113).
+
+    Kept out of the supervised set on purpose. A project with no snapshot has
+    no change set to diff and nothing to build, so putting it there would
+    make the build path act on an empty one. It is reported instead: a
+    failure that is only in the log is a failure nobody sees.
+    """
+
+    root: Path
+    error: str
+    failed_at: str = field(default_factory=utc_now)
+
+    def to_status(self) -> dict[str, object]:
+        return {
+            "root": str(self.root),
+            "error": self.error,
+            "failed_at": self.failed_at,
+        }
 
 
 @dataclass
@@ -527,23 +587,30 @@ def _write_status(
     options: DaemonOptions,
     cycle: int,
     provider_lifecycle: dict[str, object] | None = None,
+    snapshot_failures: dict[Path, SnapshotFailure] | None = None,
 ) -> dict[str, object]:
+    failures = list((snapshot_failures or {}).values())
     projects = [state.to_status() for _, state in sorted(states.items(), key=lambda item: str(item[0]).lower())]
     healthy = sum(1 for state in states.values() if state.last_error is None and not state.needs_initial_build)
-    failing = sum(1 for state in states.values() if state.last_error is not None)
+    # A project whose snapshot failed is a project the daemon is failing to
+    # maintain, so it counts as failing -- it was activated, and no graph is
+    # being kept for it (#113).
+    failing = sum(1 for state in states.values() if state.last_error is not None) + len(failures)
     pending = sum(1 for state in states.values() if state.needs_initial_build)
     payload: dict[str, object] = {
         "status": "ok" if failing == 0 else "degraded",
         "updated_at": utc_now(),
         "base_path": str(base),
         "cycle": cycle,
-        "project_count": len(projects),
+        "project_count": len(projects) + len(failures),
         "healthy_projects": healthy,
         "failing_projects": failing,
         "pending_projects": pending,
         # Repositories currently open in a coding agent -- the whole supervised
-        # set. An unopened repo is absent by construction, not by pruning.
-        "active_projects": sorted(str(root) for root in states),
+        # set. An unopened repo is absent by construction, not by pruning. A
+        # repo the daemon cannot snapshot is open but unsupervised, so it
+        # belongs here too (#113).
+        "active_projects": sorted(str(root) for root in set(states) | set(snapshot_failures or {})),
         "limits": {
             "scan_interval_seconds": options.scan_interval_seconds,
             "discover_interval_seconds": options.discover_interval_seconds,
@@ -555,6 +622,10 @@ def _write_status(
             "build_timeout_seconds": options.build_timeout_seconds,
         },
         "projects": projects,
+        "snapshot_failures": [
+            failure.to_status()
+            for failure in sorted(failures, key=lambda item: str(item.root).lower())
+        ],
     }
     if provider_lifecycle is not None:
         payload["provider_lifecycle"] = provider_lifecycle
@@ -627,6 +698,11 @@ def run_daemon(
         provider_worker.start()
 
     states: dict[Path, ProjectRuntime] = {}
+    # Projects that are activated but whose snapshot failed. They are NOT in
+    # `states` -- there is no snapshot to diff or build -- but they are
+    # reported, because a failure that only reaches the log is a failure
+    # nobody acts on (#113).
+    snapshot_failures: dict[Path, SnapshotFailure] = {}
     last_discovery = 0.0
     last_status: dict[str, object] = {}
     cycle = 0
@@ -649,8 +725,21 @@ def run_daemon(
                         project_cfg = daemon_config_for_project(cfg, project, options)
                         snap = snapshot(project, project_cfg)
                     except Exception as exc:
-                        logger.event("project_snapshot_failed", project=str(project), error=str(exc))
+                        # The error is kept, not just logged: the report has to
+                        # be able to say WHY the graph is not being maintained
+                        # (#113).
+                        snapshot_failures[project] = SnapshotFailure(
+                            root=project,
+                            error=str(exc).strip() or type(exc).__name__,
+                        )
+                        logger.event(
+                            "project_snapshot_failed",
+                            project=str(project),
+                            error=str(exc),
+                            cause=describe_exception_chain(exc),
+                        )
                         continue
+                    snapshot_failures.pop(project, None)
                     states[project] = ProjectRuntime(
                         root=project,
                         snapshot=snap,
@@ -663,6 +752,9 @@ def run_daemon(
                 if project not in discovered:
                     logger.event("project_deactivated", project=str(project))
                     del states[project]
+            for project in list(snapshot_failures):
+                if project not in discovered:
+                    del snapshot_failures[project]
 
             # An engine upgrade invalidates every supervised graph at once, but
             # the file-diff path cannot see it: a repo whose files are untouched
@@ -718,7 +810,12 @@ def run_daemon(
             except Exception as exc:
                 state.last_error = str(exc)
                 state.failure_count += 1
-                logger.event("project_scan_failed", project=str(project), error=str(exc))
+                logger.event(
+                    "project_scan_failed",
+                    project=str(project),
+                    error=str(exc),
+                    cause=describe_exception_chain(exc),
+                )
                 # Failures before a build is attempted (git enumeration,
                 # snapshotting, watcher errors) never reached the incident
                 # writer, so they were durable only in status.json, which ages
@@ -774,6 +871,7 @@ def run_daemon(
             options,
             cycle,
             None if provider_worker is None else provider_worker.snapshot(),
+            snapshot_failures,
         )
         if options.once:
             if provider_worker is not None:

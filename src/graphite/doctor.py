@@ -37,6 +37,7 @@ _FILE_LIMIT = 10_000
 _PROCESS_CLEANUP_SECONDS = 0.2
 _DAEMON_ISSUES_EXCLUDED_FROM_GLOBAL = {
     "project_failing",
+    "project_snapshot_failed",
     "project_pending_initial_build",
     "project_not_built_recently",
     "project_nested_repo_unsupervised",
@@ -431,9 +432,17 @@ def check_daemon(root: Path, daemon_base: Path) -> DoctorCheck:
         raw_projects = raw_status.get("projects", []) if isinstance(raw_status, MappingABC) else []
         if not isinstance(raw_projects, list):
             raw_projects = []
+        # A project the daemon could not snapshot is registered -- it is
+        # activated -- even though it never entered the supervised set (#113).
+        raw_failures = raw_status.get("snapshot_failures", []) if isinstance(raw_status, MappingABC) else []
+        if not isinstance(raw_failures, list):
+            raw_failures = []
         registered = any(
             isinstance(item, MappingABC) and _normalized_root(item.get("root")) == selected
             for item in raw_projects
+        ) or any(
+            isinstance(item, MappingABC) and _normalized_root(item.get("root")) == selected
+            for item in raw_failures
         )
         failing = bool(selected and _category_contains(report, "failing", selected))
         pending = bool(selected and _category_contains(report, "pending", selected))

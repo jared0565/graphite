@@ -121,6 +121,18 @@ class GitOutputLimitError(GitError):
     """Raised when Git stdout exceeds the configured bound."""
 
 
+class GitCommandFailedError(_StepGitError):
+    """Raised when a Git command ran and exited non-zero.
+
+    Git's own text is discarded on purpose -- it routinely embeds the
+    checkout path -- and the run's stderr is never captured at all. The exit
+    status is neither: it is an integer, and it is the only thing left that
+    says WHICH failure this was. Without it the enumeration error carried no
+    cause at all, so a daemon that failed every snapshot of a repository
+    could not say why (#113).
+    """
+
+
 class GitUnsupportedVersionError(_StepGitError):
     """Raised when Git's protected command configuration is unavailable.
 

@@ -205,6 +205,17 @@ def evaluate_daemon_health(
         opts.max_project_success_age_seconds,
     )
     for project in project_health["failing"]:
+        if project.get("failure_source") == "snapshot":
+            # The reason travels with the report: "how many" is not an answer
+            # an operator can act on (#113).
+            _append_bounded(errors, {
+                "code": "project_snapshot_failed",
+                "message": (
+                    f"project snapshot failed: {project['root']}: {project.get('last_error') or ''}"
+                ).rstrip(": "),
+                "project": project,
+            })
+            continue
         _append_bounded(errors, {
             "code": "project_failing",
             "message": f"project build failing: {project['root']}",
@@ -436,12 +447,32 @@ def _project_health(
     pending: list[dict[str, Any]] = []
     old: list[dict[str, Any]] = []
     counts = {"failing": 0, "pending": 0, "not_built_recently": 0}
+    # Snapshot failures come first: they are the ones the report exists to
+    # name, and the category list is capped. The entry carries the same
+    # fields a build failure carries -- a consumer reading `build_count` off
+    # a failing project must not find the key missing -- with the values
+    # that are true of a project that was never built.
+    for failure in status.get("snapshot_failures", []):
+        counts["failing"] += 1
+        if len(failing) < _MAX_CATEGORY_DETAILS:
+            failing.append({
+                "root": failure.get("root"),
+                "file_count": None,
+                "build_count": 0,
+                "failure_count": 0,
+                "last_error": failure.get("error"),
+                "last_success_at": None,
+                "last_success_age_seconds": None,
+                "needs_initial_build": True,
+                "failure_source": "snapshot",
+                "failed_at": failure.get("failed_at"),
+            })
     for item in status.get("projects", []):
         project = _project_summary(item, now)
         if item.get("last_error") is not None:
             counts["failing"] += 1
             if len(failing) < _MAX_CATEGORY_DETAILS:
-                failing.append(project)
+                failing.append({**project, "failure_source": "build"})
         if item.get("needs_initial_build") or int(item.get("build_count") or 0) == 0:
             counts["pending"] += 1
             if len(pending) < _MAX_CATEGORY_DETAILS:
@@ -531,6 +562,30 @@ def _invalid_project_field(item: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _invalid_snapshot_failure_field(item: Mapping[str, Any]) -> str | None:
+    """The fields a snapshot-failure record must carry, and their bounds.
+
+    `error` may be empty: the daemon always writes a reason, but a record
+    whose reason is missing is still a FAILURE, and dropping it would make it
+    invisible again -- the defect this report exists to close (#113). A record
+    with no reason is counted and named; only the reason is absent.
+    """
+    root = item.get("root")
+    if (
+        not isinstance(root, str)
+        or not _bounded_clean_string(root, _MAX_ROOT_LENGTH, nullable=False)
+        or not root.strip()
+    ):
+        return "root"
+    error = item.get("error")
+    if not isinstance(error, str) or not _bounded_clean_string(error, _MAX_LAST_ERROR_LENGTH, nullable=False):
+        return "error"
+    failed_at = item.get("failed_at")
+    if not isinstance(failed_at, str) or not _bounded_clean_string(failed_at, _MAX_TIMESTAMP_LENGTH, nullable=False):
+        return "failed_at"
+    return None
+
+
 def _normalize_status(
     raw_status: object,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int]]:
@@ -605,11 +660,37 @@ def _normalize_status(
                 "truncated_count": truncated_count,
             })
 
+    # A project the daemon could not snapshot (#113). Normalized explicitly,
+    # like every other key here: a key health is allowed to classify on and
+    # does not name explicitly is silently dropped, which is how the failure
+    # went unreported in the first place.
+    raw_failures = raw_status.get("snapshot_failures")
+    valid_failures: list[dict[str, Any]] = []
+    if raw_failures is not None and not isinstance(raw_failures, list):
+        issues.append(_schema_issue("snapshot_failures"))
+    elif isinstance(raw_failures, list):
+        for index, item in enumerate(raw_failures[:_MAX_INPUT_PROJECTS]):
+            if not isinstance(item, Mapping):
+                if len(issues) < _MAX_SCHEMA_ISSUES:
+                    issues.append(_schema_issue("snapshot_failure", index))
+                continue
+            invalid_field = _invalid_snapshot_failure_field(item)
+            if invalid_field is not None:
+                if len(issues) < _MAX_SCHEMA_ISSUES:
+                    issues.append(_schema_issue(invalid_field, index))
+                continue
+            valid_failures.append({
+                "root": item["root"],
+                "error": item["error"],
+                "failed_at": item["failed_at"],
+            })
+    status["snapshot_failures"] = valid_failures
+
     raw_project_count = raw_status.get("project_count")
     if not _nonnegative_int(raw_project_count):
         if len(issues) < _MAX_SCHEMA_ISSUES:
             issues.append(_schema_issue("project_count"))
-        status["project_count"] = len(valid_projects)
+        status["project_count"] = len(valid_projects) + len(valid_failures)
 
     raw_daemon_status = raw_status.get("status")
     if raw_daemon_status is not None and (
