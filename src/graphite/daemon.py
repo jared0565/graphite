@@ -16,7 +16,6 @@ from . import activation, buildlock
 from .config import Config
 from .engine_identity import EngineIdentityError, engine_identity
 from .freshness import graph_engine_changed
-from .git import GitError
 from .incident_ledger import record_incident, repo_ledger_dir
 from .io import atomic_write_json
 from .provider_observer import ProviderObservationSummary
@@ -176,9 +175,17 @@ def _exception_identity(exc: BaseException) -> str:
     so no path and no Git text can ride along. Every other exception
     contributes its class name and nothing else -- the message may name a
     path, and the class is what separates the causes.
+
+    An exception that is not a `GitError` may still know its own identity:
+    anything offering `diagnostic()` is asked for it, on the same contract
+    -- fixed tokens, no path, no message text. `IngestEnumerationError` is
+    the second class that offers one, and it is what separates the ways
+    enumerating a repository can fail. Asking rather than isinstance-ing
+    keeps the daemon from having to know where the exception came from.
     """
-    if isinstance(exc, GitError):
-        return exc.diagnostic()
+    diagnostic = getattr(exc, "diagnostic", None)
+    if callable(diagnostic):
+        return str(diagnostic())
     return type(exc).__name__
 
 

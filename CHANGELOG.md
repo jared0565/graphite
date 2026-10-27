@@ -15,6 +15,18 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Fixed
+
+- The daemon's log now says WHICH way enumerating a repository failed.
+  Every one of those failures raises the same path-free `IngestError`
+  message, and the cause chain rendered the class name alone, so four
+  different failures read "IngestError" and could not be told apart -- the
+  same loss #113 fixed for Git's exit status. Each failure now raises a
+  cause carrying its own reason (`nested_git_root`,
+  `output_not_nul_terminated`, `too_many_records`, `path_not_contained`),
+  and the chain names it. The message a caller sees is unchanged, and no
+  command, option, exit code or JSON field changes.
+
 ## [1.6.0] — 2026-10-27
 
 A minor release: the daemon's health report no longer reads "ok" while every

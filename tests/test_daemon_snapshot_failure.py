@@ -505,3 +505,77 @@ def test_the_cause_chain_stops_at_a_bounded_depth() -> None:
 
     assert chain.count(" <- ") < 10
     assert chain.startswith("RuntimeError <- RuntimeError")
+
+
+def _git_root(base: Path, name: str = "repo") -> Path:
+    """A directory that IS a Git root, so enumeration reaches the parser."""
+    root = base / name
+    root.mkdir(parents=True)
+    (root / ".git").mkdir()
+    return root
+
+
+def _listing_runner(output: bytes):
+    """A GitRunner stand-in returning a fixed `ls-files` stdout."""
+    class _FakeRunner:
+        def __init__(self, project_root):
+            pass
+
+        def run(self, arguments, *, timeout_seconds, **kwargs):
+            return subprocess.CompletedProcess(arguments, 0, output, b"")
+
+    return _FakeRunner
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_reason", "expected_message"),
+    [
+        ("nested_root", "nested_git_root", "nested Git roots are unsupported"),
+        ("output_not_terminated", "output_not_nul_terminated", SNAPSHOT_ERROR),
+        ("too_many_records", "too_many_records", SNAPSHOT_ERROR),
+        ("path_not_contained", "path_not_contained", SNAPSHOT_ERROR),
+    ],
+)
+def test_each_way_enumeration_fails_is_named_in_the_cause_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    expected_reason: str,
+    expected_message: str,
+) -> None:
+    """Four different failures, four different reasons, one message.
+
+    `IngestError` says WHAT failed and not WHY, and every one of these
+    raises the same message, so the daemon's chain read "IngestError" four
+    times over and could not say which failure it was -- the same loss
+    #113 fixed for Git's exit status. The CAUSE now carries the reason, and
+    the message the caller sees is unchanged.
+    """
+    base = tmp_path / "projects"
+    base.mkdir()
+
+    if mode == "nested_root":
+        # A directory INSIDE a Git root, but not a root itself.
+        (base / ".git").mkdir()
+        root = base / "inner"
+        root.mkdir()
+        output = b""
+    else:
+        root = _git_root(base)
+        output = {
+            "output_not_terminated": b"file.py",
+            "too_many_records": b"a\0b\0c\0d\0",
+            "path_not_contained": b"../escape.py\0",
+        }[mode]
+
+    monkeypatch.setattr(ingest_module, "GitRunner", _listing_runner(output))
+    if mode == "too_many_records":
+        monkeypatch.setattr(ingest_module, "MAX_GIT_FILE_RECORDS", 2)
+
+    with pytest.raises(IngestError) as caught:
+        ingest_module._git_ls_files(root.resolve())
+
+    assert str(caught.value) == expected_message
+    assert describe_exception_chain(caught.value) == (
+        f"IngestError <- IngestEnumerationError:{expected_reason}"
+    )
