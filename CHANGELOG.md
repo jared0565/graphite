@@ -15,6 +15,55 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-10-27
+
+A minor release: the daemon's health report no longer reads "ok" while every
+snapshot of an activated project fails (#113), and the daemon's log now
+carries the cause of a failure instead of only its message. The
+`daemon-health --json` output gains two fields on a failing project and a
+new error code, and the `dev` extra gains one dependency, so this is a
+minor by the rule in `docs/compatibility.md` -- "Fields are added in
+minors" -- and by the precedent of 1.1.0, whose own note reads "The agent
+channel's read surfaces gain fields, which is an addition to a stable
+surface." No command, option, exit code or entry point is added, removed or
+renamed, and the `daemon-status` output gains a listing where it had none.
+
+The graph changes by what this fix adds. Measured on this repository: the
+1.5.0 release tree built by the installed 1.5.0 engine, and this tree built
+by this engine, each into fresh output, cache and state directories:
+
+- 9,244 nodes become 9,293 and 25,415 edges become 25,589. The 49 new nodes
+  are the functions and classes this change adds, the file of the new test
+  file, and the fixtures and helpers that go with them;
+- every node id survives: 9,244 of 9,244 are in both, 49 are new and none
+  is removed;
+- 6,712 definition ids become 6,750: 6,512 survive naming the same
+  definition at the same line, and 200 survive by id but move line -- every
+  one of them in the seven files this change touches (`cli.py` 43,
+  `doctor.py` 37, `daemon.py` 31, `daemon_health.py` 18, `git.py` 12,
+  `ingest.py` 2, `tests/test_hardening.py` 57). No definition id is
+  removed and 38 are new;
+- `contains` goes from 6,710 relation triples to 6,748 and `imports` from
+  2,465 to 2,480; `calls` goes from 16,290 to 16,410; `inherits` (120)
+  becomes 121. 25,585 relation triples become 25,759, with none removed;
+- 18 cycles where there were 18, the same ones, and 177 communities where
+  there were 178. Orphans and surprising connections are identical; the
+  entry points, the god nodes and the top files by links differ, because
+  the new code adds and moves them.
+
+`metadata.engine.fingerprint` moves, as it does whenever the engine's own
+files change -- and they do: the identity hashes every `.py` and `.mjs`
+file in the package, so a change to the daemon, the health report, the
+ingest or the Git wrapper moves it whether or not the extraction changed.
+
+The two builds above used different `tree-sitter-python` versions (0.25.2
+for the installed 1.5.0 and 0.26.0 for the dev environment), so the
+difference was controlled for rather than assumed away: the SAME tree built
+by both parser versions gives the same ids, the same edges and the same
+triples, node for node -- 9,293 nodes, 25,589 edges and all 25,759 relation
+triples identical, with no id moved and none removed. The figures above
+are therefore attributable to this change and not to the parsers.
+
 ### Fixed
 
 - Daemon: the health report no longer reads `ok` while every snapshot of an
