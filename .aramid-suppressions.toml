@@ -215,3 +215,275 @@ tool = "ruff"
 rule = "S608"
 path = "tests/test_routing_storage.py"
 reason = "A test iterating a fixed, in-test list of table names to compare snapshots. No external input reaches the statement."
+
+# 2026-10-27: aramid's OWN inline scanners, and the twenty-nine markers they
+# record.
+#
+# The SEMGREP view above was handled at the source with bare `# nosemgrep`
+# markers, because SEMGREP's own rule id embeds the absolute path of the
+# vendored ruleset -- including a username -- and is therefore unusable both
+# in a committed file and in shipped source. That reasoning does NOT carry
+# over to aramid's own scanners, which are a DIFFERENT tool with a
+# DIFFERENT id: `semgrep-inline` and `ruff-inline` record every inline
+# marker that hides a finding, and their ids are content-derived and
+# machine-independent. The marker silences SEMGREP; the entries here
+# silence ARAMID's record OF the marker. Both are needed, and they are not
+# in conflict.
+#
+# Twenty-nine markers were adjudicated, one at a time against the source:
+#
+#   semgrep-inline (26)  20 in the two SQLite stores, 6 in
+#                        tests/test_routing_storage.py
+#   ruff-inline (3)      `# noqa` in three tests
+#
+# The list came from a whole-repo `aramid check --gate pre-push --all`
+# REPORT, not from the ledger, and the difference is not academic: the
+# ledger held 20 open `semgrep-inline` findings, all from one scoped run on
+# 2026-10-10, and the whole-repo scan raised 29. Six of the markers are in
+# the test file, and the ledger had never seen them. A ledger-only view
+# under-reports, and a file built from it would have carried a header
+# claiming those six were absent.
+#
+# The 20 in the stores fall into three shapes, each with its own reason:
+#
+#   PRAGMA (3)      `PRAGMA busy_timeout = ?` was run against sqlite3 on
+#                   this machine and raises OperationalError, message:
+#                   near "?": syntax error -- so PRAGMA genuinely cannot be
+#                   parameterized, and the value is range-checked to
+#                   100..30_000 at construction.
+#   identifier (16) The name comes from a literal in scope -- the
+#                   `rebuilds` tuple, the `expected` dict, or the
+#                   module-level _PRE_V6_WIDENED_TABLES Final mapping.
+#   allowlist (1)   storage.py's `row_count` DOES take a caller-supplied
+#                   name, and rejects it against the _TABLES frozenset
+#                   before the statement is built. That check is what makes
+#                   the interpolation safe, so it is load-bearing.
+#
+# The 6 in the test file are the same shape as the identifier ones: a table
+# name from a literal tuple written at the test's own loop head. The 3
+# `ruff-inline` ones are a `# noqa` hiding a ruff rule in a test where the
+# rule fires on the very thing the test is about -- an `exec` of the
+# commit-msg hook's embedded Python, and two redaction sentinels that have
+# to look like credentials for the redaction test to mean anything.
+#
+# These are entries, not a rule-wide exemption, and the tiers say so. An
+# inline marker whose id is NOT in this file is reported at WARN tier, so a
+# NEW marker on a statement whose name could come from a caller still
+# reports; an id that IS in this file is reported at INFO, which is what
+# "adjudicated" means here; and an entry whose statement has changed is
+# reported stale.
+#
+# One caveat about `new_ids`, measured on the run that closed this block:
+# nine of these twenty-nine ids appeared in that run's `new_ids` even
+# though they were adjudicated here, because this machine's LEDGER had
+# never seen them -- it had only ever run the scoped gate. "New" means
+# "not yet in the ledger", not "not adjudicated". A run that records will
+# learn them, and the run after it will show `new_ids: []`. CI's checkout
+# carries no ledger at all, so every finding is new there, and the CI step
+# judges the REPORT's block tier rather than `new_ids`.
+#
+# Adjudicated 2026-10-27, against the ids in the whole-repo report of that
+# date.
+
+[[suppress]]
+id = "0df35f92e93a59cc2c90b92db9bfe3d580333b13caba99ba6ff04aa688222979"
+tool = "ruff-inline"
+rule = "inline-suppressed-block"
+path = "tests/test_channel_core.py"
+reason = "A `# noqa` hiding ruff S102 (use of exec) in a test, where the rule fires on the very thing the test is about: the test compiles the commit-msg hook's embedded Python and runs it, because that hook runs under -I and cannot import graphite, so its own git lookup has to be tested where it lives. The exec IS the test, and the code it runs is the hook's own source, not a credential or a shell. The marker is the narrowest possible scope -- the finding is on this line only -- and the inline comment already records why. This is aramid's record of the marker; the acceptance lives here, in a file that is diffed and reviewed, rather than only in a comment the reader may not reach."
+
+[[suppress]]
+id = "3a24fb4da6db8d005957c1b54ae68f538ec423b95d465a2c483ab7568e59c530"
+tool = "ruff-inline"
+rule = "inline-suppressed-block"
+path = "tests/test_daemon_health.py"
+reason = "A `# noqa` hiding ruff S105 (a hardcoded password) in a test, where the rule fires on the very thing the test is about: the value is a redaction sentinel -- a path that must be redacted out of a report -- so it has to LOOK like the secret the redactor is supposed to catch. It names no real path and no real credential. The marker is the narrowest possible scope -- the finding is on this line only -- and the inline comment already records why. This is aramid's record of the marker; the acceptance lives here, in a file that is diffed and reviewed, rather than only in a comment the reader may not reach."
+
+[[suppress]]
+id = "1a2c501394c5c4ca2671c52e542afd39bb96c1cbdbb3b37b6ce145d8f7277e5f"
+tool = "ruff-inline"
+rule = "inline-suppressed-block"
+path = "tests/test_daemon_health.py"
+reason = "A `# noqa` hiding ruff S105 (a hardcoded password) in a test, where the rule fires on the very thing the test is about: the value is a redaction sentinel again: the test asserts that a provider-lifecycle payload which could leak is rejected, and the payload has to carry a credential-shaped string for that assertion to mean anything. It names no real credential. The marker is the narrowest possible scope -- the finding is on this line only -- and the inline comment already records why. This is aramid's record of the marker; the acceptance lives here, in a file that is diffed and reviewed, rather than only in a comment the reader may not reach."
+
+[[suppress]]
+id = "982315572d6b2103dd8def4d11120b85956d0c2b83973762523513dba732b007"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/lifecycle_storage.py"
+reason = "PRAGMA takes no bind parameters -- measured on this machine, PRAGMA busy_timeout = ? raises OperationalError, message: near \"?\": syntax error -- so the value can only reach the statement by interpolation. busy_timeout_ms is range-checked to 100..30_000 at construction and a bool is rejected there, so a value that is not a number raises TypeError before any statement is built, and no caller-chosen string can reach the statement. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "f690f4fefec28b7aa9e90ccf352fb43fb37af92c7a5f74b0a281d7fb25f6775a"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/lifecycle_storage.py"
+reason = "PRAGMA takes no bind parameters -- measured on this machine, PRAGMA busy_timeout = ? raises OperationalError, message: near \"?\": syntax error -- so the value can only reach the statement by interpolation. busy_timeout_ms is range-checked to 100..30_000 at construction and a bool is rejected there, so a value that is not a number raises TypeError before any statement is built, and no caller-chosen string can reach the statement. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "8a0d36e14fa10b5a4ebf43204484fb305531cae6d4799a7b89c3689288916759"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/lifecycle_storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name and column list comes from the `rebuilds` literal tuple defined immediately above the loop -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "b573b7fbd466ef4f9be035ea2c426129e47abab830c7d6289d88c361c3c5b284"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/lifecycle_storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name and column list comes from the `rebuilds` literal tuple defined immediately above the loop -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "1de474bc59655c4d05292e369925cbe2c578a1a55e073b0b66f3909af553a025"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/lifecycle_storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name and column list comes from the `rebuilds` literal tuple defined immediately above the loop -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "1469ca8c0175bc458b3c210fa6c85530d4f59f77df1aa03dd2a8beb95cff39e1"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/lifecycle_storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name and column list comes from the `rebuilds` literal tuple defined immediately above the loop -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "1e03e941533a2fa635956375e92c3a00ec9764da4fe0b356d007514874662a72"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/lifecycle_storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name and column list comes from the `rebuilds` literal tuple defined immediately above the loop -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "15d87de98749562289c3be9f33dcecf958ca562be1d03398396db5166ca5f1e6"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/lifecycle_storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from ('the `expected` literal dict of table names defined in the same function',) -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "fcfbe7457c88795eb4f5a8d2ff060b44865e8925ae11adc70d48cb7f3dbd829d"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/storage.py"
+reason = "PRAGMA takes no bind parameters -- measured on this machine, PRAGMA busy_timeout = ? raises OperationalError, message: near \"?\": syntax error -- so the value can only reach the statement by interpolation. busy_timeout_ms is range-checked to 100..30_000 at construction and a bool is rejected there, so a value that is not a number raises TypeError before any statement is built, and no caller-chosen string can reach the statement. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "0bb46f604eed06b85d935d7156529a9ecbf838bcace6fca04529396d64bd5669"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from ('a key of the module-level _PRE_V6_WIDENED_TABLES Final mapping of two literal table names',) -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "f60565c5376e57833df2edc808c4b5cc3c3defe6f09ed78fe47b4825283132c6"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from ('a key of the module-level _PRE_V6_WIDENED_TABLES Final mapping of two literal table names',) -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "857132f79a930f0aafd2b8e2e3374024fdaa523201efcced0b4f68655661d653"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from ('a key of the module-level _PRE_V6_WIDENED_TABLES Final mapping of two literal table names',) -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "835ff94e157625e9ba7ad0044efa59c4d0ae984f60767e6ba42734916e16d642"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from ('a key of the module-level _PRE_V6_WIDENED_TABLES Final mapping of two literal table names',) -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "5b8b1c316bd555d3d1f1e76876c543410049ed189235a454eeeda64f77a05e7f"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from ('a key of the module-level _PRE_V6_WIDENED_TABLES Final mapping of two literal table names',) -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "670877dbdd7fb15c75717c903b8a4ae1b6b98477457c7bce4fe092f622942d95"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from ('a key of the module-level _PRE_V6_WIDENED_TABLES Final mapping of two literal table names',) -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "f8f099d62be76ece37938a98801a187e05831052d048bf2e0fe9e5eb974679ef"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from ('a key of the module-level _PRE_V6_WIDENED_TABLES Final mapping of two literal table names',) -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "968d938fd865c66ebced776a25a75feb94a0599254a752208fafffe14121ca3d"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from ('a key of the module-level _PRE_V6_WIDENED_TABLES Final mapping of two literal table names',) -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "749df84adc9ce0c828836e4639c387dcd63299e849adde0889b9c3635627f565"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from ('a key of the module-level _PRE_V6_WIDENED_TABLES Final mapping of two literal table names',) -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "f1394387067576a53fe4a56dc7ee580dc59aa6f4ad51ec071e8406d8731f1613"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from ('a key of the module-level _PRE_V6_WIDENED_TABLES Final mapping of two literal table names',) -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "242bf74dba5e851dc57906e7b82d3e4ed0da16b3560808ca523c603812c10d5a"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "src/graphite/routing/storage.py"
+reason = "The name IS caller-supplied here, and the allowlist is what makes the interpolation safe: the method rejects any name that is not in the module-level _TABLES frozenset with ValueError('table_invalid') before the statement is built, so only a known table name can reach the query. SQLite cannot bind an identifier, so the f-string is the only mechanism available. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "3b149b33d4b8457d2936d5fbdb08015bf4d01f06f307320bc1ba3bb0002a3be8"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "tests/test_routing_storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from the literal tuple of table names written at the head of the loop -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "0cf47bcc113dc7529fa19168dca84fbcbb78f7f76dbdafd800925e0af96cbb45"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "tests/test_routing_storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from the literal tuple of table names written at the head of the loop -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "9d4aaf3d8abddf238a973cf4a12e0c3683a3e5d233438737d7cdfda0e4d17578"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "tests/test_routing_storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from the literal tuple of table names written below the expression -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "71ac823052c9c9839e823ecb6e6971bbae24b2f3788d9a9c1f11a63272c20d81"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "tests/test_routing_storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from the keys of `before`, which the literal tuple below it produced -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "28d04dbae962fe8681d7657ea00b53cf8fd519d0fc067a0cc07e9ad35f68ad38"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "tests/test_routing_storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from the `preserved_tables` literal tuple defined just above -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."
+
+[[suppress]]
+id = "7818952d769172fd7038478b51b6a43ba4cab8d8f765aa5a64e1505712ae7999"
+tool = "semgrep-inline"
+rule = "inline-suppressed-block"
+path = "tests/test_routing_storage.py"
+reason = "SQL binds values, never identifiers, so a table or column name can only reach a statement by interpolation. The interpolated table name comes from the `preserved_tables` literal tuple defined above -- never from a caller -- so the identifier in the statement is fixed when the test writes it, and no VALUE in it is interpolated: wherever one appears it is bound with ?. This is aramid's record of the inline # nosemgrep marker on the statement; the ruff S608 view of the same statement is adjudicated separately in the ruff entries above."

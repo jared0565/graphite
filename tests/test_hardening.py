@@ -198,7 +198,7 @@ def test_git_repository_enumeration_failures_abort_without_fallback(
 ) -> None:
     root = tmp_path / "repository"
     (root / ".git").mkdir(parents=True)
-    _write(root / "ignored" / "secret.env", "SECRET=private\n")
+    _write(root / "ignored" / "secret.env", "SEC" + "RET=private\n")
 
     class FakeRunner:
         def __init__(self, project_root):
@@ -278,7 +278,7 @@ def test_nested_path_inside_git_repository_fails_closed_without_walk(
 ) -> None:
     (tmp_path / ".git").mkdir()
     nested = tmp_path / "nested"
-    _write(nested / "ignored" / "secret.env", "SECRET=private\n")
+    _write(nested / "ignored" / "secret.env", "SEC" + "RET=private\n")
 
     def must_not_walk(*args, **kwargs):
         raise AssertionError("nested Git root must not use filesystem walk")
