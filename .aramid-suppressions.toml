@@ -494,3 +494,656 @@ tool = "red-proof"
 rule = "test-not-red"
 path = "tests/test_agent_hooks_session_tagging.py"
 reason = "The two tests this file gained kill two recorded mutation survivors: the `or` in `_entry_is_this_session`, and the zero offset `handle_stop` takes when there is no ledger. The production code they cover was ALREADY correct on the pre-change tree, so both tests are green there and CANNOT be red against it -- that is what a mutation-kill test is, and it is why the evidence for these two is the mutation proof (each mutant applied, each test watched to fail) rather than a red-before. A test that was red against the pre-change tree would be pinning behaviour that changed, which is not what this commit does. The sibling file tests/test_daemon_snapshot_failure.py carries no such finding, because the test it gained for the enumeration causes is red against the pre-change tree."
+
+# 2026-10-27: the whole-repo ruff backlog -- 87 findings the normal gate
+# never sees.
+#
+# The gate that runs every day scans CHANGED files, so a finding in a file
+# nobody has touched since is never raised. A whole-repo scan raises these
+# 87: they have been sitting unreported for as long as their files have
+# been quiet. They are WARN tier and do not block; they are adjudicated
+# here so that a whole-repo scan is clean, and so that the NEXT person who
+# changes one of these files finds the acceptance already written down.
+#
+# The reasons are per FAMILY, and each family was read in the source
+# before it was written -- a reason has to be true of every site it
+# covers, not merely plausible:
+#
+#   S603 (33)  A subprocess call with an argument LIST and no shell, so
+#              no argument is ever parsed as a command. The executable is
+#              the running interpreter, an absolute path from graphite's
+#              own trusted-path resolution, or a program named on PATH
+#              for a fixture.
+#   S607 (16)  `git` looked up BY NAME on PATH, as this suite's other git
+#              fixtures do. The argv is a list and no shell is involved.
+#   S101 (23)  A type-narrowing assert that follows a check which has
+#              already raised, or a branch that already guarantees the
+#              value -- so it carries no runtime behaviour that `python
+#              -O` would remove.
+#   S110 (11)  A deliberate best-effort: a cleanup, a teardown, or a
+#              notification whose own failure must not replace the error
+#              being reported. Two sites say something sharper and carry
+#              their own reason: the agent hook is fail-open by contract,
+#              and the query answer block is optional enrichment.
+#   S310 (2)   The URL scheme is validated before the request is built
+#              (`_validate_llm_base_url` rejects anything but http/https).
+#              The `# nosec` marker is bandit's own suppression; ruff's
+#              S310 does not read it, which is why the rule fires.
+#   S108 (1)   The POSIX standard temporary root, which the test RESOLVES
+#              to check its ownership and sticky bit.
+#   S311 (1)   A seeded pseudo-random generator building a synthetic
+#              repository for a benchmark.
+#
+# These are entries, not a rule-wide exemption: an id that is not in this
+# file is reported at WARN tier, and an entry whose statement has changed
+# is reported stale. Adjudicated 2026-10-27, against the ids in the
+# whole-repo report of that date.
+
+[[suppress]]
+id = "4743c477c3339d0e7ae849367f12da451be18c9589a36dc6ffb41b8ced7e2c87"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/mcp_server.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "85b0fe4e1537459cda0121fb9ca6778c82d602fca969c5e7f32198a5ae38d913"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/mcp_server.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "630050737a205c9c444117ec67c194b7331b8adca948317d58130e50c7852449"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/mcp_server.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "77e386a88937e96b86578ba728a4a1d949469167b7976ce54e57f7fcbf2e221e"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/probe_workspace.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "3742f7bca364f3e0a2194a1e59f7ef38d833bbfb4378e237a4908cfdb602c0f3"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/query.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "24edecf19cfd13d373471be02d3f305d204ea3f88e0397d3c33841a6b269be45"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/query_plan.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "afc5aeea1f84b642c4f314440a4d684337585026d059c98cf9cfd774a99b45a3"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/approval.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "23e24d7f3ab3740880daa7fbaaabde23409396280994ee63aa057cafef56a5ee"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/approval.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "aca2ada2c9448628d7f09b16b404f502bf5ef8e7f06b926f7101fae82d559fc3"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/approval.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "f0142fd596e47cc6d160f6d9f1fd6ce56e804f8167e628cdceaca0098859c19f"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/approval.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "e89e0f31672a7d3934eefd12bd8f2f426ac03572083418972e64fb2c2c6db489"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/lifecycle.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "e61c711a53b1544d5ad9e6e06eacbe8e51f2289edbc0f994a76b562be0edb79f"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/lifecycle.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "d92f79134281c19d49256505579e0cdfbc13dd3c43f753354df6b09b1894cc62"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/lifecycle.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "c0ccef8e2e3cc3f56e5413b97a201403a4afa97abd45a2c4f1d90a1fd12117ac"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/lifecycle.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "d9475d1ae12f6e2b495b4da7b1dec6459c368a3207bcc0d5b620d87ee4f29a6d"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/lifecycle.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "f507f2c20411632fcd9767d87a0d5a03d1eb9aa98c1acd5699daaeadd0e12396"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/lifecycle.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "b04e6f96f1b60d31e3125241618667fdd00d804cc5e098120ceef16e2ce9d545"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/lifecycle.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "42d90e8661923487b3ff36d1d869e6c6986da3fe49cbf544b1fc8df2c7f31773"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/lifecycle.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "40850231dc6fba561e6b5888e3acee3f907d72f514612f038ac04e0f3e566fc6"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/lifecycle.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "323a20092abf899006d2d723deb8f1c9f8fc1826af6b6717b4e271432e34367e"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/lifecycle.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "ac5d8025e3ee4295e29a06df17b0d2e9931e4d37794b247f11a3bb73a3f34c4d"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/service.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "0c298a5da5d0778c42bf0b37866db3d72de47d23fd81e8902a837a9c42c89a86"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/service.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "590158354ba9b61ddd234e19494a5d69dc5090b1b15b745d7728193beecef465"
+tool = "ruff"
+rule = "S101"
+path = "src/graphite/routing/service.py"
+reason = "A type-narrowing assert. It follows a check that has already raised, or a branch that already guarantees the value, so it carries no runtime behaviour that `python -O` would remove: it exists to narrow the type for the type checker, and the code above it is what enforces the invariant."
+
+[[suppress]]
+id = "873b2596e263f3aaf330b02a5bd76b1d382041b0aa6df274b822d4a4dd5cad87"
+tool = "ruff"
+rule = "S108"
+path = "tests/test_typescript_activation.py"
+reason = "The POSIX standard temporary root, which the test RESOLVES to check its ownership and its sticky bit. Nothing is created at or through this path; the literal is the point of the test."
+
+[[suppress]]
+id = "a6345440d62ad018e2475afa9d3e3c5fb8131616e646d87cd9953fcba7008527"
+tool = "ruff"
+rule = "S110"
+path = "src/graphite/activation.py"
+reason = "A deliberate best-effort operation: the exception is swallowed on purpose, because the operation is a cleanup, a teardown, or a notification whose own failure must not replace the error being reported, and nothing is lost by ignoring it."
+
+[[suppress]]
+id = "8ecf9f110a7b3a2f6f8164347a134b03d0aba4e6cb5aa1f35bf0a758e28e9406"
+tool = "ruff"
+rule = "S110"
+path = "src/graphite/activation.py"
+reason = "A deliberate best-effort operation: the exception is swallowed on purpose, because the operation is a cleanup, a teardown, or a notification whose own failure must not replace the error being reported, and nothing is lost by ignoring it."
+
+[[suppress]]
+id = "235c1aef4b764d644f90d49831a0fc32d2493b75af565c4273fdcbd89cee8545"
+tool = "ruff"
+rule = "S110"
+path = "src/graphite/cli.py"
+reason = "The agent hook is fail-open BY CONTRACT: `graphite agent-hook` always exits 0, so a problem inside it must never break the tool call that triggered it. The exit status is the contract; the swallowed exception IS the failure being reported."
+
+[[suppress]]
+id = "816b0b7b3244919a9d383279133a25708da03331a4a172b55def3a24cccd9b4c"
+tool = "ruff"
+rule = "S110"
+path = "src/graphite/cli.py"
+reason = "A deliberate best-effort operation: the exception is swallowed on purpose, because the operation is a cleanup, a teardown, or a notification whose own failure must not replace the error being reported, and nothing is lost by ignoring it."
+
+[[suppress]]
+id = "1c414d9cc6877a3bb409f7b5e773869b1adad832a63cbf473e7ad67ceda5b8b8"
+tool = "ruff"
+rule = "S110"
+path = "src/graphite/doctor.py"
+reason = "A deliberate best-effort operation: the exception is swallowed on purpose, because the operation is a cleanup, a teardown, or a notification whose own failure must not replace the error being reported, and nothing is lost by ignoring it."
+
+[[suppress]]
+id = "98a82a828bc2b7d00ec99a90b25a5327e60b406fb119bb1b6782c9e26d02b6a5"
+tool = "ruff"
+rule = "S110"
+path = "src/graphite/doctor.py"
+reason = "A deliberate best-effort operation: the exception is swallowed on purpose, because the operation is a cleanup, a teardown, or a notification whose own failure must not replace the error being reported, and nothing is lost by ignoring it."
+
+[[suppress]]
+id = "c47141f2386eeef63979c310f0995e627bcaeca96fb36ea8cff86f15022370e2"
+tool = "ruff"
+rule = "S110"
+path = "src/graphite/health.py"
+reason = "A deliberate best-effort operation: the exception is swallowed on purpose, because the operation is a cleanup, a teardown, or a notification whose own failure must not replace the error being reported, and nothing is lost by ignoring it."
+
+[[suppress]]
+id = "3aa4db738550d0c589a4f903818d49532caa5c1e4c96b279f01a58d4bbd7a849"
+tool = "ruff"
+rule = "S110"
+path = "src/graphite/llm.py"
+reason = "A deliberate best-effort operation: the exception is swallowed on purpose, because the operation is a cleanup, a teardown, or a notification whose own failure must not replace the error being reported, and nothing is lost by ignoring it."
+
+[[suppress]]
+id = "11f4c2f7d8bc4487a2a8ba742c37adc02fda3d3df161747edc7a6a90a086554e"
+tool = "ruff"
+rule = "S110"
+path = "src/graphite/query.py"
+reason = "The answer block is optional enrichment on top of a resolution that has already been computed: if building it fails, the envelope still reports the resolution it carries, and raising here would replace a real answer with an exception."
+
+[[suppress]]
+id = "5dfaeeef306d8e358269dc154473446a02c3a9276223bf9be64371252d4ef693"
+tool = "ruff"
+rule = "S110"
+path = "src/graphite/routing/probe_runner.py"
+reason = "A deliberate best-effort operation: the exception is swallowed on purpose, because the operation is a cleanup, a teardown, or a notification whose own failure must not replace the error being reported, and nothing is lost by ignoring it."
+
+[[suppress]]
+id = "d0dbb484ecc3eb87b833611fef85cfe8f8757b0e8f72380c47ccd95ec9867622"
+tool = "ruff"
+rule = "S110"
+path = "src/graphite/usage_ledger.py"
+reason = "A deliberate best-effort operation: the exception is swallowed on purpose, because the operation is a cleanup, a teardown, or a notification whose own failure must not replace the error being reported, and nothing is lost by ignoring it."
+
+[[suppress]]
+id = "137da65a5638fd06447b65918aa00505638f9b62b22b59a3fc741bf4d43f0486"
+tool = "ruff"
+rule = "S310"
+path = "src/graphite/llm.py"
+reason = "The URL's scheme is validated before the request is built: `_validate_llm_base_url` rejects any scheme but http/https (and requires https for the keyed cloud providers), and the request URL derives from that validated base URL. The `# nosec` marker on the call is bandit's own suppression; ruff's S310 is a different tool and does not read it, which is why the rule fires here."
+
+[[suppress]]
+id = "89b945c80c04eab699cc796a8432db233ace0d43dc9c2bade1ebae9ec2a04eb3"
+tool = "ruff"
+rule = "S310"
+path = "src/graphite/llm.py"
+reason = "The URL's scheme is validated before the request is built: `_validate_llm_base_url` rejects any scheme but http/https (and requires https for the keyed cloud providers), and the request URL derives from that validated base URL. The `# nosec` marker on the call is bandit's own suppression; ruff's S310 is a different tool and does not read it, which is why the rule fires here."
+
+[[suppress]]
+id = "620a4220608f8964e64b82eb323d4b848d116d78731c2b264b7daecde8330d00"
+tool = "ruff"
+rule = "S311"
+path = "benchmarks/synthetic_repo.py"
+reason = "A seeded pseudo-random generator building a SYNTHETIC repository for a benchmark. Nothing here is a secret, a token, a key or an identifier, so a cryptographic generator would cost time and buy no property."
+
+[[suppress]]
+id = "2ef0f7c58f3bd11e93fc71fff31cff76b9ae42bad28e4dd9c0a741f0cf99db3c"
+tool = "ruff"
+rule = "S603"
+path = "benchmarks/build_benchmark.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "d64554e4d67545fd743e8b4c566519c80e59271aa7033511ab45c0c6d3e7ac68"
+tool = "ruff"
+rule = "S603"
+path = "src/graphite/daemon_health.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "12e3b5cdd929fa78cd5648545edb3f68597fe44621435d95423cea81db66cedf"
+tool = "ruff"
+rule = "S603"
+path = "src/graphite/detach.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "d921f42f4a252659690306ff8d6c9fab4a8a030fd0c876ef3d257ea3bc7954bb"
+tool = "ruff"
+rule = "S603"
+path = "src/graphite/detach.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "02f11850d85bcbaddb280074b7ab87cbacd0142691972b83507be357d1e18a2f"
+tool = "ruff"
+rule = "S603"
+path = "src/graphite/doctor.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "21b1e042feecce77f94f680465048a40cc5ec699ecfc665baddb4601d0cf661a"
+tool = "ruff"
+rule = "S603"
+path = "src/graphite/git.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "4e72d54ed0f302dee11226d42523e7e86dfe9eabf91c1fea31ba9f1965c79d66"
+tool = "ruff"
+rule = "S603"
+path = "src/graphite/hookinstall.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "52cc73701da3fdd5f5c335b95b5366c327c63af636553e49f604c3cc314b13a0"
+tool = "ruff"
+rule = "S603"
+path = "src/graphite/init.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "9f723a34d0f7c92d006c9a770db6362cabc28d5b2db6635d20ea8359fd616f24"
+tool = "ruff"
+rule = "S603"
+path = "src/graphite/mcp_server.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "7f75d213d49b7693f8cde3fe65269aa6c1db00e70d14c54acd53f505e141d9ae"
+tool = "ruff"
+rule = "S603"
+path = "src/graphite/probe_process.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "4cc162715d6e4563a98d687fa910f498d35da7aa425e543ae76e73ecfe39ba55"
+tool = "ruff"
+rule = "S603"
+path = "src/graphite/ts_bridge.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "5853b9e92d56643bcf6a35faf5cef5602f3727326b26da5f9b4741e07c33b849"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_doctor.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "92d22afd78553c42f490e5807504c9cbf55c2777e3678221608199c93ad3ba01"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_doctor.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "770c06c83e838faa1455a5d28f16d95cfd81b362e6fadc9160f54952ce4a7a9a"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_doctor.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "7ee78ad8d3b8bc85eb2b325d550acc2f042aff069350fa872c3ba2c13dba2c9e"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_doctor_hooks.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "fb1a032a42b6b1f386c48b01984f280a521a5af8c64a826c809366c0d929ed82"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_doctor_hooks.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "0a147f4be0f6a388290271bcabcaedd122592ee9839741aa0b02800c12b799c3"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_hardening.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "ceac3d549e79355d4267768537ac6d12bf7db51fdd5b86ce9cef082ba07269d9"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_hardening.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "207118f833ab85e0f2df6d21ab634c741ab8a631d7e90b2046169dff6cc25e30"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_hardening.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "cc6be7fb4242b3aadd5f625bc92e5495760540b7b52d743cd390411370ab6708"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_hook_entry.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "eee74f512ebde09ac00f8c325dc203d5265400c12dcea466ac4b02f8f0989423"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_hook_template.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "1607cf8631f0a20ed8e921a06f1292c8605669cfc063310a168fc562a4a4a866"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_hook_template.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "bd0ba78a616df025b52ab0b6e2df40497e8c71c202db60b3d22e45bda11a3263"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_hookinstall.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "db090160a30b275f77243294b83d558d1730c0ce63672bf061600d5f455d2e80"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_hookinstall.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "e557395dbd27fe84d0ed2558407ed6987c2a3d942e9d80ca92d4e654e9fe8151"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_hookinstall.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "be0d44f81ce3223166cbccff1ec003509417ad2b8c137f93aaec9d2eafe8c99a"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_init_hooks.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "92ca420c563945370e9524983bcef257cac53cb84fab00ccec34d5407b03cb06"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_init_hooks.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "1ff5376f86d5c2a04ea46d7264a77bb2bd3075c6b6b632c2e233014c8bb565aa"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_launchd_agent.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "8838a73304d1b3b76406568432bcb6dd03ebb8557e0d15b08a7ad78d894a2c50"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_review.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "585b68546b1859e568d1ee6b4a4e494bd2f246e1ea5a20cbd99c038182f317a4"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_routing_service.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "8e2b76fd4221e477646fd051444fd6dbc1feda591f71d22513e1c229c901aa72"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_routing_worktree.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "014cf13132779a53e4c1e1321450e84ca9263350dc1a0015774499556e8245b2"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_systemd_unit.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "813dad331b6cabab080f42887b61750f65366cf640b34c41c43846891ecd737b"
+tool = "ruff"
+rule = "S603"
+path = "tests/test_typescript_activation.py"
+reason = "A subprocess call with an ARGUMENT LIST and no shell: `subprocess` without `shell=True` never parses an argument as a command, so a value that reaches argv stays one argument whatever it contains. The executable is the running interpreter, an absolute path resolved by graphite's own trusted-path resolution, or a program named on PATH for a fixture."
+
+[[suppress]]
+id = "b5605a6746127f2793972bbe6d5ade366e216937c71deeb6cafa150ec06b81f3"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_doctor_hooks.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "daa6d7db67d3cc3692300eb55c9a040dc333766bfa103eed6d567727382346bc"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_doctor_hooks.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "5afe563c32d4b9bf5e9ccb98d5ac1b7c478770bea52f1e4ec5f23c243e931ce1"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_hardening.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "573b5e1e9ed237706fb1b6db460c31a728d6f64e9c71237ed8c5fc9ce545e4a4"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_hardening.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "01bb7f94e9c0bfd7b93a61eca2e4271b63e9843f5c6fd0947c1eaddc8e01e17a"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_hardening.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "8b5b5aaa15fd07a1a77992d97370cb0faf9ec35ca40daea00f28d8189c7e8d29"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_hardening.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "b82bf6449a29ff77959a9cfd4f7ce27b7c62240b27d6bd02cafa8df4935d43ee"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_hook_template.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "1dc9ad30138b9f6951842f18fb6f904d4256a861ec791bc7febcdd30db63cdf3"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_hookinstall.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "f6be9b27d40b943bc0cda656b40212a913318355e905343f0fa6764665046b1b"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_hookinstall.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "9bad57b0c2f370ec17ae0f9a91d1f1aeefb0ef5a211c76ce844cc6faf784f202"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_hookinstall.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "ec6d1261ae3cb5d3272dc345b9db88dd2f7bdd722531acbf05690336a181d3ed"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_init_hooks.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "67e65b763f8d4e6f3103459d705d011f7282324ab11ee5964be5c3922ddffe90"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_init_hooks.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "2e8abe31c800c0eff4f06a7f8e803404c8523ec1c24bfb4167c587f86203a065"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_review.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "13c7bf0a7743aec28af2a42ad8a9f6543d9d6293cc3be6af066107fc9a0b3039"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_routing_service.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "cdbb14c8ed40b8f5a06d1bcaa84a52725f79facc890517e46ef27160998b2074"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_routing_worktree.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
+
+[[suppress]]
+id = "8aae91a625e8749fbe0dc68bcd2365a05c85c9cb60974b5b1feb840192d8194b"
+tool = "ruff"
+rule = "S607"
+path = "tests/test_routing_worktree.py"
+reason = "`git` is looked up BY NAME on PATH, as this suite's other git fixtures do -- a convenience of the test environment. The argv is a list and no shell is involved, so the name carries nothing into the command."
