@@ -630,3 +630,54 @@ def test_main_refuses_to_certify_a_mutation_imported_from_outside_the_tree(
     (record,) = _log_lines(log_path)
     assert record["rc"] == 70
     assert record["import_root"] == str(Path("F:/Projects/graphite/src/graphite/foo.py"))
+
+
+# --- the import probe's budget is a policy, and it is pinned ------------------
+#
+# MEASURED 2026-10-28: the mutation gate, working for the first time, found
+# this survivor -- `mutant survived: 120 -> 121 in _imported_module`. The old
+# bare `120` was in the `subprocess.run` call and NOTHING asserted it, so a
+# change to it was invisible to the whole suite. A budget nobody checks is a
+# budget nobody has decided.
+
+
+def test_import_timeout_is_the_pinned_default_without_an_operator_value(
+    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(launcher._IMPORT_TIMEOUT_ENV, raising=False)
+
+    assert launcher._import_timeout_seconds() == 120
+
+
+def test_import_timeout_follows_the_operator_value(
+    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(launcher._IMPORT_TIMEOUT_ENV, "45")
+
+    assert launcher._import_timeout_seconds() == 45
+
+
+@pytest.mark.parametrize("nonsense", ["", "  ", "abc", "0", "-5", "1.5", "45s"])
+def test_import_timeout_falls_back_to_the_default_on_a_nonsense_value(
+    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch, nonsense: str
+) -> None:
+    monkeypatch.setenv(launcher._IMPORT_TIMEOUT_ENV, nonsense)
+
+    assert launcher._import_timeout_seconds() == 120
+
+
+def test_imported_module_gives_the_probe_the_configured_budget(
+    launcher: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    def record(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="x\n", stderr="")
+
+    monkeypatch.setattr(launcher.subprocess, "run", record)
+    monkeypatch.setenv(launcher._IMPORT_TIMEOUT_ENV, "45")
+
+    launcher._imported_module(Path("python"), dict(os.environ), "thing", tmp_path)
+
+    assert seen and seen[0]["timeout"] == 45
