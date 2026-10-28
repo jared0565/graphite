@@ -195,6 +195,27 @@ def test_check_output_matches_published_schema(tmp_path, capsys) -> None:
     assert matches_schema(payload, _load("check.v1.schema.json")) is True
 
 
+def test_check_output_below_a_repository_root_matches_published_schema(tmp_path, capsys) -> None:
+    """`check --json` below a repository's root is a versioned output too.
+
+    Below a root there is no graph to be fresh or stale, so the command
+    answers with a status of its own -- and that answer is a JSON payload a
+    consumer parses, so it carries the same `schema_version` as every other
+    `check --json` shape. The published schema is v1 and says so with a
+    `const`, so an answer claiming another version is read against a
+    contract that does not exist.
+    """
+    (tmp_path / ".git").mkdir()
+    below = tmp_path / "sub"
+    below.mkdir()
+
+    assert main(["check", str(below), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == "below_repository_root"
+    assert payload["schema_version"] == 1
+    assert matches_schema(payload, _load("check.v1.schema.json")) is True
+
+
 def test_validate_output_matches_published_schema(tmp_path, capsys) -> None:
     """`validate --json` is a versioned output, and the promise is kept."""
     bundle = {
