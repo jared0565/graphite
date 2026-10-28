@@ -15,6 +15,100 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.7.1] — 2026-10-28
+
+A patch release: three fixes, and no change to any stable surface. No command,
+option, exit code, entry point or JSON field is added, removed or renamed, so
+this is a patch by the rule in `docs/compatibility.md` -- "fixes are patches".
+
+**A launch failure keeps its cause.** `probe_process.py` raised
+`ProbeProcessError("launch_failed") from None`, so the exception under it was
+discarded and the CI log said only `probe process failed: launch_failed` --
+nothing said why the interpreter failed to start. The cause is now kept, as
+the `__cause__` and not in the message, so the text a report or a log line may
+carry still holds no path and no process data.
+
+**A child that exits first no longer fails the launch.** The cause the first
+fix made visible turned out to be a race, and it is now fixed rather than
+merely explained. On macOS the exit observer is a kqueue registration, and the
+kernel refuses it for a process that is no longer there. The registration is
+made right after the fork, so a child that exits before it reaches the kernel
+lost the race -- and the launch was then reported as a transport failure, for a
+child that had run and succeeded.
+
+The child is a zombie at that point, so its status is still readable, and it is
+read where it was always read: at the reap, after the containment. That order
+is what keeps the process group held -- the zombie keeps the group non-empty,
+so the group's id cannot be recycled under the signals that follow -- and the
+status stays unread until then rather than carrying a placeholder that would
+be a false status.
+
+A test beside it was repaired too. The sibling that claims "fails closed
+before spawn" was failing in the environment validation and never reached its
+own spawn check, and its "must not spawn" was an assertion that the launch's
+own `except Exception` would have swallowed into the same verdict. It now
+reaches the check and asserts it.
+
+**A directory's moving times are not the trusted route's identity.** The POSIX
+trusted-command route captured every directory on the path from the filesystem
+root down to the executable, and refused a component whose stat moved between
+the capture's two `lstat` calls -- comparing a directory's size, mtime and
+ctime. None of those is a directory's identity: the size is its entry count,
+and the times move whenever a child is created or removed.
+
+pytest's xdist workers all create their `popen-gwN` directory inside the
+SHARED `pytest-N` parent, so one worker's `mkdir` landed inside another
+worker's route capture, and the route was refused -- a route that never went
+near the executable. The refusal was silent where it matters: the manager
+resolution returned `None` (`manager_unavailable`) and the revalidation failed
+(`command_changed`). Two CI cells, two shapes, one defect, and both were a
+security control failing CLOSED on a harmless event.
+
+What the route's trust rests on is the hop's inode (is it still the same
+object), its mode (who may write it) and its owner (who owns it), and all
+three are still compared: a swap changes the inode, a `chmod` the mode, a
+`chown` the owner. The code already said this about a directory's link count,
+which is its number of subdirectories; the fix extends the same reasoning to
+the size and the times. A file keeps every field -- its content is hashed and
+compared separately, and its times are its identity.
+
+Two further changes in this release are TEST-ONLY and change no product
+behaviour: the published `check` schema is now checked against every shape it
+answers -- which is what kills the recorded mutation survivor in `cli.py`,
+measured by mutating that one line and watching the suite fail at the new
+assertion; and a fourth wall-clock race in the doctor tests -- a teardown
+waited for by a one-second poll rather than by the teardown's own signal -- is
+fixed the way its three siblings already were.
+
+The graph changes by what these fixes add. Measured on this repository: the
+v1.7.0 tree built by the installed 1.7.0 engine, and this tree built by this
+engine, each into fresh output, cache and state directories:
+
+- 9,322 nodes become 9,352 and 25,655 edges become 25,714.
+- every node id survives: 9,322 of 9,322 are in both, 30 are new and 0 is removed.
+- 6,768 definition ids become 6,793: 6,479 keep their id and their definition, 289 keep their id but move, 0 is removed and 25 are new.
+- `calls` goes from 16,457 to 16,490, `contains` goes from 6,766 to 6,791, `imports` goes from 2,480 to 2,484, `inherits` stays at 122.
+- 25,825 relation triples become 25,887, with 3 only in the old graph and 65 only in the new.
+- the cycle count goes from 18 to 18, and the communities from 178 to 180.
+- every one of those moves is in the 6 files this release touches (`src/graphite/dependency_install.py` 43, `src/graphite/probe_process.py` 17, `tests/test_dependency_install.py` 16, `tests/test_doctor.py` 201, `tests/test_probe_process.py` 6, `tests/test_published_schemas.py` 6).
+- the control holds: the same tree built by both engines gives the same 9,352 nodes, the same 25,714 edges and the same 25,887 relation triples, with no id moved and none removed, and identical cycles, communities and `resolution_health` -- so the difference above is attributable to this change and not to the engine behind it.
+
+`metadata.engine.fingerprint` moves, as it does whenever the engine's own
+files change -- and they do: the identity hashes every `.py` and `.mjs` file
+in the package, so a change to the probe transport or to the trusted-command
+route moves it whether or not the extraction changed.
+
+The two builds above used different `tree-sitter` versions (0.25.2 for the
+installed 1.7.0 and 0.26.0 for the dev environment), so the difference was
+controlled for rather than assumed away. The grammar that actually parses
+Python is the same in both -- `tree-sitter-python` 0.25.0 -- and the control
+build settles the rest: the SAME tree built by both engines gives the same
+ids, the same edges and the same triples, node for node, with no id moved and
+none removed, and identical cycles, entry points, god nodes, orphans,
+surprising connections, top files by links, clusters and `resolution_health`.
+The figures above are therefore attributable to this change and not to the
+parsers.
+
 ## [1.7.0] — 2026-10-28
 
 A minor release: the daemon's log now says WHICH way enumerating a repository
