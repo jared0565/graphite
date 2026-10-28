@@ -189,9 +189,11 @@ class _Runs:
     def __init__(self, codes: list[int]) -> None:
         self.codes = list(codes)
         self.calls: list[tuple[list[str], Path]] = []
+        self.envs: list[dict[str, str] | None] = []
 
-    def __call__(self, argv: list[str], cwd: Path) -> int:
+    def __call__(self, argv: list[str], cwd: Path, env: dict[str, str] | None = None) -> int:
         self.calls.append((list(argv), cwd))
+        self.envs.append(env)
         assert self.codes, "the launcher started more stages than the test scripted"
         return self.codes.pop(0)
 
@@ -496,3 +498,135 @@ def test_git_helper_with_no_git_outside_the_tree_reads_as_a_failure(
     monkeypatch.setenv("PATH", str(tree))
 
     assert launcher._git(tree, "status") == ""
+
+
+# --- the tree under test is the tree that is imported ------------------------
+#
+# MEASURED 2026-10-28 on this machine, in aramid's own mutation shape: the
+# consumer applies a mutation to a WORKTREE and runs this launcher from it.
+# The launcher runs the suite through the dev venv, whose editable install
+# names the CANONICAL repository's `src` -- so the worktree's mutation was
+# never the code the tests imported, and the gate certified nothing.
+#
+#   mutation   src/graphite/cli.py:786, `"schema_version": 1,` -> `2`
+#   killer     tests/test_published_schemas.py::
+#              test_check_output_below_a_repository_root_matches_published_schema
+#
+#   in the consumer's shape (worktree, no PYTHONPATH)  the killer PASSED
+#   with the tree under test on PYTHONPATH            the killer FAILED
+#                                                        (`assert 2 == 1`)
+#
+# The same held for a mutation that makes a module unimportable, at the head
+# the consumer itself used (43fdfcf): 589 tests passed in the consumer's shape
+# and collection ERRORED with the tree under test imported.
+#
+# So the import path is pinned here, and PINNED LOUDLY: a launcher that
+# cannot confirm the mutated module is the one that will be imported must
+# refuse to certify rather than report a clean run.
+
+
+def _src_layout(root: Path) -> Path:
+    """A `src/graphite` package under `root`, as this repository has."""
+    package = root / "src" / "graphite"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    return package
+
+
+def test_package_root_is_the_src_directory_of_a_src_layout(
+    tmp_path: Path, launcher: ModuleType
+) -> None:
+    root = tmp_path / "repo"
+    _src_layout(root)
+
+    assert launcher._package_root(root) == root / "src"
+
+
+def test_package_root_is_the_root_itself_when_there_is_no_src_layout(
+    tmp_path: Path, launcher: ModuleType
+) -> None:
+    root = tmp_path / "repo"
+    (root / "graphite").mkdir(parents=True)
+    (root / "graphite" / "__init__.py").write_text("", encoding="utf-8")
+
+    assert launcher._package_root(root) == root
+
+
+def test_test_environment_puts_the_tree_under_test_first_on_the_import_path(
+    tmp_path: Path, launcher: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _src_layout(root)
+    elsewhere = tmp_path / "elsewhere"
+    monkeypatch.setenv("PYTHONPATH", str(elsewhere))
+
+    env = launcher._test_environment(root)
+
+    assert env["PYTHONPATH"].split(os.pathsep) == [str(root / "src"), str(elsewhere)]
+
+
+def test_imported_module_reports_where_the_interpreter_resolves_it(
+    tmp_path: Path, launcher: ModuleType
+) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "thing.py").write_text("", encoding="utf-8")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(package)
+
+    assert launcher._imported_module(sys.executable, env, "thing", tmp_path) == str(
+        package / "thing.py"
+    )
+    # A module that cannot be imported is not a verdict about the tree.
+    assert launcher._imported_module(sys.executable, env, "no_such_module", tmp_path) is None
+
+
+def test_main_gives_the_pytest_stages_the_tree_under_test_on_the_import_path(
+    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch, staged: tuple[Path, Path, Path]
+) -> None:
+    root, python, _log_path = staged
+    _src_layout(root)
+    runs = _Runs([0, 0])
+    monkeypatch.setattr(launcher, "_run", runs)
+    monkeypatch.setattr(launcher, "_dev_python", lambda *roots: python)
+    monkeypatch.setattr(
+        launcher,
+        "_imported_module",
+        lambda *args: str(root / "src" / "graphite" / "foo.py"),
+    )
+
+    assert launcher.main([]) == 0
+
+    assert runs.envs, "the stages ran with no environment at all"
+    for env in runs.envs:
+        assert env is not None
+        assert env["PYTHONPATH"].split(os.pathsep)[0] == str(root / "src")
+
+
+def test_main_refuses_to_certify_a_mutation_imported_from_outside_the_tree(
+    launcher: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    staged: tuple[Path, Path, Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root, python, log_path = staged
+    _src_layout(root)
+    runs = _Runs([])
+    monkeypatch.setattr(launcher, "_run", runs)
+    monkeypatch.setattr(launcher, "_dev_python", lambda *roots: python)
+    # The module resolves -- but somewhere else, which is the case the gate
+    # must NOT certify: the mutation would never be exercised.
+    monkeypatch.setattr(
+        launcher,
+        "_imported_module",
+        lambda *args: str(Path("F:/Projects/graphite/src/graphite/foo.py")),
+    )
+
+    assert launcher.main([]) == 70
+
+    assert runs.calls == [], "a stage ran while the tree under test was not the imported one"
+    err = capsys.readouterr().err
+    assert "outside" in err
+    (record,) = _log_lines(log_path)
+    assert record["rc"] == 70
+    assert record["import_root"] == str(Path("F:/Projects/graphite/src/graphite/foo.py"))

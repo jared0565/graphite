@@ -236,6 +236,35 @@ command = [
 #
 # Head is `python` from PATH on purpose: the launcher imports nothing from
 # graphite, and the interpreter that tests the tree is the venv it resolves.
+#
+# THE TREE UNDER TEST IS NOW PINNED TO THE IMPORT PATH, and the pin is
+# verified, because the gate was certifying nothing until 2026-10-28.
+#
+# aramid's mutation consumer applies its mutations to a WORKTREE and runs
+# `scripts/mutation_tests.py` from it. The launcher ran the suite through the
+# dev venv, whose editable install names the CANONICAL repository's `src` --
+# so the worktree's mutation was never the code the tests imported. MEASURED
+# on this machine, in the consumer's own shape:
+#
+#   mutation  src/graphite/cli.py:786, `"schema_version": 1,` -> `2`
+#   killer    tests/test_published_schemas.py::
+#             test_check_output_below_a_repository_root_matches_published_schema
+#
+#   worktree, no PYTHONPATH (the consumer's shape)  the killer PASSED
+#   worktree, PYTHONPATH = the tree under test       the killer FAILED
+#                                                      (`assert 2 == 1`)
+#
+# and, at the head the consumer itself used (43fdfcf), with a mutation that
+# makes a module unimportable: 589 tests passed in the consumer's shape, and
+# collection ERRORED with the tree under test imported.
+#
+# So a mutant could not be killed by the thing it changed, and a "survivor"
+# said nothing about the code it was said to survive in. The launcher now
+# puts the tree under test FIRST on PYTHONPATH, and confirms that the mutated
+# module resolves under that tree; if it resolves somewhere else, the
+# launcher REFUSES with exit 70 rather than certifying a run that never
+# exercised the mutation. The tree's own gate is unaffected: it runs from the
+# checkout, where the pinned path and the editable install agree.
 [mutation]
 test_command = ["python", "-P", "scripts/mutation_tests.py"]
 baseline_timeout_s = 1500
