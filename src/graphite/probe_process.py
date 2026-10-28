@@ -246,7 +246,7 @@ class _Process(Protocol):
     stdout: Any
     stderr: Any
     returncode: int | None
-    def wait(self, timeout: float) -> int: ...
+    def wait(self, timeout: float) -> int | None: ...
     def kill(self) -> bool | None: ...
 
 
@@ -263,6 +263,9 @@ class _PosixProcess:
         self._reaped = False
         self._kqueue: Any | None = None
         self._kqueue_exit_flags = 0
+        # True once the child is known to have exited while its status is
+        # still unread. See `_observe` and the registration below.
+        self._exit_pending = False
         if not callable(getattr(os, "waitid", None)):
             if sys.platform != "darwin" or not hasattr(select, "kqueue"):
                 raise RuntimeError("non-reaping process observation unavailable")
@@ -275,11 +278,42 @@ class _PosixProcess:
                 flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_ONESHOT,
                 fflags=self._kqueue_exit_flags,
             )
-            self._kqueue.control([event], 0, 0)
+            try:
+                self._kqueue.control([event], 0, 0)
+            except ProcessLookupError:
+                # The child exited before the registration reached the
+                # kernel, and macOS refuses an EVFILT_PROC registration for
+                # a process that is no longer there.
+                #
+                # MEASURED on macos-latest 3.11 (CI run 40696690448, job
+                # 122845242659): the registration answered
+                # `ProcessLookupError: [Errno 3] No such process` for a
+                # child that had already run and exited 0 -- the child's
+                # own wait succeeded afterwards, so it was an unreaped
+                # ZOMBIE, not a process that had never existed. The launch
+                # was then reported as `launch_failed`: a transport
+                # failure for a child that succeeded.
+                #
+                # The child is a zombie, so its status is still readable --
+                # by waitpid, which reaps it -- and the reap is where it is
+                # read, AFTER containment. That order is what keeps the
+                # process group held: the zombie keeps the group
+                # non-empty, so the group's id cannot be recycled under the
+                # signals that follow.
+                self._kqueue.close()
+                self._kqueue = None
+                self._exit_pending = True
 
     def _observe(self) -> int | None:
         if self.returncode is not None:
             return self.returncode
+        if self._exit_pending:
+            # The child exited before the observer could be registered, so
+            # its status is unread -- and `os.waitid`, which would read it
+            # without reaping, does not exist on darwin. The reap reads it,
+            # after containment. Returning None here says "no status",
+            # which is true; `_exit_pending` is what says "exited".
+            return None
         if self._kqueue is not None:
             events = self._kqueue.control(None, 1, 0)
             if not events:
@@ -300,12 +334,18 @@ class _PosixProcess:
     def poll(self) -> int | None:
         return self._observe()
 
-    def wait(self, timeout: float) -> int:
+    def wait(self, timeout: float) -> int | None:
         deadline = time.monotonic() + timeout
         while True:
             result = self._observe()
             if result is not None:
                 return result
+            if self._exit_pending:
+                # The child exited before the observer could be registered.
+                # The caller wants the EXIT, and it happened; the status is
+                # unread and the reap reads it, after containment. This is
+                # not a timeout, which is a different verdict.
+                return None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired([], timeout)
@@ -870,6 +910,12 @@ def _darwin_group_holds_only_the_zombie_leader(process: _Process, error: OSError
     """
     if sys.platform != "darwin" or not isinstance(error, PermissionError):
         return False
+    if getattr(process, "_exit_pending", False):
+        # The child exited before the observer could be registered, so the
+        # leader is a zombie -- which is the case this function reads. The
+        # status is unread at this point, so `returncode` cannot say it;
+        # the flag does.
+        return True
     if process.returncode is None:
         # `returncode` is only set where the run HAPPENED to observe the exit.
         # The success and timeout paths reach `process.wait` and so carry a

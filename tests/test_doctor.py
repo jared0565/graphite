@@ -2796,22 +2796,185 @@ def test_posix_observer_uses_macos_kqueue_when_waitid_is_unavailable(
     assert controls[:2] == [(0, 0), (1, 0)]
 
 
+def _refused_registration_select() -> object:
+    """A `select` stand-in whose EVFILT_PROC registration is refused.
+
+    macOS refuses the registration for a process that has already exited,
+    and answers `ProcessLookupError: [Errno 3] No such process`. That is
+    the shape the macOS CI cell produced (run 40696690448, job
+    122845242659) for a child that had already run and exited 0.
+    """
+
+    class Kqueue:
+        def control(self, changes: object, max_events: int, timeout: int) -> list[object]:
+            if changes is not None:
+                raise ProcessLookupError(3, "No such process")
+            return []
+
+        def close(self) -> None:
+            pass
+
+    return type("Select", (), {
+        "KQ_FILTER_PROC": -5, "KQ_EV_ADD": 1, "KQ_EV_ENABLE": 2,
+        "KQ_EV_ONESHOT": 4, "KQ_NOTE_EXIT": 0x80000000,
+        "KQ_NOTE_EXITSTATUS": 0x04000000,
+        "kqueue": lambda self: Kqueue(),
+        "kevent": lambda self, *args, **kwargs: object(),
+    })()
+
+
+def test_posix_observer_survives_a_registration_refused_for_an_already_exited_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child that exits first must not take the launch down with it.
+
+    The child is an unreaped zombie when the registration is refused, so
+    its status is still readable -- by waitpid, which reaps it. The reap
+    is where the status is read, and it happens AFTER containment, so the
+    zombie still holds the process group while the group is signalled and
+    the group's id cannot be recycled under those signals.
+    """
+    import graphite.probe_process as transport
+
+    monkeypatch.delattr(transport.os, "waitid", raising=False)
+    monkeypatch.setattr(transport.sys, "platform", "darwin")
+    monkeypatch.setattr(transport, "select", _refused_registration_select())
+    leader = type("Leader", (), {"pid": 44, "stdin": None, "stdout": None, "stderr": None, "returncode": None})()
+
+    process = transport._PosixProcess(leader)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(transport.os, "waitpid", lambda *args: (44, 0), raising=False)
+    monkeypatch.setattr(transport.os, "waitstatus_to_exitcode", lambda status: 0, raising=False)
+    monkeypatch.setattr(transport.os, "WNOHANG", 1, raising=False)
+    assert process.reap(time.monotonic() + 1) is True
+    assert process.returncode == 0
+
+
+def test_darwin_eperm_reads_a_refused_registration_as_a_zombie_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leader is a zombie after a refused registration, and darwin says EPERM.
+
+    EPERM on darwin is ambiguous -- "forbidden" and "nothing signalable"
+    share it -- and the reader that disambiguates it is gated on the
+    leader having exited. After a refused registration the leader HAS
+    exited, and the reader must say so; otherwise a group with nothing
+    left in it is reported as a containment failure.
+    """
+    import graphite.probe_process as transport
+
+    monkeypatch.delattr(transport.os, "waitid", raising=False)
+    monkeypatch.setattr(transport.sys, "platform", "darwin")
+    monkeypatch.setattr(transport, "select", _refused_registration_select())
+    leader = type("Leader", (), {"pid": 44, "stdin": None, "stdout": None, "stderr": None, "returncode": None})()
+
+    process = transport._PosixProcess(leader)  # type: ignore[arg-type]
+
+    assert transport._darwin_group_holds_only_the_zombie_leader(
+        process, PermissionError("Operation not permitted")
+    ) is True
+
+
+def test_bounded_process_survives_a_registration_refused_for_an_already_exited_child(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The whole run must survive it, not only the observer.
+
+    This is the shape CI saw: `probe process failed: launch_failed` for a
+    child that had run and exited 0. A transport failure for a child that
+    succeeded is a false verdict, and the run must report the child's real
+    status instead.
+    """
+    import graphite.probe_process as transport
+
+    class Pipe:
+        def read(self, _size: int) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            pass
+
+    class Child:
+        pid = 44
+        stdin = None
+        stdout = Pipe()
+        stderr = Pipe()
+        returncode = None
+
+        def wait(self, timeout: float) -> int:
+            return 0
+
+        def kill(self) -> bool:
+            return True
+
+        def poll(self) -> int | None:
+            return 0
+
+    def fake_killpg(process_group_id: int, signal_number: int) -> None:
+        if signal_number == 0:
+            # The existence probe: the group holds nothing.
+            raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.delattr(transport.os, "waitid", raising=False)
+    monkeypatch.setattr(transport.os, "name", "posix")
+    monkeypatch.setattr(transport.sys, "platform", "darwin")
+    monkeypatch.setattr(transport, "select", _refused_registration_select())
+    monkeypatch.setattr(transport.subprocess, "Popen", lambda *args, **kwargs: Child())
+    monkeypatch.setattr(transport.os, "killpg", fake_killpg, raising=False)
+    monkeypatch.setattr(transport.os, "kill", lambda *args: None, raising=False)
+    monkeypatch.setattr(transport.os, "waitpid", lambda *args: (44, 0), raising=False)
+    monkeypatch.setattr(transport.os, "waitstatus_to_exitcode", lambda status: 0, raising=False)
+    monkeypatch.setattr(transport.os, "WNOHANG", 1, raising=False)
+    monkeypatch.setattr(transport.signal, "SIGKILL", 9, raising=False)
+
+    result = transport.run_bounded_process(
+        ["python", "-c", "pass"],
+        cwd=tmp_path,
+        timeout_seconds=5,
+        # An explicit environment, not the sanitized default: patching
+        # `os.name` to "posix" makes `pathlib.Path` resolve to `PosixPath`,
+        # which cannot be instantiated on Windows -- and the sanitized
+        # default builds one to set PYTHONPATH.
+        environment={"PATH": "/usr/bin"},
+    )
+
+    assert result.returncode == 0
+
+
 def test_posix_launch_fails_closed_before_spawn_without_safe_observer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import graphite.probe_process as transport
+
+    spawned: list[object] = []
+
+    def fake_popen(*args: object, **kwargs: object) -> object:
+        spawned.append(args)
+        raise AssertionError("must not spawn")
 
     monkeypatch.delattr(transport.os, "waitid", raising=False)
     monkeypatch.setattr(transport.os, "name", "posix")
     monkeypatch.setattr(transport.sys, "platform", "freebsd")
-    monkeypatch.setattr(
-        transport.subprocess,
-        "Popen",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not spawn")),
-    )
+    monkeypatch.setattr(transport.subprocess, "Popen", fake_popen)
 
     with pytest.raises(transport.ProbeProcessError) as exc_info:
-        transport.run_bounded_process(["python"], cwd=tmp_path, timeout_seconds=1)
+        transport.run_bounded_process(
+            ["python"],
+            cwd=tmp_path,
+            timeout_seconds=1,
+            # An explicit environment, not the sanitized default: patching
+            # `os.name` to "posix" makes `pathlib.Path` resolve to
+            # `PosixPath`, which cannot be instantiated on Windows, and the
+            # sanitized default builds one to set PYTHONPATH. Without this
+            # the run failed in the environment validation and never reached
+            # the spawn check this test is about.
+            environment={"PATH": "/usr/bin"},
+        )
 
     assert exc_info.value.code == "launch_failed"
+    # The claim is "fails closed BEFORE spawn", so it is checked: an
+    # AssertionError from the fake would have been caught by the launch's
+    # `except Exception` and reported as the same `launch_failed`.
+    assert spawned == []
 
 
 def test_core_deep_probe_runs_real_pipeline_without_touching_selected_root(tmp_path: Path) -> None:
