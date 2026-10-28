@@ -3370,6 +3370,7 @@ def test_core_probe_blocking_cleanup_is_bounded_and_never_ready(tmp_path: Path) 
     from graphite.probe_workspace import ProbeWorkspaceLease
 
     release = threading.Event()
+    finished = threading.Event()
     created: list[Path] = []
     outputs = iter([
         b"",
@@ -3380,7 +3381,17 @@ def test_core_probe_blocking_cleanup_is_bounded_and_never_ready(tmp_path: Path) 
     created.append(lease.parent_path)
     def cleanup() -> None:
         release.wait(2)
-        lease.cleanup()
+        try:
+            lease.cleanup()
+        finally:
+            # The teardown is announced, not timed. The probe gave up on this
+            # thread at its cleanup budget, so the thread outlives the probe
+            # and the test has to wait for it -- and a DURATION is a race: the
+            # removal is a filesystem operation, and on a loaded runner it had
+            # not finished inside the old one-second poll, so the assertion
+            # failed for a reason that has nothing to do with the bound this
+            # test is about.
+            finished.set()
     def run(*args: object, **kwargs: object) -> object:
         return probes.ProbeProcessResult(0, next(outputs), b"", 0.01)
     started = time.monotonic()
@@ -3401,9 +3412,13 @@ def test_core_probe_blocking_cleanup_is_bounded_and_never_ready(tmp_path: Path) 
     assert check.status == "blocked"
     assert check.details == {"error_type": "cleanup", "code": "cleanup_timeout"}
     assert elapsed < _HANG_GUARD_SECONDS
-    deadline = time.monotonic() + 1
-    while created[0].exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
+    # The teardown is waited for by SIGNAL, not by a duration: `finished` is
+    # set when the cleanup thread has removed the workspace. The old
+    # one-second poll was a wall-clock race -- the removal is a filesystem
+    # operation, and on a loaded runner it had not finished, so the assertion
+    # failed for a reason that has nothing to do with the bound this test is
+    # about.
+    assert finished.wait(_HANG_GUARD_SECONDS), "the cleanup thread did not finish"
     assert not created[0].exists()
 
 
