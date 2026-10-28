@@ -2144,14 +2144,35 @@ def test_deep_bounded_runner_terminates_descendant_tree(tmp_path: Path) -> None:
     # A hang guard, and polled: it costs nothing when the parent starts
     # promptly, and it only has to outlast the transport's own budget, because
     # the transport kills the parent when that budget expires.
+    #
+    # The wait is for a PUBLISHED PID, not for a FILE. The parent creates the
+    # pid file and only then writes the number into it, so a reader that stops
+    # at existence can read it while it is still empty -- and did, in the
+    # `security` job of run 40659621598, where `int('')` raised ValueError in
+    # a test whose subject is the tree kill and not the publish. Measured on
+    # this machine, a reader polling every 0.5ms saw the file empty in 136 of
+    # 150 publishes; the window is the gap between the create and the write,
+    # so it widens with load.
     ready_deadline = time.monotonic() + _HANG_GUARD_SECONDS
-    while not pid_file.exists() and time.monotonic() < ready_deadline:
+    published = ""
+    while time.monotonic() < ready_deadline:
+        if pid_file.exists():
+            try:
+                candidate = pid_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                # A transient refusal to read a file the writer still holds.
+                # It must not end the test: the deadline below is the guard.
+                candidate = ""
+            if candidate.isdigit():
+                published = candidate
+                break
         time.sleep(0.01)
-    assert pid_file.exists(), (
-        "parent did not publish descendant PID before its bounded deadline: it could "
-        "not start an interpreter and spawn inside the transport's budget"
+    assert published, (
+        "parent did not publish a readable descendant PID before its bounded "
+        "deadline: it could not start an interpreter and spawn inside the "
+        "transport's budget, or it published the PID unreadably"
     )
-    pid = int(pid_file.read_text(encoding="utf-8"))
+    pid = int(published)
     retained_handle = None
     kernel32 = None
     if os.name == "nt":
@@ -3045,6 +3066,13 @@ def test_core_deep_probe_cleans_temp_after_success_and_failure(tmp_path: Path) -
 
 
 def test_core_deep_probe_uses_one_total_budget_and_maps_cleanup_error(tmp_path: Path) -> None:
+    """One budget for the whole pipeline, and a cleanup failure on top of it.
+
+    The three commands share ONE end-to-end budget, so each is handed what is
+    LEFT of it -- strictly less than the one before. The sibling mapping test
+    gives this coverage up on purpose (its comment: "the single budget and the
+    cleanup override"), so it is kept here.
+    """
     import graphite.doctor_probes as probes
 
     timeouts: list[float] = []
@@ -3053,23 +3081,49 @@ def test_core_deep_probe_uses_one_total_budget_and_maps_cleanup_error(tmp_path: 
         b'{"ok":true,"error_count":0,"errors":[],"node_count":2,"edge_count":1}',
         b'{"node_count":2,"edge_count":1}',
     ])
+    # The clock is INJECTED, and it advances by a fixed step each time a fake
+    # command answers. Two hazards go with it.
+    #
+    # The race. `probe_core_pipeline` spends ONE budget across the whole
+    # pipeline, and the wall-clock work inside that budget -- the workspace
+    # acquisition, two file writes, the three commands -- is the MACHINE's
+    # speed, not the code's. At one second that work outgrew the budget on a
+    # loaded runner, and the probe reported a spent budget for a pipeline that
+    # had answered everything correctly. Measured here at 2x oversubscription
+    # (24 CPU burners on 12 cores): 5 of 8 runs read `blocked` where the CI
+    # cell `test (windows-latest, py3.11)` read `assert 'blocked' == 'ready'`
+    # at this line. With the clock injected, the probe's notion of time is this
+    # test's, so no machine's speed can spend the budget.
+    #
+    # The tick. The old version needed a real `time.sleep(0.05)` to make the
+    # clock advance between two reads, because Windows' `time.monotonic()` is
+    # `GetTickCount64()` at ~15.6ms on 3.11/3.12 and a shorter sleep let two
+    # reads land in the same tick -- the strict `>` then compared a float to
+    # itself (`assert 0.7840000000000487 > 0.7840000000000487`, found by the
+    # portability matrix). The step below is explicit, so the decrease is a
+    # fact about the CODE rather than about the scheduler.
+    now = [0.0]
+    def clock() -> float:
+        return now[0]
     def run(*args: object, timeout_seconds: float, **kwargs: object) -> object:
         timeouts.append(timeout_seconds)
-        # Must exceed the COARSEST monotonic tick on any supported interpreter,
-        # not just this one. The budget is clock-derived, so a sleep shorter than
-        # one tick lets two successive reads land in the same tick and the strict
-        # `>` below compares a float to itself.
-        #
-        # Measured: Windows `time.monotonic()` is `GetTickCount64()` at ~15.6ms
-        # resolution on 3.11/3.12, and `QueryPerformanceCounter()` at 1e-07 from
-        # 3.13. The old 0.01 sleep sat UNDER the 3.11/3.12 tick, so this test
-        # failed there with `assert 0.7840000000000487 > 0.7840000000000487` --
-        # invisible on the 3.14 the gate runs. Found by the portability matrix.
-        time.sleep(0.05)
+        now[0] += 0.05  # the fake command spends this much of the budget
         return probes.ProbeProcessResult(0, next(outputs), b"", 0.01)
-    assert probes.probe_core_pipeline(tmp_path, timeout_seconds=1, _runner=run).status == "ready"
+    # The budget is the file's hang guard, not a second: a fake that answers at
+    # once must not be handed a budget a busy machine can spend. See
+    # `_ANSWERED_AT_ONCE_BUDGET_SECONDS` -- one test already failed that way
+    # in a full run on a loaded machine.
+    check = probes.probe_core_pipeline(
+        tmp_path,
+        timeout_seconds=_ANSWERED_AT_ONCE_BUDGET_SECONDS,
+        _runner=run,
+        _clock=clock,
+    )
+    assert check.status == "ready"
     assert timeouts[0] > timeouts[1] > timeouts[2] > 0
 
+    # The cleanup half runs on the REAL clock and the default budget: its
+    # subject is the override, and 30s leaves the teardown its own room.
     outputs = iter([b"", b'{"ok":true,"error_count":0,"errors":[],"node_count":2,"edge_count":1}', b'{"node_count":2,"edge_count":1}'])
     from graphite.probe_workspace import ProbeWorkspaceLease
     lease = ProbeWorkspaceLease.acquire()
@@ -3082,7 +3136,9 @@ def test_core_deep_probe_uses_one_total_budget_and_maps_cleanup_error(tmp_path: 
         validate=lease.validate,
         cleanup=fail_cleanup,
     )
-    check = probes.probe_core_pipeline(tmp_path, _runner=run, _workspace_factory=lambda: wrapped)
+    def run_cleanup(*args: object, **kwargs: object) -> object:
+        return probes.ProbeProcessResult(0, next(outputs), b"", 0.01)
+    check = probes.probe_core_pipeline(tmp_path, _runner=run_cleanup, _workspace_factory=lambda: wrapped)
     assert check.status == "blocked"
     assert check.details == {"error_type": "cleanup", "code": "cleanup_failed"}
     assert "RAW" not in json.dumps(check.to_dict())
@@ -3356,6 +3412,7 @@ def test_core_probe_cleanup_timeout_uses_single_global_slot_and_recovers(tmp_pat
     from graphite.probe_workspace import ProbeWorkspaceLease
 
     release = threading.Event()
+    finished = threading.Event()
     lease = ProbeWorkspaceLease.acquire()
     acquisitions = 0
     response_index = 0
@@ -3367,7 +3424,16 @@ def test_core_probe_cleanup_timeout_uses_single_global_slot_and_recovers(tmp_pat
 
     def cleanup() -> None:
         release.wait(5)
-        lease.cleanup()
+        try:
+            lease.cleanup()
+        finally:
+            # The teardown is announced, not timed. The probe gave up on this
+            # thread at its cleanup budget, so the thread outlives the probe
+            # and the test has to wait for it -- and a DURATION is a race: on a
+            # loaded runner the thread had not finished removing the
+            # workspace, and the assertion below failed for a reason that has
+            # nothing to do with the slot this test is about.
+            finished.set()
 
     wrapped = SimpleNamespace(
         path=lease.path,
@@ -3418,11 +3484,23 @@ def test_core_probe_cleanup_timeout_uses_single_global_slot_and_recovers(tmp_pat
     finally:
         release.set()
 
-    deadline = time.monotonic() + 2
-    while lease.parent_path.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
+    # The teardown is waited for by SIGNAL, not by a duration: `finished` is
+    # set when the cleanup thread has removed the workspace. The old
+    # 2-second wait was a wall-clock race -- on a loaded runner the thread
+    # had not finished, and the assertion failed for a reason that has
+    # nothing to do with the slot this test is about.
+    assert finished.wait(_HANG_GUARD_SECONDS), "the cleanup thread did not finish"
     assert not lease.parent_path.exists()
-    assert probes.probe_core_pipeline(tmp_path, _runner=run).status == "ready"
+    # The slot is released after that thread returns, so the next probe can
+    # find it busy for a moment. Poll for the slot rather than assume it.
+    status = ""
+    slot_deadline = time.monotonic() + _HANG_GUARD_SECONDS
+    while time.monotonic() < slot_deadline:
+        status = probes.probe_core_pipeline(tmp_path, _runner=run).status
+        if status != "cleanup_busy":
+            break
+        time.sleep(0.01)
+    assert status == "ready"
 
 
 @pytest.mark.parametrize(
