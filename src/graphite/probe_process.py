@@ -448,12 +448,23 @@ def run_bounded_process(
         validated_environment = _validated_environment(environment)
     except ProbeProcessError:
         raise
-    except Exception:
-        raise ProbeProcessError("launch_failed") from None
+    except Exception as exc:
+        # The cause is KEPT, and it is kept as the cause rather than in the
+        # message. `launch_failed` says what happened; the exception under it
+        # says why, and the difference is the whole diagnosis: the macOS cell
+        # failed to start its probes twice with nothing but the code, so the
+        # next occurrence could not be told apart from a missing program.
+        #
+        # The message stays `probe process failed: launch_failed`, so the text
+        # a report, a log line or a caller may carry still holds no path and no
+        # process data -- the house rule this module follows. The cause rides
+        # in the traceback, which is a developer surface: `graphite`'s CLI
+        # prints one only under `GRAPHITE_DEBUG`.
+        raise ProbeProcessError("launch_failed") from exc
     try:
         process = _launch_process(argv, cwd=cwd, input_data=input_data, environment=validated_environment)
-    except Exception:
-        raise ProbeProcessError("launch_failed") from None
+    except Exception as exc:
+        raise ProbeProcessError("launch_failed") from exc
 
     outputs = {"stdout": bytearray(), "stderr": bytearray()}
     overflow: threading.Event | None = None
