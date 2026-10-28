@@ -3045,6 +3045,13 @@ def test_core_deep_probe_cleans_temp_after_success_and_failure(tmp_path: Path) -
 
 
 def test_core_deep_probe_uses_one_total_budget_and_maps_cleanup_error(tmp_path: Path) -> None:
+    """One budget for the whole pipeline, and a cleanup failure on top of it.
+
+    The three commands share ONE end-to-end budget, so each is handed what is
+    LEFT of it -- strictly less than the one before. The sibling mapping test
+    gives this coverage up on purpose (its comment: "the single budget and the
+    cleanup override"), so it is kept here.
+    """
     import graphite.doctor_probes as probes
 
     timeouts: list[float] = []
@@ -3053,23 +3060,49 @@ def test_core_deep_probe_uses_one_total_budget_and_maps_cleanup_error(tmp_path: 
         b'{"ok":true,"error_count":0,"errors":[],"node_count":2,"edge_count":1}',
         b'{"node_count":2,"edge_count":1}',
     ])
+    # The clock is INJECTED, and it advances by a fixed step each time a fake
+    # command answers. Two hazards go with it.
+    #
+    # The race. `probe_core_pipeline` spends ONE budget across the whole
+    # pipeline, and the wall-clock work inside that budget -- the workspace
+    # acquisition, two file writes, the three commands -- is the MACHINE's
+    # speed, not the code's. At one second that work outgrew the budget on a
+    # loaded runner, and the probe reported a spent budget for a pipeline that
+    # had answered everything correctly. Measured here at 2x oversubscription
+    # (24 CPU burners on 12 cores): 5 of 8 runs read `blocked` where the CI
+    # cell `test (windows-latest, py3.11)` read `assert 'blocked' == 'ready'`
+    # at this line. With the clock injected, the probe's notion of time is this
+    # test's, so no machine's speed can spend the budget.
+    #
+    # The tick. The old version needed a real `time.sleep(0.05)` to make the
+    # clock advance between two reads, because Windows' `time.monotonic()` is
+    # `GetTickCount64()` at ~15.6ms on 3.11/3.12 and a shorter sleep let two
+    # reads land in the same tick -- the strict `>` then compared a float to
+    # itself (`assert 0.7840000000000487 > 0.7840000000000487`, found by the
+    # portability matrix). The step below is explicit, so the decrease is a
+    # fact about the CODE rather than about the scheduler.
+    now = [0.0]
+    def clock() -> float:
+        return now[0]
     def run(*args: object, timeout_seconds: float, **kwargs: object) -> object:
         timeouts.append(timeout_seconds)
-        # Must exceed the COARSEST monotonic tick on any supported interpreter,
-        # not just this one. The budget is clock-derived, so a sleep shorter than
-        # one tick lets two successive reads land in the same tick and the strict
-        # `>` below compares a float to itself.
-        #
-        # Measured: Windows `time.monotonic()` is `GetTickCount64()` at ~15.6ms
-        # resolution on 3.11/3.12, and `QueryPerformanceCounter()` at 1e-07 from
-        # 3.13. The old 0.01 sleep sat UNDER the 3.11/3.12 tick, so this test
-        # failed there with `assert 0.7840000000000487 > 0.7840000000000487` --
-        # invisible on the 3.14 the gate runs. Found by the portability matrix.
-        time.sleep(0.05)
+        now[0] += 0.05  # the fake command spends this much of the budget
         return probes.ProbeProcessResult(0, next(outputs), b"", 0.01)
-    assert probes.probe_core_pipeline(tmp_path, timeout_seconds=1, _runner=run).status == "ready"
+    # The budget is the file's hang guard, not a second: a fake that answers at
+    # once must not be handed a budget a busy machine can spend. See
+    # `_ANSWERED_AT_ONCE_BUDGET_SECONDS` -- one test already failed that way
+    # in a full run on a loaded machine.
+    check = probes.probe_core_pipeline(
+        tmp_path,
+        timeout_seconds=_ANSWERED_AT_ONCE_BUDGET_SECONDS,
+        _runner=run,
+        _clock=clock,
+    )
+    assert check.status == "ready"
     assert timeouts[0] > timeouts[1] > timeouts[2] > 0
 
+    # The cleanup half runs on the REAL clock and the default budget: its
+    # subject is the override, and 30s leaves the teardown its own room.
     outputs = iter([b"", b'{"ok":true,"error_count":0,"errors":[],"node_count":2,"edge_count":1}', b'{"node_count":2,"edge_count":1}'])
     from graphite.probe_workspace import ProbeWorkspaceLease
     lease = ProbeWorkspaceLease.acquire()
@@ -3082,7 +3115,9 @@ def test_core_deep_probe_uses_one_total_budget_and_maps_cleanup_error(tmp_path: 
         validate=lease.validate,
         cleanup=fail_cleanup,
     )
-    check = probes.probe_core_pipeline(tmp_path, _runner=run, _workspace_factory=lambda: wrapped)
+    def run_cleanup(*args: object, **kwargs: object) -> object:
+        return probes.ProbeProcessResult(0, next(outputs), b"", 0.01)
+    check = probes.probe_core_pipeline(tmp_path, _runner=run_cleanup, _workspace_factory=lambda: wrapped)
     assert check.status == "blocked"
     assert check.details == {"error_type": "cleanup", "code": "cleanup_failed"}
     assert "RAW" not in json.dumps(check.to_dict())
