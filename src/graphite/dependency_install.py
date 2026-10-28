@@ -312,17 +312,44 @@ def _capture_posix_component(path: Path) -> TrustedPathComponent | None:
         after = lexical.lstat()
     except (OSError, RuntimeError, ValueError):
         return None
-    stable_fields = (
-        "st_dev",
-        "st_ino",
-        "st_mode",
-        "st_size",
-        "st_mtime_ns",
-        "st_ctime_ns",
-        "st_nlink",
-        "st_uid",
+    # The fields that IDENTIFY a component: the device and the inode say
+    # whether this is still the same object, the mode and the owner say who
+    # may replace it. A swap changes the inode, a chmod changes the mode, a
+    # chown changes the owner -- all three are compared, and they are what
+    # the route's trust actually rests on.
+    #
+    # A DIRECTORY has no identity in its size, its times or its link count:
+    # the size is its entry count, the times move whenever a child is created
+    # or removed, and the link count is the number of subdirectories it has.
+    # pytest's xdist workers all create their `popen-gwN` directory inside the
+    # SHARED `pytest-N` parent, so one worker's mkdir lands inside another
+    # worker's route capture -- and a capture that refuses on any of those
+    # three refuses a route that never went near the executable.
+    #
+    # The refusal is silent where it matters: the manager resolution returns
+    # None ("manager_unavailable") or the revalidation fails
+    # ("command_changed"), and a security control that fails closed turns a
+    # harmless concurrent mkdir into a refusal to install.
+    #
+    # A FILE keeps every field: its content is hashed and compared
+    # separately, and its link count is a trust signal (a hard link is a
+    # second name for the same bytes).
+    is_directory = stat.S_ISDIR(before.st_mode)
+    fields = (
+        ("st_dev", "st_ino", "st_mode", "st_uid")
+        if is_directory
+        else (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+            "st_nlink",
+            "st_uid",
+        )
     )
-    if any(getattr(before, field, None) != getattr(after, field, None) for field in stable_fields):
+    if any(getattr(before, field, None) != getattr(after, field, None) for field in fields):
         return None
     return TrustedPathComponent(
         lexical,
