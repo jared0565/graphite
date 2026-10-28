@@ -103,6 +103,30 @@ _ANSWERED_AT_ONCE_BUDGET_SECONDS = _HANG_GUARD_SECONDS
 #: own would have bought that margin straight out of this one.
 _ORPHAN_REVEAL_SECONDS = 4
 
+#: The transport budget for a scenario whose CHILD has to start first.
+#:
+#: Derived the way the sibling case below derives its own: the transport's
+#: EXECUTION deadline -- `budget - min(1.0, 0.4 * budget)` -- must be about
+#: 4x the measured p90 of a cold interpreter start, because the child has to
+#: reach its first byte inside that window.
+#:
+#: The sibling case measured that p90 on an IDLE machine (0.27s) and derived
+#: 2.0s from it. That number is stale: CI now runs the suite in parallel, and
+#: with the suite running the p90 of a cold start on this box is 974ms (626ms
+#: to 974ms across three loaded runs). The old budget therefore put the
+#: execution deadline (1.2s) INSIDE the tail, and the suite failed this file's
+#: descendant-tree test twice under load -- once because the parent could not
+#: publish in time, so the descendant never existed, and once because the
+#: descendant outlived the runner by more than a second.
+#:
+#: 4x 974ms is 3.9s of execution deadline, and the budget that gives back
+#: 3.9s of execution time is 4.9s. Re-derive it if `cleanup_reserve` changes
+#: -- do not tune it by re-running until green.
+#:
+#: The budget is waited out on purpose by the tests that expect a timeout, so
+#: this is their cost: about 4s each.
+_COLD_START_BUDGET_SECONDS = 5.0
+
 
 def _assert_no_orphan(sentinel: Path) -> None:
     """Give a surviving orphan every chance to appear, then require it did not.
@@ -1022,10 +1046,13 @@ def test_deep_bounded_runner_times_out_without_leaking_process_output(tmp_path: 
         # first byte. The precondition cost the whole budget: the test was a coin
         # flip and had been passing on luck, before any gate load.
         #
-        # 2.0 is derived, not reflexively raised: ~1.2s of execution deadline
-        # against a measured p90 of 0.27s is roughly 4x headroom. Re-derive it if
-        # `cleanup_reserve` changes -- do not tune it by re-running until green.
-        ("sys.stdout.write('RAW partial');sys.stdout.flush();", True, 2.0),
+        # The budget is derived, not reflexively raised: see
+        # `_COLD_START_BUDGET_SECONDS`. The 0.27s p90 it was first derived from
+        # was measured on an idle machine; with the suite running in parallel
+        # the p90 of a cold start is 974ms, and a 2s budget put the execution
+        # deadline (1.2s) inside that tail. Re-derive it if `cleanup_reserve`
+        # changes -- do not tune it by re-running until green.
+        ("sys.stdout.write('RAW partial');sys.stdout.flush();", True, _COLD_START_BUDGET_SECONDS),
         # Expecting NO output needs no headroom -- there is no startup to win --
         # so this case stays fast. Load can only make silence more certain.
         ("", False, 0.3),
@@ -1099,18 +1126,31 @@ def test_deep_bounded_runner_handles_nonzero_and_held_descendant_pipe(tmp_path: 
         run_bounded_process([sys.executable, "-c", "raise SystemExit(7)"], cwd=tmp_path, timeout_seconds=5)
     assert exc_info.value.code == "nonzero"
 
-    # Deliberately NOT _UNREACHABLE_CHILD_SECONDS. This one is a *detached*
-    # grandchild whose whole job is to still be holding the pipe when its parent
-    # exits, and the transport is not guaranteed to reap it -- that is the very
-    # condition under test. Raising its lifetime would leave a survivor loading
-    # the machine for a minute, penalising every test that runs after it in this
-    # file. A child's lifetime is only safe to raise when the child is reliably
-    # killed; here 5s already outlives the ~0.1s return by 50x.
-    grandchild = "import time;time.sleep(5)"
+    # The grandchild's lifetime has to outlive the transport's budget, or the
+    # "held pipe" condition under test is gone before the transport looks: the
+    # pipe is only held if the grandchild is still alive when its parent exits.
+    # The 5s this used to be was measured against a ~0.1s return on a quiet
+    # machine; the return is a COLD interpreter start under load, measured at a
+    # 302 ms median and a 1145 ms max, with two runs in twenty never
+    # completing it at all -- and the budget it has to outlive has moved to
+    # `_COLD_START_BUDGET_SECONDS`. A child's lifetime is only safe to raise
+    # when the child is reliably killed, and it is: the transport's job kill
+    # terminates it on every path, so a survivor needs the cleanup itself to be
+    # broken, which is the failure this test exists to catch.
+    grandchild = f"import time;time.sleep({_UNREACHABLE_CHILD_SECONDS})"
     held_pipe = f"import subprocess,sys; subprocess.Popen([sys.executable,'-c',{grandchild!r}])"
     threads_before = {thread.ident for thread in threading.enumerate()}
     started = time.monotonic()
-    result = run_bounded_process([sys.executable, "-c", held_pipe], cwd=tmp_path, timeout_seconds=2)
+    # The budget is a hang guard, not a performance bound: it has to outlast a
+    # cold interpreter start on a loaded machine, or the transport times out
+    # instead of seeing the leader exit. See `_COLD_START_BUDGET_SECONDS` for
+    # the derivation. It costs nothing here -- the run returns as soon as the
+    # leader does.
+    result = run_bounded_process(
+        [sys.executable, "-c", held_pipe],
+        cwd=tmp_path,
+        timeout_seconds=_COLD_START_BUDGET_SECONDS,
+    )
     assert result.returncode == 0
     assert time.monotonic() - started < _HANG_GUARD_SECONDS
     assert [thread for thread in threading.enumerate() if thread.ident not in threads_before] == []
@@ -2072,15 +2112,28 @@ def test_deep_bounded_runner_terminates_descendant_tree(tmp_path: Path) -> None:
     from graphite.probe_process import ProbeProcessError, run_bounded_process
 
     pid_file = tmp_path / "descendant.pid"
-    child = "import time;time.sleep(10)"
+    # The child's lifetime, not a duration under test: it has to outlive the
+    # transport's budget by a margin, so the run is a TIMEOUT and the
+    # descendant is still alive when the tree is killed.
+    # `_UNREACHABLE_CHILD_SECONDS` is this file's constant for exactly that,
+    # and it is what makes an unterminated tree unmistakable below -- it would
+    # still be sleeping.
+    child = f"import time;time.sleep({_UNREACHABLE_CHILD_SECONDS})"
     parent = (
         "import pathlib,subprocess,sys,time;"
         f"p=subprocess.Popen([sys.executable,'-c',{child!r}]);"
         f"pathlib.Path({str(pid_file)!r}).write_text(str(p.pid));"
-        "time.sleep(10)"
+        f"time.sleep({_UNREACHABLE_CHILD_SECONDS})"
     )
     errors: queue.Queue[ProbeProcessError] = queue.Queue()
-    transport_timeout = 2.0
+    # The transport's budget is a HANG GUARD, not a performance bound. It has
+    # to outlast a COLD interpreter start on a loaded machine: the parent
+    # cannot publish the descendant's PID until it has started an interpreter
+    # and spawned a child, and if the transport's deadline lands first the tree
+    # is killed before the descendant ever exists -- the test then fails
+    # without ever exercising the property it exists to prove. See
+    # `_COLD_START_BUDGET_SECONDS` for the derivation.
+    transport_timeout = _COLD_START_BUDGET_SECONDS
     def run() -> None:
         try:
             run_bounded_process([sys.executable, "-c", parent], cwd=tmp_path, timeout_seconds=transport_timeout)
@@ -2088,10 +2141,16 @@ def test_deep_bounded_runner_terminates_descendant_tree(tmp_path: Path) -> None:
             errors.put(error)
     runner = threading.Thread(target=run)
     runner.start()
-    ready_deadline = time.monotonic() + transport_timeout * 0.75
+    # A hang guard, and polled: it costs nothing when the parent starts
+    # promptly, and it only has to outlast the transport's own budget, because
+    # the transport kills the parent when that budget expires.
+    ready_deadline = time.monotonic() + _HANG_GUARD_SECONDS
     while not pid_file.exists() and time.monotonic() < ready_deadline:
         time.sleep(0.01)
-    assert pid_file.exists(), "parent did not publish descendant PID before its bounded deadline"
+    assert pid_file.exists(), (
+        "parent did not publish descendant PID before its bounded deadline: it could "
+        "not start an interpreter and spawn inside the transport's budget"
+    )
     pid = int(pid_file.read_text(encoding="utf-8"))
     retained_handle = None
     kernel32 = None
@@ -2109,18 +2168,45 @@ def test_deep_bounded_runner_terminates_descendant_tree(tmp_path: Path) -> None:
         assert retained_handle
     runner.join(transport_timeout + 0.5)
     assert not runner.is_alive()
-    assert errors.get_nowait().code == "timeout"
+    error = errors.get_nowait()
+    assert error.code == "timeout"
+    # The transport's own verdict on containment, not a wall-clock bound: the
+    # tree kill either completed or it did not. This is the field the old
+    # assertion threw away, and it is what separates "the tree was terminated
+    # a moment after the runner returned" from "the tree kill failed".
+    assert not error.cleanup_failed, (
+        "the transport reported that containment did not complete, so the tree "
+        "may still be running"
+    )
     if retained_handle is not None and kernel32 is not None:
         try:
-            assert kernel32.WaitForSingleObject(retained_handle, 1000) == 0
+            signalled = kernel32.WaitForSingleObject(
+                retained_handle, int(_HANG_GUARD_SECONDS * 1000)
+            )
         finally:
             kernel32.CloseHandle(retained_handle)
+        # A hang guard, not a performance bound (graphite#50). The descendant
+        # sleeps `_UNREACHABLE_CHILD_SECONDS`, so an unterminated tree is
+        # visible for that whole span: a quarter of it tells the two apart,
+        # and it is far wider than the teardown of a killed process can
+        # plausibly take on a loaded machine. The old one-second wait was a
+        # quiet-machine number, and the suite failed it under load while the
+        # tree WAS terminated.
+        assert signalled == 0, (
+            f"the descendant {pid} was still alive {_HANG_GUARD_SECONDS}s after the "
+            f"runner returned; it sleeps {_UNREACHABLE_CHILD_SECONDS}s, so this is a "
+            f"tree that was never terminated, not a slow kill"
+        )
         return
     try:
-        deadline = time.monotonic() + 1
+        deadline = time.monotonic() + _HANG_GUARD_SECONDS
         while not _process_identity_exited(pid) and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert _process_identity_exited(pid)
+        assert _process_identity_exited(pid), (
+            f"the descendant {pid} was still alive {_HANG_GUARD_SECONDS}s after the "
+            f"runner returned; it sleeps {_UNREACHABLE_CHILD_SECONDS}s, so this is a "
+            f"tree that was never terminated, not a slow kill"
+        )
     finally:
         if os.name != "nt" and _pid_exists(pid):
             try:
@@ -2134,7 +2220,10 @@ def test_deep_bounded_runner_kills_descendant_after_leader_exits(tmp_path: Path,
     from graphite.probe_process import run_bounded_process
 
     pid_file = tmp_path / "leader-exited-descendant.pid"
-    child = "import time;time.sleep(10)"
+    # The child's lifetime has to outlive the transport's budget, so the
+    # descendant is still alive when the leader exits and the tree is killed.
+    # `_UNREACHABLE_CHILD_SECONDS` is this file's constant for that.
+    child = f"import time;time.sleep({_UNREACHABLE_CHILD_SECONDS})"
     stdio = ",stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL" if detached_stdio else ""
     parent = (
         "import pathlib,subprocess,sys;"
@@ -2142,15 +2231,31 @@ def test_deep_bounded_runner_kills_descendant_after_leader_exits(tmp_path: Path,
         f"pathlib.Path({str(pid_file)!r}).write_text(str(p.pid))"
     )
 
-    result = run_bounded_process([sys.executable, "-c", parent], cwd=tmp_path, timeout_seconds=2)
+    # The budget is a hang guard, not a performance bound: it has to outlast a
+    # COLD interpreter start on a loaded machine, or the transport times out
+    # instead of seeing the leader exit. See `_COLD_START_BUDGET_SECONDS` for
+    # the derivation. It costs nothing here -- the run returns as soon as the
+    # leader does.
+    result = run_bounded_process(
+        [sys.executable, "-c", parent],
+        cwd=tmp_path,
+        timeout_seconds=_COLD_START_BUDGET_SECONDS,
+    )
 
     assert result.returncode == 0
     pid = int(pid_file.read_text(encoding="utf-8"))
     try:
-        deadline = time.monotonic() + 1
+        # A hang guard, not a performance bound (graphite#50): the descendant
+        # sleeps `_UNREACHABLE_CHILD_SECONDS`, so an unterminated tree is
+        # visible for that whole span.
+        deadline = time.monotonic() + _HANG_GUARD_SECONDS
         while not _process_identity_exited(pid) and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert _process_identity_exited(pid)
+        assert _process_identity_exited(pid), (
+            f"the descendant {pid} was still alive {_HANG_GUARD_SECONDS}s after the "
+            f"runner returned; it sleeps {_UNREACHABLE_CHILD_SECONDS}s, so this is a "
+            f"tree that was never terminated, not a slow kill"
+        )
     finally:
         if os.name != "nt" and _pid_exists(pid):
             try:
