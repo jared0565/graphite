@@ -149,6 +149,53 @@ def test_run_reports_a_program_that_cannot_start_as_launch_failed(tmp_path: Path
     assert info.value.code == "launch_failed"
 
 
+def test_run_keeps_the_launch_failure_as_the_cause(tmp_path: Path) -> None:
+    """The code says WHAT happened; the cause says WHY.
+
+    `launch_failed` is the whole of what the transport reported when the
+    macOS cell failed to start its probe processes -- twice, in the 1.7.0
+    release run and in PR #122's run -- and nothing named the error
+    underneath it, so the next occurrence could not be told apart from a
+    program that simply is not there. The cause is kept for that reason.
+
+    It is kept as the CAUSE and not in the message, which is the house rule
+    this module follows: `str(exc)` stays `probe process failed:
+    launch_failed`, so the text a report, a log line or a caller may carry
+    still holds no path and no process data. The traceback is where the
+    OSError shows, and a traceback is a developer surface -- `graphite`'s own
+    CLI prints one only under `GRAPHITE_DEBUG`.
+    """
+    with pytest.raises(ProbeProcessError) as info:
+        run_bounded_process([str(tmp_path / "no-such-program")], cwd=tmp_path, timeout_seconds=5)
+    assert info.value.code == "launch_failed"
+    assert isinstance(info.value.__cause__, OSError)
+    assert str(info.value) == "probe process failed: launch_failed"
+
+
+def test_run_keeps_the_environment_failure_as_the_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same code, the same promise: a `launch_failed` carries its cause.
+
+    Two sites raise it -- the environment gate and the launch itself -- and a
+    caller reading only the code could not tell which one failed. The
+    environment gate is pure, so a failure there is graphite's own bug rather
+    than the machine's, and the one place it can be diagnosed is the
+    traceback.
+    """
+    import graphite.probe_process as transport
+
+    def boom(environment: object) -> dict[str, str]:
+        raise ValueError("environment could not be validated")
+
+    monkeypatch.setattr(transport, "_validated_environment", boom)
+    with pytest.raises(ProbeProcessError) as info:
+        run_bounded_process([_PYTHON, "-c", "pass"], cwd=tmp_path, timeout_seconds=5)
+    assert info.value.code == "launch_failed"
+    assert isinstance(info.value.__cause__, ValueError)
+    assert str(info.value) == "probe process failed: launch_failed"
+
+
 # --- a real child -------------------------------------------------------------------------------
 
 
