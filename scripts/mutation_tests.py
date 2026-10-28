@@ -27,10 +27,17 @@ Why a launcher rather than a bare pytest command:
   excluded. pytest re-sorts a file named twice into directory order, which is
   why this is two invocations rather than one.
 
-The tree is tested through the dev venv's editable install, exactly as the
-pre-push gate does; the machine interpreter this script starts under imports
-nothing from graphite. Extra arguments are passed to both pytest stages;
-`--dry-run` prints the stages without running them.
+The tree is tested through the dev venv, with the tree's own `src` FIRST on
+the import path, so the code the suite imports is the code that was mutated.
+That pin is not a detail: MEASURED 2026-10-28, a run from a worktree imported
+the CANONICAL repository's `src` (the dev venv's editable install names it),
+so the worktree's mutation was never exercised and the gate certified
+nothing. The launcher now confirms that the mutated module resolves under the
+tree it was given, and refuses with exit 70 if it does not -- a clean run
+over code it never mutated is worse than no run at all. The machine
+interpreter this script starts under imports nothing from graphite. Extra
+arguments are passed to both pytest stages; `--dry-run` prints the stages
+without running them.
 """
 
 from __future__ import annotations
@@ -154,13 +161,93 @@ def _targeted_tests(root: Path, changed: list[str]) -> list[str]:
     return seen
 
 
-def _run(argv: list[str], cwd: Path) -> int:
+def _run(argv: list[str], cwd: Path, env: dict[str, str] | None = None) -> int:
     try:
         # argv[0] is the dev venv interpreter this script resolved; no shell.
-        return subprocess.run(argv, cwd=cwd).returncode  # noqa: S603
+        return subprocess.run(argv, cwd=cwd, env=env).returncode  # noqa: S603
     except OSError as exc:
         print(f"mutation_tests: cannot start {argv[0]}: {exc}", file=sys.stderr)
         return 127
+
+
+def _package_root(root: Path) -> Path:
+    """Where the tree's package is imported from: `src/` in a src layout.
+
+    The suite runs from the tree under test, so the tree's own `src` has to be
+    on the import path -- see `_test_environment`.
+    """
+    candidate = root / "src"
+    if (candidate / "graphite" / "__init__.py").is_file():
+        return candidate
+    return root
+
+
+def _test_environment(root: Path) -> dict[str, str]:
+    """The environment the suite runs in, with the tree under test FIRST.
+
+    MEASURED 2026-10-28: the dev venv's editable install names the CANONICAL
+    repository's `src`, so a run from a worktree imported the canonical tree
+    and the worktree's mutation was never exercised. aramid's mutation
+    consumer applies its mutations to a worktree, so this is the shape every
+    mutation ran in.
+
+    The tree under test goes first, and any inherited PYTHONPATH follows it,
+    so an ambient one can never outrank the tree being certified.
+    """
+    env = dict(os.environ)
+    package_root = _package_root(root)
+    inherited = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(package_root) + (os.pathsep + inherited if inherited else "")
+    return env
+
+
+def _imported_module(python: Path, env: dict[str, str], module: str, cwd: Path) -> str | None:
+    """Where `python` would import `module` from, or None if it cannot.
+
+    None is not a verdict about the tree: a mutation can break the module it
+    mutates, and the suite will see that as an error. It is only the case
+    where the module resolves SOMEWHERE ELSE that the gate must refuse.
+    """
+    try:
+        result = subprocess.run(  # noqa: S603
+            [str(python), "-c", f"import {module}; print({module}.__file__)"],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _mutated_modules(root: Path, changed: list[str]) -> list[str]:
+    """The package modules the changed files are, e.g. `src/graphite/cli.py`
+    -> `graphite.cli`. A changed file outside the package (`scripts/`) has no
+    module: its own test loads it by path."""
+    package_root = _package_root(root)
+    modules: list[str] = []
+    for name in changed:
+        path = (root / name).resolve()
+        try:
+            relative = path.relative_to(package_root.resolve())
+        except ValueError:
+            continue
+        parts = list(relative.parts)
+        if not parts:
+            continue
+        parts[-1] = Path(parts[-1]).stem
+        if parts[-1] == "__init__":
+            parts.pop()
+        if parts:
+            modules.append(".".join(parts))
+    return modules
+
 
 
 def main(argv: list[str]) -> int:
@@ -172,6 +259,7 @@ def main(argv: list[str]) -> int:
     python = _dev_python(canonical, root)
     changed = _changed_sources(root)
     targeted = _targeted_tests(root, changed)
+    env = _test_environment(root)
     record: dict[str, object] = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "cwd": os.getcwd(),
@@ -183,6 +271,7 @@ def main(argv: list[str]) -> int:
         "changed": changed,
         "targeted": targeted,
         "extra": extra,
+        "package_root": str(_package_root(root)),
     }
     log_path = (python.parents[2] if python else root.parent / ".venvs") / "graphite-mutation-tests.log"
 
@@ -206,6 +295,26 @@ def main(argv: list[str]) -> int:
         )
         return finish(78)  # EX_CONFIG
 
+    # The gate's verdict is only about the code it MUTATED, so the code the
+    # suite imports has to be that code. MEASURED 2026-10-28: it was not --
+    # the dev venv's editable install names the canonical repository's `src`,
+    # so a mutation applied in a worktree was never exercised and the gate
+    # certified nothing. A launcher that cannot confirm the import must
+    # refuse, not report a clean run over code it never mutated.
+    for module in _mutated_modules(root, changed):
+        resolved = _imported_module(python, env, module, root)
+        if resolved is None:
+            continue  # the module does not import at all; the suite will say so
+        record["import_root"] = resolved
+        if not Path(resolved).resolve().is_relative_to(root.resolve()):
+            print(
+                f"mutation_tests: refusing to certify {module}: it resolves to {resolved}, "
+                f"outside the tree under test ({root}). The mutation would never be "
+                "exercised, so a clean run would say nothing about it.",
+                file=sys.stderr,
+            )
+            return finish(70)  # EX_SOFTWARE: the tree under test is not the imported one
+
     base = [str(python), "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider", *extra]
     stages: list[tuple[str, list[str]]] = []
     if targeted:
@@ -218,7 +327,7 @@ def main(argv: list[str]) -> int:
         return finish(0)
 
     for name, cmd in stages:
-        rc = _run(cmd, root)
+        rc = _run(cmd, root, env)
         record[f"rc_{name}"] = rc
         if name == "targeted" and rc == _PYTEST_NO_TESTS:
             continue  # the named files held no tests; the rest still decides
