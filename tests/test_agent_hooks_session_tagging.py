@@ -232,3 +232,33 @@ def test_a_stop_with_no_ledger_file_leaves_the_cursor_at_offset_zero(repo: Path,
     assert _stop(repo, "A") is None
 
     assert read_cursor(repo)["sessions"]["A"]["offset"] == 0
+
+
+def test_a_cursor_state_without_an_offset_reads_the_ledger_from_its_start(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A state that lost its offset is a damaged cursor, and a damaged
+    cursor reads the ledger from the beginning.
+
+    The ledger is newline-delimited JSON, so the offset decides where a
+    line starts. An offset of 1 would cut the FIRST entry in half: it no
+    longer parses, and the turn's own use would go uncounted without a
+    word. The default is 0 because that is what this function already does
+    with a damaged cursor elsewhere -- an offset past the end of the ledger
+    resyncs to 0.
+    """
+    _start(repo, "A")
+    _use(repo, monkeypatch, "A")
+
+    # Damage the cursor: the session's state keeps no offset, and no inode
+    # either, so the rotation check cannot fire and the offset alone decides.
+    cursor = read_cursor(repo)
+    cursor["sessions"]["A"].pop("offset", None)
+    cursor["sessions"]["A"].pop("ino", None)
+    usage_ledger.write_cursor(repo, cursor)
+
+    summary = _stop(repo, "A")
+
+    unit = _one_entry_tokens(repo)
+    assert summary is not None
+    assert _session_tokens(repo, "A") == unit

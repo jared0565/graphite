@@ -15,6 +15,71 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-10-28
+
+A minor release: the daemon's log now says WHICH way enumerating a repository
+failed, and `check --json`, `validate --json` and `daemon-health --json` carry
+`schema_version`, with a schema published for each of them.
+
+The three outputs are stable surfaces and a field is added to each, so this is
+a minor by the rule in `docs/compatibility.md` -- "Fields are added in minors"
+-- and by the precedent of 1.1.0, whose own note reads "The agent channel's
+read surfaces gain fields, which is an addition to a stable surface." No
+command, option, exit code or entry point is added, removed or renamed.
+
+The field was added because the three outputs were the only ones in that list
+without it, so a consumer branching on it had nothing to branch on. The
+published schemas are deliberately open at the top level, because the same
+rule lets a later minor add fields to them.
+
+The daemon's change is a fix that adds no field: every way enumerating a
+repository can fail raised the same path-free `IngestError`, so the cause
+chain rendered the class name alone and four different failures read
+"IngestError" and could not be told apart. Each failure now raises a cause
+carrying its own reason, and the chain names it. The message a caller sees is
+unchanged.
+
+The graph changes by what these fixes add. Measured on this repository: the
+v1.6.0 tree built by the installed 1.6.0 engine, and this tree built by this
+engine, each into fresh output, cache and state directories:
+
+- 9,298 nodes become 9,322 and 25,599 edges become 25,655. The 24 new nodes
+  are the functions the daemon's fix adds, the three published schemas, the
+  new test's function, and the fixtures and helpers that go with them;
+- every node id survives: 9,298 of 9,298 are in both, 24 are new and none is
+  removed; 8,742 of them keep their denotation exactly;
+- 6,752 definition ids become 6,768: 6,196 keep their id and their definition,
+  and 556 keep their id but move line -- every one of them in the six files
+  this release touches (`tests/test_doctor.py` 383, `src/graphite/cli.py` 89,
+  `src/graphite/daemon.py` 35, `tests/test_agent_hooks_session_tagging.py` 18,
+  `src/graphite/ingest.py` 16, `tests/test_published_schemas.py` 15). No
+  definition id is removed and 16 are new;
+- `calls` goes from 16,418 relation triples to 16,457, `contains` from 6,750 to
+  6,766, `imports` stays at 2,480, and `inherits` goes from 121 to 122. 25,769
+  relation triples become 25,825, with 2 only in the old graph and 58 only in
+  the new one;
+- 18 cycles where there were 18, the same ones, and 178 communities where
+  there were 175. The entry points, the orphans and the surprising
+  connections are identical; the god nodes and the top files by links differ,
+  because the new code adds and moves them;
+- `resolution_health` is healthy on both sides: the `calls` ratio is 0.983
+  before and after, and `imports` is 1.0 on both.
+
+`metadata.engine.fingerprint` moves, as it does whenever the engine's own
+files change -- and they do: the identity hashes every `.py` and `.mjs` file
+in the package, so a change to the daemon or the ingest moves it whether or
+not the extraction changed.
+
+The two builds above used different `tree-sitter` versions (0.25.2 for the
+installed 1.6.0 and 0.26.0 for the dev environment), so the difference was
+controlled for rather than assumed away: the SAME tree built by both engines
+gives the same ids, the same edges and the same triples, node for node --
+9,322 nodes, 25,655 edges and all 25,825 relation triples identical, with no
+id moved and none removed, and identical cycles, entry points, god nodes,
+orphans, surprising connections, top files by links, clusters and
+`resolution_health`. The figures above are therefore attributable to this
+change and not to the parsers.
+
 ### Added
 
 - `check --json`, `validate --json` and `daemon-health --json` now carry
@@ -38,6 +103,20 @@ machine-checkable identity; the version is for humans.
   `output_not_nul_terminated`, `too_many_records`, `path_not_contained`),
   and the chain names it. The message a caller sees is unchanged, and no
   command, option, exit code or JSON field changes.
+- Tests: the three mutation survivors in `src/graphite/agent_hooks.py` are
+  now killed. A mutant the suite cannot kill is a behaviour the suite does
+  not pin, and the mutation gate's ledger recorded three of them: `or` ->
+  `and` in `_entry_is_this_session`, and `0` -> `1` twice in `handle_stop`
+  -- in the ledger's byte length when there is no ledger, and in the
+  cursor's offset when the state has none. The first two are pinned by the
+  one case that distinguishes them. The third had no such case and needed
+  one: a cursor state that lost its offset is a damaged cursor, and the
+  ledger is newline-delimited JSON, so an offset of 1 would cut the first
+  entry in half -- it would no longer parse, and the turn's own use would
+  go uncounted without a word. The default is 0, which is what the
+  function already does with a damaged cursor elsewhere. Each kill is
+  proved by applying the mutation and watching the test that is meant to
+  kill it fail, with the source restored byte-identical afterwards.
 
 ## [1.6.0] — 2026-10-27
 
