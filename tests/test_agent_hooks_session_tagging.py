@@ -262,3 +262,29 @@ def test_a_cursor_state_without_an_offset_reads_the_ledger_from_its_start(
     unit = _one_entry_tokens(repo)
     assert summary is not None
     assert _session_tokens(repo, "A") == unit
+
+
+def test_a_cursor_state_without_a_token_count_starts_from_zero(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A state that lost its token count is a damaged cursor, and a damaged
+    cursor counts no tokens of its own.
+
+    The session's total is the stored total plus this turn's, and it is
+    carried forward for the rest of the session's life. A default of 1
+    would invent a token that was never saved: the count would read one too
+    high from then on, and every later report would carry it. The default is
+    0 -- no stored tokens, no stored tokens.
+    """
+    _start(repo, "A")
+    _use(repo, monkeypatch, "A")
+
+    # Damage the cursor: the session's state keeps no token count.
+    cursor = read_cursor(repo)
+    cursor["sessions"]["A"].pop("tokens", None)
+    usage_ledger.write_cursor(repo, cursor)
+
+    _stop(repo, "A")
+
+    unit = _one_entry_tokens(repo)
+    assert _session_tokens(repo, "A") == unit
