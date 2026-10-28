@@ -2144,14 +2144,35 @@ def test_deep_bounded_runner_terminates_descendant_tree(tmp_path: Path) -> None:
     # A hang guard, and polled: it costs nothing when the parent starts
     # promptly, and it only has to outlast the transport's own budget, because
     # the transport kills the parent when that budget expires.
+    #
+    # The wait is for a PUBLISHED PID, not for a FILE. The parent creates the
+    # pid file and only then writes the number into it, so a reader that stops
+    # at existence can read it while it is still empty -- and did, in the
+    # `security` job of run 40659621598, where `int('')` raised ValueError in
+    # a test whose subject is the tree kill and not the publish. Measured on
+    # this machine, a reader polling every 0.5ms saw the file empty in 136 of
+    # 150 publishes; the window is the gap between the create and the write,
+    # so it widens with load.
     ready_deadline = time.monotonic() + _HANG_GUARD_SECONDS
-    while not pid_file.exists() and time.monotonic() < ready_deadline:
+    published = ""
+    while time.monotonic() < ready_deadline:
+        if pid_file.exists():
+            try:
+                candidate = pid_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                # A transient refusal to read a file the writer still holds.
+                # It must not end the test: the deadline below is the guard.
+                candidate = ""
+            if candidate.isdigit():
+                published = candidate
+                break
         time.sleep(0.01)
-    assert pid_file.exists(), (
-        "parent did not publish descendant PID before its bounded deadline: it could "
-        "not start an interpreter and spawn inside the transport's budget"
+    assert published, (
+        "parent did not publish a readable descendant PID before its bounded "
+        "deadline: it could not start an interpreter and spawn inside the "
+        "transport's budget, or it published the PID unreadably"
     )
-    pid = int(pid_file.read_text(encoding="utf-8"))
+    pid = int(published)
     retained_handle = None
     kernel32 = None
     if os.name == "nt":
