@@ -3412,6 +3412,7 @@ def test_core_probe_cleanup_timeout_uses_single_global_slot_and_recovers(tmp_pat
     from graphite.probe_workspace import ProbeWorkspaceLease
 
     release = threading.Event()
+    finished = threading.Event()
     lease = ProbeWorkspaceLease.acquire()
     acquisitions = 0
     response_index = 0
@@ -3423,7 +3424,16 @@ def test_core_probe_cleanup_timeout_uses_single_global_slot_and_recovers(tmp_pat
 
     def cleanup() -> None:
         release.wait(5)
-        lease.cleanup()
+        try:
+            lease.cleanup()
+        finally:
+            # The teardown is announced, not timed. The probe gave up on this
+            # thread at its cleanup budget, so the thread outlives the probe
+            # and the test has to wait for it -- and a DURATION is a race: on a
+            # loaded runner the thread had not finished removing the
+            # workspace, and the assertion below failed for a reason that has
+            # nothing to do with the slot this test is about.
+            finished.set()
 
     wrapped = SimpleNamespace(
         path=lease.path,
@@ -3474,11 +3484,23 @@ def test_core_probe_cleanup_timeout_uses_single_global_slot_and_recovers(tmp_pat
     finally:
         release.set()
 
-    deadline = time.monotonic() + 2
-    while lease.parent_path.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
+    # The teardown is waited for by SIGNAL, not by a duration: `finished` is
+    # set when the cleanup thread has removed the workspace. The old
+    # 2-second wait was a wall-clock race -- on a loaded runner the thread
+    # had not finished, and the assertion failed for a reason that has
+    # nothing to do with the slot this test is about.
+    assert finished.wait(_HANG_GUARD_SECONDS), "the cleanup thread did not finish"
     assert not lease.parent_path.exists()
-    assert probes.probe_core_pipeline(tmp_path, _runner=run).status == "ready"
+    # The slot is released after that thread returns, so the next probe can
+    # find it busy for a moment. Poll for the slot rather than assume it.
+    status = ""
+    slot_deadline = time.monotonic() + _HANG_GUARD_SECONDS
+    while time.monotonic() < slot_deadline:
+        status = probes.probe_core_pipeline(tmp_path, _runner=run).status
+        if status != "cleanup_busy":
+            break
+        time.sleep(0.01)
+    assert status == "ready"
 
 
 @pytest.mark.parametrize(
