@@ -201,6 +201,30 @@ def _test_environment(root: Path) -> dict[str, str]:
     return env
 
 
+_IMPORT_TIMEOUT_ENV = "GRAPHITE_MUTATION_IMPORT_TIMEOUT_S"
+_DEFAULT_IMPORT_TIMEOUT_SECONDS = 120
+
+
+def _import_timeout_seconds() -> int:
+    """The import probe's budget: the operator's value, or the default.
+
+    The probe starts an interpreter and imports a module, so it needs a
+    budget -- without one a hung import would hang the gate. The number is
+    POLICY, not a derived quantity: no other quantity in this file bounds an
+    import, and the launcher cannot measure the machine's speed in advance.
+    It is a knob for that reason, and the default is pinned by a test, so a
+    change to it has to be a decision rather than a drift. (An int-bound
+    mutant of the old bare `120` SURVIVED the suite on 2026-10-28 -- nothing
+    asserted the value, so nothing noticed the change.)
+    """
+    raw = os.environ.get(_IMPORT_TIMEOUT_ENV, "").strip()
+    if raw.isdigit():
+        value = int(raw)
+        if value > 0:
+            return value
+    return _DEFAULT_IMPORT_TIMEOUT_SECONDS
+
+
 def _imported_module(python: Path, env: dict[str, str], module: str, cwd: Path) -> str | None:
     """Where `python` would import `module` from, or None if it cannot.
 
@@ -217,7 +241,7 @@ def _imported_module(python: Path, env: dict[str, str], module: str, cwd: Path) 
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=120,
+            timeout=_import_timeout_seconds(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
