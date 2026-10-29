@@ -122,6 +122,11 @@ _DAEMON_STATUS_PROJECT_CAP = 20
 _VALIDATE_ERROR_CAP = 10
 _WATCH_IMPACTED_CAP = 20
 _WATCH_TESTS_CAP = 30
+# The `check --json` envelope's schema version. The published schema
+# (docs/schemas/check.v1.schema.json) holds it as a `const`, and BOTH shapes
+# of the answer carry it -- a stale graph, and a path below a repository's
+# root -- so it is stamped from one place and the two cannot drift apart.
+_CHECK_SCHEMA_VERSION = 1
 # The repository size `capabilities` declares as supported, and what backs
 # it. The binding limit is MAX_GRAPH_BYTES, not build time. Graph bytes per
 # file depend on code density: the synthetic corpus in benchmarks/ yields
@@ -815,7 +820,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         if not args.json:
             raise ValueError(_below_a_root(root, top))
         status: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": _CHECK_SCHEMA_VERSION,
             "stale": True,
             "reason": "below_repository_root",
             "repository_root": top.as_posix() if trusted_root(top) else None,
@@ -832,7 +837,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     cfg = _project_scoped_config(args, root, canonical=True)
     status = check_graph_freshness(root, cfg, ignore_engine=args.ignore_engine)
     if args.json:
-        status["schema_version"] = 1
+        status["schema_version"] = _CHECK_SCHEMA_VERSION
         status["resolution_health"] = persisted_resolution(
             root,
             on_error=lambda exc: record_incident(
