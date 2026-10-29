@@ -170,16 +170,39 @@ packages = ["src/graphite"]
 # repo root should be absent from the sdist by default, not shipped until
 # someone notices. Tests are included deliberately -- an sdist a consumer
 # cannot run the suite from is not much of a source distribution.
+#
+# `/scripts` and `/benchmarks` are included for the SAME reason, and they were
+# missing until 2026-10-29. The shipped tests import from them: four of them
+# put `<root>/scripts` on `sys.path` and import `compare_dist`,
+# `verify_artifact` and `verify_published_release`, one imports
+# `scripts.gen_cli_reference` as a package, one imports
+# `benchmarks.realty_router.evaluate`, and `tests/test_mutation_tests.py`
+# loads `scripts/mutation_tests.py` by path. MEASURED against the unpacked
+# 1.8.0 sdist: the suite did not COLLECT -- 6 collection errors and 0 tests
+# run, exit 2 -- so a consumer could not run the suite it was shipped with at
+# all. Shipping the tests without what they import is not shipping a suite.
+#
+# The `docs/` tree is deliberately NOT shipped. It is the repository's internal
+# engineering record, and two dozen of its documents quote a developer
+# machine's absolute paths -- `RELEASING.md` makes those a stop condition for
+# an archive, and rewriting a record of what was decided to suit a packaging
+# boundary is worse than leaving it out. The tests that read it are
+# REPOSITORY tests rather than package tests, and they SKIP when the tree is
+# absent (see `tests/conftest.py`).
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
     "/tests",
+    "/scripts",
+    "/benchmarks",
+    "/.mcp.json",
     "/pyproject.toml",
     "/README.md",
     "/CHANGELOG.md",
     "/RELEASING.md",
     "/CONTRIBUTING.md",
     "/ARCHITECTURE.md",
+    "/SECURITY.md",
     "/LICENSE",
 ]
 

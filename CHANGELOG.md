@@ -40,6 +40,28 @@ and a file keeps every field.
 The anti-swap property is unchanged. A replaced directory is a different
 inode, and is still refused (#132).
 
+**The source distribution ships what its own test suite imports.** The sdist
+carried `tests/` and none of what those tests import: four of them put
+`<root>/scripts` on `sys.path` and import `compare_dist`, `verify_artifact`
+and `verify_published_release`, one imports `scripts.gen_cli_reference` as a
+package, and one imports `benchmarks.realty_router.evaluate`;
+`tests/test_mutation_tests.py` loads `scripts/mutation_tests.py` by path.
+MEASURED against the unpacked 1.8.0 sdist: the suite did not **collect** — 6
+collection errors, 0 tests run, exit 2 — so a consumer who unpacked the sdist
+and ran the suite it was shipped with got an import error, not a test result.
+
+The sdist now ships `/scripts` and `/benchmarks`, along with `.mcp.json` and
+`SECURITY.md`. MEASURED against the same tree rebuilt: **4882 passed, 173
+skipped**, exit 0 — the suite collects and runs from an unpacked sdist.
+
+**The documentation tree is deliberately still not shipped.** It is the
+repository's internal engineering record, and two dozen of its documents quote
+a developer machine's absolute paths, which `RELEASING.md` makes a stop
+condition for an archive. The **117 tests** that read that tree are repository
+tests rather than package tests, and they now **skip**, with the reason named,
+when the tree is absent. They used to fail, which said the artifact was
+broken; it was not.
+
 ## [1.8.0] — 2026-10-29
 
 A minor release: one addition to a stable JSON output, and no change to any

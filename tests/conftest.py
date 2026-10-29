@@ -90,6 +90,48 @@ def _tracking_connect(*arguments: object, **keywords: object) -> sqlite3.Connect
 sqlite3.connect = _tracking_connect
 
 
+# --- tests that read the repository's documentation tree ------------------------
+#
+# The source distribution ships `tests/` but NOT `docs/`. The documentation is
+# the repository's internal engineering record, and two dozen of its documents
+# quote a developer machine's absolute paths -- which RELEASING.md makes a stop
+# condition for an archive, and which a record of what was decided should not
+# be rewritten to suit a packaging boundary.
+#
+# The tests below read that tree, so in an unpacked sdist they cannot be
+# evaluated. They SKIP rather than FAIL: a failure there would say the
+# artifact is broken, and it is not -- it is a source distribution that
+# deliberately does not carry the repository's documentation. In a checkout
+# the tree is present, nothing is skipped, and these run exactly as before.
+#
+# MEASURED 2026-10-29 against the unpacked 1.8.0 sdist: the suite did not
+# COLLECT at all -- 6 collection errors, 0 tests run -- and those errors were
+# the missing `scripts/` and `benchmarks/` modules, which the packaging config
+# now ships. These 46 tests are what remained.
+_REPOSITORY_TREE_MODULES = frozenset(
+    {
+        "test_cli_reference",
+        "test_configuration_reference",
+        "test_documentation",
+        "test_exit_codes_reference",
+        "test_published_schemas",
+    }
+)
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if (_REPO_ROOT / "docs").is_dir():
+        return
+    skip = pytest.mark.skip(
+        reason="the documentation tree is not part of the source distribution"
+    )
+    for item in items:
+        module = getattr(item, "module", None)
+        name = getattr(module, "__name__", "")
+        if name.rsplit(".", 1)[-1] in _REPOSITORY_TREE_MODULES:
+            item.add_marker(skip)
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     if not _open_connections:
         return

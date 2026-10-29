@@ -1235,3 +1235,91 @@ def test_no_absolute_developer_path_ships_in_the_packaged_sources() -> None:
         "absolute developer path(s) in packaged sources -- these reach every "
         "consumer inside the wheel:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_the_sdist_ships_what_the_shipped_tests_reach_for() -> None:
+    """A shipped test must be able to reach the subject it reads.
+
+    MEASURED 2026-10-29 against the unpacked 1.8.0 sdist: the suite did not
+    COLLECT -- 6 collection errors, 0 tests run, exit 2. The sdist shipped
+    `tests/` and none of what those tests import: four of them put
+    `<root>/scripts` on `sys.path` and import `compare_dist`,
+    `verify_artifact` and `verify_published_release`, one imports
+    `scripts.gen_cli_reference` as a package, and one imports
+    `benchmarks.realty_router.evaluate`. A consumer who unpacked the sdist and
+    ran the suite it was shipped with got an import error, not a test result.
+
+    Shipping the tests without what they import is not shipping a suite.
+
+    The requirement is DERIVED rather than asserted as a literal. A shipped
+    test reaches a subject the installed environment cannot supply in two
+    ways, and both are scanned for:
+
+      * it puts a repository-root directory on `sys.path`, or imports a
+        package that lives at the repository root;
+      * it reads a path built from a repository-root anchor -- the variable
+        assigned from `Path(__file__).resolve().parents[1]`.
+
+    Every top-level name that turns up must be in the sdist's include list,
+    except the one the package DELIBERATELY does not carry: the documentation
+    tree. That tree is the repository's internal engineering record and two
+    dozen of its documents quote a developer machine's absolute paths, which
+    `RELEASING.md` makes a stop condition for an archive. The tests that read
+    it are repository tests rather than package tests, and they skip when the
+    tree is absent (see `tests/conftest.py`).
+    """
+    import re
+    import tomllib
+
+    root = Path(__file__).parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    sdist = project["tool"]["hatch"]["build"]["targets"]["sdist"]
+    covered = {str(item).lstrip("/").split("/", 1)[0] for item in sdist["include"]}
+
+    # The subjects the package deliberately does not carry.
+    repository_only = {"docs"}
+
+    sys_path_insert = re.compile(r"sys\.path\.insert\([^\n]*")
+    repo_root_segment = re.compile(r'parents\[1\]\s*/\s*"([^"]+)"')
+    root_package_import = re.compile(r"^\s*(?:from|import)\s+([A-Za-z_]\w*)\.", re.MULTILINE)
+    repo_root_anchor = re.compile(
+        r"^(\w+)\s*=\s*Path\(__file__\)\.resolve\(\)\.parents\[1\]\s*$", re.MULTILINE
+    )
+    anchored_path = re.compile(r'\b(\w+)\s*/\s*"([^"]+)"')
+
+    required: dict[str, set[str]] = {}
+    for test_file in sorted((root / "tests").glob("test_*.py")):
+        source = test_file.read_text(encoding="utf-8")
+        names: set[str] = set()
+        for line in sys_path_insert.findall(source):
+            names.update(
+                match.group(1).split("/", 1)[0] for match in repo_root_segment.finditer(line)
+            )
+        for match in root_package_import.finditer(source):
+            package = match.group(1)
+            if (root / package).is_dir():
+                names.add(package.split("/", 1)[0])
+        anchors = set(repo_root_anchor.findall(source))
+        if anchors:
+            for variable, literal in anchored_path.findall(source):
+                if variable in anchors and (root / literal).exists():
+                    names.add(literal.split("/", 1)[0])
+        if names:
+            required[test_file.name] = names
+
+    missing = {
+        name: sorted(names - covered - repository_only)
+        for name, names in required.items()
+        if names - covered - repository_only
+    }
+
+    assert not missing, (
+        "the sdist ships `tests/` but not what those tests reach for, so an "
+        "unpacked sdist cannot run the suite it ships:\n  "
+        + "\n  ".join(f"{name}: {names}" for name, names in missing.items())
+    )
+
+    assert not (covered & repository_only), (
+        f"the sdist ships {sorted(covered & repository_only)}, which "
+        "repository_only declares it deliberately does not carry"
+    )
