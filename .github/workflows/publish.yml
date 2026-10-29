@@ -48,9 +48,9 @@ env:
   # local build with the same pins. A digest taken from only one of them is a
   # single source agreeing with itself.
   APPROVED_VERSION: "1.8.0"
-  APPROVED_COMMIT: "9f8ea5b871c81bd8ba8fc3d9e24bb6a620c9f4cf"
+  APPROVED_COMMIT: "f658c2582e1f4f8985e783a439419e24ad2f7788"
   WHEEL_SHA256: "66320ec99cd12e96dcf77ed18df1fdc8640045fc84ceb6832ef9b5cfbce20076"
-  SDIST_SHA256: "fd36b1e40030ec4ef4b6f8ee49123495514455b2211edb3be2089b3172f890e6"
+  SDIST_SHA256: "24d6561b367902d689e99567374fb8821b3ab88603596dc5ae7250e9ef92b8f3"
 
 jobs:
   publish:
