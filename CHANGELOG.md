@@ -15,6 +15,13 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-10-29
+
+A minor release: one addition to a stable JSON output, and no change to any
+command, option, exit code or entry point. By the rule in
+`docs/compatibility.md` — "additions are minors" — a field added to a
+versioned JSON output is a minor, not a patch.
+
 **`check --json` names which part of the engine moved.** A graph built by one
 engine and read by another reported `stale: true` with the reason
 `engine_changed` and nothing else: no file difference, and no indication of
@@ -44,10 +51,22 @@ The human-readable output says the same in short form:
         version: 1.7.0 -> 1.7.1
         fingerprint: 3b1f2c4d5e6f... -> 9a2c8e0f1b3d...
 
-This **adds a field** to a stable JSON output, so by the rule in
-`docs/compatibility.md` it is a **minor** release, not a patch.
 `review-changes --json` is unaffected: its packet sanitizes the freshness
 status down to a whitelist of keys, and `engine_delta` is not among them.
+`doctor --json` is unaffected too — it reads only `stale` from the status.
+
+**The mutation gate now certifies what it tests** (in the sdist, not the
+wheel). `scripts/mutation_tests.py` runs the suite through a dev venv whose
+editable install names the *canonical* repository's `src`, so a mutation
+applied in a worktree was never the code the tests imported: no mutant could
+be killed by the thing it changed, and a "survivor" said nothing about the
+code it was said to survive in. The launcher now puts the tree's own `src`
+first on `PYTHONPATH`, confirms that each mutated module resolves under the
+tree it was given, and refuses with exit 70 if one resolves elsewhere rather
+than certifying a run that never exercised the mutation. The import probe's
+budget became a pinned policy with its edges asserted, and every mutation
+verdict recorded before 2026-10-28 is untrustworthy in both directions. See
+the release evidence for the measurements.
 
 ## [1.7.1] — 2026-10-28
 
