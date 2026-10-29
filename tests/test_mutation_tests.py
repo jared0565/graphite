@@ -639,6 +639,13 @@ def test_main_refuses_to_certify_a_mutation_imported_from_outside_the_tree(
 # bare `120` was in the `subprocess.run` call and NOTHING asserted it, so a
 # change to it was invisible to the whole suite. A budget nobody checks is a
 # budget nobody has decided.
+#
+# MEASURED 2026-10-29: the SAME class, twice more, in the fix's own new code.
+# The boundary `value > 0` was asserted nowhere, so the mutation that moved it
+# to `value > 1` survived (ledger 1b1643b5); and `str.isdigit` admits a
+# superscript two, which `int` cannot parse, so an operator's value CRASHED
+# the launcher instead of falling back. A budget nobody checks is a budget
+# nobody has decided -- including its edges.
 
 
 def test_import_timeout_is_the_pinned_default_without_an_operator_value(
@@ -662,6 +669,29 @@ def test_import_timeout_falls_back_to_the_default_on_a_nonsense_value(
     launcher: ModuleType, monkeypatch: pytest.MonkeyPatch, nonsense: str
 ) -> None:
     monkeypatch.setenv(launcher._IMPORT_TIMEOUT_ENV, nonsense)
+
+    assert launcher._import_timeout_seconds() == 120
+
+
+def test_import_timeout_honours_the_smallest_positive_value(
+    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The LOWER boundary is a policy too: a positive value is the operator's
+    # budget, including the smallest one. The mutation that moved this
+    # boundary (`value > 0` -> `value > 1`) SURVIVED the suite -- the drain
+    # recorded it on 2026-10-28, against PR #129's own new code.
+    monkeypatch.setenv(launcher._IMPORT_TIMEOUT_ENV, "1")
+
+    assert launcher._import_timeout_seconds() == 1
+
+
+def test_import_timeout_falls_back_on_a_digit_that_is_not_a_number(
+    launcher: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `"²".isdigit()` is True and `int("²")` raises, so a value the operator
+    # set used to CRASH the gate's launcher instead of falling back. MEASURED
+    # 2026-10-29: `GRAPHITE_MUTATION_IMPORT_TIMEOUT_S=²` raised ValueError.
+    monkeypatch.setenv(launcher._IMPORT_TIMEOUT_ENV, "²")
 
     assert launcher._import_timeout_seconds() == 120
 

@@ -219,7 +219,14 @@ def _import_timeout_seconds() -> int:
     """
     raw = os.environ.get(_IMPORT_TIMEOUT_ENV, "").strip()
     if raw.isdigit():
-        value = int(raw)
+        try:
+            value = int(raw)
+        except ValueError:
+            # `str.isdigit` is true for characters `int` cannot parse -- a
+            # superscript two, for one -- so a digit is not yet a number. The
+            # operator set a value; the gate answers with the default rather
+            # than failing the run.
+            return _DEFAULT_IMPORT_TIMEOUT_SECONDS
         if value > 0:
             return value
     return _DEFAULT_IMPORT_TIMEOUT_SECONDS
