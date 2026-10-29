@@ -55,8 +55,9 @@ The human-readable output says the same in short form:
 status down to a whitelist of keys, and `engine_delta` is not among them.
 `doctor --json` is unaffected too — it reads only `stale` from the status.
 
-**The mutation gate now certifies what it tests** (in the sdist, not the
-wheel). `scripts/mutation_tests.py` runs the suite through a dev venv whose
+**The mutation gate now certifies what it tests** (in the repository, not in
+the package: neither the wheel nor the sdist carries `scripts/`). `scripts/mutation_tests.py`
+runs the suite through a dev venv whose
 editable install names the *canonical* repository's `src`, so a mutation
 applied in a worktree was never the code the tests imported: no mutant could
 be killed by the thing it changed, and a "survivor" said nothing about the
