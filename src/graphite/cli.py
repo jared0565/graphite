@@ -122,6 +122,11 @@ _DAEMON_STATUS_PROJECT_CAP = 20
 _VALIDATE_ERROR_CAP = 10
 _WATCH_IMPACTED_CAP = 20
 _WATCH_TESTS_CAP = 30
+# The `check --json` envelope's schema version. The published schema
+# (docs/schemas/check.v1.schema.json) holds it as a `const`, and BOTH shapes
+# of the answer carry it -- a stale graph, and a path below a repository's
+# root -- so it is stamped from one place and the two cannot drift apart.
+_CHECK_SCHEMA_VERSION = 1
 # The repository size `capabilities` declares as supported, and what backs
 # it. The binding limit is MAX_GRAPH_BYTES, not build time. Graph bytes per
 # file depend on code density: the synthetic corpus in benchmarks/ yields
@@ -772,6 +777,38 @@ def cmd_report(args: argparse.Namespace) -> int:
     return cmd_build(args)
 
 
+def _print_engine_delta(delta: Any) -> None:
+    """Name the part of the engine identity that moved.
+
+    The reason alone said THAT the engine moved and never WHICH part of it,
+    so the actor was never named: the 1.7.0 gate saw `check` report the graph
+    stale with no file difference and could say nothing more. The JSON
+    output carries the same detail in full; this is the short form.
+    """
+    if not isinstance(delta, dict):
+        return
+    changed = delta.get("changed") or []
+    if not changed:
+        return
+    previous = delta.get("previous")
+    current = delta.get("current") or {}
+    print("  engine identity moved:")
+    for key in changed:
+        if isinstance(previous, dict):
+            before = _short_value(previous.get(key))
+        else:
+            before = "not recorded"
+        print(f"    {key}: {before} -> {_short_value(current.get(key))}")
+
+
+def _short_value(value: Any, limit: int = 12) -> str:
+    """A value short enough to read on one line. A fingerprint is 64 hex
+    characters, and the first twelve of them identify it as well as the whole
+    does."""
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
     # Below a repository's root there is no graph to be fresh or stale, and
@@ -783,7 +820,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         if not args.json:
             raise ValueError(_below_a_root(root, top))
         status: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": _CHECK_SCHEMA_VERSION,
             "stale": True,
             "reason": "below_repository_root",
             "repository_root": top.as_posix() if trusted_root(top) else None,
@@ -800,7 +837,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     cfg = _project_scoped_config(args, root, canonical=True)
     status = check_graph_freshness(root, cfg, ignore_engine=args.ignore_engine)
     if args.json:
-        status["schema_version"] = 1
+        status["schema_version"] = _CHECK_SCHEMA_VERSION
         status["resolution_health"] = persisted_resolution(
             root,
             on_error=lambda exc: record_incident(
@@ -817,6 +854,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"[graphite] graph is stale ({reason})")
         if reason == "engine_changed":
             print("  graphite was updated since this graph was built; rebuild to refresh")
+            _print_engine_delta(status.get("engine_delta"))
         for key in ("added", "changed", "removed"):
             if status.get(key):
                 print(f"  {key}: {', '.join(status[key])}")

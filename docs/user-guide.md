@@ -66,7 +66,9 @@ engine. A moved file is parsed again where it now is.
 
 `check` exits non-zero when the graph is stale and says why: source changes
 (files added, changed, removed) or `engine_changed` (graphite itself was
-upgraded). `--ignore-engine` reports source drift only.
+upgraded). When the engine moved, `check` names which part of it moved — the
+version, the parsers, or the engine files themselves — in the output and, in
+`--json`, under `engine_delta`. `--ignore-engine` reports source drift only.
 
 **From a subfolder.** `build`, `report`, `scan` and `check` name the
 directory to work on, and a repository is built and checked from its root.

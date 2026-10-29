@@ -38,6 +38,30 @@ def manifest_map(manifest: dict[str, Any]) -> dict[str, str]:
     return {f["rel_path"]: f.get("hash", "") for f in manifest.get("files", []) if "rel_path" in f}
 
 
+def engine_identity_delta(previous: Any, current: dict[str, Any]) -> dict[str, Any]:
+    """Which part of the engine identity moved, and from what to what.
+
+    The identity is a flat map of strings, so a difference between two of them
+    is a difference of keys. Naming those keys is what makes the next
+    occurrence explain itself: `engine_changed` said THAT the engine moved and
+    never WHICH part of it, so the actor was never named -- the defect the
+    1.7.0 gate hit, where `check` reported the graph stale with no file
+    difference at all.
+
+    A previous identity that is not a map -- a legacy manifest that recorded
+    none, or a corrupt one -- is reported as such rather than as a difference:
+    every part of the current identity is new.
+    """
+    if not isinstance(previous, dict):
+        return {"changed": sorted(current), "previous": None, "current": dict(current)}
+    changed = sorted(key for key in set(previous) | set(current) if previous.get(key) != current.get(key))
+    return {
+        "changed": changed,
+        "previous": {key: previous.get(key) for key in changed},
+        "current": {key: current.get(key) for key in changed},
+    }
+
+
 def graph_engine_changed(cfg: Config, current_engine: dict[str, Any]) -> bool:
     """True when a built graph records an engine identity other than the current one.
 
@@ -116,6 +140,7 @@ def check_graph_freshness(
             return {
                 "stale": True,
                 "reason": "engine_changed",
+                "engine_delta": engine_identity_delta(previous.get("engine"), current_engine),
                 "added": [],
                 "changed": [],
                 "removed": [],

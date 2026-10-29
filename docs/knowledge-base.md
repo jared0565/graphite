@@ -55,7 +55,8 @@ exact. Upgrade.
 source changed.** → `engine_changed`: the extraction engine's identity moved
 with the upgrade, so cached extraction is not trusted. → Rebuild. A running
 daemon does this itself on its next discovery cycle (#18); `check
---ignore-engine` reports source drift only.
+--ignore-engine` reports source drift only. `check` names the part that moved
+— `version`, `parsers` or the engine files — under `engine_delta` in `--json`.
 
 **The graph is missing a whole nested repository, or shows it stale.** →
 The daemon supervises project roots it discovered; a repository nested inside
