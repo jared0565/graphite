@@ -10,6 +10,17 @@
     "schema_version": {"const": 1},
     "stale": {"type": "boolean"},
     "reason": {"type": "string"},
+    "engine_delta": {
+      "type": "object",
+      "description": "Present when reason is engine_changed. Names which part of the engine identity moved, and what it moved from and to, so the next occurrence explains itself. previous is null when no identity was recorded at all (a legacy or corrupt manifest), in which case every part of the current identity is new.",
+      "additionalProperties": true,
+      "required": ["changed", "current"],
+      "properties": {
+        "changed": {"type": "array", "items": {"type": "string"}},
+        "previous": {"type": ["object", "null"], "additionalProperties": true},
+        "current": {"type": "object", "additionalProperties": true}
+      }
+    },
     "repository_root": {"type": ["string", "null"]},
     "added": {"type": "array", "items": {"type": "string"}},
     "changed": {"type": "array", "items": {"type": "string"}},

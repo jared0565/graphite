@@ -216,6 +216,34 @@ def test_check_output_below_a_repository_root_matches_published_schema(tmp_path,
     assert matches_schema(payload, _load("check.v1.schema.json")) is True
 
 
+def test_check_engine_changed_output_matches_published_schema(tmp_path, capsys) -> None:
+    """The `engine_changed` shape is a versioned output too.
+
+    `engine_delta` is part of the published v1 contract, so the shape a
+    consumer sees when the engine moved has to validate against the same
+    schema the other two `check --json` shapes are held to.
+    """
+    from graphite.config import Config
+    from graphite.engine_identity import engine_identity
+
+    output = tmp_path / "graph-out"
+    output.mkdir()
+    current = engine_identity(Config().cache_version)
+    (output / ".graphite_manifest.json").write_text(
+        json.dumps(
+            {"root": tmp_path.name, "files": [], "engine": {**current, "version": "1.0.0"}}
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["check", str(tmp_path), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["reason"] == "engine_changed"
+    assert payload["engine_delta"]["changed"] == ["version"]
+    assert matches_schema(payload, _load("check.v1.schema.json")) is True
+
+
 def test_validate_output_matches_published_schema(tmp_path, capsys) -> None:
     """`validate --json` is a versioned output, and the promise is kept."""
     bundle = {

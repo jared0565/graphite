@@ -15,6 +15,40 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+**`check --json` names which part of the engine moved.** A graph built by one
+engine and read by another reported `stale: true` with the reason
+`engine_changed` and nothing else: no file difference, and no indication of
+what had actually changed. The 1.7.0 pre-push gate hit exactly that — the
+engine identity moved between two xdist workers while the files stayed put,
+so the reason could not be named.
+
+`check --json` now carries an `engine_delta` beside `reason`:
+
+    "engine_delta": {
+      "changed": ["fingerprint", "version"],
+      "previous": {"fingerprint": "3b1f2c4d5e6f…", "version": "1.7.0"},
+      "current":  {"fingerprint": "9a2c8e0f1b3d…", "version": "1.7.1"}
+    }
+
+`changed` names the parts that moved (`version`, `cache_version`,
+`schema_version`, `parsers`, `fingerprint`); `previous` and `current` give
+what each moved from and to. A manifest that recorded no identity at all — a
+legacy one, or a corrupt one — reports `previous: null`, because every part
+of the current identity is *new* rather than different.
+
+The human-readable output says the same in short form:
+
+    [graphite] graph is stale (engine_changed)
+      graphite was updated since this graph was built; rebuild to refresh
+      engine identity moved:
+        version: 1.7.0 -> 1.7.1
+        fingerprint: 3b1f2c4d5e6f... -> 9a2c8e0f1b3d...
+
+This **adds a field** to a stable JSON output, so by the rule in
+`docs/compatibility.md` it is a **minor** release, not a patch.
+`review-changes --json` is unaffected: its packet sanitizes the freshness
+status down to a whitelist of keys, and `engine_delta` is not among them.
+
 ## [1.7.1] — 2026-10-28
 
 A patch release: three fixes, and no change to any stable surface. No command,

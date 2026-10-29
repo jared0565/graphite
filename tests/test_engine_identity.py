@@ -202,12 +202,21 @@ def test_freshness_treats_legacy_manifest_as_engine_changed(tmp_path: Path) -> N
         json.dumps({"root": root.name, "files": []}),
         encoding="utf-8",
     )
+    cfg = Config(output_dir=output)
 
-    result = check_graph_freshness(root, Config(output_dir=output))
+    result = check_graph_freshness(root, cfg)
 
+    # No identity was recorded at all, so every part of the current one is
+    # new -- which is what the delta says, rather than a difference.
+    current = engine_identity(cfg.cache_version)
     assert result == {
         "stale": True,
         "reason": "engine_changed",
+        "engine_delta": {
+            "changed": sorted(current),
+            "previous": None,
+            "current": current,
+        },
         "added": [],
         "changed": [],
         "removed": [],
@@ -256,7 +265,75 @@ def test_freshness_prioritizes_engine_mismatch_when_repository_is_unchanged(
     assert result == {
         "stale": True,
         "reason": "engine_changed",
+        "engine_delta": {
+            "changed": ["fingerprint", "version"],
+            "previous": {"fingerprint": "0" * 64, "version": "old"},
+            "current": {"fingerprint": "1" * 64, "version": "new"},
+        },
         "added": [],
         "changed": [],
         "removed": [],
     }
+
+
+def _seed_engine(root: Path, output: Path, engine: dict[str, str]) -> Config:
+    """A project whose manifest records exactly `engine`."""
+    root.mkdir(parents=True, exist_ok=True)
+    output.mkdir(parents=True, exist_ok=True)
+    (output / ".graphite_manifest.json").write_text(
+        json.dumps({"root": root.name, "files": [], "engine": engine}),
+        encoding="utf-8",
+    )
+    return Config(output_dir=output)
+
+
+def test_freshness_names_the_part_of_the_engine_that_moved(tmp_path: Path, monkeypatch) -> None:
+    """The reason alone never named the actor; the delta does.
+
+    A `version` bump with byte-identical engine files is the case that
+    confused the 1.7.0 gate: the FILES did not change, so nothing comparing
+    file lists could see it, and `check` said only `engine_changed` -- with no
+    way to say what had moved.
+    """
+    root = tmp_path / "project"
+    output = tmp_path / "graph-out"
+    cfg = Config(output_dir=output)
+    current = {
+        "version": "2.0.0",
+        "cache_version": cfg.cache_version,
+        "schema_version": "1",
+        "parsers": "parsers-1",
+        "fingerprint": "a" * 64,
+    }
+    _seed_engine(root, output, {**current, "version": "1.0.0"})
+    monkeypatch.setattr(freshness_module, "engine_identity", lambda _cache_version: current)
+
+    result = check_graph_freshness(root, cfg)
+
+    assert result["engine_delta"] == {
+        "changed": ["version"],
+        "previous": {"version": "1.0.0"},
+        "current": {"version": "2.0.0"},
+    }
+
+
+def test_freshness_carries_no_engine_delta_when_the_engine_did_not_move(tmp_path: Path, monkeypatch) -> None:
+    """A delta that is always present would be a delta nobody reads: it has
+    to be there exactly when something moved."""
+    root = tmp_path / "project"
+    output = tmp_path / "graph-out"
+    cfg = Config(output_dir=output)
+    current = {
+        "version": "2.0.0",
+        "cache_version": cfg.cache_version,
+        "schema_version": "1",
+        "parsers": "parsers-1",
+        "fingerprint": "a" * 64,
+    }
+    _seed_engine(root, output, current)
+    monkeypatch.setattr(freshness_module, "engine_identity", lambda _cache_version: current)
+
+    result = check_graph_freshness(root, cfg)
+
+    assert result["stale"] is False
+    assert "engine_delta" not in result

@@ -786,6 +786,68 @@ def test_check_names_engine_staleness_reason_without_json(tmp_path: Path, monkey
     assert "engine_changed" in out
 
 
+def _downgrade_the_recorded_engine_version(tmp_path: Path) -> str:
+    """Make the graph's recorded engine identity differ ONLY in its version.
+
+    The 1.7.0 pre-push gate hit exactly this shape: `check` reported the
+    graph stale with the reason `engine_changed` and no file difference at
+    all, so the actor could not be named. Returns the real version.
+    """
+    manifest_path = tmp_path / "graph-out" / ".graphite_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    engine = manifest["engine"]
+    real_version = engine["version"]
+    manifest["engine"] = {**engine, "version": "1.0.0"}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return real_version
+
+
+def test_check_json_names_the_part_of_the_engine_that_moved(tmp_path: Path, monkeypatch, capsys) -> None:
+    """`engine_changed` said THAT the engine moved, never WHICH part of it."""
+    _write(tmp_path / "src" / "app.ts", "export const app = 1;\n")
+    monkeypatch.chdir(tmp_path)
+    assert main(["build", "."]) == 0
+    capsys.readouterr()
+    real_version = _downgrade_the_recorded_engine_version(tmp_path)
+
+    assert main(["check", ".", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["reason"] == "engine_changed"
+    assert payload["engine_delta"]["changed"] == ["version"]
+    assert payload["engine_delta"]["previous"] == {"version": "1.0.0"}
+    assert payload["engine_delta"]["current"] == {"version": real_version}
+
+
+def test_check_names_the_part_of_the_engine_that_moved_without_json(tmp_path: Path, monkeypatch, capsys) -> None:
+    """The short form says it too: which part, and what it moved from and to."""
+    _write(tmp_path / "src" / "app.ts", "export const app = 1;\n")
+    monkeypatch.chdir(tmp_path)
+    assert main(["build", "."]) == 0
+    capsys.readouterr()
+    real_version = _downgrade_the_recorded_engine_version(tmp_path)
+
+    assert main(["check", "."]) == 1
+    out = capsys.readouterr().out
+
+    assert "engine identity moved" in out
+    assert f"version: 1.0.0 -> {real_version}" in out
+
+
+def test_check_json_carries_no_engine_delta_when_the_graph_is_fresh(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A delta that is always there would be a delta nobody reads."""
+    _write(tmp_path / "src" / "app.ts", "export const app = 1;\n")
+    monkeypatch.chdir(tmp_path)
+    assert main(["build", "."]) == 0
+    capsys.readouterr()
+
+    assert main(["check", ".", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["stale"] is False
+    assert "engine_delta" not in payload
+
+
 def test_check_ignore_engine_reports_source_drift_only(tmp_path: Path, monkeypatch, capsys) -> None:
     _write(tmp_path / "src" / "app.ts", "export const app = 1;\n")
     monkeypatch.chdir(tmp_path)

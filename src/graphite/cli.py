@@ -772,6 +772,38 @@ def cmd_report(args: argparse.Namespace) -> int:
     return cmd_build(args)
 
 
+def _print_engine_delta(delta: Any) -> None:
+    """Name the part of the engine identity that moved.
+
+    The reason alone said THAT the engine moved and never WHICH part of it,
+    so the actor was never named: the 1.7.0 gate saw `check` report the graph
+    stale with no file difference and could say nothing more. The JSON
+    output carries the same detail in full; this is the short form.
+    """
+    if not isinstance(delta, dict):
+        return
+    changed = delta.get("changed") or []
+    if not changed:
+        return
+    previous = delta.get("previous")
+    current = delta.get("current") or {}
+    print("  engine identity moved:")
+    for key in changed:
+        if isinstance(previous, dict):
+            before = _short_value(previous.get(key))
+        else:
+            before = "not recorded"
+        print(f"    {key}: {before} -> {_short_value(current.get(key))}")
+
+
+def _short_value(value: Any, limit: int = 12) -> str:
+    """A value short enough to read on one line. A fingerprint is 64 hex
+    characters, and the first twelve of them identify it as well as the whole
+    does."""
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
     # Below a repository's root there is no graph to be fresh or stale, and
@@ -817,6 +849,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"[graphite] graph is stale ({reason})")
         if reason == "engine_changed":
             print("  graphite was updated since this graph was built; rebuild to refresh")
+            _print_engine_delta(status.get("engine_delta"))
         for key in ("added", "changed", "removed"):
             if status.get(key):
                 print(f"  {key}: {', '.join(status[key])}")
