@@ -71,6 +71,35 @@ _TYPESCRIPT_SCRIPT = (
     "process.exit(4)}"
     "process.stdout.write(JSON.stringify({detected:true}));"
 )
+#: The identity rule, shared by the parent and by BOTH child bootstraps.
+#:
+#: A DIRECTORY's size and times are not its identity. A directory's size is
+#: its entry count and its times move whenever a child is created or removed.
+#: For a repository root that is routine rather than an attack -- a coverage
+#: run writing its own bookkeeping files into the checkout is enough -- so
+#: refusing on it turns a harmless concurrent write into a refusal to probe.
+#: The inode IS a directory's identity: the same object, or a different one.
+#:
+#: A FILE keeps every field. A file's size and mtime ARE its content, and they
+#: are what says the content did not change under us. The old rule also got
+#: this backwards for directories: an in-place edit to a file inside a
+#: directory does NOT move the directory's times, so the directory check never
+#: saw it, while a benign create or delete always moved them. What the
+#: directory check could reliably express is WHICH directory it is, and that is
+#: what it now says.
+#:
+#: The bootstraps run isolated (`-I -S`) and cannot import this module, so
+#: they carry this text rather than calling it. Splicing the SAME constant
+#: into both keeps the two children from drifting apart, and a test pins that
+#: their copies agree with the parent's.
+_MCP_IDENTITY_MATCHER = '''
+def identity_matches(stat, identity, require_directory):
+    """Whether `stat` is still the object `identity` recorded."""
+    if require_directory:
+        return [stat.st_dev, stat.st_ino] == identity[:2]
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns] == identity
+'''
+
 _MCP_MANIFEST_BUILDER_BOOTSTRAP = """\
 import os
 import json
@@ -79,6 +108,7 @@ import sys
 from importlib.machinery import PathFinder
 
 sys.excepthook = lambda *_: os._exit(70)
+""" + _MCP_IDENTITY_MATCHER + """\
 def validate_binding(raw, require_directory):
     if not isinstance(raw, dict) or set(raw) != {"canonical", "identity", "lexical"}:
         raise SystemExit(70)
@@ -98,7 +128,7 @@ def validate_binding(raw, require_directory):
     if lexical.resolve(strict=True) != canonical or canonical.resolve(strict=True) != canonical:
         raise SystemExit(70)
     stat = canonical.stat()
-    if [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns] != identity:
+    if not identity_matches(stat, identity, require_directory):
         raise SystemExit(70)
     if canonical.is_dir() != require_directory:
         raise SystemExit(70)
@@ -272,6 +302,7 @@ from importlib import metadata
 from importlib.machinery import PathFinder
 
 sys.excepthook = lambda *_: os._exit(70)
+""" + _MCP_IDENTITY_MATCHER + """
 def overlaps_selected(path):
     try:
         path.relative_to(selected)
@@ -303,7 +334,7 @@ def validate_binding(raw, require_directory, reject_selected=True):
     if resolved != canonical or canonical.resolve(strict=True) != canonical:
         raise SystemExit(70)
     stat = canonical.stat()
-    if [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns] != identity:
+    if not identity_matches(stat, identity, require_directory):
         raise SystemExit(70)
     if require_directory != canonical.is_dir() or (reject_selected and overlaps_selected(canonical)):
         raise SystemExit(70)
@@ -941,9 +972,41 @@ def _path_is_within(path: Path, root: Path) -> bool:
         return False
 
 
+def _identity_matches(
+    stat: os.stat_result,
+    identity: list[object],
+    *,
+    require_directory: bool,
+) -> bool:
+    """Whether `stat` is still the object `identity` recorded.
+
+    A DIRECTORY's size and times are not its identity: a directory's size is
+    its entry count and its times move whenever a child is created or
+    removed. For a repository root that is routine rather than an attack --
+    a coverage run writing its own bookkeeping files into the checkout is
+    enough -- so refusing on it turns a harmless concurrent write into a
+    refusal to probe. The inode IS a directory's identity: the same object,
+    or a different one.
+
+    A FILE keeps every field: a file's size and mtime ARE its content, and
+    they are what says the content did not change under us.
+
+    The two child bootstraps apply the same rule. They carry their own copy
+    (``_MCP_IDENTITY_MATCHER``) because they run isolated and cannot import
+    this module; a test pins that the copies agree.
+    """
+    if require_directory:
+        return [stat.st_dev, stat.st_ino] == identity[:2]
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns] == identity
+
+
 def _path_binding(path: Path, *, require_directory: bool) -> dict[str, object]:
     # Best-effort race detection only: same-user replacement after the final
     # check remains an operating-system trust boundary, not a complete TOCTOU fix.
+    #
+    # The recorded identity keeps all four fields for every kind of path. For a
+    # DIRECTORY the last two are a record of what was observed, not what is
+    # compared -- see `_identity_matches`.
     lexical = Path(os.path.abspath(path))
     canonical = lexical.resolve(strict=True)
     if canonical.is_dir() != require_directory:
@@ -981,7 +1044,7 @@ def _validate_path_binding(
     if lexical.resolve(strict=True) != canonical or canonical.resolve(strict=True) != canonical:
         raise ValueError
     stat = canonical.stat()
-    if [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns] != identity:
+    if not _identity_matches(stat, identity, require_directory=require_directory):
         raise ValueError
     if canonical.is_dir() != require_directory:
         raise ValueError

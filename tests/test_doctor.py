@@ -5012,6 +5012,162 @@ def test_mcp_deep_probe_real_server_supports_trusted_source_inside_selected_repo
     assert check.details["server_name"] == "graphite"
 
 
+def test_a_directories_identity_survives_moving_times_but_a_files_does_not(
+    tmp_path: Path,
+) -> None:
+    """A DIRECTORY's size and times are not its identity; a FILE's are.
+
+    The identity a binding records is four fields either way, but what is
+    COMPARED depends on what was bound. A directory's times move whenever a
+    child is created or removed, which for a repository root is routine; a
+    file's size and mtime ARE its content, and a file whose content changed
+    is not the same file.
+
+    The moved times here are written into the recorded identity rather than
+    waited for, so the test cannot pass or fail on filesystem timestamp
+    granularity.
+    """
+    import graphite.doctor_probes as probes
+
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    child = directory / "child.tmp"
+    child.write_text("x", encoding="utf-8")
+
+    file_stat = child.stat()
+    moved_file = dict(probes._path_binding(child, require_directory=False))
+    moved_file["identity"] = [
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_size,
+        file_stat.st_mtime_ns + 1,
+    ]
+    with pytest.raises(ValueError):
+        probes._validate_path_binding(moved_file, require_directory=False)
+
+    directory_stat = directory.stat()
+    moved_directory = dict(probes._path_binding(directory, require_directory=True))
+    moved_directory["identity"] = [
+        directory_stat.st_dev,
+        directory_stat.st_ino,
+        directory_stat.st_size,
+        directory_stat.st_mtime_ns + 1,
+    ]
+    lexical, canonical = probes._validate_path_binding(
+        moved_directory,
+        require_directory=True,
+    )
+
+    assert canonical == directory.resolve()
+    assert lexical == directory
+
+
+def test_the_parent_and_both_children_apply_one_identity_rule() -> None:
+    """The rule is written three times, because the two child bootstraps run
+    isolated and cannot import the parent.
+
+    Three copies can drift, and a drifted copy is a child that refuses (or
+    accepts) something the parent does not. This asserts the copies are the
+    SAME rule: it compares the executable statements, not the text, so a
+    reworded docstring does not break it but a changed comparison does.
+    """
+    import ast
+    import inspect
+    import graphite.doctor_probes as probes
+
+    def statements(source: str, name: str) -> list[ast.stmt]:
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                body = list(node.body)
+                if (
+                    body
+                    and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)
+                ):
+                    body = body[1:]
+                return body
+        raise AssertionError(f"no function named {name!r} in the source")
+
+    parent = statements(inspect.getsource(probes._identity_matches), "_identity_matches")
+    builder = statements(probes._MCP_MANIFEST_BUILDER_BOOTSTRAP, "identity_matches")
+    server = statements(probes._MCP_BOOTSTRAP, "identity_matches")
+
+    def rendered(body: list[ast.stmt]) -> str:
+        return ast.dump(ast.Module(body=body, type_ignores=[]))
+
+    assert rendered(parent) == rendered(builder) == rendered(server)
+
+
+def test_mcp_probe_survives_a_write_into_the_selected_root_between_the_children(
+    tmp_path: Path,
+) -> None:
+    """A routine write into the selected root must not refuse the probe.
+
+    This is graphite#132. The manifest builder binds the selected root, the
+    server child re-validates that binding, and a directory's mtime moves
+    whenever a child is created or removed. A coverage run writing its own
+    `.coverage.*` files into the checkout is enough to move it, and the
+    server then refuses with no output at all -- reported as `nonzero`,
+    which reads as a crash and is not one.
+
+    The write is injected at the seam the parent uses to launch the server
+    child, so this is deterministic rather than a race.
+    """
+    import graphite.doctor_probes as probes
+    from graphite.probe_process import run_bounded_process
+
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    marker = selected / "coverage-like.tmp"
+
+    def runner_that_writes_into_the_selected_root(argv, **kwargs):
+        marker.write_text("", encoding="utf-8")
+        try:
+            return run_bounded_process(argv, **kwargs)
+        finally:
+            marker.unlink()
+
+    check = probes.probe_mcp(
+        selected,
+        timeout_seconds=20,
+        _runner=runner_that_writes_into_the_selected_root,
+    )
+
+    assert check.status == "ready", check.details
+
+
+def test_mcp_probe_still_refuses_a_selected_root_that_was_swapped(tmp_path: Path) -> None:
+    """The fix drops a directory's TIMES from its identity; it must not drop
+    the directory.
+
+    A swapped directory is a different inode, and the inode is exactly what
+    the surviving check compares. This is the property the identity check
+    exists for, asserted here so that a later relaxation cannot quietly
+    remove it along with the fix.
+    """
+    import graphite.doctor_probes as probes
+    from graphite.probe_process import run_bounded_process
+
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    moved = tmp_path / "moved"
+
+    def runner_that_swaps_the_selected_root(argv, **kwargs):
+        os.rename(selected, moved)
+        selected.mkdir()
+        return run_bounded_process(argv, **kwargs)
+
+    check = probes.probe_mcp(
+        selected,
+        timeout_seconds=20,
+        _runner=runner_that_swaps_the_selected_root,
+    )
+
+    assert check.status == "degraded", check.details
+    assert check.details["code"] == "nonzero"
+
+
 class _QueuedProbePipe:
     def __init__(self) -> None:
         self.items: queue.Queue[bytes | None] = queue.Queue()
