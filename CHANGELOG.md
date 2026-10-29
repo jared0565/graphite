@@ -15,6 +15,13 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-10-29
+
+A patch release: two fixes, and no change to any stable surface. The identity
+a path binding compares is internal to the MCP probe, and what a source
+distribution contains is not a stable surface, so by the rule in
+`docs/compatibility.md` — "fixes are patches" — this is a patch.
+
 **A directory's times are not its identity.** The MCP probe's manifest builder
 binds every path it hands to a child by `[st_dev, st_ino, st_size,
 st_mtime_ns]`, and the server child re-validates that binding before it
@@ -61,6 +68,16 @@ condition for an archive. The **117 tests** that read that tree are repository
 tests rather than package tests, and they now **skip**, with the reason named,
 when the tree is absent. They used to fail, which said the artifact was
 broken; it was not.
+
+**Known, and not fixed here.** The publish gate
+(`scripts/verify_artifact.py`) scans the **wheel's** content for absolute
+paths that name the build machine, and never the **sdist's**. The 1.8.0 sdist
+already shipped ten members whose content names it — `F:\Projects`, which is
+graphite's own legacy default projects root — and the gate passes those
+artifacts. 1.8.1's sdist ships one more such member (`scripts/`), because the
+suite needs it. Closing the gap is not a one-line change: the needles overlap
+the product's documented default, so a content check over the sdist would fail
+on shipped test files that legitimately mention it. Filed as **#135**.
 
 ## [1.8.0] — 2026-10-29
 
