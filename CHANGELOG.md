@@ -15,6 +15,31 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+**A directory's times are not its identity.** The MCP probe's manifest builder
+binds every path it hands to a child by `[st_dev, st_ino, st_size,
+st_mtime_ns]`, and the server child re-validates that binding before it
+imports anything. For a FILE that is right: a file's size and mtime are its
+content, and they are what says the content did not change under us.
+
+For a DIRECTORY it is wrong, and wrong in the direction that turns routine
+work into a refusal. A directory's size is its entry count, and its times
+move whenever a child is created or removed — which for a repository root is
+ordinary. A coverage run writing its own `.coverage.*` files into the
+checkout is enough. The builder binds the selected root, the server
+re-validates it, and anything created or removed in between moved the root's
+mtime and made the server refuse with no output at all: reported as
+`nonzero`, which reads as a crash and is not one.
+
+The old check was also backwards about what it could see. An in-place edit to
+a file inside a directory does NOT move the directory's times, so the
+directory check never saw it; a benign create or delete always moved them.
+What a directory binding can reliably express is WHICH directory it is, and
+that is what it now says: a directory is compared by its device and inode,
+and a file keeps every field.
+
+The anti-swap property is unchanged. A replaced directory is a different
+inode, and is still refused (#132).
+
 ## [1.8.0] — 2026-10-29
 
 A minor release: one addition to a stable JSON output, and no change to any
