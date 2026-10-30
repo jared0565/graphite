@@ -15,6 +15,13 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-10-30
+
+A patch release: one fix, and no change to any stable surface. What a source
+distribution contains is not a stable surface, and the release gate is not one
+either, so by the rule in `docs/compatibility.md` — "fixes are patches" — this
+is a patch. **Fixes: graphite#135.**
+
 **The publish gate now scans the SDIST's content, not just the wheel's.**
 `scripts/verify_artifact.py` checked the wheel's bytes and the sdist's member
 *NAMES*; the sdist's content was never read. That is where the leak was: the
@@ -56,6 +63,7 @@ separator stripped, in the shipped wheel. A path-shaped rule cannot see it,
 because it is a NAME. Changing the default renames the scheduled task and the
 startup launcher that existing installations already have, so it is a
 user-visible change rather than a hygiene fix, and it is not made here.
+Filed as **#137**, and deliberately left for its own decision.
 
 ## [1.8.1] — 2026-10-29
 
