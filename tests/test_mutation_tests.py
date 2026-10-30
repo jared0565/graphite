@@ -619,7 +619,7 @@ def test_main_refuses_to_certify_a_mutation_imported_from_outside_the_tree(
     monkeypatch.setattr(
         launcher,
         "_imported_module",
-        lambda *args: str(Path("F:/Projects/graphite/src/graphite/foo.py")),
+        lambda *args: str(Path("C:/Projects/graphite/src/graphite/foo.py")),
     )
 
     assert launcher.main([]) == 70
@@ -629,7 +629,7 @@ def test_main_refuses_to_certify_a_mutation_imported_from_outside_the_tree(
     assert "outside" in err
     (record,) = _log_lines(log_path)
     assert record["rc"] == 70
-    assert record["import_root"] == str(Path("F:/Projects/graphite/src/graphite/foo.py"))
+    assert record["import_root"] == str(Path("C:/Projects/graphite/src/graphite/foo.py"))
 
 
 # --- the import probe's budget is a policy, and it is pinned ------------------

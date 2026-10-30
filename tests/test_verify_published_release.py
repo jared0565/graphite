@@ -298,7 +298,7 @@ def test_a_package_answering_from_outside_site_packages_fails(tmp_path: Path) ->
     """The arm exists because a pip that resolved to a local checkout reads
     exactly like a successful index install."""
     outcome, _ = _verify(tmp_path, replies={"probe": Reply(stdout=json.dumps({
-        "file": "F:/Projects/graphite/src/graphite/__init__.py",
+        "file": "C:/Projects/graphite/src/graphite/__init__.py",
         "version": VERSION,
         "in_site_packages": False,
     }))})

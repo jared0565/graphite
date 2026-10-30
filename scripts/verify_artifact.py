@@ -8,9 +8,11 @@ release -- which means drift between releases is invisible by construction, and
 two defects have already been found by finally looking:
 
 * a developer path shipped inside the wheel METADATA, rendering on PyPI;
-* the release runbook naming artifacts the build no longer produces.
+* the release runbook naming artifacts the build no longer produces;
+* a developer path shipped inside the SDIST -- which carries the tests and the
+  scripts, and was never scanned for content at all.
 
-Both were invisible to 2856 passing tests, because neither is a property of the
+All were invisible to 2856 passing tests, because none is a property of the
 source tree.
 
 Run with a path to a directory containing exactly one wheel and one sdist:
@@ -41,6 +43,55 @@ FORBIDDEN_PATHS = re.compile(
     r"|\.aramid|\.graphite|graph-out|\.cache|\.env|\.claude|\.codex|\.vscode"
     r"|node_modules"
     r")(/|$)"
+)
+
+# The SHAPE of an absolute path that belongs to one developer's machine.
+#
+# Deliberately machine-INDEPENDENT. The first version of this check derived
+# its needles from `ROOT` and `Path.home()`, which is right for catching a
+# path leaked out of the machine doing the building -- but the gate runs on a
+# CI runner, where those needles are the runner's own POSIX paths and can
+# never match a path baked into the source on a developer's Windows box. A
+# rule that only sees its own machine's spelling of a path is a local check,
+# not a release gate; this one matches the shape instead, so it sees the path
+# whoever wrote it.
+#
+# The trailing group is optional on purpose: the literal that actually
+# shipped was a bare projects root, and the version with a required
+# separator missed it.
+#
+# Separators are matched as runs, because source code spells a Windows path
+# with escaped backslashes and a document spells the same path with one.
+DEVELOPER_PATH = re.compile(
+    # `C:/Users/x`, `C:\Projects`, and their escaped spellings.
+    r"[A-Za-z]:[\\/]+(?:Users|Projects)(?:[\\/]+[^\s\"'`)\]}]*)?"
+    # the MSYS spelling of the same thing.
+    r"|(?<![A-Za-z0-9])/[a-zA-Z][\\/]+(?:Users|Projects)(?:[\\/]+[^\s\"'`)\]}]*)?"
+    # `/home/someone`, `/Users/me`. A segment is required, so a bare home
+    # prefix is a prefix rather than a path -- the same shape the
+    # repository's own rule uses.
+    r"|(?<![A-Za-z0-9])/(?:home|Users)[\\/]+[a-z][\w.-]*(?:[\\/]+[^\s\"'`)\]}]*)?",
+    re.IGNORECASE,
+)
+
+# The roots this repository writes as EXAMPLES, as normalised path prefixes.
+# A path under one of these is an example on purpose; a path with the same
+# shape under any other root is somebody's machine. Each entry is a path the
+# repository itself writes -- the README's example projects root, and the
+# placeholder user profiles the fixtures use -- so the list is closed and
+# short rather than a denylist of every path that ever leaked.
+#
+# A prefix rather than a whole path, because the examples nest: the README
+# shows both a bare projects root and a project under it.
+EXAMPLE_ROOTS = (
+    "c:/projects",
+    "c:/users/someone",
+    "c:/users/x",
+    "c:/users/example",
+    "c:/users/<user>",
+    "/users/me",
+    "/home/someone",
+    "/home/x",
 )
 
 
@@ -78,11 +129,58 @@ def _check_members(label: str, names: list[str], problems: list[str]) -> None:
             problems.append(f"{label} contains an excluded path: {name}")
 
 
+def _normalise(path: str) -> str:
+    collapsed = re.sub(r"[\\/]+", "/", path)
+    return collapsed.lower()
+
+
+def _msys_to_windows(normalised: str) -> str:
+    """`/c/users/x` is the same path as `c:/users/x`."""
+    parts = normalised.lstrip("/").split("/")
+    if len(parts) > 1 and len(parts[0]) == 1 and parts[0].isalpha():
+        return parts[0] + ":/" + "/".join(parts[1:])
+    return normalised
+
+
+def _is_example(path: str) -> bool:
+    """Whether `path` sits under a root this repository writes as an example."""
+    normalised = _normalise(path)
+    candidates = {normalised, _msys_to_windows(normalised)}
+    return any(
+        candidate == root or candidate.startswith(root + "/")
+        for candidate in candidates
+        for root in EXAMPLE_ROOTS
+    )
+
+
+def developer_paths(text: str) -> list[str]:
+    """The absolute paths in `text` that name one developer's machine.
+
+    Machine-independent by construction: it matches the SHAPE of such a path
+    rather than this machine's spelling of it. Returns the offending path
+    strings in the order they appear.
+    """
+    found = []
+    for match in DEVELOPER_PATH.finditer(text):
+        path = match.group(0).rstrip(",;:!?")
+        if not path or _is_example(path):
+            continue
+        found.append(path)
+    return found
+
+
 def _check_content(label: str, blobs: dict[str, bytes], problems: list[str]) -> None:
     for needle in _machine_needles():
         for name, blob in blobs.items():
             if needle.encode("utf-8") in blob:
                 problems.append(f"{label}:{name} names the build machine: {needle!r}")
+    for name, blob in blobs.items():
+        try:
+            text = blob.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        for path in developer_paths(text):
+            problems.append(f"{label}:{name} names a developer's machine: {path!r}")
 
 
 def verify(dist_dir: Path) -> list[str]:
@@ -134,6 +232,20 @@ def verify(dist_dir: Path) -> list[str]:
 
     with tarfile.open(sdist) as archive:
         _check_members("sdist", archive.getnames(), problems)
+        # The sdist's CONTENT, not just its member names. It ships the test
+        # suite and the scripts, and the whole of that is text a developer
+        # path can hide in -- a comment ships exactly as a string literal
+        # does. Scanning only the wheel left the larger archive unchecked,
+        # and the larger archive is the one that carries the sources.
+        blobs = {}
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            handle = archive.extractfile(member)
+            if handle is None:  # pragma: no cover - defensive
+                continue
+            blobs[member.name] = handle.read()
+        _check_content("sdist", blobs, problems)
 
     return problems
 

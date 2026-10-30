@@ -51,7 +51,7 @@ def test_path_goes_to_stdout_even_when_the_channel_is_absent(projects_root: Path
 
 def test_respects_the_projects_root_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     """The path must never be welded to this machine's layout -- the same reason
-    `default_projects_root` honours the env var ahead of the legacy F:/Projects
+    `default_projects_root` honours the env var ahead of its legacy
     fallback."""
     elsewhere = tmp_path / "somewhere-else"
     (elsewhere / ".agent-channel").mkdir(parents=True)

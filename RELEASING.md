@@ -180,6 +180,15 @@ wheel's `METADATA` fields `Name`, `Version`, and every `Requires-Dist`, plus
 source and build files. Both archives must exclude credentials, caches, VCS files,
 local configuration, scratch output, and absolute developer paths.
 
+The `artifact` gate enforces the last of those for **both** archives:
+`scripts/verify_artifact.py` scans each one's content for a path that names one
+developer's machine. It matches the SHAPE of such a path rather than a list of
+paths, so it fires on a CI runner as well as on the machine that built the
+artifact -- a list derived from the running machine can only ever see that
+machine. A path under a root the repository writes as an example (the README's
+example projects root, the placeholder user profiles the fixtures use) is not a
+developer's path, and is allowed.
+
 The digests that get PINNED in `publish.yml` are CI's: the `artifact` job of the CI run
 on the release commit builds twice with the same pins, proves the two builds
 byte-identical, prints `dist.sha256`, and keeps `dist/` as a workflow artifact for 90

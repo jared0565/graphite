@@ -62,7 +62,7 @@ def test_daemon_startup_status_cli_reports_missing(monkeypatch: pytest.MonkeyPat
         "script_path": "missing.ps1",
     })
 
-    result = main(["daemon-startup-status", "F:/Projects", "--name", "GraphiteDaemon-Test"])
+    result = main(["daemon-startup-status", "C:/Projects", "--name", "GraphiteDaemon-Test"])
     output = capsys.readouterr().out
 
     assert result == 1

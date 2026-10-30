@@ -29,7 +29,7 @@ def _write_status(base: Path, payload: object) -> None:
 
 def _status(updated_at: str, projects: list[dict] | None = None, status: str = "ok") -> dict:
     projects = projects or [{
-        "root": "F:/Projects/app",
+        "root": "C:/Projects/app",
         "file_count": 2,
         "build_count": 1,
         "failure_count": 0,
@@ -130,7 +130,7 @@ def test_daemon_health_reports_failing_pending_and_old_projects(tmp_path: Path) 
     now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
     projects = [
         {
-            "root": "F:/Projects/bad",
+            "root": "C:/Projects/bad",
             "file_count": 2,
             "build_count": 2,
             "failure_count": 1,
@@ -139,7 +139,7 @@ def test_daemon_health_reports_failing_pending_and_old_projects(tmp_path: Path) 
             "needs_initial_build": False,
         },
         {
-            "root": "F:/Projects/pending",
+            "root": "C:/Projects/pending",
             "file_count": 2,
             "build_count": 0,
             "failure_count": 0,
@@ -148,7 +148,7 @@ def test_daemon_health_reports_failing_pending_and_old_projects(tmp_path: Path) 
             "needs_initial_build": True,
         },
         {
-            "root": "F:/Projects/old",
+            "root": "C:/Projects/old",
             "file_count": 2,
             "build_count": 1,
             "failure_count": 0,
@@ -177,7 +177,7 @@ def test_daemon_health_reports_failing_pending_and_old_projects(tmp_path: Path) 
 
 def test_daemon_health_does_not_report_recovered_project_as_failing(tmp_path: Path) -> None:
     now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
-    recovered = _project("F:/Projects/recovered", failure_count=4)
+    recovered = _project("C:/Projects/recovered", failure_count=4)
     _write_status(tmp_path, _status("2026-06-23T11:59:30+00:00", projects=[recovered]))
 
     report = evaluate_daemon_health(
@@ -194,7 +194,7 @@ def test_daemon_health_does_not_report_recovered_project_as_failing(tmp_path: Pa
 
 def test_daemon_health_reports_last_error_as_active_failure_after_recent_success(tmp_path: Path) -> None:
     now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
-    failing = _project("F:/Projects/failing", failure_count=7, last_error="still broken")
+    failing = _project("C:/Projects/failing", failure_count=7, last_error="still broken")
     _write_status(tmp_path, _status("2026-06-23T11:59:30+00:00", projects=[failing]))
 
     report = evaluate_daemon_health(
@@ -203,7 +203,7 @@ def test_daemon_health_reports_last_error_as_active_failure_after_recent_success
         now=now,
     )
 
-    assert [project["root"] for project in report["projects"]["failing"]] == ["F:/Projects/failing"]
+    assert [project["root"] for project in report["projects"]["failing"]] == ["C:/Projects/failing"]
     assert report["projects"]["failing"][0]["failure_count"] == 7
     assert report["summary"]["failing_count"] == 1
     assert [issue["code"] for issue in report["errors"]] == ["project_failing"]
@@ -211,7 +211,7 @@ def test_daemon_health_reports_last_error_as_active_failure_after_recent_success
 
 def test_daemon_health_treats_empty_last_error_as_active_failure(tmp_path: Path) -> None:
     now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
-    failing = _project("F:/Projects/empty-error", failure_count=2, last_error="")
+    failing = _project("C:/Projects/empty-error", failure_count=2, last_error="")
     _write_status(tmp_path, _status("2026-06-23T11:59:30+00:00", projects=[failing]))
 
     report = evaluate_daemon_health(
@@ -228,7 +228,7 @@ def test_daemon_health_treats_empty_last_error_as_active_failure(tmp_path: Path)
 def test_daemon_health_reports_initial_pending_project_as_stale_but_not_failing(tmp_path: Path) -> None:
     now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
     pending = _project(
-        "F:/Projects/initial-pending",
+        "C:/Projects/initial-pending",
         build_count=0,
         last_success_at=None,
         needs_initial_build=True,
@@ -242,9 +242,9 @@ def test_daemon_health_reports_initial_pending_project_as_stale_but_not_failing(
     )
 
     assert report["projects"]["failing"] == []
-    assert [project["root"] for project in report["projects"]["pending"]] == ["F:/Projects/initial-pending"]
+    assert [project["root"] for project in report["projects"]["pending"]] == ["C:/Projects/initial-pending"]
     assert [project["root"] for project in report["projects"]["not_built_recently"]] == [
-        "F:/Projects/initial-pending"
+        "C:/Projects/initial-pending"
     ]
     assert report["summary"]["failing_count"] == 0
     assert report["summary"]["pending_count"] == 1
@@ -258,8 +258,8 @@ def test_daemon_health_reports_initial_pending_project_as_stale_but_not_failing(
 def test_daemon_health_text_matches_report_for_recovered_and_empty_error_projects(tmp_path: Path) -> None:
     now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
     projects = [
-        _project("F:/Projects/recovered", failure_count=4),
-        _project("F:/Projects/empty-error", failure_count=1, last_error=""),
+        _project("C:/Projects/recovered", failure_count=4),
+        _project("C:/Projects/empty-error", failure_count=1, last_error=""),
     ]
     _write_status(tmp_path, _status("2026-06-23T11:59:30+00:00", projects=projects))
 
@@ -271,11 +271,11 @@ def test_daemon_health_text_matches_report_for_recovered_and_empty_error_project
     text = format_health_text(report)
 
     assert report["summary"]["failing_count"] == 1
-    assert report["projects"]["failing"][0]["root"] == "F:/Projects/empty-error"
+    assert report["projects"]["failing"][0]["root"] == "C:/Projects/empty-error"
     assert "1 failing" in text
-    assert "project_failing: project build failing: F:/Projects/empty-error" in text
-    assert "F:/Projects/recovered" not in "\n".join(issue["message"] for issue in report["errors"])
-    assert "F:/Projects/recovered" not in text
+    assert "project_failing: project build failing: C:/Projects/empty-error" in text
+    assert "C:/Projects/recovered" not in "\n".join(issue["message"] for issue in report["errors"])
+    assert "C:/Projects/recovered" not in text
 
 
 def test_daemon_health_text_top_line_is_unambiguous_ok(tmp_path: Path) -> None:
@@ -296,7 +296,7 @@ def test_daemon_health_text_top_line_is_unambiguous_ok(tmp_path: Path) -> None:
 
 def test_daemon_health_text_counts_issues_and_groups_repeated_warning_codes(tmp_path: Path) -> None:
     now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
-    projects = [_project(f"F:/Projects/p{i}", build_count=0) for i in range(7)]
+    projects = [_project(f"C:/Projects/p{i}", build_count=0) for i in range(7)]
     _write_status(tmp_path, _status("2026-06-23T11:59:30+00:00", projects=projects))
 
     report = evaluate_daemon_health(
@@ -319,7 +319,7 @@ def test_daemon_health_text_counts_issues_and_groups_repeated_warning_codes(tmp_
 
 def test_daemon_health_text_degraded_top_line_names_counts(tmp_path: Path) -> None:
     now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
-    projects = [_project("F:/Projects/broken", last_error="boom", failure_count=3)]
+    projects = [_project("C:/Projects/broken", last_error="boom", failure_count=3)]
     _write_status(tmp_path, _status("2026-06-23T11:59:30+00:00", projects=projects))
 
     report = evaluate_daemon_health(
@@ -335,30 +335,30 @@ def test_daemon_health_text_degraded_top_line_names_counts(tmp_path: Path) -> No
     assert "error" in first_line
     assert "attention required" not in text
     # A single occurrence of a code keeps the flat one-line form.
-    assert "project_failing: project build failing: F:/Projects/broken" in text
+    assert "project_failing: project build failing: C:/Projects/broken" in text
 
 
 def test_daemon_health_keeps_pending_and_stale_classification_independent(tmp_path: Path) -> None:
     now = datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc)
     projects = [
         _project(
-            "F:/Projects/pending-by-flag",
+            "C:/Projects/pending-by-flag",
             build_count=2,
             needs_initial_build=True,
         ),
-        _project("F:/Projects/pending-by-count", build_count=0),
+        _project("C:/Projects/pending-by-count", build_count=0),
         _project(
-            "F:/Projects/old-recovered",
+            "C:/Projects/old-recovered",
             failure_count=3,
             last_success_at="2026-06-20T12:00:00+00:00",
         ),
         _project(
-            "F:/Projects/missing-success-recovered",
+            "C:/Projects/missing-success-recovered",
             failure_count=5,
             last_success_at=None,
         ),
         _project(
-            "F:/Projects/missing-success-failing",
+            "C:/Projects/missing-success-failing",
             failure_count=2,
             last_success_at=None,
             last_error="current error",
@@ -373,16 +373,16 @@ def test_daemon_health_keeps_pending_and_stale_classification_independent(tmp_pa
     )
 
     assert [project["root"] for project in report["projects"]["failing"]] == [
-        "F:/Projects/missing-success-failing"
+        "C:/Projects/missing-success-failing"
     ]
     assert [project["root"] for project in report["projects"]["pending"]] == [
-        "F:/Projects/pending-by-flag",
-        "F:/Projects/pending-by-count",
+        "C:/Projects/pending-by-flag",
+        "C:/Projects/pending-by-count",
     ]
     assert [project["root"] for project in report["projects"]["not_built_recently"]] == [
-        "F:/Projects/old-recovered",
-        "F:/Projects/missing-success-recovered",
-        "F:/Projects/missing-success-failing",
+        "C:/Projects/old-recovered",
+        "C:/Projects/missing-success-recovered",
+        "C:/Projects/missing-success-failing",
     ]
     assert report["summary"]["failing_count"] == 1
     assert report["summary"]["pending_count"] == 2
@@ -468,7 +468,7 @@ def test_daemon_health_rejects_invalid_project_counts(
     field: str,
     value: object,
 ) -> None:
-    project = _project("F:/Projects/secret-sentinel")
+    project = _project("C:/Projects/secret-sentinel")
     project[field] = value
     _write_status(tmp_path, _status("2026-06-23T12:00:00+00:00", projects=[project]))
 
@@ -502,7 +502,7 @@ def test_daemon_health_rejects_invalid_project_field_types(
     field: str,
     value: object,
 ) -> None:
-    project = _project("F:/Projects/private")
+    project = _project("C:/Projects/private")
     project[field] = value
     _write_status(tmp_path, _status("2026-06-23T12:00:00+00:00", projects=[project]))
 
@@ -520,7 +520,7 @@ def test_daemon_health_invalid_project_count_falls_back_to_valid_projects(
     tmp_path: Path,
     project_count: object,
 ) -> None:
-    payload = _status("2026-06-23T12:00:00+00:00", projects=[_project("F:/Projects/valid")])
+    payload = _status("2026-06-23T12:00:00+00:00", projects=[_project("C:/Projects/valid")])
     payload["project_count"] = project_count
     _write_status(tmp_path, payload)
 
@@ -534,9 +534,9 @@ def test_daemon_health_invalid_project_count_falls_back_to_valid_projects(
 
 
 def test_daemon_health_mixed_schema_classifies_only_valid_projects_and_formats_safely(tmp_path: Path) -> None:
-    secret = "F:/Projects/DO-NOT-LEAK"  # noqa: S105 -- redaction sentinel, not a credential
+    secret = "C:/Projects/DO-NOT-LEAK"  # noqa: S105 -- redaction sentinel, not a credential
     projects = [
-        _project("F:/Projects/good", last_error="failed"),
+        _project("C:/Projects/good", last_error="failed"),
         _project(secret, build_count="bad"),
         "not-a-project",
     ]
@@ -552,7 +552,7 @@ def test_daemon_health_mixed_schema_classifies_only_valid_projects_and_formats_s
     text = format_health_text(report)
 
     assert report["ok"] is False
-    assert [project["root"] for project in report["projects"]["failing"]] == ["F:/Projects/good"]
+    assert [project["root"] for project in report["projects"]["failing"]] == ["C:/Projects/good"]
     assert report["summary"]["project_count"] == 3
     assert len([issue for issue in report["errors"] if issue["code"] == "status_schema_invalid"]) == 2
     assert secret not in json.dumps(report)
@@ -561,7 +561,7 @@ def test_daemon_health_mixed_schema_classifies_only_valid_projects_and_formats_s
 
 def test_daemon_health_schema_issue_cap_does_not_skip_later_valid_projects(tmp_path: Path) -> None:
     invalid_projects = [None] * 25
-    valid = _project("F:/Projects/later-valid", last_error="failed")
+    valid = _project("C:/Projects/later-valid", last_error="failed")
     payload = _status("2026-06-23T12:00:00+00:00")
     payload["projects"] = [*invalid_projects, valid]
     payload["project_count"] = len(invalid_projects) + 1
@@ -574,15 +574,15 @@ def test_daemon_health_schema_issue_cap_does_not_skip_later_valid_projects(tmp_p
 
     schema_issues = [issue for issue in report["errors"] if issue["code"] == "status_schema_invalid"]
     assert len(schema_issues) == 20
-    assert [project["root"] for project in report["projects"]["failing"]] == ["F:/Projects/later-valid"]
+    assert [project["root"] for project in report["projects"]["failing"]] == ["C:/Projects/later-valid"]
 
 
 def test_daemon_health_bounds_project_processing_and_category_details(tmp_path: Path) -> None:
     projects = [
-        _project(f"F:/Projects/failing-{index}", last_error="failed")
+        _project(f"C:/Projects/failing-{index}", last_error="failed")
         for index in range(1_100)
     ]
-    projects.append(_project("F:/Projects/after-cap", last_error="must-not-be-processed"))
+    projects.append(_project("C:/Projects/after-cap", last_error="must-not-be-processed"))
     payload = _status("2026-06-23T12:00:00+00:00", projects=projects)
     _write_status(tmp_path, payload)
 
@@ -606,9 +606,9 @@ def test_daemon_health_rejects_oversized_or_controlled_project_strings_without_l
     secret = "SECRET-OVERSIZED-" + ("X" * 10_000)
     projects = [
         _project(secret, last_error="failed"),
-        _project("F:/Projects/control\nINJECT", last_error="failed"),
-        _project("F:/Projects/error", last_error=secret),
-        _project("F:/Projects/time", last_success_at=secret),
+        _project("C:/Projects/control\nINJECT", last_error="failed"),
+        _project("C:/Projects/error", last_error=secret),
+        _project("C:/Projects/time", last_success_at=secret),
     ]
     _write_status(tmp_path, _status("2026-06-23T12:00:00+00:00", projects=projects))
 
@@ -786,7 +786,7 @@ def test_daemon_health_rejects_unicode_control_and_format_project_strings(
     spoof: str,
     field: str,
 ) -> None:
-    project = _project("F:/Projects/safe")
+    project = _project("C:/Projects/safe")
     project[field] = f"safe{spoof}forged"
     _write_status(tmp_path, _status("2026-06-23T12:00:00+00:00", projects=[project]))
 

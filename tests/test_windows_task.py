@@ -96,10 +96,10 @@ def test_query_daemon_task_parses_csv(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def fake_run(cmd, capture_output, text, check):
         assert cmd[:3] == [str(system_program("schtasks.exe")), "/Query", "/TN"]
-        stdout = '"TaskName","Status","Task To Run"\n"\\GraphiteDaemon-FProjects","Ready","graphite daemon F:\\Projects"\n'
+        stdout = '"TaskName","Status","Task To Run"\n"\\GraphiteDaemon-CProjects","Ready","graphite daemon C:\\Projects"\n'
         return subprocess.CompletedProcess(cmd, 0, stdout, "")
 
-    result = query_daemon_task("GraphiteDaemon-FProjects", run=fake_run)
+    result = query_daemon_task("GraphiteDaemon-CProjects", run=fake_run)
 
     assert result["exists"] is True
     assert result["task"]["Status"] == "Ready"

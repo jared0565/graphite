@@ -42,10 +42,10 @@ def test_active_projects_are_reported(tmp_path: Path) -> None:
         "updated_at": "2026-07-28T09:00:00+00:00",
         "status": "ok",
         "projects": [],
-        "active_projects": ["F:\\Projects\\aramid", "F:\\Projects\\graphite"],
+        "active_projects": ["C:\\Projects\\aramid", "C:\\Projects\\graphite"],
     })
 
-    assert report["active_projects"] == ["F:\\Projects\\aramid", "F:\\Projects\\graphite"]
+    assert report["active_projects"] == ["C:\\Projects\\aramid", "C:\\Projects\\graphite"]
 
 
 def test_missing_active_projects_defaults_to_empty(tmp_path: Path) -> None:
@@ -66,7 +66,7 @@ def test_nested_repo_warning_is_gone(tmp_path: Path) -> None:
         "status": "ok",
         "projects": [],
         "active_projects": [],
-        "unsupervised_nested_repos": ["F:\\Projects\\demo\\worker"],
+        "unsupervised_nested_repos": ["C:\\Projects\\demo\\worker"],
     })
 
     codes = {w["code"] for w in report.get("warnings", [])}

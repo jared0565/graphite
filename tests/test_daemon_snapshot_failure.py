@@ -267,7 +267,7 @@ def test_a_status_file_without_the_key_is_still_readable(tmp_path: Path) -> None
         "updated_at": "2026-10-27T07:59:30+00:00",
         "project_count": 1,
         "projects": [{
-            "root": "F:/Projects/app",
+            "root": "C:/Projects/app",
             "file_count": 2,
             "build_count": 1,
             "failure_count": 0,
@@ -299,7 +299,7 @@ def test_a_malformed_snapshot_failures_key_is_reported_not_ignored(tmp_path: Pat
         "updated_at": "2026-10-27T07:59:30+00:00",
         "project_count": 1,
         "projects": [],
-        "snapshot_failures": {"root": "F:/Projects/app"},
+        "snapshot_failures": {"root": "C:/Projects/app"},
     }
     (base / ".graphite-daemon").mkdir()
     (base / ".graphite-daemon" / "status.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -324,7 +324,7 @@ def test_a_snapshot_failure_without_a_reason_is_still_counted_and_named(
         "updated_at": "2026-10-27T07:59:30+00:00",
         "project_count": 1,
         "projects": [],
-        "snapshot_failures": [{"root": "F:/Projects/app", "error": "", "failed_at": "2026-10-27T07:59:00+00:00"}],
+        "snapshot_failures": [{"root": "C:/Projects/app", "error": "", "failed_at": "2026-10-27T07:59:00+00:00"}],
     }
     (base / ".graphite-daemon").mkdir()
     (base / ".graphite-daemon" / "status.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -336,7 +336,7 @@ def test_a_snapshot_failure_without_a_reason_is_still_counted_and_named(
 
     assert report["ok"] is False
     assert report["summary"]["failing_count"] == 1
-    assert [project["root"] for project in report["projects"]["failing"]] == ["F:/Projects/app"]
+    assert [project["root"] for project in report["projects"]["failing"]] == ["C:/Projects/app"]
     assert "project_snapshot_failed" in {issue["code"] for issue in report["errors"]}
 
 
@@ -350,7 +350,7 @@ def test_unknown_fields_in_a_snapshot_failure_are_not_leaked(tmp_path: Path) -> 
         "project_count": 1,
         "projects": [],
         "snapshot_failures": [{
-            "root": "F:/Projects/app",
+            "root": "C:/Projects/app",
             "error": SNAPSHOT_ERROR,
             "failed_at": "2026-10-27T07:59:00+00:00",
             "unknown_blob": secret,
