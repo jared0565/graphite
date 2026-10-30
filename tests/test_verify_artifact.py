@@ -34,6 +34,29 @@ _OTHER_DEVELOPER_PATH = "Z:" + "/Projects/graphite/src"
 _FOREIGN_HOME = "/home/" + "another-user/checkout"
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "Z:" + "/Projects/app",
+        "Z:" + "/Projects",
+        "Z:" + "/Users/" + "someone-else",
+        "Z:" + "\\\\Projects\\\\app",
+        "/d" + "/Projects/else",
+        "/home/" + "another-user/checkout",
+        "/Users/" + "someone-else/checkout",
+    ],
+)
+def test_the_rule_flags_every_spelling_of_a_developers_path(path: str) -> None:
+    """Each shape the rule knows, one arm each.
+
+    The shapes are the ones a source file actually writes: a plain drive
+    path, the escaped spelling a Python string literal uses, the MSYS
+    spelling, and the two POSIX homes. A rule with an unexercised branch is
+    a branch nobody has checked.
+    """
+    assert verify_artifact.developer_paths(path) == [path]
+
+
 def _write_archives(
     directory: Path,
     *,
@@ -152,6 +175,7 @@ def test_the_repository_s_own_examples_are_not_flagged() -> None:
         "C:\\Users\\someone\\private\\checkout",
         "/home/someone/checkout",
         "/USERS/ME/REPO/src",
+        "/c/Users/x",
     ]
 
     assert [text for text in examples if verify_artifact.developer_paths(text)] == []
