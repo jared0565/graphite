@@ -56,7 +56,12 @@ source changed.** → `engine_changed`: the extraction engine's identity moved
 with the upgrade, so cached extraction is not trusted. → Rebuild. A running
 daemon does this itself on its next discovery cycle (#18); `check
 --ignore-engine` reports source drift only. `check` names the part that moved
-— `version`, `parsers` or the engine files — under `engine_delta` in `--json`.
+— `version`, `parsers` or the engine files — under `engine_delta` in `--json`,
+and the engine file that moved under `engine_files`. The repository's own
+file lists are empty on this path by construction: the fingerprint covers the
+engine's package directory and the diff covers the repository, so the file
+that moved is in neither — which is why the actor went unnamed in the 1.7.0
+gate.
 
 **The graph is missing a whole nested repository, or shows it stale.** →
 The daemon supervises project roots it discovered; a repository nested inside

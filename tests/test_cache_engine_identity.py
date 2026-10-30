@@ -90,12 +90,16 @@ def test_build_partitions_the_cache_by_engine_fingerprint(
     def _partitions() -> list[str]:
         return sorted(p.name for p in cache_dir.iterdir() if p.is_dir())
 
-    monkeypatch.setattr(cli, "engine_identity", lambda _v: _engine("a" * 64))
+    # The build computes the identity and the engine's file inventory in ONE
+    # pass, so the seam it goes through yields both. The subject of this test
+    # is unchanged -- the fingerprint still decides the partition -- but the
+    # name the build goes through is the one that now carries it.
+    monkeypatch.setattr(cli, "engine_identity_and_files", lambda _v: (_engine("a" * 64), {}))
     assert cli.main(["build", "."]) == 0
     first = _partitions()
 
     # Same repo, same cache_version, different engine. Nothing else changes.
-    monkeypatch.setattr(cli, "engine_identity", lambda _v: _engine("b" * 64))
+    monkeypatch.setattr(cli, "engine_identity_and_files", lambda _v: (_engine("b" * 64), {}))
     assert cli.main(["build", "."]) == 0
     second = _partitions()
 
