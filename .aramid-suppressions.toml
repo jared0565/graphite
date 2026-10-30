@@ -284,6 +284,15 @@ reason = "A test iterating a fixed, in-test list of table names to compare snaps
 #
 # Adjudicated 2026-10-27, against the ids in the whole-repo report of that
 # date.
+#
+# 2026-10-30: one id re-affirmed after its fingerprint moved --
+# `b12f0a15` replaced `3a24fb4d`, for the redaction sentinel in
+# `tests/test_daemon_health.py`. Same finding, same code, same reasoning;
+# nothing was newly adjudicated. The line changed because the sentinel's
+# value stopped naming one developer's projects root and started naming the
+# example root the README already uses -- the finding's id hashes the line's
+# CONTENT, so the acceptance had to move with it. The second redaction
+# sentinel in that file did not change, and its id did not move.
 
 [[suppress]]
 id = "0df35f92e93a59cc2c90b92db9bfe3d580333b13caba99ba6ff04aa688222979"
@@ -293,7 +302,7 @@ path = "tests/test_channel_core.py"
 reason = "A `# noqa` hiding ruff S102 (use of exec) in a test, where the rule fires on the very thing the test is about: the test compiles the commit-msg hook's embedded Python and runs it, because that hook runs under -I and cannot import graphite, so its own git lookup has to be tested where it lives. The exec IS the test, and the code it runs is the hook's own source, not a credential or a shell. The marker is the narrowest possible scope -- the finding is on this line only -- and the inline comment already records why. This is aramid's record of the marker; the acceptance lives here, in a file that is diffed and reviewed, rather than only in a comment the reader may not reach."
 
 [[suppress]]
-id = "3a24fb4da6db8d005957c1b54ae68f538ec423b95d465a2c483ab7568e59c530"
+id = "b12f0a1543f5aad1133563af9a378f87f5d1c1e9d5fc61b2984a4047eb9f39c0"
 tool = "ruff-inline"
 rule = "inline-suppressed-block"
 path = "tests/test_daemon_health.py"

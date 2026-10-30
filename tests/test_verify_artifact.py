@@ -25,12 +25,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import verify_artifact  # noqa: E402
 
+# The planted paths are assembled from parts on purpose. This file ships in the
+# sdist and the release gate scans the sdist's content, so a literal
+# path-shaped string here would be exactly what the gate refuses. A detector's
+# own test data is the one place a detector cannot hold the thing it detects.
+_DEVELOPER_PATH = "F:" + "/Projects/app"
+_OTHER_DEVELOPER_PATH = "Z:" + "/Projects/graphite/src"
+_FOREIGN_HOME = "/home/" + "another-user/checkout"
+
 
 def _write_archives(
     directory: Path,
     *,
     wheel_members: dict[str, bytes],
-    sdist_members: tuple[str, ...] = ("graphite_code-0.2.1/PKG-INFO",),
+    sdist_members: dict[str, bytes] | None = None,
     prefix: str = "graphite_code",
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
@@ -38,10 +46,11 @@ def _write_archives(
         for name, blob in wheel_members.items():
             archive.writestr(name, blob)
     with tarfile.open(directory / f"{prefix}-0.2.1.tar.gz", "w:gz") as archive:
-        for name in sdist_members:
+        members = sdist_members if sdist_members is not None else {"graphite_code-0.2.1/PKG-INFO": b""}
+        for name, blob in members.items():
             info = tarfile.TarInfo(name)
-            info.size = 0
-            archive.addfile(info, io.BytesIO(b""))
+            info.size = len(blob)
+            archive.addfile(info, io.BytesIO(blob))
 
 
 def _clean_members() -> dict[str, bytes]:
@@ -74,6 +83,78 @@ def test_a_developer_path_in_the_content_is_caught(tmp_path: Path) -> None:
     problems = verify_artifact.verify(tmp_path)
 
     assert any("names the build machine" in p for p in problems), problems
+
+
+def test_a_developer_path_in_the_sdist_content_is_caught(tmp_path: Path) -> None:
+    """The gap this closes: the gate scanned the WHEEL's content and the
+    sdist's member NAMES, and never the sdist's content.
+
+    The sdist is the archive that carries the tests and the scripts, so it is
+    the one where a developer's path actually shipped -- ten members of the
+    1.8.0 sdist named the build machine, and the gate passed them.
+    """
+    _write_archives(
+        tmp_path,
+        wheel_members=_clean_members(),
+        sdist_members={
+            "graphite_code-0.2.1/PKG-INFO": b"",
+            "graphite_code-0.2.1/tests/test_daemon_health.py": b'root = "' + _DEVELOPER_PATH.encode() + b'"\n',
+        },
+    )
+
+    problems = verify_artifact.verify(tmp_path)
+
+    assert any("sdist:" in p and "developer's machine" in p for p in problems), problems
+
+
+def test_a_developer_path_in_the_wheel_content_is_caught_by_the_shape_rule(
+    tmp_path: Path,
+) -> None:
+    """The shape rule, on the artifact it is there to protect. A path the
+    running machine has never seen is still a path from a machine."""
+    members = _clean_members()
+    members["graphite/module.py"] = b'ROOT = "' + _DEVELOPER_PATH.encode() + b'"\n'
+    _write_archives(tmp_path, wheel_members=members)
+
+    problems = verify_artifact.verify(tmp_path)
+
+    assert any("wheel:" in p and "developer's machine" in p for p in problems), problems
+
+
+def test_the_developer_path_rule_does_not_depend_on_the_running_machine() -> None:
+    """Why the rule matches a SHAPE rather than a list of paths.
+
+    The needles derived from `ROOT` describe the machine doing the checking,
+    and the gate runs on a CI runner -- where they are the runner's own POSIX
+    paths and can never match a path baked into the source on a developer's
+    Windows box. A rule that only sees its own machine's spelling of a path is
+    a local check, not a release gate.
+    """
+    assert verify_artifact.developer_paths("run it against " + _OTHER_DEVELOPER_PATH) == [
+        _OTHER_DEVELOPER_PATH
+    ]
+    assert verify_artifact.developer_paths("run it against " + _FOREIGN_HOME) == [
+        _FOREIGN_HOME
+    ]
+
+
+def test_the_repository_s_own_examples_are_not_flagged() -> None:
+    """The control in the other direction.
+
+    A rule that flagged the project's own examples would refuse the project's
+    own artifacts, which is why the example roots are an explicit vocabulary
+    rather than an open-ended judgement about every path.
+    """
+    examples = [
+        "graphite daemon C:\\Projects --once",
+        "graphite init C:/Projects/MyApp",
+        "Validate package: node C:/Users/<user>/atlas/Codex/.codex_state/x",
+        "C:\\Users\\someone\\private\\checkout",
+        "/home/someone/checkout",
+        "/USERS/ME/REPO/src",
+    ]
+
+    assert [text for text in examples if verify_artifact.developer_paths(text)] == []
 
 
 def test_an_excluded_path_is_caught(tmp_path: Path) -> None:
@@ -150,5 +231,5 @@ def test_the_needles_are_derived_not_hardcoded() -> None:
         "the parent directory is where the shipped developer path actually was"
     )
     assert all(len(n) > 3 for n in needles), "a short needle would match everything"
-    # The MSYS spelling (/f/Projects/...) is a real form on this platform.
+    # The MSYS spelling of a drive path is a real form on this platform.
     assert any(re.match(r"^/[a-z]/", n) for n in needles) or sys.platform != "win32"

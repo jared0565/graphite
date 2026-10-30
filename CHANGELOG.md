@@ -15,6 +15,48 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+**The publish gate now scans the SDIST's content, not just the wheel's.**
+`scripts/verify_artifact.py` checked the wheel's bytes and the sdist's member
+*NAMES*; the sdist's content was never read. That is where the leak was: the
+sdist is the archive that carries the tests and the scripts, and the 1.8.0
+sdist already shipped ten members naming the build machine, all of which the
+gate passed.
+
+**⇒⇒⇒ ⇒⇒⇒⇒ THE NEEDLE LIST HAD TO CHANGE DIRECTION, NOT SIZE.** The check
+derived its needles from `ROOT` and `Path.home()` — the machine doing the
+checking. The gate runs on a CI runner, where those needles are the runner's
+own POSIX paths, so in CI they could never match a path baked into the source
+on a developer's Windows box. **A rule that only sees its own machine's
+spelling of a path is a local check, not a release gate.** The rule now
+matches the SHAPE of such a path instead, and therefore fires on a CI runner
+as well as locally.
+
+**⇒⇒⇒ ⇒⇒⇒⇒ ⇒⇒⇒⇒ WHAT THE SHAPE CANNOT DISTINGUISH, AND WHAT DOES.** The
+repository's own examples have the same shape as the leak: a bare projects
+root in the README is indistinguishable from the maintainer's. The rule
+therefore carries an explicit vocabulary of the roots the repository writes as
+EXAMPLES — the README's example projects root and the placeholder user
+profiles the fixtures use — and flags a path of the same shape under any
+other root. The vocabulary is closed and short; a new example path has to be
+registered, which is the gate doing its job.
+
+**⇒⇒⇒ ⇒⇒⇒⇒ ⇒⇒⇒⇒ ⇒⇒⇒⇒ ⇒⇒⇒⇒ THE SHIPPED TREES ARE ALSO CLEAN NOW.** The
+source distribution named the maintainer's own projects root in **63 places
+across 13 members**: fixture data (which moved to the example root the README
+already uses), sentences that quoted the literal (which now say what it was
+without spelling it), the release notes for 1.8.1 (which described the leak
+while spelling it), and one entry in the history of this file. The tree check
+that enforces it — `tests/test_hardening.py` — now covers everything the
+sdist ships rather than `src/` alone, and it imports the same rule the
+release gate uses, so the two cannot drift apart.
+
+**Known, and still open: `DEFAULT_TASK_NAME` in `src/graphite/windows_task.py`
+is `GraphiteDaemon-FProjects`** — the maintainer's projects root with the
+separator stripped, in the shipped wheel. A path-shaped rule cannot see it,
+because it is a NAME. Changing the default renames the scheduled task and the
+startup launcher that existing installations already have, so it is a
+user-visible change rather than a hygiene fix, and it is not made here.
+
 ## [1.8.1] — 2026-10-29
 
 A patch release: two fixes, and no change to any stable surface. The identity
@@ -72,12 +114,9 @@ broken; it was not.
 **Known, and not fixed here.** The publish gate
 (`scripts/verify_artifact.py`) scans the **wheel's** content for absolute
 paths that name the build machine, and never the **sdist's**. The 1.8.0 sdist
-already shipped ten members whose content names it — `F:\Projects`, which is
-graphite's own legacy default projects root — and the gate passes those
-artifacts. 1.8.1's sdist ships one more such member (`scripts/`), because the
-suite needs it. Closing the gap is not a one-line change: the needles overlap
-the product's documented default, so a content check over the sdist would fail
-on shipped test files that legitimately mention it. Filed as **#135**.
+already shipped ten members whose content named the maintainer's own projects
+root, and the gate passed those artifacts. 1.8.1's sdist ships one more such
+member (`scripts/`), because the suite needs it. Filed as **#135**.
 
 ## [1.8.0] — 2026-10-29
 
@@ -1711,7 +1750,7 @@ Four kinds of search are now refused that used to pass:
 - `cd docs && grep -rn <symbol> ..`, where `..` is the repository root. The
   path was resolved against the root itself and read as leading outside.
 - On Windows, a Git Bash drive path into the repository, such as
-  `grep -rn <symbol> /f/Projects/repo/src`. Read by Python it was a path on
+  `grep -rn <symbol> <drive-path>/repo/src`. Read by Python it was a path on
   the current drive. The Bash tool's `/c/...` paths are now read as the drive.
 - A search rooted at a directory the repository lies under, such as
   `grep -rn <symbol> ..`. It was read as a search outside the repository,

@@ -5,6 +5,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,10 @@ from graphite.graph import build_graph
 from graphite.ingest import IngestError, collect_files
 import graphite.git as git_module
 import graphite.ingest as ingest_module
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+import verify_artifact  # noqa: E402
 
 
 def _write(path: Path, text: str) -> None:
@@ -1074,22 +1079,39 @@ def test_no_shipped_source_hardcodes_a_developer_machine_path() -> None:
     A text scan rather than an `ast` walk over string constants, deliberately: a
     developer path in a COMMENT ships in the sdist exactly the same way, so
     restricting this to literals would leave the archive just as dirty.
-    """
-    import re
 
-    machine_path = re.compile(
-        r"[A-Za-z]:[\\/](?:Users|Projects)[\\/][^\s\"'`)]*"  # C:\Users\..., F:/Projects/...
-        r"|/(?:home|Users)/[a-z][\w.-]*",                     # /home/..., /Users/...
-        re.IGNORECASE,
-    )
+    It covers everything the SDIST ships, not just `src/`. The archive carries
+    the tests and the scripts as well, and the release gate applies this same
+    rule to the built artifacts -- one implementation, imported from
+    `scripts/verify_artifact.py`, so the tree check and the artifact check
+    cannot drift apart and leave the archive dirty while the tree reads clean.
+    """
+    import tomllib
+
+    root = Path(__file__).parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    include = project["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
+
+    shipped: list[Path] = []
+    for item in include:
+        candidate = root / str(item).lstrip("/")
+        if candidate.is_dir():
+            shipped.extend(
+                path
+                for path in sorted(candidate.rglob("*"))
+                if path.is_file() and "__pycache__" not in path.parts
+            )
+        elif candidate.is_file():
+            shipped.append(candidate)
 
     offenders = []
-    for path in sorted(Path("src").rglob("*.py")) + sorted(Path("src").rglob("*.mjs")):
-        for number, line in enumerate(
-            path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
-        ):
-            for found in machine_path.finditer(line):
-                offenders.append(f"{path}:{number}: {found.group(0)}")
+    for path in shipped:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for found in verify_artifact.developer_paths(text):
+            offenders.append(f"{path.relative_to(root).as_posix()}: {found}")
 
     assert not offenders, (
         "shipped source hardcodes a path from one developer's machine; it is "

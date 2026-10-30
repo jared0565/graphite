@@ -75,9 +75,13 @@ def test_graphite_doc_uses_shell_agnostic_invocation(tmp_path: Path) -> None:
 
     assert "python -m graphite check ." in doc
     assert "python -m graphite context <target-file>" in doc
-    # No machine-specific install path may leak into project files.
+    # No machine-specific install path may leak into project files. The
+    # guard is the SHAPE rather than one literal: the legacy default is
+    # gone, and what must never appear is any absolute path at all.
+    import re
+
     assert "_tools" not in doc
-    assert "F:\\Projects" not in doc
+    assert not re.search(r"[A-Za-z]:[\\/]", doc), doc
 
 
 def test_init_writes_versioned_managed_markers_and_is_idempotent(tmp_path: Path) -> None:

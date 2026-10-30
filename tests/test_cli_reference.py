@@ -150,7 +150,8 @@ def test_every_argument_declares_help() -> None:
 def test_cli_reference_carries_no_machine_path(monkeypatch) -> None:  # noqa: ANN001 - pytest fixture
     """The page is committed, so a default that came from the environment
     would publish one machine's layout as if it were the tool's. Measured:
-    the first cut rendered `F:\\Projects` and failed on every CI leg. The
+    the first cut rendered the maintainer's own projects root and failed on
+    every CI leg. The
     rendering must not change with GRAPHITE_PROJECTS_ROOT, and must never
     contain an absolute path."""
     import os

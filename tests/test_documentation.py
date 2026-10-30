@@ -1873,7 +1873,7 @@ def machine_local_path_offences(root: Path = ROOT, home: Path | None = None) -> 
 def test_shipped_docs_never_name_the_checkout_they_ship_from() -> None:
     """A document that names where this clone happens to live is broken for everyone else.
 
-    `README.md` shipped `pip install -e F:/Projects/graphite` as its ONLY
+    `README.md` shipped a `pip install -e <this checkout>` as its ONLY
     install instruction -- correct on exactly one computer -- and `README.md` is
     also the packaging `readme`, so it is the front page wherever this project
     is distributed.

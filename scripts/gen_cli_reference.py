@@ -33,12 +33,13 @@ def _default(action: argparse.Action) -> str:
         return ""
     rendered = str(action.default)
     # Defaults derived from the environment are the machine's, not the
-    # tool's. The first cut of this page rendered `F:\Projects` -- the value
-    # of GRAPHITE_PROJECTS_ROOT on the maintainer's box -- and the lockstep
-    # test then failed on every CI leg, where the same default is `.`. Name
-    # the rule, never the value. Keyed on the DESTINATION, not the value: with
-    # the variable unset the value is `.`, which is also the honest default
-    # of every plain `path` argument and must keep rendering as `.`.
+    # tool's. The first cut of this page rendered the maintainer's own
+    # projects root -- the value of GRAPHITE_PROJECTS_ROOT on the box it
+    # was written on -- and the lockstep test then failed on every CI leg,
+    # where the same default is `.`. Name the rule, never the value. Keyed
+    # on the DESTINATION, not the value: with the variable unset the value
+    # is `.`, which is also the honest default of every plain `path`
+    # argument and must keep rendering as `.`.
     if action.dest in _ENVIRONMENT_DERIVED_DESTS or Path(rendered).is_absolute():
         return " (default: the projects root -- `GRAPHITE_PROJECTS_ROOT`, else the current directory)"
     return f" (default: `{rendered}`)"

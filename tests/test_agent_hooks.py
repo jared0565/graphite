@@ -1367,7 +1367,7 @@ def test_a_parent_path_after_cd_no_longer_reads_as_outside_the_repository(litera
     ("text", "msys", "expected"),
     [
         ("/c/Users/x", True, "C:/Users/x"),
-        ("/F/Projects", True, "F:/Projects"),
+        ("/d/work", True, "D:/work"),
         ("/c", True, "C:/"),
         ("/cache/x", True, "/cache/x"),  # a directory named `cache`, not drive C
         ("src/pkg", True, "src/pkg"),

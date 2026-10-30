@@ -68,7 +68,7 @@ def test_default_daemon_base_finds_the_directory_holding_the_daemon_state(
 ) -> None:
     """The base is discovered by the marker it exists to find, not by its name.
 
-    It was matched against the literal `f:/projects` -- the maintainer's own
+    It was matched against a literal projects root -- the maintainer's own
     layout compiled into shipped code, so the daemon was discoverable on exactly
     one machine and the wheel carried an absolute developer path (RELEASING.md
     forbids one in the archives). The value is only ever used to reach
@@ -262,21 +262,22 @@ def test_bootstrap_ci_masks_terminal_capability(tmp_path, capsys, monkeypatch) -
 def test_no_machine_specific_path_is_consulted_when_the_env_is_unset(monkeypatch) -> None:
     r"""`default_projects_root()` welded one machine's drive layout into the tool.
 
-    The old body probed a hardcoded `F:/Projects` and returned it when it
+    The old body probed a hardcoded projects root and returned it when it
     existed. Three consequences, in rising order of seriousness:
 
     * `--help` advertised that path, and README used it as the example
       throughout -- and README is the packaging `readme`, so the maintainer's
       layout rendered on PyPI;
-    * any Windows user who happens to have `F:\Projects` would silently get a
-      directory that is not theirs, with no message saying so;
+    * any Windows user who happens to have that same directory would
+      silently get one that is not theirs, with no message saying so;
     * `channel_root()` derives from this, so the agent channel's location was
       decided by whether one specific drive letter existed.
 
-    The check is deliberately NOT "does F:/Projects exist on this host" -- that
-    passes vacuously on CI, where it never exists, and would only bite on the
-    one machine it was written for. Instead every `exists()` is forced True: the
-    old body then returns the hardcoded path and this fails, on any host.
+    The check is deliberately NOT "does that legacy root exist on this host"
+    -- that passes vacuously on CI, where it never exists, and would only
+    bite on the one machine it was written for. Instead every `exists()` is
+    forced True: the old body then returns the hardcoded path and this
+    fails, on any host.
     """
     from pathlib import Path as _Path
 
