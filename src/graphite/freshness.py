@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .engine_identity import EngineIdentityError, engine_identity
+from .engine_identity import EngineIdentityError, engine_identity_and_files
 from .ingest import collect_files
 
 _DOCTOR_FILE_LIMIT = 10_000
@@ -60,6 +60,31 @@ def engine_identity_delta(previous: Any, current: dict[str, Any]) -> dict[str, A
         "previous": {key: previous.get(key) for key in changed},
         "current": {key: current.get(key) for key in changed},
     }
+
+
+def engine_file_diff(recorded: Any, current: dict[str, str]) -> dict[str, Any] | None:
+    """Which of the engine's own files moved, when the manifest recorded them.
+
+    `engine_changed` says the engine moved and nothing else, and the
+    repository's added/changed/removed lists are empty BY CONSTRUCTION on that
+    path -- the file diff is never computed. So the actor stayed unnamed: the
+    1.7.0 pre-push gate reported `engine_changed` on two tests in two workers
+    and could say nothing about what had moved.
+
+    The manifest records the engine's file inventory, so the difference names
+    the file. `None` means the question cannot be answered -- a manifest
+    written before the inventory was recorded -- and it is reported as absent
+    rather than as "nothing changed", which would be a different and false
+    claim.
+    """
+    if not isinstance(recorded, dict) or not recorded:
+        return None
+    added = sorted(set(current) - set(recorded))
+    removed = sorted(set(recorded) - set(current))
+    changed = sorted(
+        name for name in set(current) & set(recorded) if current[name] != recorded[name]
+    )
+    return {"added": added, "changed": changed, "removed": removed}
 
 
 def graph_engine_changed(cfg: Config, current_engine: dict[str, Any]) -> bool:
@@ -127,7 +152,7 @@ def check_graph_freshness(
         raise FreshnessLimitError("freshness file limit exceeded")
     if not ignore_engine:
         try:
-            current_engine = engine_identity(cfg.cache_version)
+            current_engine, current_files = engine_identity_and_files(cfg.cache_version)
         except EngineIdentityError:
             return {
                 "stale": True,
@@ -141,6 +166,7 @@ def check_graph_freshness(
                 "stale": True,
                 "reason": "engine_changed",
                 "engine_delta": engine_identity_delta(previous.get("engine"), current_engine),
+                "engine_files": engine_file_diff(previous.get("engine_files"), current_files),
                 "added": [],
                 "changed": [],
                 "removed": [],

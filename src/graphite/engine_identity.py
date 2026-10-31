@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import stat
+from collections.abc import Iterator
 from importlib import metadata
 from pathlib import Path
 from typing import Final
@@ -172,7 +173,36 @@ def _parser_record(name: str) -> str:
         return f"{name}=absent"
 
 
-def engine_identity(
+def _read_engine_files(
+    root: Path,
+    *,
+    max_files: int,
+    max_file_bytes: int,
+    max_total_bytes: int,
+) -> Iterator[tuple[str, bytes]]:
+    """Every engine source file, in a stable order, with the byte budget enforced.
+
+    One pass, so that the fingerprint and the file inventory cost what the
+    fingerprint alone used to cost: reading the package twice would double
+    every build.
+    """
+    paths = _collect_engine_files(root, max_files=max_files)
+    inventory: list[tuple[str, Path]] = [(_contained_relative(path, root), path) for path in paths]
+    total_bytes = 0
+    for relative, path in sorted(inventory, key=lambda item: item[0]):
+        try:
+            data = _read_stable_file(path, root, max_file_bytes)
+        except EngineIdentityError:
+            raise
+        except OSError as exc:
+            raise EngineIdentityError("engine_file_unreadable") from exc
+        total_bytes += len(data)
+        if total_bytes > max_total_bytes:
+            raise EngineIdentityError("engine_total_too_large")
+        yield relative, data
+
+
+def engine_identity_and_files(
     cache_version: str,
     *,
     package_root: Path | None = None,
@@ -181,8 +211,16 @@ def engine_identity(
     max_files: int = MAX_ENGINE_FILES,
     max_file_bytes: int = MAX_ENGINE_FILE_BYTES,
     max_total_bytes: int = MAX_ENGINE_TOTAL_BYTES,
-) -> dict[str, str]:
-    """Return a public, path-free identity for trusted packaged engine files."""
+) -> tuple[dict[str, str], dict[str, str]]:
+    """The engine's identity, and the inventory of the files it covers.
+
+    The fingerprint says THAT the engine changed; the inventory says WHICH file
+    changed. The fingerprint covers the PACKAGE directory, so a source edit
+    moves it without touching the repository being checked, while the
+    repository's file-level diff covers the REPOSITORY and so names nothing.
+    That asymmetry is why `check` reported `engine_changed` with empty
+    added/changed/removed lists and no actor -- the 1.7.0 gate hit exactly it.
+    """
     if isinstance(max_file_bytes, bool) or max_file_bytes <= 0:
         raise EngineIdentityError("engine_file_too_large")
     if isinstance(max_total_bytes, bool) or max_total_bytes <= 0:
@@ -207,7 +245,6 @@ def engine_identity(
         root = candidate_root.resolve(strict=True)
     except OSError as exc:
         raise EngineIdentityError("engine_root_invalid") from exc
-    paths = _collect_engine_files(root, max_files=max_files)
 
     header = {
         "cache_version": cache_version,
@@ -217,22 +254,78 @@ def engine_identity(
     }
     digest = hashlib.sha256()
     digest.update(json.dumps(header, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-    total_bytes = 0
-    inventory: list[tuple[str, Path]] = [(_contained_relative(path, root), path) for path in paths]
-    for relative, path in sorted(inventory, key=lambda item: item[0]):
-        try:
-            data = _read_stable_file(path, root, max_file_bytes)
-        except EngineIdentityError:
-            raise
-        except OSError as exc:
-            raise EngineIdentityError("engine_file_unreadable") from exc
-        total_bytes += len(data)
-        if total_bytes > max_total_bytes:
-            raise EngineIdentityError("engine_total_too_large")
+    files: dict[str, str] = {}
+    for relative, data in _read_engine_files(
+        root,
+        max_files=max_files,
+        max_file_bytes=max_file_bytes,
+        max_total_bytes=max_total_bytes,
+    ):
         encoded_name = relative.encode("utf-8")
         digest.update(len(encoded_name).to_bytes(4, "big"))
         digest.update(encoded_name)
         digest.update(len(data).to_bytes(8, "big"))
         digest.update(data)
+        files[relative] = hashlib.sha256(data).hexdigest()
 
-    return {**header, "fingerprint": digest.hexdigest()}
+    return {**header, "fingerprint": digest.hexdigest()}, files
+
+
+def engine_identity(
+    cache_version: str,
+    *,
+    package_root: Path | None = None,
+    parsers: str | None = None,
+    version: str | None = None,
+    max_files: int = MAX_ENGINE_FILES,
+    max_file_bytes: int = MAX_ENGINE_FILE_BYTES,
+    max_total_bytes: int = MAX_ENGINE_TOTAL_BYTES,
+) -> dict[str, str]:
+    """Return a public, path-free identity for trusted packaged engine files."""
+    identity, _ = engine_identity_and_files(
+        cache_version,
+        package_root=package_root,
+        parsers=parsers,
+        version=version,
+        max_files=max_files,
+        max_file_bytes=max_file_bytes,
+        max_total_bytes=max_total_bytes,
+    )
+    return identity
+
+
+def engine_file_inventory(
+    package_root: Path | None = None,
+    *,
+    max_files: int = MAX_ENGINE_FILES,
+    max_file_bytes: int = MAX_ENGINE_FILE_BYTES,
+    max_total_bytes: int = MAX_ENGINE_TOTAL_BYTES,
+) -> dict[str, str]:
+    """The engine's own source files, keyed by path relative to the package
+    root and valued by the hash of their bytes.
+
+    The fingerprint says THAT the engine changed. This says WHICH file changed,
+    and it is the only thing that can: the fingerprint covers the PACKAGE
+    directory, so a source edit moves it without touching the repository being
+    checked, while the file-level diff covers the REPOSITORY and so names
+    nothing. That asymmetry is why `check` reported `engine_changed` with empty
+    added/changed/removed lists and no actor -- the 1.7.0 gate hit exactly it.
+
+    Keys are relative and carry no absolute path, so an inventory can be
+    recorded in the manifest and in a diagnostic without disclosing where the
+    engine is installed.
+    """
+    candidate_root = package_root if package_root is not None else Path(__file__).parent
+    try:
+        root = candidate_root.resolve(strict=True)
+    except OSError as exc:
+        raise EngineIdentityError("engine_root_invalid") from exc
+    return {
+        relative: hashlib.sha256(data).hexdigest()
+        for relative, data in _read_engine_files(
+            root,
+            max_files=max_files,
+            max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes,
+        )
+    }

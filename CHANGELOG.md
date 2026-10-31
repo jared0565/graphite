@@ -15,6 +15,30 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Added
+
+**`check` now names the engine file that moved, not just the fact that the
+engine moved.** `engine_changed` reported that graphite's own engine had
+changed since the graph was built and listed no files — and that was
+structural, not an oversight: the engine's fingerprint covers the *package*
+directory while the file-level diff covers the *repository* being checked, so
+the file that moved was in neither list, and the repository's `added`,
+`changed` and `removed` were empty by construction. The 1.7.0 pre-push gate
+hit exactly this and could say nothing about what had moved.
+
+The build now records the engine's file inventory in the manifest, and
+`check --json` reports the difference as `engine_files`
+(`added`/`changed`/`removed`, relative to the engine's package root, so no
+absolute path is disclosed). The short form names the files too. When the
+manifest records no inventory — one written before this, or an engine that
+cannot be read — the answer is `null`, not an empty list: "no file changed"
+and "we do not know" are different claims.
+
+The engine's *fingerprint* is unchanged, byte for byte: this adds a record
+beside the identity, and no existing graph is invalidated by it. The inventory
+comes out of the pass the fingerprint already made, so the build does not read
+the package twice — measured at 127 ms per build before and after.
+
 ## [1.8.2] — 2026-10-30
 
 A patch release: one fix, and no change to any stable surface. What a source

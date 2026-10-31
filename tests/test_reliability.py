@@ -151,3 +151,8 @@ def test_build_manifest_records_engine_identity(tmp_path: Path, monkeypatch, cap
     # into engine_identity's return value (#52).
     assert "tree-sitter-python=" in manifest["engine"]["parsers"]
     assert_json_omits(Path(__file__).parents[1], manifest["engine"])
+    # The engine's file inventory is recorded beside the identity, so that a
+    # later `check` can name the file that moved. It is relative for the same
+    # reason the identity is path-free: a manifest is read by whoever holds it.
+    assert manifest["engine_files"]
+    assert_json_omits(Path(__file__).parents[1], manifest["engine_files"])

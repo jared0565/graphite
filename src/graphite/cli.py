@@ -42,7 +42,7 @@ from .daemon_health import HealthOptions, evaluate_daemon_health, format_health_
 from . import buildlock
 from .detach import spawn_detached
 from .doctor import format_doctor_text, run_doctor
-from .engine_identity import engine_identity
+from .engine_identity import engine_identity, engine_identity_and_files
 from .export.html import to_html as export_html
 from .export.json import build_bundle, to_json as export_json
 from .export.md import to_markdown as export_md
@@ -277,10 +277,18 @@ def _scan(args: argparse.Namespace, cfg: Config) -> tuple[dict[str, Any], list[A
 
     start = time.time()
     entries = collect_files(root, cfg)
+    # One pass over the engine's files yields both the identity and the
+    # inventory, so the inventory costs nothing beyond what the fingerprint
+    # already cost.
+    engine, engine_files = engine_identity_and_files(cfg.cache_version)
     manifest = {
         "root": root.name,
         "file_count": len(entries),
-        "engine": engine_identity(cfg.cache_version),
+        "engine": engine,
+        # The engine's own files, so a later `check` can name WHICH of them
+        # moved when the identity does. The fingerprint alone cannot: it says
+        # that something under the package directory changed and not what.
+        "engine_files": engine_files,
         "files": [
             {"rel_path": e.rel_path, "language": e.language, "size": e.size, "hash": e.content_hash}
             for e in entries
@@ -809,6 +817,29 @@ def _short_value(value: Any, limit: int = 12) -> str:
     return text if len(text) <= limit else text[:limit] + "..."
 
 
+def _print_engine_files(files: Any) -> None:
+    """Name the engine's own files that moved, when they are known.
+
+    `engine_changed` otherwise says only THAT the engine moved. The file
+    names are what a consumer can act on, and they are what the 1.7.0 gate
+    could not report.
+    """
+    if not isinstance(files, dict):
+        return
+    named: list[str] = []
+    for key in ("changed", "added", "removed"):
+        values = files.get(key)
+        if not isinstance(values, list):
+            continue
+        for name in values:
+            named.append(f"{key}: {name}")
+    if not named:
+        return
+    print("  engine files that moved:")
+    for line in named:
+        print(f"    {line}")
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
     # Below a repository's root there is no graph to be fresh or stale, and
@@ -855,6 +886,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         if reason == "engine_changed":
             print("  graphite was updated since this graph was built; rebuild to refresh")
             _print_engine_delta(status.get("engine_delta"))
+            _print_engine_files(status.get("engine_files"))
         for key in ("added", "changed", "removed"):
             if status.get(key):
                 print(f"  {key}: {', '.join(status[key])}")

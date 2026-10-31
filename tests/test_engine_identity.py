@@ -9,7 +9,7 @@ import pytest
 import graphite.engine_identity as engine_identity_module
 import graphite.freshness as freshness_module
 from graphite.config import Config
-from graphite.engine_identity import EngineIdentityError, engine_identity
+from graphite.engine_identity import EngineIdentityError, engine_file_inventory, engine_identity
 from graphite.freshness import check_graph_freshness
 from graphite.ingest import collect_files
 
@@ -44,6 +44,37 @@ def test_engine_identity_changes_when_trusted_source_changes(tmp_path: Path) -> 
     after = engine_identity("cache-v1", package_root=package, version="1.2.3")
 
     assert after["fingerprint"] != before["fingerprint"]
+
+
+def test_the_engine_file_inventory_names_the_files_and_their_bytes(tmp_path: Path) -> None:
+    """The fingerprint says THAT the engine moved; this says WHICH file.
+
+    The fingerprint covers the engine's package directory, so a source edit
+    moves it without touching the repository being checked -- and the
+    repository's file diff covers the repository, so it names nothing. That
+    asymmetry is why the 1.7.0 gate reported `engine_changed` with empty
+    file lists and no actor.
+    """
+    package = _package(tmp_path)
+
+    inventory = engine_file_inventory(package_root=package)
+
+    assert set(inventory) == {"__init__.py", "resolver.mjs"}
+    assert all(len(digest) == 64 for digest in inventory.values())
+    # Keys are relative: an inventory is recorded in a manifest, and a
+    # manifest is read by whoever holds it.
+    assert all(not name.startswith(("/", "\\")) for name in inventory)
+
+
+def test_the_engine_file_inventory_follows_the_bytes_of_one_file(tmp_path: Path) -> None:
+    package = _package(tmp_path)
+    inventory = engine_file_inventory(package_root=package)
+
+    (package / "__init__.py").write_text("VALUE = 2\n", encoding="utf-8")
+    after = engine_file_inventory(package_root=package)
+
+    assert after["__init__.py"] != inventory["__init__.py"]
+    assert after["resolver.mjs"] == inventory["resolver.mjs"]
 
 
 def test_engine_identity_is_independent_of_inventory_order(tmp_path: Path, monkeypatch) -> None:
@@ -217,6 +248,9 @@ def test_freshness_treats_legacy_manifest_as_engine_changed(tmp_path: Path) -> N
             "previous": None,
             "current": current,
         },
+        # No inventory was recorded either, so no file can be named -- and
+        # that is reported as absent rather than as "nothing changed".
+        "engine_files": None,
         "added": [],
         "changed": [],
         "removed": [],
@@ -251,13 +285,16 @@ def test_freshness_prioritizes_engine_mismatch_when_repository_is_unchanged(
     )
     monkeypatch.setattr(
         freshness_module,
-        "engine_identity",
-        lambda _cache_version: {
-            "version": "new",
-            "cache_version": cfg.cache_version,
-            "schema_version": "1",
-            "fingerprint": "1" * 64,
-        },
+        "engine_identity_and_files",
+        lambda _cache_version: (
+            {
+                "version": "new",
+                "cache_version": cfg.cache_version,
+                "schema_version": "1",
+                "fingerprint": "1" * 64,
+            },
+            {},
+        ),
     )
 
     result = check_graph_freshness(root, cfg)
@@ -270,6 +307,7 @@ def test_freshness_prioritizes_engine_mismatch_when_repository_is_unchanged(
             "previous": {"fingerprint": "0" * 64, "version": "old"},
             "current": {"fingerprint": "1" * 64, "version": "new"},
         },
+        "engine_files": None,
         "added": [],
         "changed": [],
         "removed": [],
@@ -306,7 +344,9 @@ def test_freshness_names_the_part_of_the_engine_that_moved(tmp_path: Path, monke
         "fingerprint": "a" * 64,
     }
     _seed_engine(root, output, {**current, "version": "1.0.0"})
-    monkeypatch.setattr(freshness_module, "engine_identity", lambda _cache_version: current)
+    monkeypatch.setattr(
+        freshness_module, "engine_identity_and_files", lambda _cache_version: (current, {})
+    )
 
     result = check_graph_freshness(root, cfg)
 
@@ -331,7 +371,9 @@ def test_freshness_carries_no_engine_delta_when_the_engine_did_not_move(tmp_path
         "fingerprint": "a" * 64,
     }
     _seed_engine(root, output, current)
-    monkeypatch.setattr(freshness_module, "engine_identity", lambda _cache_version: current)
+    monkeypatch.setattr(
+        freshness_module, "engine_identity_and_files", lambda _cache_version: (current, {})
+    )
 
     result = check_graph_freshness(root, cfg)
 

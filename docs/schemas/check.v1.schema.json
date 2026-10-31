@@ -21,6 +21,16 @@
         "current": {"type": "object", "additionalProperties": true}
       }
     },
+    "engine_files": {
+      "type": ["object", "null"],
+      "description": "Present when reason is engine_changed. Names WHICH of graphite's own source files moved, because the fingerprint covers the engine's package directory while the added/changed/removed lists below cover the repository being checked -- so on this path they are empty by construction and the file that moved would otherwise be unnamed. added/changed/removed are relative to the engine's package root and carry no absolute path. null when the manifest recorded no inventory (written before it was recorded) or the engine cannot be read: an absent answer, not an empty one.",
+      "additionalProperties": true,
+      "properties": {
+        "added": {"type": "array", "items": {"type": "string"}},
+        "changed": {"type": "array", "items": {"type": "string"}},
+        "removed": {"type": "array", "items": {"type": "string"}}
+      }
+    },
     "repository_root": {"type": ["string", "null"]},
     "added": {"type": "array", "items": {"type": "string"}},
     "changed": {"type": "array", "items": {"type": "string"}},
