@@ -15,6 +15,13 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-10-31
+
+A minor release: one addition to a stable JSON output, and no change to any
+command, option, exit code or entry point. By the rule in
+`docs/compatibility.md` — "additions are minors" — a field added to a versioned
+JSON output is a minor, not a patch.
+
 ### Added
 
 **`check` now names the engine file that moved, not just the fact that the
