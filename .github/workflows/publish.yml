@@ -47,10 +47,10 @@ env:
   # build with the pins in release-build-constraints.txt) and the maintainer's
   # local build with the same pins. A digest taken from only one of them is a
   # single source agreeing with itself.
-  APPROVED_VERSION: "1.8.2"
-  APPROVED_COMMIT: "2c572063461780a361cb7c870869d2e36f0f2661"
-  WHEEL_SHA256: "36898cddf48773f1bf8da311ee5051506492f93e800acadfc16ffa99dcd2a62b"
-  SDIST_SHA256: "74c1aba8aeca2e1af18c0287a33a9ed945e98dd98affb3aee198de848b8984e0"
+  APPROVED_VERSION: "1.9.0"
+  APPROVED_COMMIT: "9c28bab9b80ed93d81db9a8525384de2b6ce1b99"
+  WHEEL_SHA256: "49aea4e2ecd019524bd29bdfe43b521a54fe02976218fc3e786887310aaac4d0"
+  SDIST_SHA256: "7bb673a0740241fa26ccb7f10080dc7dfe081254ba79867d460f8b9dfe03d155"
 
 jobs:
   publish:
