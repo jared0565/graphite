@@ -27,6 +27,29 @@ output or the help said so. The line now reads `20 of 3499 match(es) for: X
 says the cap instead of naming a number above it. `--limit`'s help states
 its default. The JSON form already carried both figures and is unchanged.
 
+**A search for a phrase is no longer refused for a word the repo happens to
+name.** The strict agent hook refused `email you` because `email` is a
+method in that repository's graph, and refused `the parser tree` and
+`version path` for the same reason — while `Send Test Email` passed. Whether
+a prose search was allowed depended on where the word fell in the sentence,
+because the comparison is case-exact.
+
+A literal space inside a pattern is part of the text the search must match,
+so the word beside it cannot be the bare symbol the search is looking for.
+That is the rule the gate already applied to a piece of a path, a file's
+name and a hyphenated option, and a required space is that kind of joining
+character. A phrase is now searched as text, on all three routes — the Grep
+tool, a shell search and PowerShell — and the graph-first reminder still
+reaches the agent.
+
+Two conditions keep this from becoming a way past the gate: the space must
+be **required** (`?`, `*` and `{0` after it make it optional, and an optional
+space can still find the bare name) and it must be **interior** (text on both
+sides, so a leading or a trailing space cannot be added to any pattern to
+smuggle a bare symbol through). A regex escape is not a space: `^\s*def\s+name\b`
+still names the symbol and is still refused, and a bare identifier is still
+refused.
+
 ## [1.9.0] — 2026-10-31
 
 A minor release: one addition to a stable JSON output, and no change to any

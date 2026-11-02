@@ -358,7 +358,16 @@ that merely mentions a symbol name. It does not fire when:
   module;
 - the term differs in case from the symbol and the search matches case exactly;
 - the term is one piece of a hyphenated name, a path or a filename
-  (`graph-out`, `src/pkg`, `graph\.json`).
+  (`graph-out`, `src/pkg`, `graph\.json`);
+- the term is one word of a phrase the search must match. A literal space in
+  a pattern is part of the text the search finds, so `email you` is a search
+  for that phrase and cannot be finding the symbol `email` — the same rule
+  that applies to a path, a filename and a hyphenated option. The space must
+  be **required** (`?`, `*` and `{0` after it make it optional, and an
+  optional space can still find the bare term) and **interior** (text on both
+  sides, so a leading or a trailing space cannot be added to any pattern to
+  get past the gate). A regex escape is not a space: `^\s*def\s+name\b` still
+  names the symbol, and is still refused.
 
 A command line that holds several searches is refused if any one of them is.
 A search is read wherever the command runs one: on any line of a multi-line

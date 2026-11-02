@@ -236,6 +236,55 @@ def _without_fused_escapes(pattern: str) -> str:
     return _FUSED_ESCAPE_RE.sub(lambda found: found.group() if found.group() == "\\\\" else "  ", pattern)
 
 
+# A run of literal whitespace in a pattern. Tab counts: a pattern may be
+# written with one.
+_WHITESPACE_RUN_RE = re.compile(r"[ \t]+")
+# A quantifier that makes the character before it optional. `email ?you` can
+# match "emailyou", so the space is not something the matched text must
+# carry, and the bare name is still what the search may be looking for.
+_OPTIONAL_QUANTIFIER_RE = re.compile(r"[?*]|\{0")
+
+
+def _required_interior_whitespace(pattern: str) -> list[tuple[int, int]]:
+    """Spans of whitespace a matched text must carry, with text on both sides.
+
+    A literal space inside a pattern is part of the text the search must
+    match: `email you` finds the phrase, not the bare word. The rule that
+    already skips a piece of a path, a file's name or a hyphenated option is
+    the same one -- a fragment of a longer literal is not judged alone -- and
+    a required space beside a word is that kind of joining character. So a
+    prose search is not refused for a word the repo happens to call `email`
+    (round 331), and the refusal no longer depends on where the word falls
+    in the sentence.
+
+    Two conditions keep this from becoming a way past the gate:
+
+    - the space must be REQUIRED. `?`, `*` and `{0` after it make it
+      optional, and an optional space can still find the bare name.
+    - it must be INTERIOR: text on both sides. A leading or a trailing space
+      would let any pattern smuggle a bare symbol past the gate by adding
+      one space, so neither is treated as a joining character.
+
+    A regex escape is not a space. `\\s` is an operator, so
+    `^\\s*def\\s+dependents\\b` still names the symbol and is still judged,
+    and the name beside an escape is judged exactly as it was.
+    """
+    spans: list[tuple[int, int]] = []
+    for found in _WHITESPACE_RUN_RE.finditer(pattern):
+        start, end = found.start(), found.end()
+        if start == 0 or end == len(pattern):
+            continue  # leading or trailing: not interior
+        if end - start == 1 and _OPTIONAL_QUANTIFIER_RE.match(pattern, end):
+            continue  # the space may be absent, so the bare name may be found
+        spans.append((start, end))
+    return spans
+
+
+def _beside_a_required_space(start: int, end: int, spaces: list[tuple[int, int]]) -> bool:
+    """Whether the token at `start:end` sits against a required interior space."""
+    return any(run_end == start or run_start == end for run_start, run_end in spaces)
+
+
 def _pattern_tokens(pattern: str, fold_case: bool) -> list[str]:
     """Identifier-like tokens from a grep pattern, deduplicated, capped.
 
@@ -244,9 +293,15 @@ def _pattern_tokens(pattern: str, fold_case: bool) -> list[str]:
     """
     seen: set[str] = set()
     tokens: list[str] = []
+    # The spaces are read from the pattern as written: `_without_fused_escapes`
+    # blanks an escape into spaces of its own, and a blanked escape is an
+    # operator, not a space the matched text must carry.
+    spaces = _required_interior_whitespace(pattern)
     pattern = _without_fused_escapes(pattern)
     for found in _IDENTIFIER_RE.finditer(pattern):
         if _is_literal_fragment(pattern, found.start(), found.end()):
+            continue
+        if _beside_a_required_space(found.start(), found.end(), spaces):
             continue
         token = found.group()
         key = token.lower() if fold_case else token
