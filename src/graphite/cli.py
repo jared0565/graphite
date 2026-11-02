@@ -1415,6 +1415,29 @@ def cmd_query(args: argparse.Namespace) -> int:
     return 0
 
 
+def _search_summary(result: dict[str, Any]) -> str:
+    """The one line that says what was shown, how much exists, and how to see it.
+
+    `20 match(es)` reads as the total, and an agent that reads it that way
+    believes the graph fell short and falls back to searching files one at a
+    time -- the outcome the graph-first rule exists to prevent. The full
+    answer was one flag away, so the line now says so (round 330). The JSON
+    form already carried both figures and is unchanged.
+    """
+    count = result["count"]
+    query = result["query"]
+    if not result.get("truncated"):
+        return f"[graphite] {count} match(es) for: {query}"
+    total = result["total_matches"]
+    if total <= MAX_SEARCH_LIMIT:
+        way_out = f"pass --limit {total} to see all"
+    else:
+        # `--limit` is capped, so naming a number above the cap would be a
+        # false instruction. Say the cap instead.
+        way_out = f"--limit caps at {MAX_SEARCH_LIMIT}"
+    return f"[graphite] {count} of {total} match(es) for: {query} (truncated; {way_out})"
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     started = time.perf_counter()
     g = _load_cli_graph(args)
@@ -1426,8 +1449,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     elif not result["results"]:
         print(f"[graphite] no matches for: {result['query']}")
     else:
-        suffix = " (truncated)" if result["truncated"] else ""
-        print(f"[graphite] {result['count']} match(es) for: {result['query']}{suffix}")
+        print(_search_summary(result))
         for item in result["results"]:
             location = f" ({item['source_file']})" if item["source_file"] else ""
             print(f"  - {item['id']} [{item['kind']}, {item['match_type']}]{location}")
@@ -3362,7 +3384,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=_DEFAULT_GRAPH_JSON,
         help="Path to graph.json",
     )
-    p_search.add_argument("--limit", type=int, default=DEFAULT_SEARCH_LIMIT, help="Maximum results")
+    p_search.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_SEARCH_LIMIT,
+        help=f"Maximum results (default: {DEFAULT_SEARCH_LIMIT})",
+    )
     p_search.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     p_search.set_defaults(func=cmd_search)
 

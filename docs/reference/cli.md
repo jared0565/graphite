@@ -518,7 +518,7 @@ Deterministic ranked node search by symbol, path, or concept
 | `-h`, `--help` | show this help message and exit |
 | `text` | Symbol, path, or concept to search for |
 | `--graph-json` | Path to graph.json (default: `graph-out/graph.json`) |
-| `--limit` | Maximum results (default: `20`) |
+| `--limit` | Maximum results (default: 20) (default: `20`) |
 | `--json` | Emit machine-readable JSON |
 
 ### `graphite capabilities`

@@ -15,6 +15,18 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Fixed
+
+**`graphite search` says how many matches there are, and how to see them.**
+The text form printed `20 match(es) for: X (truncated)`, which reads as the
+total: an agent that reads it that way believes the graph fell short and
+falls back to searching files one at a time — the outcome the graph-first
+rule exists to prevent. The full answer was one flag away and nothing in the
+output or the help said so. The line now reads `20 of 3499 match(es) for: X
+(truncated; pass --limit 3499 to see all)`, and where `--limit` is capped it
+says the cap instead of naming a number above it. `--limit`'s help states
+its default. The JSON form already carried both figures and is unchanged.
+
 ## [1.9.0] — 2026-10-31
 
 A minor release: one addition to a stable JSON output, and no change to any

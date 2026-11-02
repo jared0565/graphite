@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from graphite.cli import main
 from graphite.graph import build_graph
 from graphite.query import (
@@ -126,6 +128,79 @@ def test_search_cli_json_human_and_canonical_gate(tmp_path: Path, monkeypatch, c
     # search is canonical: inference-free, rejects LLM flags outright.
     assert main(["--llm", "local", "search", "main"]) == 2
     capsys.readouterr()
+
+
+def test_the_search_line_names_the_total_and_the_way_out_when_it_is_cut_short(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """`20 match(es)` reads as the total, and an agent that reads it that way
+    believes the graph fell short and falls back to searching files one at a
+    time. The line says how many exist and how to see them (round 330)."""
+    _write(tmp_path / "src" / "app.ts", "export function main() { return 1; }\n")
+    for index in range(30):
+        _write(tmp_path / "src" / f"mod{index}.ts", f"export function handler{index}() {{ return 1; }}\n")
+    monkeypatch.chdir(tmp_path)
+    assert main(["build", "."]) == 0
+    capsys.readouterr()
+
+    assert main(["search", "handler", "--limit", "5"]) == 0
+    line = capsys.readouterr().out.splitlines()[0]
+    payload = main(["search", "handler", "--limit", "5", "--json"]) == 0
+    assert payload
+    total = json.loads(capsys.readouterr().out)["total_matches"]
+
+    assert total > 5
+    assert line.startswith("[graphite] 5 of ")
+    assert f"{total} match(es) for: handler" in line
+    assert "truncated" in line
+    assert f"pass --limit {total} to see all" in line
+
+
+def test_the_search_line_says_the_limit_is_capped_when_the_total_is_above_it(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """`--limit` is capped, so naming a number above the cap would be a false
+    instruction. The line says the cap instead."""
+    for index in range(MAX_SEARCH_LIMIT + 5):
+        _write(tmp_path / "src" / f"mod{index}.ts", f"export function handler{index}() {{ return 1; }}\n")
+    monkeypatch.chdir(tmp_path)
+    assert main(["build", "."]) == 0
+    capsys.readouterr()
+
+    assert main(["search", "handler", "--limit", "5"]) == 0
+    line = capsys.readouterr().out.splitlines()[0]
+
+    assert "truncated" in line
+    assert f"--limit caps at {MAX_SEARCH_LIMIT}" in line
+
+
+def test_the_search_line_is_unchanged_when_nothing_was_cut_short(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A search that shows everything needs no total and no way out."""
+    _write(tmp_path / "src" / "app.ts", "export function main() { return 1; }\n")
+    monkeypatch.chdir(tmp_path)
+    assert main(["build", "."]) == 0
+    capsys.readouterr()
+
+    assert main(["search", "main"]) == 0
+    line = capsys.readouterr().out.splitlines()[0]
+
+    assert line == "[graphite] 1 match(es) for: main"
+
+
+def test_the_search_help_states_the_default_limit(capsys) -> None:
+    """The help did not say what the default was, so `20 match(es)` could not
+    be told from a total."""
+    with pytest.raises(SystemExit) as exit_info:
+        main(["search", "--help"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+
+    assert f"(default: {DEFAULT_SEARCH_LIMIT})" in out
+
+
+
 
 
 def test_capabilities_json_lists_registry_kinds_and_limits(capsys) -> None:
