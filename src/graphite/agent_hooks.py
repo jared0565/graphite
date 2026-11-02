@@ -239,10 +239,19 @@ def _without_fused_escapes(pattern: str) -> str:
 # A run of literal whitespace in a pattern. Tab counts: a pattern may be
 # written with one.
 _WHITESPACE_RUN_RE = re.compile(r"[ \t]+")
-# A quantifier that makes the character before it optional. `email ?you` can
-# match "emailyou", so the space is not something the matched text must
-# carry, and the bare name is still what the search may be looking for.
-_OPTIONAL_QUANTIFIER_RE = re.compile(r"[?*]|\{0")
+# The characters that end a branch, a group, a character class, a repetition
+# or an anchor's span. A run next to one of them sits at the edge of what the
+# pattern matches rather than inside a phrase, so it is not a joining
+# character: `dependents |zzqx` is the first branch `dependents ` and
+# `zzqx| dependents` is the second branch ` dependents`, and both are the
+# bare name with a space at the edge of it.
+_BOUNDARY_CHARS = frozenset("|()[]{}^$")
+# A quantifier or an escape after a space. The space may be absent -- `?`,
+# `*` and `{0` in ERE, `\\?` and `\\{0,1\\}` in BRE -- or the construct is one
+# this hook cannot parse, and a parse it does not understand fails closed.
+# Either way the space is not something the matched text must carry, so the
+# bare name is still what the search may be looking for.
+_QUANTIFIER_OR_ESCAPE_AFTER = frozenset("?*+{\\")
 
 
 def _required_interior_whitespace(pattern: str) -> list[tuple[int, int]]:
@@ -259,11 +268,19 @@ def _required_interior_whitespace(pattern: str) -> list[tuple[int, int]]:
 
     Two conditions keep this from becoming a way past the gate:
 
-    - the space must be REQUIRED. `?`, `*` and `{0` after it make it
-      optional, and an optional space can still find the bare name.
-    - it must be INTERIOR: text on both sides. A leading or a trailing space
-      would let any pattern smuggle a bare symbol past the gate by adding
-      one space, so neither is treated as a joining character.
+    - the space must be REQUIRED. A quantifier or an escape after it may make
+      the space absent, and an absent space can still find the bare name.
+    - it must be INTERIOR: text on both sides, within the same branch and
+      group. A space at the edge of either -- leading, trailing, or against
+      an alternation, a group or an anchor -- would let any pattern smuggle a
+      bare symbol past the gate by adding one space, so it is not treated as
+      a joining character.
+
+    The engine's dialect is not read, and where it would matter the space is
+    judged rather than excused: a bare `?` is a quantifier in ERE and a
+    literal character in BRE, and the hook cannot tell which it is looking
+    at, so `email ?you` is judged in both. That refuses a search the pattern
+    may have allowed, and refusing is the safe direction.
 
     A regex escape is not a space. `\\s` is an operator, so
     `^\\s*def\\s+dependents\\b` still names the symbol and is still judged,
@@ -272,10 +289,14 @@ def _required_interior_whitespace(pattern: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     for found in _WHITESPACE_RUN_RE.finditer(pattern):
         start, end = found.start(), found.end()
-        if start == 0 or end == len(pattern):
-            continue  # leading or trailing: not interior
-        if end - start == 1 and _OPTIONAL_QUANTIFIER_RE.match(pattern, end):
-            continue  # the space may be absent, so the bare name may be found
+        before = pattern[start - 1] if start else ""
+        after = pattern[end] if end < len(pattern) else ""
+        if not before or not after:
+            continue  # at the edge of the pattern
+        if before in _BOUNDARY_CHARS or after in _BOUNDARY_CHARS:
+            continue  # at the edge of a branch, a group or an anchor
+        if after in _QUANTIFIER_OR_ESCAPE_AFTER:
+            continue  # the space may be absent, or the parse is unknown
         spans.append((start, end))
     return spans
 

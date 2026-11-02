@@ -43,12 +43,15 @@ tool, a shell search and PowerShell — and the graph-first reminder still
 reaches the agent.
 
 Two conditions keep this from becoming a way past the gate: the space must
-be **required** (`?`, `*` and `{0` after it make it optional, and an optional
-space can still find the bare name) and it must be **interior** (text on both
-sides, so a leading or a trailing space cannot be added to any pattern to
-smuggle a bare symbol through). A regex escape is not a space: `^\s*def\s+name\b`
-still names the symbol and is still refused, and a bare identifier is still
-refused.
+be **required** (a quantifier or an escape after it may make the space
+absent — `?`, `*`, `{0}`, and BRE's escaped `\?` — and an absent space can
+still find the bare name; where the engine's dialect cannot be read, the
+term is judged rather than excused) and it must be **interior** (text on both
+sides, within the same branch and group, so a space at the edge of either —
+leading, trailing, or against an alternation, a group or an anchor — cannot
+be added to any pattern to smuggle a bare symbol through). A regex escape is
+not a space: `^\s*def\s+name\b` still names the symbol and is still refused,
+and a bare identifier is still refused.
 
 ## [1.9.0] — 2026-10-31
 

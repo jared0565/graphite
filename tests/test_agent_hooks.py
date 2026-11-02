@@ -1146,14 +1146,35 @@ def test_a_fragment_of_a_literal_is_not_judged_alone(
         ("check the round", "allow"),
         ("round one message", "allow"),
         ("out of the graph", "allow"),
+        # a code-shaped search is a phrase too. The reporter's rule is that a
+        # word inside a pattern carrying whitespace is a fragment of a longer
+        # literal, and this is that. The bare name and the escape form are
+        # still refused, so the nudge survives in its strongest forms; what
+        # is given up is the nudge for a search written `def <name>`.
+        ("def dependents", "allow"),
         # a space that is not interior does not join: it cannot be added to
         # any pattern to smuggle a bare name past the gate
         ("dependents ", "deny"),
         (" dependents", "deny"),
+        # a space at the edge of a branch, a group or an anchor is the same
+        # space at the edge of the search: `dependents |zzqx` is the first
+        # branch `dependents `, and `zzqx| dependents` is the second branch
+        # ` dependents`
+        ("dependents |zzqx", "deny"),
+        ("zzqx| dependents", "deny"),
+        ("(dependents )", "deny"),
+        ("( dependents)", "deny"),
+        ("^dependents $", "deny"),
         # a space that may be absent is not a joining character either
         ("dependents ?x", "deny"),
         ("dependents *x", "deny"),
+        ("dependents +x", "deny"),
         ("dependents {0,2}x", "deny"),
+        # a quantifier this hook cannot parse, in the dialect that has it:
+        # BRE writes the optional `?` escaped, and ERE accepts `{,n}`
+        ("dependents \\?(", "deny"),
+        ("dependents \\{0,1\\}x", "deny"),
+        ("dependents {,1}x", "deny"),
         # an escape is an operator, not a space the matched text must carry
         ("dependents\\sx", "deny"),
         ("\\bdependents\\b", "deny"),
@@ -1183,6 +1204,16 @@ def test_a_phrase_is_not_judged_for_the_name_it_contains(
         ("grep -rn 'dependents' src/", "deny"),
         ("rg 'the dependents call' src/", "allow"),
         ("rg 'dependents' src/", "deny"),
+        # the edge of a branch and the edge of a group, on the shell route
+        ("grep -rn 'dependents |zzqx' src/", "deny"),
+        ("grep -rn 'zzqx| dependents' src/", "deny"),
+        ("grep -rnE '(dependents )' src/", "deny"),
+        # BRE writes the optional quantifier escaped, and ERE accepts `{,n}`.
+        # Plain `grep` is BRE, so `\\?` there makes the space optional and the
+        # pattern still matches the bare name.
+        ("grep -rn 'dependents \\?(' src/", "deny"),
+        ("grep -rn 'dependents \\{0,1\\}(' src/", "deny"),
+        ("grep -rnE 'dependents {,1}(' src/", "deny"),
     ],
 )
 def test_a_phrase_is_not_judged_in_a_shell_search_either(

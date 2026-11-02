@@ -363,11 +363,13 @@ that merely mentions a symbol name. It does not fire when:
   a pattern is part of the text the search finds, so `email you` is a search
   for that phrase and cannot be finding the symbol `email` — the same rule
   that applies to a path, a filename and a hyphenated option. The space must
-  be **required** (`?`, `*` and `{0` after it make it optional, and an
-  optional space can still find the bare term) and **interior** (text on both
-  sides, so a leading or a trailing space cannot be added to any pattern to
-  get past the gate). A regex escape is not a space: `^\s*def\s+name\b` still
-  names the symbol, and is still refused.
+  be **required** (a quantifier or an escape after it may make the space
+  absent — `?`, `*`, `{0}`, and BRE's escaped `\?` — and an absent space can
+  still find the bare term; where the engine's dialect cannot be read the
+  term is judged rather than excused) and **interior** (text on both sides,
+  within the same branch and group, so a space at the edge of either cannot
+  be added to any pattern to get past the gate). A regex escape is not a
+  space: `^\s*def\s+name\b` still names the symbol, and is still refused.
 
 A command line that holds several searches is refused if any one of them is.
 A search is read wherever the command runs one: on any line of a multi-line
