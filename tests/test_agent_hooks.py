@@ -1268,6 +1268,84 @@ def test_a_phrase_search_still_reports_the_graph_first_reminder(literal_repo: Pa
     assert "graph-first" in hook["additionalContext"]
 
 
+# ------------------------- a qualified member the graph cannot answer for (332) --
+# The gate refused `CLIENT_SETTINGS\.put\(` because `put` is a property of a
+# test mock's object literal -- a node nothing calls, so the route the refusal
+# offers (`callers put`) answers with an empty list. The member was a call on
+# something the graph does not model, and the graph had nothing to say about
+# it.
+#
+# A member is exempt only when BOTH hold: the receiver is not something this
+# repo defines, and nothing in this repo calls anything of that name. Either
+# alone would undo an arm the table above already pins.
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        # the member has callers: the graph knows who calls it
+        ("env\\.run\\(", "deny"),
+        ("env\\.check\\(", "deny"),
+        # the member has none, and the receiver is not a symbol of this repo:
+        # the graph has no relationship to offer for it
+        ("env\\.graph\\(", "allow"),
+        ("env\\.round\\(", "allow"),
+        # the receiver IS a symbol of this repo, so the dotted name is a
+        # search for a member of something the graph does model
+        ("round\\.out\\(", "deny"),
+        ("dependents\\.attr\\(", "deny"),
+        ("graph\\.jsonify", "deny"),
+        # a bare word is still refused, including one nothing calls
+        ("graph", "deny"),
+        ("round", "deny"),
+        # a word that appears bare somewhere is a search for the bare name too
+        ("graph|env\\.graph\\(", "deny"),
+    ],
+)
+def test_a_qualified_member_the_graph_cannot_answer_for_is_not_refused(
+    literal_repo: Path, pattern: str, expected: str
+) -> None:
+    """A member of something this repo does not define, that nothing here
+    calls, is not a symbol this search is about."""
+    out = handle_pre_tool_use(_grep_payload(literal_repo, pattern, path="src/"), "strict")
+
+    assert _decision(out) == expected, pattern
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("grep -rn 'env\\.run\\(' src/", "deny"),
+        ("grep -rn 'env\\.graph\\(' src/", "allow"),
+        ("grep -rnE 'env\\.round\\(' src/", "allow"),
+        ("grep -rnE 'round\\.out\\(' src/", "deny"),
+    ],
+)
+def test_a_qualified_member_is_judged_the_same_on_the_shell_route(
+    literal_repo: Path, command: str, expected: str
+) -> None:
+    """The shell route reads the same pattern and must reach the same verdict."""
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == expected, command
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("Select-String -Pattern 'env\\.run\\(' -Path src/", "deny"),
+        ("Select-String -Pattern 'env\\.graph\\(' -Path src/", "allow"),
+    ],
+)
+def test_a_qualified_member_is_judged_the_same_on_the_powershell_route(
+    literal_repo: Path, command: str, expected: str
+) -> None:
+    """PowerShell is a third route, and it reads the same pattern."""
+    out = handle_pre_tool_use(_ps_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == expected, command
+
+
 # ------------------------------------------- options the command line does not show --
 # Measured: `GREP_OPTIONS=-i grep ledger` finds `class Ledger:` with the grep
 # Git Bash ships, and `rg ledger` finds it once `RIPGREP_CONFIG_PATH` names a

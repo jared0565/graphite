@@ -19,10 +19,12 @@ from . import usage_ledger
 from .activation import mark_active
 from .config import Config
 from .freshness import check_graph_freshness
+from .graph import edge_relations
 from .graph_io import load_validated_graph_bundle
 from .health import _edge_language, is_placeholder, persisted_resolution
 from .incident_ledger import record_incident, repo_ledger_dir
 from .ingest import enclosing_git_root, repository_root
+from .query import _CALL_RELATIONS
 
 SESSION_CONTRACT = (
     "graphite-first: this repo uses a shared code graph. For cross-file questions "
@@ -306,14 +308,43 @@ def _beside_a_required_space(start: int, end: int, spaces: list[tuple[int, int]]
     return any(run_end == start or run_start == end for run_start, run_end in spaces)
 
 
-def _pattern_tokens(pattern: str, fold_case: bool) -> list[str]:
+def _receiver_of(pattern: str, start: int) -> str | None:
+    """The identifier the word at `start` is qualified by, or None.
+
+    `env.put(` and `env\\.put(` both qualify `put` by `env`. A word that is
+    not behind a dot is qualified by nothing.
+    """
+    index = start - 1
+    if index < 0:
+        return None
+    if pattern[index] == "\\":
+        index -= 1
+    if index < 0 or pattern[index] != ".":
+        return None
+    index -= 1  # past the dot
+    if index >= 0 and pattern[index] == "\\":
+        index -= 1  # and past the backslash of an escaped dot
+    end = index + 1
+    while index >= 0 and (pattern[index].isalnum() or pattern[index] == "_"):
+        index -= 1
+    if index + 1 == end:
+        return None  # nothing before the dot
+    return pattern[index + 1:end]
+
+
+def _pattern_tokens(pattern: str, fold_case: bool) -> list[tuple[str, str | None]]:
     """Identifier-like tokens from a grep pattern, deduplicated, capped.
 
     Two spellings of one word are one token only when the search folds case.
     Otherwise `Done|done` would keep `Done` alone and never check `done`.
+
+    Each token carries the identifier it is qualified by, or None when the
+    word appears without one. A word that appears bare anywhere in the
+    pattern is never a qualified member: `install|env.install(` is a search
+    for the bare name as well.
     """
-    seen: set[str] = set()
-    tokens: list[str] = []
+    seen: dict[str, str] = {}
+    receivers: dict[str, str | None] = {}
     # The spaces are read from the pattern as written: `_without_fused_escapes`
     # blanks an escape into spaces of its own, and a blanked escape is an
     # operator, not a space the matched text must carry.
@@ -326,13 +357,18 @@ def _pattern_tokens(pattern: str, fold_case: bool) -> list[str]:
             continue
         token = found.group()
         key = token.lower() if fold_case else token
+        receiver = _receiver_of(pattern, found.start())
         if key in seen:
+            # Qualified somewhere and bare somewhere else is a search for the
+            # bare name too, so the word is not a qualified member.
+            if receivers[key] != receiver:
+                receivers[key] = None
             continue
-        seen.add(key)
-        tokens.append(token)
-        if len(tokens) >= _MAX_TOKENS_CHECKED:
+        seen[key] = token
+        receivers[key] = receiver
+        if len(seen) >= _MAX_TOKENS_CHECKED:
             break
-    return tokens
+    return [(seen[key], receivers[key]) for key in seen]
 
 
 def _hook_graph(root: Path) -> Any | None:
@@ -344,7 +380,74 @@ def _hook_graph(root: Path) -> Any | None:
     return graph
 
 
-def _graph_symbol(graph: Any, tokens: list[str], fold_case: bool) -> tuple[str, str] | None:
+def _defines(graph: Any, word: str, fold_case: bool) -> bool:
+    """Whether this repo defines something by this word.
+
+    A placeholder does not count: `json` is in the graph because a file
+    imports it, not because the repo defines it.
+    """
+    key = word.lower() if fold_case else word
+    for node_id, data in graph.nodes(data=True):
+        if is_placeholder(data):
+            continue
+        for candidate in (node_id, str(data.get("name", ""))):
+            candidate_key = candidate.lower() if fold_case else candidate
+            if candidate_key and candidate_key == key:
+                return True
+    return False
+
+
+def _has_callers(graph: Any, node_id: str) -> bool:
+    """Whether the graph's own `callers` listing for this node is non-empty.
+
+    The same relations `query "callers"` counts: an inbound edge whose
+    relations include a call or a reference. Nesting (`contains`) is not a
+    call -- a nested function is contained by its parent, not called by it.
+    """
+    return any(
+        any(relation in _CALL_RELATIONS for relation in edge_relations(graph[source][node_id]))
+        for source in graph.predecessors(node_id)
+    )
+
+
+def _exempt_member(graph: Any, word: str, receiver: str | None, fold_case: bool) -> bool:
+    """Whether a qualified member is something the graph cannot answer for.
+
+    The receiver is not something this repo defines, so the member is a call
+    on something the graph does not model -- a runtime binding, or a test
+    double's namesake. And nothing in this repo calls anything of that name,
+    so the route the refusal offers (`callers <word>`) would resolve the word
+    to a node with no callers and answer with an empty list (round 332).
+
+    Both conditions are needed, and each of them alone would undo a decision
+    this gate already made:
+
+    - the receiver alone would excuse `self.check(`, where the graph does
+      know who calls the method;
+    - the callers alone would excuse `graph.jsonify`, where the receiver is
+      a symbol this repo defines.
+    """
+    if receiver is None:
+        return False
+    if _defines(graph, receiver, fold_case):
+        return False
+    key = word.lower() if fold_case else word
+    for node_id, data in graph.nodes(data=True):
+        if is_placeholder(data):
+            continue
+        name = str(data.get("name", ""))
+        name_key = name.lower() if fold_case else name
+        id_key = node_id.lower() if fold_case else node_id
+        if name_key != key and id_key != key:
+            continue
+        if _has_callers(graph, node_id):
+            return False
+    return True
+
+
+def _graph_symbol(
+    graph: Any, tokens: list[tuple[str, str | None]], fold_case: bool
+) -> tuple[str, str] | None:
     """First token that IS something this repo defines (exact id or name), else None.
 
     A placeholder does not count. `json` is in the graph because a file imports
@@ -354,15 +457,26 @@ def _graph_symbol(graph: Any, tokens: list[str], fold_case: bool) -> tuple[str, 
 
     Case is compared the way the search compares it. A case-exact search for
     `DONE` cannot find a function `done`, so it is not a search for one.
+
+    A qualified member the graph cannot answer for is not a symbol this
+    search is about, and does not refuse it (round 332).
     """
-    wanted = {(token.lower() if fold_case else token): token for token in tokens}
+    wanted = {(token.lower() if fold_case else token): token for token, _ in tokens}
+    receivers = {(token.lower() if fold_case else token): receiver for token, receiver in tokens}
+    exempt: set[str] = set()
     for node_id, data in graph.nodes(data=True):
         if is_placeholder(data):
             continue
         for candidate in (node_id, str(data.get("name", ""))):
             key = candidate.lower() if fold_case else candidate
-            if key and key in wanted:
-                return node_id, wanted[key]
+            if not (key and key in wanted):
+                continue
+            if key in exempt:
+                continue
+            if _exempt_member(graph, key, receivers.get(key), fold_case):
+                exempt.add(key)
+                continue
+            return node_id, wanted[key]
     return None
 
 

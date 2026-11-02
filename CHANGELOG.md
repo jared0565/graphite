@@ -53,6 +53,21 @@ be added to any pattern to smuggle a bare symbol through). A regex escape is
 not a space: `^\s*def\s+name\b` still names the symbol and is still refused,
 and a bare identifier is still refused.
 
+**A qualified member the graph cannot answer for is no longer refused.** The
+strict agent hook refused `CLIENT_SETTINGS\.put\(` because `put` is a
+property of a test mock's object literal — a node nothing calls, so the
+route the refusal offers (`callers put`) answers with an empty list. The
+member was a call on something the graph does not model, and the graph had
+nothing to say about it.
+
+A member is now exempt from being a refusal when **both** hold: the receiver
+is not something this repo defines, and nothing in this repo calls anything
+of that name. Both are needed — the receiver alone would excuse
+`self.check(`, where the graph does know who calls the method, and the
+callers alone would excuse `graph.jsonify`, where the receiver is a symbol
+this repo defines. A bare word is still refused, including one nothing
+calls.
+
 ## [1.9.0] — 2026-10-31
 
 A minor release: one addition to a stable JSON output, and no change to any
