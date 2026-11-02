@@ -372,7 +372,7 @@ that merely mentions a symbol name. It does not fire when:
   space: `^\s*def\s+name\b` still names the symbol, and is still refused;
 - the term is a **qualified member** of something this repo does not define,
   and nothing in this repo calls anything of that name.
-  `CLIENT_SETTINGS\.put\(` is a call on a runtime binding the graph does not
+  `RUNTIME\.put\(` is a call on a runtime binding the graph does not
   model; the node the word happens to match is a test double that nothing
   calls, so the route the refusal offers (`callers put`) would answer with an
   empty list. **Both** conditions are needed: the receiver alone would

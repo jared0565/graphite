@@ -54,7 +54,7 @@ not a space: `^\s*def\s+name\b` still names the symbol and is still refused,
 and a bare identifier is still refused.
 
 **A qualified member the graph cannot answer for is no longer refused.** The
-strict agent hook refused `CLIENT_SETTINGS\.put\(` because `put` is a
+strict agent hook refused `RUNTIME\.put\(` because `put` is a
 property of a test mock's object literal — a node nothing calls, so the
 route the refusal offers (`callers put`) answers with an empty list. The
 member was a call on something the graph does not model, and the graph had
