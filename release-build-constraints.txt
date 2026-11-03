@@ -2,8 +2,11 @@
 # Bump both by editing this file; the publish digest guard proves the result
 # still reproduces the reviewed bytes. The maintainer's build venv
 # (F:/Projects/.venvs/graphite-build) must hold these same versions.
-# Bumped from build 1.5.0 / hatchling 1.32.0 on 2026-10-04: rebuilding v1.1.1
-# with these gave a byte-identical sdist and a wheel that differs only in
-# WHEEL's "Generator:" line and that file's RECORD hash.
+# Bumped from build 1.6.1 / hatchling 1.32.4 on 2026-11-03: the same result
+# as the 2026-10-04 bump, measured again on the v1.9.1 tree -- a
+# byte-identical sdist, and a wheel that differs only in WHEEL's "Generator:"
+# line and the one RECORD row that hashes it (118 of 120 members
+# byte-identical). A tag carries its own copy of this file, so a published
+# release stays reproducible whatever main holds.
 build==1.6.1
 hatchling==1.33.0
