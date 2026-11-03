@@ -15,6 +15,59 @@ machine-checkable identity; the version is for humans.
 
 ## [Unreleased]
 
+### Fixed
+
+**`graphite search` says how many matches there are, and how to see them.**
+The text form printed `20 match(es) for: X (truncated)`, which reads as the
+total: an agent that reads it that way believes the graph fell short and
+falls back to searching files one at a time — the outcome the graph-first
+rule exists to prevent. The full answer was one flag away and nothing in the
+output or the help said so. The line now reads `20 of 3499 match(es) for: X
+(truncated; pass --limit 3499 to see all)`, and where `--limit` is capped it
+says the cap instead of naming a number above it. `--limit`'s help states
+its default. The JSON form already carried both figures and is unchanged.
+
+**A search for a phrase is no longer refused for a word the repo happens to
+name.** The strict agent hook refused `email you` because `email` is a
+method in that repository's graph, and refused `the parser tree` and
+`version path` for the same reason — while `Send Test Email` passed. Whether
+a prose search was allowed depended on where the word fell in the sentence,
+because the comparison is case-exact.
+
+A literal space inside a pattern is part of the text the search must match,
+so the word beside it cannot be the bare symbol the search is looking for.
+That is the rule the gate already applied to a piece of a path, a file's
+name and a hyphenated option, and a required space is that kind of joining
+character. A phrase is now searched as text, on all three routes — the Grep
+tool, a shell search and PowerShell — and the graph-first reminder still
+reaches the agent.
+
+Two conditions keep this from becoming a way past the gate: the space must
+be **required** (a quantifier or an escape after it may make the space
+absent — `?`, `*`, `{0}`, and BRE's escaped `\?` — and an absent space can
+still find the bare name; where the engine's dialect cannot be read, the
+term is judged rather than excused) and it must be **interior** (text on both
+sides, within the same branch and group, so a space at the edge of either —
+leading, trailing, or against an alternation, a group or an anchor — cannot
+be added to any pattern to smuggle a bare symbol through). A regex escape is
+not a space: `^\s*def\s+name\b` still names the symbol and is still refused,
+and a bare identifier is still refused.
+
+**A qualified member the graph cannot answer for is no longer refused.** The
+strict agent hook refused `RUNTIME\.put\(` because `put` is a
+property of a test mock's object literal — a node nothing calls, so the
+route the refusal offers (`callers put`) answers with an empty list. The
+member was a call on something the graph does not model, and the graph had
+nothing to say about it.
+
+A member is now exempt from being a refusal when **both** hold: the receiver
+is not something this repo defines, and nothing in this repo calls anything
+of that name. Both are needed — the receiver alone would excuse
+`self.check(`, where the graph does know who calls the method, and the
+callers alone would excuse `graph.jsonify`, where the receiver is a symbol
+this repo defines. A bare word is still refused, including one nothing
+calls.
+
 ## [1.9.0] — 2026-10-31
 
 A minor release: one addition to a stable JSON output, and no change to any

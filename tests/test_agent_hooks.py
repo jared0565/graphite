@@ -1121,6 +1121,231 @@ def test_a_fragment_of_a_literal_is_not_judged_alone(
     assert _decision(out) == expected, pattern
 
 
+# --------------------------------- a phrase is literal text, not a symbol (331) --
+# The gate refused a search for a PHRASE because one of its words happened to
+# be a name this repo defines. `the parser tree` is a search for that phrase;
+# it cannot find the function `parser`. Whether it was refused depended on
+# where the word fell in the sentence: `Send Test Email` passed and `email
+# you` did not, because the comparison is case-exact (round 331).
+#
+# The rule that already skips a piece of a path, a file's name or a hyphenated
+# option is the same one: a fragment of a longer literal is not judged alone.
+# A required space beside a word is that kind of joining character. Each arm
+# below has its own deny control, so an arm that starts to allow by removing
+# the rule, instead of repairing it, turns a control red.
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        # the deny control: the bare name is the search
+        ("dependents", "deny"),
+        # prose that contains a name this repo defines
+        ("the dependents call", "allow"),
+        ("dependents and check", "allow"),
+        ("check the round", "allow"),
+        ("round one message", "allow"),
+        ("out of the graph", "allow"),
+        # a code-shaped search is a phrase too. The reporter's rule is that a
+        # word inside a pattern carrying whitespace is a fragment of a longer
+        # literal, and this is that. The bare name and the escape form are
+        # still refused, so the nudge survives in its strongest forms; what
+        # is given up is the nudge for a search written `def <name>`.
+        ("def dependents", "allow"),
+        # a space that is not interior does not join: it cannot be added to
+        # any pattern to smuggle a bare name past the gate
+        ("dependents ", "deny"),
+        (" dependents", "deny"),
+        # a space at the edge of a branch, a group or an anchor is the same
+        # space at the edge of the search: `dependents |zzqx` is the first
+        # branch `dependents `, and `zzqx| dependents` is the second branch
+        # ` dependents`
+        ("dependents |zzqx", "deny"),
+        ("zzqx| dependents", "deny"),
+        ("(dependents )", "deny"),
+        ("( dependents)", "deny"),
+        ("^dependents $", "deny"),
+        # a space that may be absent is not a joining character either
+        ("dependents ?x", "deny"),
+        ("dependents *x", "deny"),
+        ("dependents +x", "deny"),
+        ("dependents {0,2}x", "deny"),
+        # a quantifier this hook cannot parse, in the dialect that has it:
+        # BRE writes the optional `?` escaped, and ERE accepts `{,n}`
+        ("dependents \\?(", "deny"),
+        ("dependents \\{0,1\\}x", "deny"),
+        ("dependents {,1}x", "deny"),
+        # an escape is an operator, not a space the matched text must carry
+        ("dependents\\sx", "deny"),
+        ("\\bdependents\\b", "deny"),
+        ("^\\s*def\\s+dependents\\b", "deny"),
+        # one branch is judged on its own: the other is a phrase
+        ("dependents|the check", "deny"),
+        ("zzqx|the check", "allow"),
+        # a call is not a phrase
+        ("dependents(", "deny"),
+    ],
+)
+def test_a_phrase_is_not_judged_for_the_name_it_contains(
+    literal_repo: Path, pattern: str, expected: str
+) -> None:
+    """A space the matched text must carry makes the word beside it a fragment
+    of a longer literal, so the search is for the phrase and not for the name."""
+    out = handle_pre_tool_use(_grep_payload(literal_repo, pattern, path="src/"), "strict")
+
+    assert _decision(out) == expected, pattern
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("grep -rn 'the dependents call' src/", "allow"),
+        ("grep -rnE 'dependents and check' src/", "allow"),
+        ("grep -rn 'dependents' src/", "deny"),
+        ("rg 'the dependents call' src/", "allow"),
+        ("rg 'dependents' src/", "deny"),
+        # the edge of a branch and the edge of a group, on the shell route
+        ("grep -rn 'dependents |zzqx' src/", "deny"),
+        ("grep -rn 'zzqx| dependents' src/", "deny"),
+        ("grep -rnE '(dependents )' src/", "deny"),
+        # BRE writes the optional quantifier escaped, and ERE accepts `{,n}`.
+        # Plain `grep` is BRE, so `\\?` there makes the space optional and the
+        # pattern still matches the bare name.
+        ("grep -rn 'dependents \\?(' src/", "deny"),
+        ("grep -rn 'dependents \\{0,1\\}(' src/", "deny"),
+        ("grep -rnE 'dependents {,1}(' src/", "deny"),
+    ],
+)
+def test_a_phrase_is_not_judged_in_a_shell_search_either(
+    literal_repo: Path, command: str, expected: str
+) -> None:
+    """The shell route reads the same pattern and must reach the same verdict."""
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == expected, command
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("Select-String -Pattern 'the dependents call' -Path src/", "allow"),
+        ("Select-String -Pattern 'dependents' -Path src/", "deny"),
+    ],
+)
+def test_a_phrase_is_not_judged_in_a_powershell_search_either(
+    literal_repo: Path, command: str, expected: str
+) -> None:
+    """PowerShell is a third route, and it reads the same pattern."""
+    out = handle_pre_tool_use(_ps_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == expected, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -rn 'the dependents call' src/ ; grep -rn dependents src/",
+        "grep -rn 'the dependents call' src/ && grep -rn check src/",
+    ],
+)
+def test_a_phrase_does_not_excuse_another_search_in_the_same_command(
+    literal_repo: Path, command: str
+) -> None:
+    """One refused search refuses the command. A phrase beside it changes
+    nothing."""
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == "deny", command
+
+
+def test_a_phrase_search_still_reports_the_graph_first_reminder(literal_repo: Path) -> None:
+    """A phrase is allowed, and the advisory still reaches the agent: the graph
+    is the way to answer a relationship question, and this search is not one."""
+    out = handle_pre_tool_use(_grep_payload(literal_repo, "the dependents call", path="src/"), "strict")
+
+    hook = out["hookSpecificOutput"]
+    assert "permissionDecision" not in hook
+    assert "graph-first" in hook["additionalContext"]
+
+
+# ------------------------- a qualified member the graph cannot answer for (332) --
+# The gate refused `CLIENT_SETTINGS\.put\(` because `put` is a property of a
+# test mock's object literal -- a node nothing calls, so the route the refusal
+# offers (`callers put`) answers with an empty list. The member was a call on
+# something the graph does not model, and the graph had nothing to say about
+# it.
+#
+# A member is exempt only when BOTH hold: the receiver is not something this
+# repo defines, and nothing in this repo calls anything of that name. Either
+# alone would undo an arm the table above already pins.
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        # the member has callers: the graph knows who calls it
+        ("env\\.run\\(", "deny"),
+        ("env\\.check\\(", "deny"),
+        # the member has none, and the receiver is not a symbol of this repo:
+        # the graph has no relationship to offer for it
+        ("env\\.graph\\(", "allow"),
+        ("env\\.round\\(", "allow"),
+        # the receiver IS a symbol of this repo, so the dotted name is a
+        # search for a member of something the graph does model
+        ("round\\.out\\(", "deny"),
+        ("dependents\\.attr\\(", "deny"),
+        ("graph\\.jsonify", "deny"),
+        # a bare word is still refused, including one nothing calls
+        ("graph", "deny"),
+        ("round", "deny"),
+        # a word that appears bare somewhere is a search for the bare name too
+        ("graph|env\\.graph\\(", "deny"),
+    ],
+)
+def test_a_qualified_member_the_graph_cannot_answer_for_is_not_refused(
+    literal_repo: Path, pattern: str, expected: str
+) -> None:
+    """A member of something this repo does not define, that nothing here
+    calls, is not a symbol this search is about."""
+    out = handle_pre_tool_use(_grep_payload(literal_repo, pattern, path="src/"), "strict")
+
+    assert _decision(out) == expected, pattern
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("grep -rn 'env\\.run\\(' src/", "deny"),
+        ("grep -rn 'env\\.graph\\(' src/", "allow"),
+        ("grep -rnE 'env\\.round\\(' src/", "allow"),
+        ("grep -rnE 'round\\.out\\(' src/", "deny"),
+    ],
+)
+def test_a_qualified_member_is_judged_the_same_on_the_shell_route(
+    literal_repo: Path, command: str, expected: str
+) -> None:
+    """The shell route reads the same pattern and must reach the same verdict."""
+    out = handle_pre_tool_use(_bash_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == expected, command
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("Select-String -Pattern 'env\\.run\\(' -Path src/", "deny"),
+        ("Select-String -Pattern 'env\\.graph\\(' -Path src/", "allow"),
+    ],
+)
+def test_a_qualified_member_is_judged_the_same_on_the_powershell_route(
+    literal_repo: Path, command: str, expected: str
+) -> None:
+    """PowerShell is a third route, and it reads the same pattern."""
+    out = handle_pre_tool_use(_ps_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == expected, command
+
+
 # ------------------------------------------- options the command line does not show --
 # Measured: `GREP_OPTIONS=-i grep ledger` finds `class Ledger:` with the grep
 # Git Bash ships, and `rg ledger` finds it once `RIPGREP_CONFIG_PATH` names a
