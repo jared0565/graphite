@@ -13,7 +13,14 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
-## [Unreleased]
+## [1.9.1] — 2026-11-03
+
+A patch release: three fixes, and no change to any command, option, exit code
+or entry point. The wording of human-readable output is not a stable surface
+(`docs/compatibility.md`), and the agent hook's stable contract is that it
+always exits 0 — neither moves. The graph the release changes was measured
+against the 1.9.0 tree: every node id survives, none is removed, and no edge
+triple is lost.
 
 ### Fixed
 
