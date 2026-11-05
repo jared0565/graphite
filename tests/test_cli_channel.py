@@ -71,6 +71,12 @@ def test_json_reports_existence_and_git_status(projects_root: Path, capsys) -> N
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
+    # The envelope is pinned, not just the facts in it. A `schema_version`
+    # nothing asserted SURVIVED aramid's mutation gate as `1 -> 2`
+    # (8aab21c3, 2026-11-05): a caller branching on the version would have
+    # read a different contract and no test would have said so.
+    assert payload["schema_version"] == 1
+    assert payload["ok"] is True
     assert payload["exists"] is True
     assert payload["is_git_repo"] is True
     assert payload["has_protocol"] is True
@@ -85,6 +91,10 @@ def test_json_distinguishes_a_bare_directory_from_a_channel(projects_root: Path,
     code = main(["channel", "--json"])
 
     payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 1
+    # `ok` is the one field a caller can gate on, and here it must say no:
+    # the directory exists, but without git it is not a channel.
+    assert payload["ok"] is False
     assert payload["exists"] is True
     assert payload["is_git_repo"] is False
     assert payload["has_protocol"] is False
