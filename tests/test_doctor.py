@@ -4217,7 +4217,9 @@ def _trusted_mcp_child_bindings(selected: Path) -> tuple[dict[str, object], ...]
     )
 
 
-def test_mcp_deep_probe_initializes_and_lists_required_tools(tmp_path: Path) -> None:
+def test_mcp_deep_probe_initializes_and_lists_required_tools(
+    tmp_path: Path, cold_manifest_build_budget: float
+) -> None:
     import graphite.doctor_probes as probes
 
     captured: dict[str, object] = {}
@@ -4260,10 +4262,14 @@ def test_mcp_deep_probe_initializes_and_lists_required_tools(tmp_path: Path) -> 
         assert argv[0] == "PYTHON"
         return probes.run_bounded_process([sys.executable, *argv[1:]], **kwargs)
 
+    # The "PYTHON" sentinel is part of the manifest cache key, so this build
+    # is ALWAYS cold -- the shape that outran the default budget on loaded
+    # runners (#146). The budget is derived in conftest.py.
     check = probes.probe_mcp(
         tmp_path,
         python_executable="PYTHON",
         timeout_seconds=20,
+        manifest_timeout_seconds=cold_manifest_build_budget,
         _runner=run,
         _builder_runner=build,
     )
@@ -4341,6 +4347,7 @@ def test_mcp_requirement_marker_evaluates_and_or_compounds() -> None:
 def test_mcp_deep_probe_rejects_user_site_dependency_shadow_without_execution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    cold_manifest_build_budget: float,
 ) -> None:
     import graphite.doctor_probes as probes
 
@@ -4359,7 +4366,11 @@ def test_mcp_deep_probe_rejects_user_site_dependency_shadow_without_execution(
     )
     monkeypatch.setattr(probes.sys, "path", [str(fake_user_site), *probes.sys.path])
 
-    check = probes.probe_mcp(selected, timeout_seconds=20)
+    # A patched `sys.path` changes the metadata roots, which are part of the
+    # manifest cache key: this build is always cold (#146; budget in conftest.py).
+    check = probes.probe_mcp(
+        selected, timeout_seconds=20, manifest_timeout_seconds=cold_manifest_build_budget
+    )
 
     assert check.status == "degraded"
     assert check.details == {"code": "probe_failed"}
@@ -4369,6 +4380,7 @@ def test_mcp_deep_probe_rejects_user_site_dependency_shadow_without_execution(
 def test_mcp_manifest_builder_never_imports_metadata_root_shadows(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    cold_manifest_build_budget: float,
 ) -> None:
     import graphite.doctor_probes as probes
 
@@ -4394,9 +4406,11 @@ def test_mcp_manifest_builder_never_imports_metadata_root_shadows(
         {"jsonrpc": "2.0", "id": 2, "result": _mcp_tools_result()},
     )
 
+    # Always cold: the patched `sys.path` is part of the cache key (#146).
     check = probes.probe_mcp(
         selected,
         timeout_seconds=20,
+        manifest_timeout_seconds=cold_manifest_build_budget,
         _runner=lambda *a, **k: probes.ProbeProcessResult(0, output, b"", 0.01),
     )
 
@@ -4409,6 +4423,7 @@ def test_mcp_manifest_builder_never_imports_metadata_root_shadows(
 def test_mcp_manifest_builder_rejects_metadata_root_inside_selected_without_execution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    cold_manifest_build_budget: float,
 ) -> None:
     import graphite.doctor_probes as probes
 
@@ -4429,7 +4444,10 @@ def test_mcp_manifest_builder_rejects_metadata_root_inside_selected_without_exec
     )
     monkeypatch.setattr(probes.sys, "path", [str(metadata_root), *probes.sys.path])
 
-    check = probes.probe_mcp(selected, timeout_seconds=20)
+    # Always cold: the patched `sys.path` is part of the cache key (#146).
+    check = probes.probe_mcp(
+        selected, timeout_seconds=20, manifest_timeout_seconds=cold_manifest_build_budget
+    )
 
     assert check.status == "degraded"
     assert check.details == {"code": "probe_failed"}
@@ -4541,6 +4559,7 @@ def test_cached_path_binding_rejects_symlink_retarget(tmp_path: Path) -> None:
 def test_cached_mcp_manifest_revalidation_rejects_root_retarget(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    cold_manifest_build_budget: float,
 ) -> None:
     import graphite.doctor_probes as probes
 
@@ -4601,7 +4620,13 @@ def test_cached_mcp_manifest_revalidation_rejects_root_retarget(
         child_called = True
         raise AssertionError("invalid cached manifest must not reach MCP child")
 
-    second = probes.probe_mcp(selected, timeout_seconds=20, _runner=unexpected_child)
+    # The REAL builder revalidates the cached manifest here (#146; budget in conftest.py).
+    second = probes.probe_mcp(
+        selected,
+        timeout_seconds=20,
+        manifest_timeout_seconds=cold_manifest_build_budget,
+        _runner=unexpected_child,
+    )
 
     assert second.status == "degraded"
     assert second.details == {"code": "probe_failed"}
@@ -4840,11 +4865,15 @@ def test_a_transport_timeout_diagnostic_reports_what_was_observed(
         _mcp_probe_output({"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "other"}}}),
     ],
 )
-def test_mcp_deep_probe_rejects_closed_or_malformed_responses(tmp_path: Path, output: bytes) -> None:
+def test_mcp_deep_probe_rejects_closed_or_malformed_responses(
+    tmp_path: Path, output: bytes, cold_manifest_build_budget: float
+) -> None:
     import graphite.doctor_probes as probes
 
+    # Real builder, cold if first in its worker (#146; budget in conftest.py).
     check = probes.probe_mcp(
         tmp_path,
+        manifest_timeout_seconds=cold_manifest_build_budget,
         _runner=lambda *a, **k: probes.ProbeProcessResult(0, output, b"", 0.01),
     )
     assert check.status == "degraded"
@@ -4918,11 +4947,15 @@ def test_mcp_deep_probe_rejects_closed_or_malformed_responses(tmp_path: Path, ou
         "overflow-number",
     ],
 )
-def test_mcp_deep_probe_strictly_validates_protocol_envelopes(tmp_path: Path, output: bytes) -> None:
+def test_mcp_deep_probe_strictly_validates_protocol_envelopes(
+    tmp_path: Path, output: bytes, cold_manifest_build_budget: float
+) -> None:
     import graphite.doctor_probes as probes
 
+    # Real builder, cold if first in its worker (#146; budget in conftest.py).
     check = probes.probe_mcp(
         tmp_path,
+        manifest_timeout_seconds=cold_manifest_build_budget,
         _runner=lambda *a, **k: probes.ProbeProcessResult(0, output, b"", 0.01),
     )
     assert check.status == "degraded"
@@ -4933,14 +4966,20 @@ def test_mcp_deep_probe_strictly_validates_protocol_envelopes(tmp_path: Path, ou
 def test_mcp_deep_probe_rejects_excessive_lines_and_nesting_before_json_decode(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    cold_manifest_build_budget: float,
 ) -> None:
     import graphite.doctor_probes as probes
 
+    # Both calls run the real builder. Their `degraded` assertions would also
+    # be satisfied by a builder TIMEOUT, so a cold build that outran its budget
+    # here passed without exercising the line or nesting limits at all (#146;
+    # budget in conftest.py).
     too_many_lines = _mcp_probe_output(
         *({"jsonrpc": "2.0", "method": "progress", "params": {}} for _ in range(65))
     )
     assert probes.probe_mcp(
         tmp_path,
+        manifest_timeout_seconds=cold_manifest_build_budget,
         _runner=lambda *a, **k: probes.ProbeProcessResult(0, too_many_lines, b"", 0.01),
     ).status == "degraded"
 
@@ -4963,6 +5002,7 @@ def test_mcp_deep_probe_rejects_excessive_lines_and_nesting_before_json_decode(
     monkeypatch.setattr(probes.json, "loads", tracked_loads)
     check = probes.probe_mcp(
         tmp_path,
+        manifest_timeout_seconds=cold_manifest_build_budget,
         _runner=lambda *a, **k: probes.ProbeProcessResult(0, deeply_nested, b"", 0.01),
     )
     assert check.status == "degraded"
@@ -5006,7 +5046,9 @@ def test_mcp_deep_probe_rejects_excessive_lines_and_nesting_before_json_decode(
 # 10/10 on 2.0.0 while CI was failing ~38%. Sample with `workflow_dispatch`.
 
 
-def test_mcp_deep_probe_real_server_ignores_project_import_shadows(tmp_path: Path) -> None:
+def test_mcp_deep_probe_real_server_ignores_project_import_shadows(
+    tmp_path: Path, cold_manifest_build_budget: float
+) -> None:
     import graphite.doctor_probes as probes
 
     sentinel = tmp_path / "executed.txt"
@@ -5026,13 +5068,19 @@ def test_mcp_deep_probe_real_server_ignores_project_import_shadows(tmp_path: Pat
             encoding="utf-8",
         )
 
-    check = probes.probe_mcp(tmp_path, timeout_seconds=20)
+    # The server keeps its own 20s; only the BUILD gets the derived budget
+    # (#146; conftest.py).
+    check = probes.probe_mcp(
+        tmp_path, timeout_seconds=20, manifest_timeout_seconds=cold_manifest_build_budget
+    )
 
     assert check.status == "ready"
     assert not sentinel.exists()
 
 
-def test_mcp_deep_probe_real_server_supports_trusted_source_inside_selected_repo() -> None:
+def test_mcp_deep_probe_real_server_supports_trusted_source_inside_selected_repo(
+    cold_manifest_build_budget: float,
+) -> None:
     """Launches a real MCP server, so it inherits a real precondition.
 
     The manifest builder refuses any package-metadata root that lives inside
@@ -5054,7 +5102,11 @@ def test_mcp_deep_probe_real_server_supports_trusted_source_inside_selected_repo
     trusted_source = Path(probes.__file__).resolve(strict=True).parent.parent
     selected_repo = trusted_source.parent
 
-    check = probes.probe_mcp(selected_repo, timeout_seconds=20)
+    # The server keeps its own 20s; only the BUILD gets the derived budget
+    # (#146; conftest.py).
+    check = probes.probe_mcp(
+        selected_repo, timeout_seconds=20, manifest_timeout_seconds=cold_manifest_build_budget
+    )
 
     assert check.status == "ready", check.details
     assert check.details["server_name"] == "graphite"
@@ -5149,6 +5201,7 @@ def test_the_parent_and_both_children_apply_one_identity_rule() -> None:
 
 def test_mcp_probe_survives_a_write_into_the_selected_root_between_the_children(
     tmp_path: Path,
+    cold_manifest_build_budget: float,
 ) -> None:
     """A routine write into the selected root must not refuse the probe.
 
@@ -5179,13 +5232,16 @@ def test_mcp_probe_survives_a_write_into_the_selected_root_between_the_children(
     check = probes.probe_mcp(
         selected,
         timeout_seconds=20,
+        manifest_timeout_seconds=cold_manifest_build_budget,  # #146; conftest.py
         _runner=runner_that_writes_into_the_selected_root,
     )
 
     assert check.status == "ready", check.details
 
 
-def test_mcp_probe_still_refuses_a_selected_root_that_was_swapped(tmp_path: Path) -> None:
+def test_mcp_probe_still_refuses_a_selected_root_that_was_swapped(
+    tmp_path: Path, cold_manifest_build_budget: float
+) -> None:
     """The fix drops a directory's TIMES from its identity; it must not drop
     the directory.
 
@@ -5209,6 +5265,7 @@ def test_mcp_probe_still_refuses_a_selected_root_that_was_swapped(tmp_path: Path
     check = probes.probe_mcp(
         selected,
         timeout_seconds=20,
+        manifest_timeout_seconds=cold_manifest_build_budget,  # #146; conftest.py
         _runner=runner_that_swaps_the_selected_root,
     )
 
@@ -5765,7 +5822,9 @@ def test_prerelease_python_full_version_does_not_abort_the_closure(
     assert probes._requirement_applies("dep>=1; python_full_version < '3.9'") is False
 
 
-def test_probe_stdin_length_prefixes_the_manifest(tmp_path: Path) -> None:
+def test_probe_stdin_length_prefixes_the_manifest(
+    tmp_path: Path, cold_manifest_build_budget: float
+) -> None:
     """The manifest must be framed by length, not by a trailing newline.
 
     A newline frame forces the child to find the boundary with
@@ -5782,7 +5841,9 @@ def test_probe_stdin_length_prefixes_the_manifest(tmp_path: Path) -> None:
         captured["stdin"] = kwargs["stdin"]  # type: ignore[assignment]
         return probes.ProbeProcessResult(0, b"", b"", 0.01)
 
-    probes.probe_mcp(tmp_path, _runner=runner)
+    probes.probe_mcp(
+        tmp_path, manifest_timeout_seconds=cold_manifest_build_budget, _runner=runner
+    )  # real builder (#146; budget in conftest.py)
 
     header, separator, rest = captured["stdin"].partition(b"\n")
     assert separator == b"\n"
@@ -5796,7 +5857,7 @@ def test_probe_stdin_length_prefixes_the_manifest(tmp_path: Path) -> None:
 
 
 def test_manifest_build_time_does_not_consume_the_server_budget(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cold_manifest_build_budget: float
 ) -> None:
     """A slow manifest build and an unresponsive child are different faults.
 
@@ -5846,7 +5907,16 @@ def test_manifest_build_time_does_not_consume_the_server_budget(
         captured.update(kwargs)
         return probes.ProbeProcessResult(0, b"", b"", 0.01)
 
-    probes.probe_mcp(tmp_path, timeout_seconds=20.0, _runner=runner)
+    # The REAL build runs first, so it gets the derived build budget (#146;
+    # conftest.py). That does not weaken this test: what is asserted is the
+    # SERVER's allowance, and a shared-deadline regression would hand the
+    # server `120 - 15 - build` seconds -- nowhere near 20.
+    probes.probe_mcp(
+        tmp_path,
+        timeout_seconds=20.0,
+        manifest_timeout_seconds=cold_manifest_build_budget,
+        _runner=runner,
+    )
 
     assert captured["timeout_seconds"] == pytest.approx(20.0)
 
