@@ -13,7 +13,12 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
-## [Unreleased]
+## [1.9.2] — 2026-11-05
+
+A patch release: one fix, and no change to any command, option, exit code
+or entry point. The agent hook's stable contract is that it always exits 0,
+and which searches the strict hook refuses is not a stable surface
+(`docs/compatibility.md`) — so a fix to that decision is a patch.
 
 ### Fixed
 
