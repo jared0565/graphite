@@ -265,8 +265,57 @@ command = [
 # launcher REFUSES with exit 70 rather than certifying a run that never
 # exercised the mutation. The tree's own gate is unaffected: it runs from the
 # checkout, where the pinned path and the editable install agree.
+#
+# THE CERTIFYING SUITE RUNS IN PARALLEL, from 2026-11-05, because run
+# serially it no longer fits. Its serial baseline measured 979-1360 s over
+# the drains of 10-27..10-29 and then ran past baseline_timeout_s (1500)
+# three times, so aramid stood the item down on 10-29 and has given up on
+# every item since in under 2 s -- the gate certified nothing for a week and
+# kept graphite's fleet row red on `consumers_healthy`. Raising
+# baseline_timeout_s is the trap documented above: a baseline that passes
+# and leaves the item nothing to test a mutant with.
+#
+# The push gate already runs this suite as `-n 6 --dist loadfile
+# --no-loadscope-reorder` (see [tests]), and the launcher hands any extra
+# arguments to both of its pytest stages, so the same flags are appended
+# here. Measured 2026-11-05 at 7bd5d65 in the consumer's shape -- a detached
+# worktree, the launcher run from it:
+#
+#   unmutated baseline                     5080 passed, 55 skipped, exit 0,
+#                                          346.7 s wall
+#   _CHECK_SCHEMA_VERSION 1 -> 2, the tree pinned on PYTHONPATH, -n 6
+#                                          killer FAILED (`assert 2 == 1`)
+#   the same mutant, NO PYTHONPATH         26 passed  <- the control
+#   the launcher, on that mutant, with the flags below
+#                                          exit 1, 4 failed (every `check`
+#                                          schema test), 381 s wall
+#
+# So the pin on the tree under test reaches the xdist workers, and the
+# control shows the arm reads both ways. A process count taken during and
+# after each run read 7-8 dev-venv interpreters while it ran and 0 after it:
+# nothing was left behind.
+#
+# `--maxfail=0` is load-bearing. The launcher's own `-x` comes first in its
+# argv and `--maxfail` sets the same option, so the later one wins. Without
+# it, xdist ends a failing run with "Interrupted: stopping after 1
+# failures" and EXIT 2 -- measured on the same mutant -- which is also the
+# code pytest gives a collection error, where the serial run exited 1. aramid
+# books a stage-1 exit 3 or 4 as an error rather than a verdict (channel
+# round 175) and has not said how it reads 2, so a kill keeps the exit code it
+# always had. The price is the early stop: a failing confirmation now runs
+# its whole stage, still well under what one serial `-x` run cost.
+#
+# The flags live HERE and not in the launcher on purpose. aramid runs the
+# launcher at each item's own head but reads this file from the working
+# tree, so a launcher change would miss every item already queued; the
+# launcher has passed extra arguments to pytest since its first commit
+# (673c804). aramid's stage 1 is unaffected: it runs that itself, on the
+# drain's interpreter, never through this command (round 175).
 [mutation]
-test_command = ["python", "-P", "scripts/mutation_tests.py"]
+test_command = [
+  "python", "-P", "scripts/mutation_tests.py",
+  "-n", "6", "--dist", "loadfile", "--no-loadscope-reorder", "--maxfail=0",
+]
 baseline_timeout_s = 1500
 mutant_timeout_s = 1500
 # SIZED to the drain's hard deadline, 2026-10-03. This replaces the 2026-09-27
@@ -292,16 +341,26 @@ mutant_timeout_s = 1500
 # wall_budget_s covers the whole consumer (baseline, re-tests, mutants), but
 # it is checked only BEFORE each mutant, so a run can overshoot it by one
 # mutant. The dearest mutant is a survivor:
-#   - its stage 1, up to about 840 s over the channel tests;
-#   - plus a full-suite confirmation. baseline_s has measured 602-1012 s
-#     over eleven drains. The 1012 s run (10-03 18Z) was the same suite at
-#     the same head that took 660 s four hours earlier: machine load, which
-#     a drain must still fit;
-#   - total about 1850 s. The most one has actually cost is 1266 s (09-27).
-# So wall_budget_s <= 4260 - 1852 = 2408, and 2200 leaves about 200 s.
-# Typically the baseline takes 650-1000 s and the rest goes to mutants: a
-# stage-1 kill costs seconds, a confirmed survivor about 1300 s, and the
-# first re-test here (e37afd86, 10-03 18Z) about 530 s.
+#   - its stage 1, up to about 840 s over the channel tests. aramid runs
+#     stage 1 itself, serially, so the parallel suite does not shorten it;
+#   - plus a full-suite confirmation, which DOES go through test_command and
+#     is now parallel: 346.7 s measured (2026-11-05). Drain load has moved a
+#     baseline +53 % before (660 s -> 1012 s, 10-03), so about 540 s loaded;
+#   - total about 1380 s (it was about 1850 s run serially).
+# So wall_budget_s <= 4260 - 1380 - 200 = 2680, which is the value.
+#
+# The same number decides whether an owed re-test can run. aramid re-tests a
+# survivor once per occurrence, each a full-suite confirmation after the
+# baseline, and refuses when the item cannot hold them all. Survivor
+# 8aab21c3 (cli.py, `cmd_check`, an int-bound `1 -> 2`) has four, so it needs
+# max_mutants and confirm_cap both >= 4 and five full runs: about 1735 s at
+# the measured 347 s, about 2700 s at the loaded estimate -- so it fits a
+# quiet drain and may not fit a loaded one, which would leave it owed, not
+# lost. It was recorded at 10-28 07:52Z, before the tree-under-test pin
+# reached main (20:15Z that day), so it is evidence from the run that
+# certified nothing, and the literal it mutated has since moved out of
+# `cmd_check` into `_CHECK_SCHEMA_VERSION`. aramid's own re-test is what
+# should settle it, and confirm_cap 4 is what lets that happen.
 #
 # This is measured highs plus the drain's start rule, NOT a guarantee. A
 # mutant that drives both stage 1 and its confirmation to their 1500 s
@@ -309,18 +368,21 @@ mutant_timeout_s = 1500
 # degraded ("stopped at the drain's hard deadline"), leaves the item queued,
 # and stands down after three such stops at one head (FN-16): loud, not
 # silent. Re-derive if any of these change:
-#   - the baseline grows;
+#   - the baseline grows -- as it did on 2026-11-05, when the serial suite
+#     stopped fitting at all and the confirmation went parallel;
 #   - the deadline or the drain budget changes;
 #   - a stage-1 run passes about 840 s.
 #
-# The wall clock is what binds, so the count caps go back to aramid's packaged
-# values. They are written out so the decision reads here. Re-tests are on:
-# that is what lets a fixed survivor reach `fixed`. e37afd86, pending since
-# b0e4e4e pinned the hook's mode, went `fixed` on the first drain after
-# re-tests were turned back on (10-03 18Z).
-wall_budget_s = 2200
+# The wall clock is what binds, so the count caps are aramid's packaged
+# values except one: confirm_cap is 4, not 3, so that an owed re-test of a
+# four-occurrence survivor can run at all (8aab21c3, above). They are written
+# out so the decision reads here. Re-tests are on: that is what lets a fixed
+# survivor reach `fixed`. e37afd86, pending since b0e4e4e pinned the hook's
+# mode, went `fixed` on the first drain after re-tests were turned back on
+# (10-03 18Z).
+wall_budget_s = 2680
 max_mutants = 20
-confirm_cap = 3
+confirm_cap = 4
 retest_open_survivors = true
 retest_cap = 3
 
