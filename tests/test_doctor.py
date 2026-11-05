@@ -3336,10 +3336,16 @@ def test_a_cleanup_failure_headlines_without_discarding_the_cause(tmp_path: Path
         validate=lease.validate,
         cleanup=fail_cleanup,
     )
+    # With the clock frozen, `timeout_seconds` buys nothing but the REAL-time
+    # join on the teardown thread (`deadline - frozen`), and this teardown
+    # removes a real directory. At one second, a teardown slower than that --
+    # a loaded runner, or one delayed by hand -- reads `cleanup_timeout`
+    # instead of the `cleanup_failed` asserted below (#144). The join returns
+    # the moment the teardown does, so the hang guard costs nothing.
     frozen = time.monotonic()
     check = probes.probe_core_pipeline(
         tmp_path,
-        timeout_seconds=1,
+        timeout_seconds=_ANSWERED_AT_ONCE_BUDGET_SECONDS,
         _runner=fail,
         _workspace_factory=lambda: wrapped,
         _clock=lambda: frozen,
@@ -3388,10 +3394,12 @@ def test_nothing_masked_means_no_masked_fields(tmp_path: Path) -> None:
         validate=lease.validate,
         cleanup=fail_cleanup,
     )
+    # Hang-guard budget: the real teardown is joined on the real clock, see
+    # test_a_cleanup_failure_headlines_without_discarding_the_cause (#144).
     frozen = time.monotonic()
     check = probes.probe_core_pipeline(
         tmp_path,
-        timeout_seconds=1,
+        timeout_seconds=_ANSWERED_AT_ONCE_BUDGET_SECONDS,
         _runner=run,
         _workspace_factory=lambda: wrapped,
         _clock=lambda: frozen,
@@ -3446,10 +3454,12 @@ def test_an_isolation_failure_survives_a_blocked_cleanup_on_every_platform(tmp_p
         validate=validate_then_change,
         cleanup=blocked_cleanup,
     )
+    # Hang-guard budget: the real teardown is joined on the real clock, see
+    # test_a_cleanup_failure_headlines_without_discarding_the_cause (#144).
     frozen = time.monotonic()
     check = probes.probe_core_pipeline(
         tmp_path,
-        timeout_seconds=1,
+        timeout_seconds=_ANSWERED_AT_ONCE_BUDGET_SECONDS,
         _workspace_factory=lambda: wrapped,
         _clock=lambda: frozen,
     )
@@ -3502,27 +3512,65 @@ def test_blocked_carries_a_cause_only_when_one_is_actually_there() -> None:
     }
 
 
-def test_core_probe_deadline_includes_temp_creation_and_verified_cleanup(tmp_path: Path) -> None:
+def test_core_probe_deadline_includes_temp_creation_and_verified_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import graphite.doctor_probes as probes
     from graphite.probe_workspace import ProbeWorkspaceLease
+
+    # The REAL-time budget in this test is the cleanup join, not a subprocess
+    # (#144). Workspace creation moves the injected clock past `phase_deadline`,
+    # so the probe raises `timeout` before any command is launched -- the
+    # runner below proves that. The probe then joins the real teardown thread
+    # for `deadline - clock()` of WALL-CLOCK time, and a cleanup still alive
+    # at that point is reported as `cleanup_timeout`, which outranks and masks
+    # the `timeout` this test asserts.
+    #
+    # This used to be timeout_seconds=1 with the clock moved to 0.95: a 0.05s
+    # window for removing a real directory. A loaded CI runner missed it, and
+    # the failure was CI's exact shape -- {"error_type": "cleanup", "code":
+    # "cleanup_timeout"} plus the masked `timeout` pair. Delaying the teardown
+    # by hand reproduces it deterministically, and the late thread then held
+    # the global probe slot, so the next probe in the same worker read
+    # `cleanup_busy`.
+    #
+    # Derived, not raised: an injected clock cannot make a thread join wait on
+    # fake time, so the join's window is made a HANG GUARD instead. The reserve
+    # constant is the hang guard, `timeout_seconds` is sized so `0.2 * T`
+    # reaches it (making the reserve exactly the guard), and the clock lands
+    # one second past `phase_deadline`. The join then waits up to
+    # `_HANG_GUARD_SECONDS - 1` and returns the moment the teardown finishes.
+    # If the reserve formula changes so that this jump no longer crosses
+    # `phase_deadline`, the probe launches a command and `launches` says so,
+    # rather than the window quietly shrinking back to a race.
+    monkeypatch.setattr(probes, "_CLEANUP_RESERVE_SECONDS", float(_HANG_GUARD_SECONDS))
+    timeout_seconds = 5.0 * _HANG_GUARD_SECONDS
+    phase_deadline = timeout_seconds - _HANG_GUARD_SECONDS
 
     selected = tmp_path / "selected"
     selected.mkdir()
     temp_root = tmp_path / "temp"
     temp_root.mkdir()
     created: list[Path] = []
+    launches: list[object] = []
     now = [0.0]
     def factory() -> object:
         lease = ProbeWorkspaceLease.acquire(temp_root=temp_root)
         created.append(lease.parent_path)
-        now[0] = 0.95
+        # Creation spent the whole phase budget and one second of the reserve.
+        now[0] = phase_deadline + 1.0
         return lease
+    def must_not_launch(*args: object, **kwargs: object) -> object:
+        launches.append(args)
+        raise AssertionError("the creation deadline must stop the probe before any command")
     check = probes.probe_core_pipeline(
         selected,
-        timeout_seconds=1,
+        timeout_seconds=timeout_seconds,
+        _runner=must_not_launch,
         _clock=lambda: now[0],
         _workspace_factory=factory,
     )
+    assert launches == []
     assert check.status == "blocked"
     assert check.details == {"error_type": "timeout", "code": "timeout"}
     assert created and not created[0].exists()
