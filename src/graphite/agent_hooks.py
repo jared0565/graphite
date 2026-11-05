@@ -308,6 +308,46 @@ def _beside_a_required_space(start: int, end: int, spaces: list[tuple[int, int]]
     return any(run_end == start or run_start == end for run_start, run_end in spaces)
 
 
+# The words a definition is written with, in the languages graphite reads.
+# The word after one is the name being defined, so `def dependents` asks where
+# `dependents` is defined -- the question the graph answers -- and is not a
+# phrase. Round 331 first excused it as prose, which gave up the nudge for
+# the commonest way a definition is searched for.
+_DEFINITION_KEYWORDS = frozenset(
+    {
+        "def", "class", "function", "fn", "func", "struct", "enum", "trait",
+        "impl", "interface", "type", "const", "let", "var",
+    }
+)
+# The word that ends exactly where a space begins: the whole identifier, so
+# `undef` and `defx` are not `def`.
+_WORD_BEFORE_RE = re.compile(r"[A-Za-z0-9_]+$")
+
+
+def _follows_a_definition_keyword(
+    pattern: str, start: int, spaces: list[tuple[int, int]], fold_case: bool
+) -> bool:
+    """Whether the token at `start` follows a definition keyword across a
+    required space.
+
+    Such a token is the name a definition defines, so the space beside it does
+    not make it a fragment of a phrase. `pattern` is read with its fused
+    escapes blanked, so `\\bdef name` reads its keyword as `def`. The keyword
+    is matched as written unless the search folds case: `Def name` cannot
+    match `def name` in code.
+    """
+    for run_start, run_end in spaces:
+        if run_end != start:
+            continue
+        found = _WORD_BEFORE_RE.search(pattern, 0, run_start)
+        if found is None:
+            continue
+        word = found.group()
+        if (word.lower() if fold_case else word) in _DEFINITION_KEYWORDS:
+            return True
+    return False
+
+
 def _receiver_of(pattern: str, start: int) -> str | None:
     """The identifier the word at `start` is qualified by, or None.
 
@@ -353,7 +393,9 @@ def _pattern_tokens(pattern: str, fold_case: bool) -> list[tuple[str, str | None
     for found in _IDENTIFIER_RE.finditer(pattern):
         if _is_literal_fragment(pattern, found.start(), found.end()):
             continue
-        if _beside_a_required_space(found.start(), found.end(), spaces):
+        if _beside_a_required_space(
+            found.start(), found.end(), spaces
+        ) and not _follows_a_definition_keyword(pattern, found.start(), spaces, fold_case):
             continue
         token = found.group()
         key = token.lower() if fold_case else token

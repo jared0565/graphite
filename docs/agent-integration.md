@@ -369,7 +369,13 @@ that merely mentions a symbol name. It does not fire when:
   term is judged rather than excused) and **interior** (text on both sides,
   within the same branch and group, so a space at the edge of either cannot
   be added to any pattern to get past the gate). A regex escape is not a
-  space: `^\s*def\s+name\b` still names the symbol, and is still refused;
+  space: `^\s*def\s+name\b` still names the symbol, and is still refused.
+  Nor is a **definition** a phrase: a term that follows `def`, `class`,
+  `function`, `fn`, `func`, `struct`, `enum`, `trait`, `impl`,
+  `interface`, `type`, `const`, `let` or `var` across that space is the
+  name being defined, so `def name` asks where `name` is defined and is
+  judged like the bare term. The keyword is the whole word before the space
+  (`undef name` is prose), matched as written unless the search folds case;
 - the term is a **qualified member** of something this repo does not define,
   and nothing in this repo calls anything of that name.
   `RUNTIME\.put\(` is a call on a runtime binding the graph does not

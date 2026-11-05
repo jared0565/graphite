@@ -13,6 +13,31 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
+## [Unreleased]
+
+### Fixed
+
+**A search for a definition is judged again, not let through as a phrase.**
+1.9.1 stopped the strict agent hook from refusing a prose search for a word
+the repository happens to name: a required space inside a pattern makes the
+word beside it part of a phrase. That rule also let `def dependents`
+through, because it has such a space — and a search written that way asks
+where `dependents` is defined, which is exactly the question the graph
+answers. The nudge was gone for the commonest way a definition is searched
+for.
+
+A term that follows a definition keyword across that space is now judged
+like the bare term: `def`, `class`, `function`, `fn`, `func`, `struct`,
+`enum`, `trait`, `impl`, `interface`, `type`, `const`, `let` and `var`. The
+keyword must be the whole word before the space, so `undef name` is still
+prose, and it is matched as written unless the search folds case, since
+`Def name` cannot match `def name` in code. It holds on all three routes.
+
+The price is stated rather than hidden: prose that puts one of those words
+in front of a name the repository defines — `type check`, where `check` is a
+function — is refused. The refusal points at the graph, which can answer it,
+and refusing is the direction this hook already takes when it cannot tell.
+
 ## [1.9.1] — 2026-11-03
 
 A patch release: three fixes, and no change to any command, option, exit code
