@@ -158,8 +158,17 @@ _REPOSITORY_TREE_MODULES = frozenset(
 # The local gate passes no `--timeout`, so only CI would ever show that
 # ceiling -- which is why it is stated here.
 #
-# NOT for a test whose subject IS the manifest budget (the hard-bound and
-# separate-budget tests in test_doctor.py): those keep their own numbers.
+# THE HANG COST. "Costs nothing" holds only while the build FINISHES. If the
+# builder genuinely hangs, the cache never fills and every test requesting the
+# fixture waits out the whole budget: test_doctor.py runs on one worker under
+# `--dist loadfile` and holds about 24 such items, roughly 48 minutes in
+# series -- past the CI test job's 30-minute `timeout-minutes`, which kills the
+# job with no pytest summary (the #45 shape). Under the old 20s default the same
+# hang cost about 8 minutes of clean `timeout` failures. Either way a hang is a
+# real defect; this records what it would now cost to see one.
+#
+# NOT for a test whose subject IS the manifest budget (the hard-bound test in
+# test_doctor.py): it keeps its own number.
 COLD_MANIFEST_BUILD_BUDGET_SECONDS = 120.0
 _COLD_MANIFEST_BUILD_TEST_TIMEOUT_SECONDS = 2 * COLD_MANIFEST_BUILD_BUDGET_SECONDS + 20 + 60
 _COLD_MANIFEST_BUILD_FIXTURE = "cold_manifest_build_budget"
