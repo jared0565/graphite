@@ -1146,12 +1146,11 @@ def test_a_fragment_of_a_literal_is_not_judged_alone(
         ("check the round", "allow"),
         ("round one message", "allow"),
         ("out of the graph", "allow"),
-        # a code-shaped search is a phrase too. The reporter's rule is that a
-        # word inside a pattern carrying whitespace is a fragment of a longer
-        # literal, and this is that. The bare name and the escape form are
-        # still refused, so the nudge survives in its strongest forms; what
-        # is given up is the nudge for a search written `def <name>`.
-        ("def dependents", "allow"),
+        # a definition is NOT a phrase: the word after `def` is the name being
+        # defined, so `def dependents` asks where `dependents` is defined --
+        # the question the graph answers. Round 331 first let it through as
+        # prose; the keywords are below, each with its own allow control.
+        ("def dependents", "deny"),
         # a space that is not interior does not join: it cannot be added to
         # any pattern to smuggle a bare name past the gate
         ("dependents ", "deny"),
@@ -1237,6 +1236,112 @@ def test_a_phrase_is_not_judged_in_a_powershell_search_either(
 ) -> None:
     """PowerShell is a third route, and it reads the same pattern."""
     out = handle_pre_tool_use(_ps_payload(literal_repo, command), "strict")
+
+    assert _decision(out) == expected, command
+
+
+# ------------------------- a definition is not a phrase (round 331 follow-up) --
+# The phrase rule excuses a word beside a required space, and `def dependents`
+# has one, so it was let through as prose. But the word after a definition
+# keyword is the NAME BEING DEFINED: the search asks where `dependents` is
+# defined, which is the question the graph answers. So a name that follows a
+# keyword across a required space is judged as if the space were not there.
+#
+# Every keyword has its own allow control, `<keyword>x dependents`: the same
+# letters, but not the whole word. An implementation that matched a keyword
+# as a substring, or that dropped the phrase rule altogether, turns that
+# control red rather than passing every deny arm by accident.
+
+_DEFINITION_KEYWORDS = (
+    "def", "class", "function", "fn", "func", "struct", "enum", "trait",
+    "impl", "interface", "type", "const", "let", "var",
+)
+
+
+@pytest.mark.parametrize("keyword", _DEFINITION_KEYWORDS)
+def test_the_name_after_a_definition_keyword_is_judged(
+    literal_repo: Path, keyword: str
+) -> None:
+    out = handle_pre_tool_use(
+        _grep_payload(literal_repo, f"{keyword} dependents", path="src/"), "strict"
+    )
+
+    assert _decision(out) == "deny", keyword
+
+
+@pytest.mark.parametrize("keyword", _DEFINITION_KEYWORDS)
+def test_a_word_that_only_contains_a_keyword_is_still_prose(
+    literal_repo: Path, keyword: str
+) -> None:
+    out = handle_pre_tool_use(
+        _grep_payload(literal_repo, f"{keyword}x dependents", path="src/"), "strict"
+    )
+
+    assert _decision(out) == "allow", keyword
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected", "fold"),
+    [
+        # the keyword need not start the pattern
+        ("async def dependents", "deny", False),
+        ("pub fn dependents", "deny", False),
+        ("export function dependents", "deny", False),
+        ("the def dependents", "deny", False),
+        # a run of spaces, or a tab, is the same required space
+        ("def  dependents", "deny", False),
+        ("def\tdependents", "deny", False),
+        # an escape before the keyword is an operator, not part of the word
+        ("\\bdef dependents", "deny", False),
+        # an alternation before the keyword does not hide it
+        ("zzqx|def dependents", "deny", False),
+        # the keyword is matched as written unless the search folds case:
+        # `Def dependents` cannot match `def dependents` in code
+        ("Def dependents", "allow", False),
+        ("DEF dependents", "deny", True),
+        # a keyword AFTER the name defines nothing
+        ("dependents def", "allow", False),
+        # a word that ends in a keyword is not the keyword
+        ("undef dependents", "allow", False),
+        # the price, stated: prose that happens to put a keyword before a
+        # name this repo defines is refused. The refusal points at the graph,
+        # which can answer it, and refusing is the direction this hook takes.
+        ("type check", "deny", False),
+        # a keyword before a word the repo does not define changes nothing
+        ("def zzqx", "allow", False),
+    ],
+)
+def test_a_definition_keyword_is_read_where_it_stands(
+    literal_repo: Path, pattern: str, expected: str, fold: bool
+) -> None:
+    extra = {"-i": True} if fold else {}
+    out = handle_pre_tool_use(_grep_payload(literal_repo, pattern, path="src/", **extra), "strict")
+
+    assert _decision(out) == expected, pattern
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("grep -rn 'def dependents' src/", "deny"),
+        ("grep -rnE 'class dependents' src/", "deny"),
+        ("rg 'fn dependents' src/", "deny"),
+        ("grep -rn 'defx dependents' src/", "allow"),
+        ("Select-String -Pattern 'def dependents' -Path src/", "deny"),
+        ("Select-String -Pattern 'defx dependents' -Path src/", "allow"),
+    ],
+)
+def test_a_definition_keyword_is_read_on_every_route(
+    literal_repo: Path, command: str, expected: str
+) -> None:
+    """The shell and PowerShell routes read the same pattern and must reach
+    the same verdict as the Grep tool."""
+    payload = (
+        _ps_payload(literal_repo, command)
+        if command.startswith("Select-String")
+        else _bash_payload(literal_repo, command)
+    )
+    out = handle_pre_tool_use(payload, "strict")
 
     assert _decision(out) == expected, command
 
