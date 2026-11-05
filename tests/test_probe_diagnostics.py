@@ -37,11 +37,19 @@ def test_ledger_accepts_the_doctor_class() -> None:
     assert "doctor" in _CLASSES
 
 
-def test_invalid_response_records_the_subprocess_evidence(tmp_path: Path) -> None:
+def test_invalid_response_records_the_subprocess_evidence(
+    tmp_path: Path, cold_manifest_build_budget: float
+) -> None:
     import graphite.doctor_probes as probes
 
+    # Every test here runs the REAL manifest builder, and the first in a worker
+    # runs it cold; a cold build on a loaded runner outran the default budget
+    # and read `timeout` instead of the code asserted (#146). A timed-out build
+    # also leaves the cache empty, so the next test is cold too. The budget is
+    # derived in conftest.py.
     check = probes.probe_mcp(
         tmp_path,
+        manifest_timeout_seconds=cold_manifest_build_budget,
         _runner=lambda *a, **k: probes.ProbeProcessResult(3, b"not json at all", b"Traceback: boom", 0.01),
     )
 
@@ -54,13 +62,16 @@ def test_invalid_response_records_the_subprocess_evidence(tmp_path: Path) -> Non
     assert "3" in blob, "the returncode was discarded"
 
 
-def test_diagnostics_do_not_change_the_public_check(tmp_path: Path) -> None:
+def test_diagnostics_do_not_change_the_public_check(
+    tmp_path: Path, cold_manifest_build_budget: float
+) -> None:
     """Existing callers assert exact equality on `details`. Widening it would
     break them and would put stderr into a shareable report."""
     import graphite.doctor_probes as probes
 
     check = probes.probe_mcp(
         tmp_path,
+        manifest_timeout_seconds=cold_manifest_build_budget,
         _runner=lambda *a, **k: probes.ProbeProcessResult(0, b"{}", b"", 0.01),
     )
 
@@ -68,7 +79,9 @@ def test_diagnostics_do_not_change_the_public_check(tmp_path: Path) -> None:
     assert check.status == "degraded"
 
 
-def test_a_broken_ledger_never_breaks_the_probe(tmp_path: Path, monkeypatch) -> None:
+def test_a_broken_ledger_never_breaks_the_probe(
+    tmp_path: Path, monkeypatch, cold_manifest_build_budget: float
+) -> None:
     """Diagnostics are a convenience. A probe that fails because its own
     logging failed would be worse than the opacity being fixed."""
     import graphite.doctor_probes as probes
@@ -80,6 +93,7 @@ def test_a_broken_ledger_never_breaks_the_probe(tmp_path: Path, monkeypatch) -> 
 
     check = probes.probe_mcp(
         tmp_path,
+        manifest_timeout_seconds=cold_manifest_build_budget,
         _runner=lambda *a, **k: probes.ProbeProcessResult(1, b"garbage", b"err", 0.01),
     )
 
@@ -87,7 +101,9 @@ def test_a_broken_ledger_never_breaks_the_probe(tmp_path: Path, monkeypatch) -> 
     assert check.details == {"code": "invalid_response"}
 
 
-def test_recorded_diagnostics_are_bounded(tmp_path: Path) -> None:
+def test_recorded_diagnostics_are_bounded(
+    tmp_path: Path, cold_manifest_build_budget: float
+) -> None:
     """A probe can emit megabytes. The ledger caps `detail` at 2048 chars, but
     the probe must not rely on that -- an unbounded string still gets built,
     hashed and passed around first."""
@@ -95,6 +111,7 @@ def test_recorded_diagnostics_are_bounded(tmp_path: Path) -> None:
 
     check = probes.probe_mcp(
         tmp_path,
+        manifest_timeout_seconds=cold_manifest_build_budget,
         _runner=lambda *a, **k: probes.ProbeProcessResult(1, b"x" * 500_000, b"y" * 500_000, 0.01),
     )
 
@@ -108,7 +125,9 @@ def test_recorded_diagnostics_are_bounded(tmp_path: Path) -> None:
         assert len(str(entry.get("detail", ""))) <= 2048
 
 
-def test_diagnostics_also_reach_stderr(tmp_path: Path, capfd) -> None:
+def test_diagnostics_also_reach_stderr(
+    tmp_path: Path, capfd, cold_manifest_build_budget: float
+) -> None:
     """Load-bearing, not belt-and-braces. The ledger is per-repo on local disk;
     a CI runner throws that disk away, so a ledger-only diagnostic is invisible
     in exactly the environment where this failure actually occurs. Verified
@@ -118,6 +137,7 @@ def test_diagnostics_also_reach_stderr(tmp_path: Path, capfd) -> None:
 
     probes.probe_mcp(
         tmp_path,
+        manifest_timeout_seconds=cold_manifest_build_budget,
         _runner=lambda *a, **k: probes.ProbeProcessResult(7, b"junk", b"the real cause", 0.01),
     )
 
@@ -126,7 +146,9 @@ def test_diagnostics_also_reach_stderr(tmp_path: Path, capfd) -> None:
     assert "the real cause" in err
 
 
-def test_process_error_paths_are_recorded_too(tmp_path: Path) -> None:
+def test_process_error_paths_are_recorded_too(
+    tmp_path: Path, cold_manifest_build_budget: float
+) -> None:
     """The original fix only covered `invalid_response`. The failure actually
     seen in CI arrived via ProbeProcessError, which recorded nothing."""
     import graphite.doctor_probes as probes
@@ -134,7 +156,9 @@ def test_process_error_paths_are_recorded_too(tmp_path: Path) -> None:
     def _raise(*args, **kwargs):
         raise probes.ProbeProcessError("nonzero")
 
-    check = probes.probe_mcp(tmp_path, _runner=_raise)
+    check = probes.probe_mcp(
+        tmp_path, manifest_timeout_seconds=cold_manifest_build_budget, _runner=_raise
+    )
 
     assert check.details == {"code": "nonzero"}
     codes = {e.get("code") for e in _doctor_entries(tmp_path)}

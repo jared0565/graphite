@@ -119,7 +119,63 @@ _REPOSITORY_TREE_MODULES = frozenset(
 )
 
 
+# --- tests that run a REAL manifest build (#146) -------------------------------
+#
+# `probe_mcp` launches a manifest builder child before the server. A test that
+# leaves that child real pays for a real build, and a COLD one -- no cached
+# manifest for that cache key -- walks every package's metadata. The walk is
+# syscall-bound on Windows (`_getfinalpathname`, `_path_exists`), so under
+# contention each call yields its slice and queues behind the busy processes:
+# it slows far more than its CPU share would predict. The probe's default 20s
+# budget (19s of execution) is an idle-machine figure, and the suite spends it
+# on a loaded one.
+#
+# MEASURED 2026-11-05 on a 12-core Windows dev box, cold build, dev venv:
+#
+#   idle                          n=5   3.60-3.96s
+#   2x oversubscribed             n=20  p50 21.1s  p90 30.0s  max 52.3s
+#   (24 CPU burners on 12 cores)
+#
+# CI that day, Windows cells: five runs failed with every build killed at
+# 19.1-19.3s, and the pre-change tag failed the same way on the same day -- the
+# runners, not a change. That gives only a LOWER bound on CI's true duration,
+# which is why the budget is derived from the harsher local shape instead.
+#
+# Derived the way `_COLD_START_BUDGET_SECONDS` in test_doctor.py derives its
+# own: the transport's EXECUTION deadline -- `budget - min(1.0, 0.4 * budget)`
+# -- about 4x the loaded p90. 4 x 30.0s = 120s; a 120s budget leaves 119s of
+# execution, 2.3x the slowest build measured. It costs nothing when the code is
+# correct, because the run returns the moment the build does. Re-derive it if
+# the build or the load model changes -- do not tune it by re-running until
+# green.
+#
+# THE CEILING. CI runs pytest with `--timeout=120 --timeout-method=thread`, and
+# that method calls `os._exit` -- it kills the whole xdist worker, not the
+# test. A test legitimately waiting out this budget would die mid-wait and take
+# the rest of its file with it. So every test that requests the fixture also
+# gets a per-test timeout above its own worst case: two builds (one test calls
+# the probe twice), one real server phase (20s), and a minute for the rest.
+# The local gate passes no `--timeout`, so only CI would ever show that
+# ceiling -- which is why it is stated here.
+#
+# NOT for a test whose subject IS the manifest budget (the hard-bound and
+# separate-budget tests in test_doctor.py): those keep their own numbers.
+COLD_MANIFEST_BUILD_BUDGET_SECONDS = 120.0
+_COLD_MANIFEST_BUILD_TEST_TIMEOUT_SECONDS = 2 * COLD_MANIFEST_BUILD_BUDGET_SECONDS + 20 + 60
+_COLD_MANIFEST_BUILD_FIXTURE = "cold_manifest_build_budget"
+
+
+@pytest.fixture
+def cold_manifest_build_budget() -> float:
+    """The manifest budget for a test that runs a REAL build (see above)."""
+    return COLD_MANIFEST_BUILD_BUDGET_SECONDS
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    ceiling = pytest.mark.timeout(_COLD_MANIFEST_BUILD_TEST_TIMEOUT_SECONDS)
+    for item in items:
+        if _COLD_MANIFEST_BUILD_FIXTURE in getattr(item, "fixturenames", ()):
+            item.add_marker(ceiling)
     if (_REPO_ROOT / "docs").is_dir():
         return
     skip = pytest.mark.skip(
