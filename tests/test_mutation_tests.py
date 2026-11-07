@@ -552,6 +552,54 @@ def test_package_root_is_the_root_itself_when_there_is_no_src_layout(
     assert launcher._package_root(root) == root
 
 
+# `_mutated_modules` names the module the import guard asks the interpreter
+# about, and every `main()` test stubs `_imported_module` with a function that
+# ignores that name. So a WRONG name was invisible: aramid's mutation gate kept
+# `parts[-1]` -> `parts[-2]` alive in it as 9e5d638f (`int-bound 1 -> 2 in
+# _mutated_modules`, re-confirmed 2026-11-05). A wrong name is not a harmless
+# label -- it resolves to no module, the guard `continue`s, and the refusal the
+# guard exists to make can never fire. The mapping is therefore pinned here
+# directly, for both layouts `_package_root` reads.
+
+
+def test_mutated_modules_names_the_module_each_changed_file_is(
+    tmp_path: Path, launcher: ModuleType
+) -> None:
+    root = tmp_path / "repo"
+    _src_layout(root)
+
+    modules = launcher._mutated_modules(
+        root,
+        [
+            "src/graphite/cli.py",
+            "src/graphite/routing/schema_validation.py",
+            "src/graphite/__init__.py",
+            "src/graphite/routing/__init__.py",
+            # Outside the package: the script's own test loads it by path.
+            "scripts/mutation_tests.py",
+        ],
+    )
+
+    assert modules == [
+        "graphite.cli",
+        "graphite.routing.schema_validation",
+        "graphite",
+        "graphite.routing",
+    ]
+
+
+def test_mutated_modules_reads_a_flat_layout_from_the_root(
+    tmp_path: Path, launcher: ModuleType
+) -> None:
+    root = tmp_path / "repo"
+    (root / "graphite").mkdir(parents=True)
+    (root / "graphite" / "__init__.py").write_text("", encoding="utf-8")
+
+    modules = launcher._mutated_modules(root, ["graphite/cli.py", "graphite/__init__.py"])
+
+    assert modules == ["graphite.cli", "graphite"]
+
+
 def test_test_environment_puts_the_tree_under_test_first_on_the_import_path(
     tmp_path: Path, launcher: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -83,6 +83,12 @@ def test_savings_report_json(tmp_path: Path, capsys, monkeypatch) -> None:
     payload = _json.loads(capsys.readouterr().out)
 
     assert payload["ok"] is True
+    # The envelope is pinned, not just the facts in it. A `schema_version`
+    # nothing asserted SURVIVED aramid's mutation gate as `1 -> 2`
+    # (8aab21c3, re-detected here 2026-11-06 once #150 had pinned the same
+    # literal in `channel --json`): a caller branching on the version would
+    # read a different contract and no test would say so.
+    assert payload["schema_version"] == 1
     assert payload["all_time"]["count"] == 2
     assert set(payload["all_time"]["by_cmd"]) == {"context", "impact"}
     assert payload["today"]["count"] == 2
