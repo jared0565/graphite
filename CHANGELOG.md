@@ -17,14 +17,14 @@ machine-checkable identity; the version is for humans.
 
 ### Fixed
 
-**`doctor --deep` no longer reports MCP `probe_failed` on every wheel install.**
-Before it starts the MCP server, the deep probe builds a manifest of the
-server's dependencies from the interpreter's package-metadata roots. It
-skipped the root that holds graphite itself — an exemption meant only for
-graphite probing its own checkout, whose source sits inside the repository
-being probed. A wheel install keeps graphite, `mcp` and `networkx` in one
-site-packages, so skipping that root left `mcp` and `networkx` with no
-installed copy at all. The probe refused before the server ever started, and
+**`doctor --deep` no longer reports MCP `probe_failed` when the MCP
+dependencies are installed beside graphite.** Before it starts the MCP server,
+the deep probe builds a manifest of the server's dependencies from the
+interpreter's package-metadata roots. It skipped the root that holds graphite
+itself — an exemption meant only for graphite probing its own checkout, whose
+source sits inside the repository being probed. pip's usual layout puts
+graphite, `mcp` and `networkx` in one site-packages, and there skipping that
+root left `mcp` and `networkx` with no installed copy at all. The probe refused before the server ever started, and
 said `probe_failed` with nothing to explain it. The MCP server itself was
 never affected. The test suite runs from the source tree, where the
 dependencies live elsewhere, so it never saw this.

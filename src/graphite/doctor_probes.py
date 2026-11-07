@@ -224,9 +224,9 @@ for raw in raw_metadata_roots:
     _, lexical, root = bind_path(raw, True)
     # The trusted root is exempt from the refusal below and from nothing else:
     # graphite probing its own checkout has its source inside the selected
-    # repository. Skipping it everywhere also dropped the site-packages a WHEEL
-    # install shares with mcp and networkx, so neither had a candidate and
-    # every wheel install read probe_failed.
+    # repository. Skipping it everywhere also dropped the site-packages an
+    # installed graphite usually shares with mcp and networkx: with them beside
+    # it, neither had a candidate and the probe read probe_failed.
     if root == trusted and overlaps(root, selected):
         continue
     if overlaps(root, selected):

@@ -5135,13 +5135,14 @@ def test_mcp_manifest_builder_reads_dependencies_installed_beside_the_trusted_so
     tmp_path: Path,
     cold_manifest_build_budget: float,
 ) -> None:
-    """A wheel install keeps graphite and the MCP closure in ONE directory.
+    """An installed graphite usually shares ONE directory with the MCP closure.
 
     That directory is the trusted root, since the trusted root is the one
     holding the `graphite` package. The builder used to skip the trusted root
-    outright when it collected package-metadata roots, so on a wheel install
-    `mcp` and `networkx` had no candidate at all and every `doctor --deep`
-    read MCP `probe_failed` -- while the server itself was fine. The suite
+    outright when it collected package-metadata roots, so with `mcp` and
+    `networkx` installed beside graphite -- pip's usual layout -- they had no
+    candidate at all and `doctor --deep` read MCP `probe_failed`, while the
+    server itself was fine. The suite
     never saw it: it runs from `src/`, where the trusted root holds graphite
     alone and the dependencies sit in the environment's site-packages.
 
