@@ -222,7 +222,12 @@ for raw in raw_metadata_roots:
     if not canonical_candidate.is_dir():
         continue
     _, lexical, root = bind_path(raw, True)
-    if root == trusted:
+    # The trusted root is exempt from the refusal below and from nothing else:
+    # graphite probing its own checkout has its source inside the selected
+    # repository. Skipping it everywhere also dropped the site-packages a WHEEL
+    # install shares with mcp and networkx, so neither had a candidate and
+    # every wheel install read probe_failed.
+    if root == trusted and overlaps(root, selected):
         continue
     if overlaps(root, selected):
         if any(doctor_probes.metadata.Distribution.discover(path=[str(lexical)])):

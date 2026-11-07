@@ -5112,6 +5112,130 @@ def test_mcp_deep_probe_real_server_supports_trusted_source_inside_selected_repo
     assert check.details["server_name"] == "graphite"
 
 
+def _installed_distribution(site: Path, name: str) -> None:
+    """A minimal installed distribution: a one-module package and its dist-info."""
+    package = site / name
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    dist_info = site / f"{name}-0.0.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: {name}\nVersion: 0.0.0\n", encoding="utf-8"
+    )
+    (dist_info / "RECORD").write_text(
+        f"{name}/__init__.py,,\n"
+        f"{dist_info.name}/METADATA,,\n"
+        f"{dist_info.name}/RECORD,,\n",
+        encoding="utf-8",
+    )
+
+
+def test_mcp_manifest_builder_reads_dependencies_installed_beside_the_trusted_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cold_manifest_build_budget: float,
+) -> None:
+    """A wheel install keeps graphite and the MCP closure in ONE directory.
+
+    That directory is the trusted root, since the trusted root is the one
+    holding the `graphite` package. The builder used to skip the trusted root
+    outright when it collected package-metadata roots, so on a wheel install
+    `mcp` and `networkx` had no candidate at all and every `doctor --deep`
+    read MCP `probe_failed` -- while the server itself was fine. The suite
+    never saw it: it runs from `src/`, where the trusted root holds graphite
+    alone and the dependencies sit in the environment's site-packages.
+
+    The trusted root's exemption belongs to the refusal of metadata roots
+    INSIDE the selected repository (graphite probing its own checkout, the
+    test above). Outside it, the trusted root is walked like any other root.
+
+    The metadata roots are this one site only. Adding the running
+    environment's roots would put a second, real `mcp` in reach and test the
+    duplicate refusal instead of this.
+    """
+    import graphite.doctor_probes as probes
+
+    site = tmp_path / "site-packages"
+    shutil.copytree(
+        Path(probes.__file__).resolve(strict=True).parent,
+        site / "graphite",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    for name in ("mcp", "networkx"):
+        _installed_distribution(site, name)
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    # The default builder writes the single-slot manifest cache; keep this
+    # build's entry from evicting the one the real-server tests warm.
+    monkeypatch.setattr(probes, "_MCP_MANIFEST_CACHE", None)
+
+    manifest, bindings = probes._build_mcp_manifest_bounded(
+        str(selected),
+        trusted_raw=str(site),
+        metadata_roots=[str(site)],
+        python_executable=sys.executable,
+        timeout_seconds=cold_manifest_build_budget,
+        builder_script=probes._MCP_MANIFEST_BUILDER_BOOTSTRAP,
+        runner=probes.run_bounded_process,
+    )
+
+    resolved_site = site.resolve(strict=True)
+    assert Path(str(bindings["trusted"]["canonical"])) == resolved_site
+    packages = manifest["packages"]
+    assert isinstance(packages, dict)
+    for name in ("mcp", "networkx"):
+        assert Path(str(packages[name]["search"]["canonical"])) == resolved_site
+
+
+def test_mcp_manifest_builder_exempts_a_trusted_source_inside_the_selected_repo(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cold_manifest_build_budget: float,
+) -> None:
+    """The exemption the wheel fix narrowed, pinned where it still applies.
+
+    A metadata root inside the selected repository that holds distributions
+    is refused, since the selected repo is untrusted. The trusted source is the
+    one exception, and the real-server test above cannot pin it on this
+    checkout: its `src/` holds no distribution metadata, so that refusal could
+    never fire there, with or without the exemption. Here the trusted source
+    inside the repo DOES carry a dist-info -- as an editable install's metadata
+    beside the source would -- and the dependencies live outside the repo.
+    Without the exemption the builder refuses.
+    """
+    import graphite.doctor_probes as probes
+
+    selected = tmp_path / "repo"
+    trusted = selected / "src"
+    shutil.copytree(
+        Path(probes.__file__).resolve(strict=True).parent,
+        trusted / "graphite",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    _installed_distribution(trusted, "graphite_code")
+    dependencies = tmp_path / "site-packages"
+    dependencies.mkdir()
+    for name in ("mcp", "networkx"):
+        _installed_distribution(dependencies, name)
+    monkeypatch.setattr(probes, "_MCP_MANIFEST_CACHE", None)
+
+    manifest, _ = probes._build_mcp_manifest_bounded(
+        str(selected),
+        trusted_raw=str(trusted),
+        metadata_roots=[str(trusted), str(dependencies)],
+        python_executable=sys.executable,
+        timeout_seconds=cold_manifest_build_budget,
+        builder_script=probes._MCP_MANIFEST_BUILDER_BOOTSTRAP,
+        runner=probes.run_bounded_process,
+    )
+
+    packages = manifest["packages"]
+    assert isinstance(packages, dict)
+    resolved_dependencies = dependencies.resolve(strict=True)
+    for name in ("mcp", "networkx"):
+        assert Path(str(packages[name]["search"]["canonical"])) == resolved_dependencies
+
+
 def test_a_directories_identity_survives_moving_times_but_a_files_does_not(
     tmp_path: Path,
 ) -> None:

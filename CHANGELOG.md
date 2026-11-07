@@ -13,6 +13,28 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
+## [Unreleased]
+
+### Fixed
+
+**`doctor --deep` no longer reports MCP `probe_failed` on every wheel install.**
+Before it starts the MCP server, the deep probe builds a manifest of the
+server's dependencies from the interpreter's package-metadata roots. It
+skipped the root that holds graphite itself — an exemption meant only for
+graphite probing its own checkout, whose source sits inside the repository
+being probed. A wheel install keeps graphite, `mcp` and `networkx` in one
+site-packages, so skipping that root left `mcp` and `networkx` with no
+installed copy at all. The probe refused before the server ever started, and
+said `probe_failed` with nothing to explain it. The MCP server itself was
+never affected. The test suite runs from the source tree, where the
+dependencies live elsewhere, so it never saw this.
+
+The exemption now applies only where it was meant to: the root holding
+graphite is skipped only when it lies inside the selected repository.
+Anywhere else it is read like any other root. One consequence follows from
+the rule every other root already obeys: a dependency installed both there
+and in another root now has two candidates, and the probe refuses it.
+
 ## [1.9.2] — 2026-11-05
 
 A patch release: one fix, and no change to any command, option, exit code
