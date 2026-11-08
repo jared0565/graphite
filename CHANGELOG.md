@@ -13,7 +13,13 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
-## [Unreleased]
+## [1.9.3] — 2026-11-08
+
+A patch release: three fixes, and no change to any command, option, exit
+code, entry point or published schema. `doctor --json` keeps every field and
+every `details` value it had — the new explanations are in `summary` and
+`remediation`, which are human wording (`docs/compatibility.md`) — and the
+incident ledger code it adds is local diagnostics, not a stable surface.
 
 ### Fixed
 
