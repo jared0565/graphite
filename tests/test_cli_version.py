@@ -159,12 +159,17 @@ def test_version_needs_no_graph_and_no_project(tmp_path, monkeypatch, capsys) ->
     assert "graphite" in capsys.readouterr().out.lower()
 
 
-def test_version_does_not_mark_the_repo_active(monkeypatch, capsys) -> None:
+def test_version_does_not_mark_the_repo_active(monkeypatch, capsys, tmp_path) -> None:
     """Surveying eight consumer repos must not enrol eight repos into daemon
     supervision. Activation is what tells the daemon to keep a graph fresh, so a
     read-only identity question that activates would trigger eight rebuilds --
     the survey would change the thing it measures.
+
+    It is asked from a checkout's root, which the backstop would register; the
+    process's own directory is not one everywhere (an unpacked sdist).
     """
+    (tmp_path / ".git").mkdir()
+    monkeypatch.chdir(tmp_path)
     calls: list[object] = []
     monkeypatch.setattr(activation, "mark_active", lambda *a, **k: calls.append(a))
 

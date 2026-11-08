@@ -53,7 +53,7 @@ from .graph_io import MAX_GRAPH_BYTES, GraphReadError, load_validated_graph_bund
 from .health import persisted_resolution, ratio_percent, resolution_health
 from . import hookinstall
 from .incident_ledger import record_incident, repo_ledger_dir
-from .ingest import collect_files, enclosing_git_root, repository_root, trusted_root
+from .ingest import activation_root, collect_files, enclosing_git_root, repository_root, trusted_root
 from .init import init_project, platform_choices, resolve_platform_selection
 from .io import atomic_write_json
 from .listing import listing_lines
@@ -3704,14 +3704,15 @@ def main(argv: list[str] | None = None) -> int:
     # GRAPHITE_DAEMON_CHILD, without which activation would never expire.
     #
     # What is registered is the REPOSITORY the command is typed in, not the
-    # directory (#81): its root where graphite is set up there, and nothing at
-    # all for a folder below some other checkout's root. No build can run
-    # below a root, so the daemon would fail on such a marker at every
-    # discovery cycle for as long as it lived. `agent_hooks._activate` has
-    # made the same two choices since #80.
+    # directory (#81), and `ingest.activation_root` decides it for this path
+    # and for `agent_hooks._activate` alike: a checkout's root; nothing for a
+    # folder below a root, where no build can run; and a folder in no
+    # repository only where graphite is set up there, never a drive or
+    # filesystem root. Registering any folder a command ran in put a whole
+    # drive under supervision when a command was typed at its root.
     if args.command not in _ACTIVATION_EXEMPT_COMMANDS and not _is_scratch_workspace(Path.cwd()):
-        opened = repository_root(Path.cwd())
-        if _root_above(opened) is None:
+        opened = activation_root(Path.cwd())
+        if opened is not None:
             activation.mark_active(opened, "cli")
 
     try:

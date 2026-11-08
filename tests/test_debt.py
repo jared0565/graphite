@@ -122,16 +122,22 @@ def test_the_cli_renders_the_report(capsys) -> None:
     assert "declaration -> fix" in out, "the retired series must be visible too"
 
 
-def test_the_cli_does_not_mark_the_repository_active(monkeypatch, capsys) -> None:
+def test_the_cli_does_not_mark_the_repository_active(monkeypatch, capsys, tmp_path) -> None:
     """Asking how much debt exists must not enrol the directory you asked from.
 
     Same failure as a version survey that activates eight repos: the
     measurement changes the thing it measures, and the daemon starts
     supervising whatever the operator happened to `cd` into.
+
+    It is asked from a checkout's root, which the backstop would register:
+    only the exemption stands between it and a marker. The process's own
+    directory is not that everywhere -- an unpacked sdist has no `.git`.
     """
     from graphite import activation
     from graphite.cli import main
 
+    (tmp_path / ".git").mkdir()
+    monkeypatch.chdir(tmp_path)
     calls: list[object] = []
     monkeypatch.setattr(activation, "mark_active", lambda *a, **k: calls.append(a))
 

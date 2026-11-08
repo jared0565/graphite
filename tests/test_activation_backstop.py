@@ -83,6 +83,7 @@ def test_interactive_cli_invocation_marks_the_repo_active(
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     (repo / "src" / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    _git_init(repo)
     monkeypatch.chdir(repo)
 
     main(["build", "."])
@@ -145,11 +146,14 @@ def test_explicit_activation_of_a_temp_path_is_still_honoured(tmp_path: Path) ->
 def test_daemon_subcommand_does_not_mark_the_repo_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The supervisor is not an editing session."""
+    """The supervisor is not an editing session.
+
+    `base` holds `.git`, so the backstop would register it: only the
+    exemption stands between it and a marker."""
     from graphite.cli import main
 
     base = tmp_path / "base"
-    base.mkdir()
+    (base / ".git").mkdir(parents=True)
     monkeypatch.chdir(base)
 
     main(["daemon", str(base), "--once", "--state-dir", str(tmp_path / "state")])

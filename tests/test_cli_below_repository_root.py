@@ -628,17 +628,74 @@ def test_a_run_below_a_root_graphite_is_not_set_up_in_registers_nothing(
     assert _active_roots() == []
 
 
-def test_a_run_in_no_repository_registers_the_folder_as_before(
+def test_a_run_in_no_repository_registers_nothing_where_graphite_is_not_set_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A folder in no repository used to register itself, whatever it was. A
+    command typed in a drive root then handed the daemon the whole drive, and
+    every build of it timed out until the marker expired. A package manifest
+    does not make a folder a project here: a home directory often has one."""
     plain = tmp_path / "plain"
     plain.mkdir()
+    (plain / "package.json").write_text("{}\n", encoding="utf-8")
 
     code, _out, err = _run(plain, ["query", "callers anything"], monkeypatch, capsys)
 
     assert code == 1
     assert "graph_missing" in err
+    assert _active_roots() == []
+
+
+def test_a_run_in_no_repository_registers_the_folder_where_graphite_is_set_up_by_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "GRAPHITE.md").write_text("# graphite\n", encoding="utf-8")
+
+    _run(plain, ["query", "callers anything"], monkeypatch, capsys)
+
     assert _active_roots() == [plain.resolve()]
+
+
+def test_a_run_in_no_repository_registers_the_folder_once_it_has_a_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The `build` that makes the first graph is asked about before the graph
+    exists, so it registers nothing; the next command does."""
+    plain = tmp_path / "plain"
+    _write(plain, APP)
+
+    code, _out, _err = _run(plain, ["build", "."], monkeypatch, capsys)
+    assert code == 0
+    assert _active_roots() == []
+
+    code, _out, _err = _run(plain, ["query", "callers compute_total"], monkeypatch, capsys)
+
+    assert code == 0
+    assert _active_roots() == [plain.resolve()]
+
+
+def test_a_drive_or_filesystem_root_never_registers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Even where graphite looks set up. `_is_set_up` is forced true so the
+    root rule is the only thing that can refuse it."""
+    monkeypatch.setattr(ingest, "_is_set_up", lambda top: True)
+    anchor = Path(tmp_path.anchor)
+
+    assert ingest.activation_root(anchor) is None
+    assert ingest.activation_root(tmp_path) == tmp_path
+
+
+def test_the_hooks_register_nothing_in_a_folder_of_no_repository_not_set_up(tmp_path: Path) -> None:
+    """The same rule on the hook path: a session's `cwd` follows a `cd`, and
+    `Stop` renews its marker every turn."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    agent_hooks.handle_session_start({"cwd": str(plain)})
+    agent_hooks.handle_stop({"cwd": str(plain)})
+
+    assert _active_roots() == []
 
 
 # --- build and check name `.`: refused below a root, with the root named ------
