@@ -669,11 +669,17 @@ jobs:
       # directory OUTSIDE it. Running from the repo root would let `src/` satisfy
       # the import and the test would pass without the wheel working at all --
       # the whole question is whether the package stands on its own.
+      # With the `mcp` extra, so mcp and networkx land in the SAME site-packages
+      # as graphite -- pip's ordinary layout, and the one the deep probe below
+      # must work in. Without the extra the MCP server was never installed here
+      # at all, which is how a probe that refused in exactly this layout shipped.
       - name: Install the wheel into a clean environment
         run: |
+          set -euo pipefail
           python -m venv "$RUNNER_TEMP/smoke"
           "$RUNNER_TEMP/smoke/bin/python" -m pip install --upgrade pip
-          "$RUNNER_TEMP/smoke/bin/python" -m pip install dist/*.whl
+          WHEEL="$(ls dist/*.whl)"
+          "$RUNNER_TEMP/smoke/bin/python" -m pip install "${WHEEL}[mcp]"
       - name: Smoke test from outside the checkout
         run: |
           set -euo pipefail
@@ -714,6 +720,32 @@ jobs:
           PY
           "$SMOKE/bin/graphite" debt --as-of 2026-01-01 > /dev/null
           echo "installed wheel builds and queries a graph from a clean environment"
+
+      # The MCP server, exercised from the ARTIFACT. 1.9.2 shipped a deep probe
+      # that refused before starting the server on every install with mcp beside
+      # graphite, while every unit test passed: the suite runs from `src/`, where
+      # the dependencies live somewhere else. This is the layout the suite cannot
+      # build, so it is checked here, against the bytes that get published.
+      #
+      # Asserted on the payload, never doctor's exit status: other checks are
+      # legitimately degraded on a fresh runner (no daemon, no hooks). A missing
+      # `deep_mcp` check fails as loudly as a degraded one.
+      - name: Deep-probe the MCP server from the installed wheel
+        run: |
+          set -euo pipefail
+          SMOKE="$RUNNER_TEMP/smoke"
+          cd "$RUNNER_TEMP/probe"
+          "$SMOKE/bin/graphite" doctor --deep --json . > doctor.json || true
+          "$SMOKE/bin/python" - <<'PY'
+          import json
+          report = json.load(open("doctor.json", encoding="utf-8"))
+          assert report.get("deep") is True, f"not a deep report: deep={report.get('deep')!r}"
+          checks = {c["code"]: c for c in report["checks"]}
+          assert "deep_mcp" in checks, f"no deep_mcp check among {sorted(checks)}"
+          mcp = checks["deep_mcp"]
+          assert mcp["status"] == "ready", json.dumps(mcp, indent=2)
+          print("deep MCP probe from the installed wheel:", mcp["summary"])
+          PY
 
       # `init` is the most invasive thing this package does -- it writes git
       # hooks, an MCP server registration, VS Code tasks and agent hooks INTO
