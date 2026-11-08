@@ -26,8 +26,13 @@ registered the folder itself, whatever it was. A command typed in a drive
 root, which is where release deploy steps run to keep a checkout off
 `sys.path`, put the whole drive under supervision. Every build of it then
 timed out after the daemon's 240-second limit and was retried, for the hour
-until the marker expired. One machine's records show it four times, 14 to 17
-timed-out builds each. A home directory is the same case.
+until the marker expired. One machine's records show it four times, each on
+a release day:
+- three episodes ran for about an hour, with 17, 14 and 14 timed-out builds;
+- the fourth, caused by commands run from the drive root after a deploy, was
+  cut short at 4 when its marker was removed.
+
+A home directory is the same case.
 
 Such a folder now registers only where graphite is set up: it has a graph,
 or the `GRAPHITE.md` that `init` writes. A drive or filesystem root never
