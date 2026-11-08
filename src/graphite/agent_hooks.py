@@ -82,9 +82,10 @@ def _activate(root: Path) -> None:
     registered: no build can run there, so the daemon would fail on it at
     every discovery cycle for as long as the marker lived. A folder in no
     repository is registered only where graphite is set up there, and a drive
-    or filesystem root never is. The payload's `cwd` follows a `cd` in the
-    shell and `Stop` renews the marker every turn, so a session that wandered
-    to a drive root would otherwise keep the whole drive under supervision.
+    or filesystem root never is, not even one holding `.git`. The payload's
+    `cwd` follows a `cd` in the shell and `Stop` renews the marker every turn,
+    so a session that wandered to a drive root would otherwise keep the whole
+    drive under supervision.
 
     Guarded separately from the caller's own try/except: activation is
     bookkeeping, and this module is fail-open by contract -- a broken registry

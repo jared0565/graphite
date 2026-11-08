@@ -271,26 +271,31 @@ def activation_root(directory: Path) -> Path | None:
     CLI's backstop and the agent hooks. `graphite activate` names its path and
     is believed as given, so it does not ask.
 
+    - A drive or filesystem root never registers, not even one holding
+      `.git`. Registering whatever folder a command ran in handed the daemon
+      that folder to build: a command typed in a drive root put the whole
+      drive under supervision, and every build of it timed out until the
+      marker expired an hour later. A stray `.git` at a drive root is the
+      same drive, so it is asked about first -- the stance `trusted_root`
+      already takes. A repository whose root really is a drive root is
+      registered with `graphite activate`, which names its path.
     - A checkout's root registers itself, set up or not. That is how a fresh
       clone gets its first graph.
     - A folder below a checkout's root registers nothing. No build can run
       there (#80, #81), so the daemon would fail on the marker at every cycle.
     - A folder in no repository registers itself only where graphite is set
-      up there (a graph, or `GRAPHITE.md`), and a drive or filesystem root
-      never does. Registering whatever folder a command ran in handed the
-      daemon that folder to build: a command typed in a drive root put the
-      whole drive under supervision, and every build of it timed out until
-      the marker expired an hour later. A home directory is the same case.
+      up there (a graph, or `GRAPHITE.md`). A home directory, which often
+      holds a stray package manifest, is otherwise the drive-root case again.
 
     Never raises: a directory that cannot be read registers nothing.
     """
     try:
         root = repository_root(directory)
+        if root.parent == root or _resolved(root).parent == _resolved(root):
+            return None
         top = enclosing_git_root(root)
         if top is not None:
             return root if top == root else None
-        if root.parent == root or _resolved(root).parent == _resolved(root):
-            return None
         return root if _is_set_up(root) else None
     except OSError:
         return None

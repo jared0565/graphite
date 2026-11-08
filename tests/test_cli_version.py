@@ -179,6 +179,25 @@ def test_version_does_not_mark_the_repo_active(monkeypatch, capsys, tmp_path) ->
     assert calls == [], "--version marked the repository active"
 
 
+def test_graphite_with_no_command_prints_help_and_exits_1(monkeypatch, capsys, tmp_path) -> None:
+    """Bare `graphite` is the help screen, and it fails: a script that ran the
+    command without a subcommand did not get what it asked for. Nothing held
+    the status -- a mutant returning 2 survived the suite.
+
+    Like `--version` it returns before the activation backstop, so it is asked
+    from a checkout's root, which the backstop would register."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.chdir(tmp_path)
+    calls: list[object] = []
+    monkeypatch.setattr(activation, "mark_active", lambda *a, **k: calls.append(a))
+
+    assert main([]) == 1
+    out = capsys.readouterr().out
+
+    assert out.startswith("usage: graphite"), out[:80]
+    assert calls == [], "bare graphite marked the repository active"
+
+
 def test_version_degrades_honestly_when_the_engine_cannot_be_identified(
     monkeypatch, capsys
 ) -> None:
