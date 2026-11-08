@@ -100,8 +100,18 @@ class ProbeProcessError(Exception):
         budget_seconds: float | None = None,
         stdout_bytes: int | None = None,
         stderr_bytes: int | None = None,
+        returncode: int | None = None,
     ) -> None:
         self.code = code if code in _SAFE_ERROR_CODES else "unexpected"
+        # The child's exit status on `nonzero`, which is the one fact that says
+        # WHICH refusal a bootstrap made: every refusal used to read
+        # `returncode=<none>`, because this error carried no status at all.
+        # A number, coerced like `os_error` and for the same reason -- it is
+        # safe to carry where the child's streams are not. Deliberately left out
+        # of the message, which tests pin.
+        self.returncode = (
+            returncode if isinstance(returncode, int) and not isinstance(returncode, bool) else None
+        )
         # Coerced, never trusted: an OSError subclass can carry anything in
         # `errno`, and only an int may reach the message.
         self.os_error = os_error if isinstance(os_error, int) and not isinstance(os_error, bool) else None
@@ -757,6 +767,7 @@ def run_bounded_process(
             budget_seconds=timeout_seconds,
             stdout_bytes=stdout_seen,
             stderr_bytes=stderr_seen,
+            returncode=process.returncode,
         )
     # Last, so it never speaks over a diagnosis -- but still raised rather than
     # returned, because a run that may have leaked a process is not a success.

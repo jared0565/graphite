@@ -21,12 +21,14 @@ be cited as a released artifact. Releases 0.3.0 through 0.5.3 published artifact
 maintainer had built locally; from 1.0.0 the published bytes are CI's.
 
 Note what a release is FOR here, because the answer is not only publication. Every
-consumer on this machine imports Graphite from one editable install pointed at the
-development tree, so a saved file reaches all of them immediately and there is no
-previous version to return to. A retained, hash-recorded artifact is what makes that
-recoverable: rollback is "reinstall the last known-good wheel", which is only possible
-if that wheel was built and kept. Building into a scratch directory and discarding it
-satisfies the gate below and leaves the gap open.
+consumer on this machine runs an installed wheel, so a fix on `main` reaches none of
+them until it is released and deployed. (Through 0.2.1 they all imported one editable
+install of the development tree instead, so a saved file reached every one at once
+with no previous version to return to; see "Retention and rollback".) A retained,
+hash-recorded artifact is what makes a deploy recoverable: rollback is "reinstall the
+last known-good wheel", which is only possible if that wheel was built and kept.
+Building into a scratch directory and discarding it satisfies the gate below and
+leaves the gap open.
 
 Releases are model-independent. No LLM or other model access is required, and model
 output is not release evidence. Run Graphite checks with model integration disabled.
@@ -255,9 +257,15 @@ graphite --help
 
 The printed version must exactly match the approved version, and the registrations must
 match the wheel's inspected `entry_points.txt`. Do not start `graphite-mcp` as a help
-probe: it is a protocol server rather than a help-style CLI and requires the optional
-`mcp` dependency. A separate protocol smoke test is permitted only when that dependency
-is included in the approved, hash-verified snapshot.
+probe: it is a protocol server rather than a help-style CLI.
+
+The approved snapshot must include the `mcp` extra, installed into the same environment
+as the wheel. That layout -- mcp and networkx in the same site-packages as graphite -- is
+what pip produces for an ordinary install, and it is the one the test suite cannot
+build: the suite runs from `src/`, where the dependencies live elsewhere. 1.9.2 shipped
+a deep MCP probe that refused in exactly this layout while every test passed. CI's
+`artifact` job now checks it for every pull request and every push to `main`; check it
+here too, on the bytes being released.
 
 Create a small temporary Git repository under the approved smoke workspace with one
 small Python file. From that repository run:
@@ -266,10 +274,14 @@ small Python file. From that repository run:
 graphite --llm none --output-dir graph-out --cache-dir cache scan .
 graphite --llm none --output-dir graph-out --cache-dir cache build .
 graphite validate --graph-json graph-out/graph.json --json
+graphite doctor --deep --json .
 ```
 
-Confirm valid JSON, Markdown, and HTML. Retain artifact hashes and results in the release
-evidence. Clean disposable areas only after resolving and re-verifying their identity;
+Confirm valid JSON, Markdown, and HTML. In the doctor report, `deep` must be true and the
+check with code `deep_mcp` must be present and read `ready`. Read the payload, not
+doctor's exit status: other checks are legitimately degraded in a throwaway repository,
+and a degraded MCP probe does not change the exit status either. Retain artifact hashes
+and results in the release evidence. Clean disposable areas only after resolving and re-verifying their identity;
 then require `git status --short` to be clean in the release checkout.
 
 ## Tag and publish
@@ -417,6 +429,13 @@ them:
 ```text
 python -c "import graphite; print(graphite.__file__)"
 ```
+
+A deploy -- installing a release on this machine -- is read back the same way, and then
+exercised: from a repository, `graphite doctor --deep --json .` must report `deep_mcp`
+as `ready`. Record that result in the store beside the version and fingerprint
+readback. Until 1.9.3 the readback stopped at the version, so an MCP probe that refused
+on every run with mcp beside graphite shipped unseen in every wheel from 0.3.0, the first
+one deployed, through 1.9.2.
 
 Prove a rollback path in a throwaway virtual environment before relying on it,
 and prove the return as well. An untested recovery step is not a recovery step.
