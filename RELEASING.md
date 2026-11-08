@@ -264,8 +264,8 @@ as the wheel. That layout -- mcp and networkx in the same site-packages as graph
 what pip produces for an ordinary install, and it is the one the test suite cannot
 build: the suite runs from `src/`, where the dependencies live elsewhere. 1.9.2 shipped
 a deep MCP probe that refused in exactly this layout while every test passed. CI's
-`artifact` job now checks it on every commit; check it here too, on the bytes being
-released.
+`artifact` job now checks it for every pull request and every push to `main`; check it
+here too, on the bytes being released.
 
 Create a small temporary Git repository under the approved smoke workspace with one
 small Python file. From that repository run:

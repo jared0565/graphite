@@ -28,9 +28,11 @@ root left `mcp` and `networkx` with no installed copy at all. The probe
 refused before the server ever started, and said `probe_failed` with nothing
 to explain it. The MCP server itself was never affected. The test suite runs
 from the source tree, where the dependencies live elsewhere, so it never saw
-this — and nothing exercised an installed wheel's MCP server either. CI now
-installs every commit's wheel with the `mcp` extra and requires the deep
-probe to read `ready` from it.
+this — and nothing exercised an installed wheel's MCP server either. It
+shipped in every wheel from 0.3.0 through 1.9.2: measured on the retained
+0.3.0 and 1.9.2 wheels, with the skip unchanged in between. CI now installs
+the wheel it builds for every pull request and every push to `main` with the
+`mcp` extra, and requires the deep probe to read `ready` from it.
 
 The exemption now applies only where it was meant to: the root holding
 graphite is skipped only when it lies inside the selected repository.

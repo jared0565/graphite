@@ -5290,6 +5290,15 @@ def test_every_builder_refusal_status_is_one_the_parent_decodes() -> None:
 
     import graphite.doctor_probes as probes
 
+    # Exact, not merely self-consistent: ledgers record `returncode=73` and are
+    # read long after, so renumbering a class would misread every past refusal
+    # while all the generated names still agreed with each other.
+    assert dict(probes._MCP_BUILDER_REFUSALS) == {
+        71: "installation_mismatch",
+        72: "environment_in_repository",
+        73: "dependency_missing",
+        74: "dependency_duplicated",
+    }
     names = {f"REFUSED_{token.upper()}": status for status, token in probes._MCP_BUILDER_REFUSALS.items()}
     raised = re.findall(r"SystemExit\(([^)]*)\)", probes._MCP_MANIFEST_BUILDER_BOOTSTRAP)
     assert raised, "the sweep matched nothing, so it checked nothing"
@@ -5360,6 +5369,47 @@ def test_mcp_builder_refuses_installed_packages_inside_the_repo_as_environment_i
     refusal = _refusal_from_real_builder(selected, site, [site, in_repo_venv], cold_manifest_build_budget)
 
     assert refusal == "environment_in_repository"
+
+
+def test_mcp_builder_exception_nothing_classified_exits_70_and_decodes_as_unclassified(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cold_manifest_build_budget: float
+) -> None:
+    """The real child's excepthook path, which no injected runner can reach.
+
+    networkx is installed but its RECORD declares no importable file, so the
+    inventory refuses with a bare ValueError the builder does not classify. It
+    must leave through the excepthook as 70 and read `unclassified` -- a status
+    in the table here would send the operator to the wrong remedy.
+    """
+    import graphite.doctor_probes as probes
+
+    site = _site_with_graphite(tmp_path / "site-packages")
+    _installed_distribution(site, "mcp")
+    dist_info = site / "networkx-0.0.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: networkx\nVersion: 0.0.0\n", encoding="utf-8"
+    )
+    (dist_info / "RECORD").write_text(
+        f"{dist_info.name}/METADATA,,\n{dist_info.name}/RECORD,,\n", encoding="utf-8"
+    )
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    monkeypatch.setattr(probes, "_MCP_MANIFEST_CACHE", None)
+
+    with pytest.raises(probes._McpManifestRefused) as info:
+        probes._build_mcp_manifest_bounded(
+            str(selected),
+            trusted_raw=str(site),
+            metadata_roots=[str(site)],
+            python_executable=sys.executable,
+            timeout_seconds=cold_manifest_build_budget,
+            builder_script=probes._MCP_MANIFEST_BUILDER_BOOTSTRAP,
+            runner=probes.run_bounded_process,
+        )
+
+    assert info.value.refusal == "unclassified"
+    assert info.value.transport.returncode == 70
 
 
 @pytest.mark.parametrize("returncode", [None, 70, 1, 99])
