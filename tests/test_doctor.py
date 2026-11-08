@@ -4687,7 +4687,9 @@ def test_mcp_manifest_builder_rejects_trusted_source_symlink_escape(
         check=False,
     )
 
-    assert result.returncode == 70
+    # A source file that resolves outside the trusted package is graphite not
+    # laid out where it was loaded from -- refused, and refused as that.
+    assert probes._MCP_BUILDER_REFUSALS.get(result.returncode) == "installation_mismatch"
     assert not sentinel.exists()
 
 
@@ -5235,6 +5237,209 @@ def test_mcp_manifest_builder_exempts_a_trusted_source_inside_the_selected_repo(
     resolved_dependencies = dependencies.resolve(strict=True)
     for name in ("mcp", "networkx"):
         assert Path(str(packages[name]["search"]["canonical"])) == resolved_dependencies
+
+
+# --- builder refusals say why -------------------------------------------------
+#
+# Every builder refusal used to exit 70 and surface as `probe_failed` with each
+# diagnostic field `<none>`, which is how the probe above failed on every
+# install with mcp beside graphite for months unnoticed. The child now refuses
+# with a status from `_MCP_BUILDER_REFUSALS`; the parent decodes it to its own
+# vocabulary, so the reason reaches the report without any child output doing so.
+
+
+def _site_with_graphite(site: Path) -> Path:
+    import graphite.doctor_probes as probes
+
+    shutil.copytree(
+        Path(probes.__file__).resolve(strict=True).parent,
+        site / "graphite",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    return site
+
+
+def _refusal_from_real_builder(
+    selected: Path, trusted: Path, metadata_roots: list[Path], budget: float
+) -> str:
+    import graphite.doctor_probes as probes
+
+    with pytest.raises(probes._McpManifestRefused) as info:
+        probes._build_mcp_manifest_bounded(
+            str(selected),
+            trusted_raw=str(trusted),
+            metadata_roots=[str(root) for root in metadata_roots],
+            python_executable=sys.executable,
+            timeout_seconds=budget,
+            builder_script=probes._MCP_MANIFEST_BUILDER_BOOTSTRAP,
+            runner=probes.run_bounded_process,
+        )
+    # Still a ValueError, so every caller that treated a refusal as one does.
+    assert isinstance(info.value, ValueError)
+    return info.value.refusal
+
+
+def test_every_builder_refusal_status_is_one_the_parent_decodes() -> None:
+    """The child raises with names generated from the parent's table; pin that.
+
+    A status the table lost would decode as `unclassified` and silently undo
+    the point of the change. Every class must also be raised somewhere, or its
+    report is dead text.
+    """
+    import re
+
+    import graphite.doctor_probes as probes
+
+    names = {f"REFUSED_{token.upper()}": status for status, token in probes._MCP_BUILDER_REFUSALS.items()}
+    raised = re.findall(r"SystemExit\(([^)]*)\)", probes._MCP_MANIFEST_BUILDER_BOOTSTRAP)
+    assert raised, "the sweep matched nothing, so it checked nothing"
+    assert set(raised) <= {"70", *names}, set(raised) - {"70", *names}
+    assert set(names) <= set(raised), set(names) - set(raised)
+    assert 70 not in probes._MCP_BUILDER_REFUSALS
+    assert len(set(probes._MCP_BUILDER_REFUSALS.values())) == len(probes._MCP_BUILDER_REFUSALS)
+    assert set(probes._MCP_REFUSAL_REPORTS) == {
+        *probes._MCP_BUILDER_REFUSALS.values(),
+        probes._MCP_REFUSAL_UNCLASSIFIED,
+    }
+    for status, token in probes._MCP_BUILDER_REFUSALS.items():
+        assert f"REFUSED_{token.upper()} = {status}\n" in probes._MCP_MANIFEST_BUILDER_BOOTSTRAP
+
+
+def test_mcp_builder_refuses_a_missing_dependency_as_dependency_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cold_manifest_build_budget: float
+) -> None:
+    import graphite.doctor_probes as probes
+
+    site = _site_with_graphite(tmp_path / "site-packages")
+    _installed_distribution(site, "mcp")  # networkx is not installed
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    monkeypatch.setattr(probes, "_MCP_MANIFEST_CACHE", None)
+
+    refusal = _refusal_from_real_builder(selected, site, [site], cold_manifest_build_budget)
+
+    assert refusal == "dependency_missing"
+
+
+def test_mcp_builder_refuses_a_twice_installed_dependency_as_dependency_duplicated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cold_manifest_build_budget: float
+) -> None:
+    """The case the trusted-root fix made reachable: mcp beside graphite AND elsewhere."""
+    import graphite.doctor_probes as probes
+
+    site = _site_with_graphite(tmp_path / "site-packages")
+    for name in ("mcp", "networkx"):
+        _installed_distribution(site, name)
+    elsewhere = tmp_path / "system-site-packages"
+    elsewhere.mkdir()
+    _installed_distribution(elsewhere, "mcp")
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    monkeypatch.setattr(probes, "_MCP_MANIFEST_CACHE", None)
+
+    refusal = _refusal_from_real_builder(selected, site, [site, elsewhere], cold_manifest_build_budget)
+
+    assert refusal == "dependency_duplicated"
+
+
+def test_mcp_builder_refuses_installed_packages_inside_the_repo_as_environment_in_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cold_manifest_build_budget: float
+) -> None:
+    """The in-clone virtual environment, which cost real time to chase blind."""
+    import graphite.doctor_probes as probes
+
+    site = _site_with_graphite(tmp_path / "site-packages")
+    for name in ("mcp", "networkx"):
+        _installed_distribution(site, name)
+    selected = tmp_path / "repo"
+    in_repo_venv = selected / ".venv" / "Lib" / "site-packages"
+    in_repo_venv.mkdir(parents=True)
+    _installed_distribution(in_repo_venv, "anything")
+    monkeypatch.setattr(probes, "_MCP_MANIFEST_CACHE", None)
+
+    refusal = _refusal_from_real_builder(selected, site, [site, in_repo_venv], cold_manifest_build_budget)
+
+    assert refusal == "environment_in_repository"
+
+
+@pytest.mark.parametrize("returncode", [None, 70, 1, 99])
+def test_mcp_builder_status_the_table_does_not_name_decodes_as_unclassified(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, returncode: int | None
+) -> None:
+    """A crash, the excepthook's 70, or a runner that reported no status."""
+    import graphite.doctor_probes as probes
+
+    monkeypatch.setattr(probes, "_MCP_MANIFEST_CACHE", None)
+
+    def refusing_runner(*args: object, **kwargs: object) -> probes.ProbeProcessResult:
+        raise probes.ProbeProcessError("nonzero", returncode=returncode)
+
+    with pytest.raises(probes._McpManifestRefused) as info:
+        probes._build_mcp_manifest_bounded(
+            str(tmp_path),
+            trusted_raw=str(tmp_path),
+            metadata_roots=[],
+            python_executable=sys.executable,
+            timeout_seconds=5,
+            builder_script=probes._MCP_MANIFEST_BUILDER_BOOTSTRAP,
+            runner=refusing_runner,
+        )
+    assert info.value.refusal == "unclassified"
+    assert info.value.transport.returncode == returncode
+
+
+def test_mcp_deep_probe_reports_why_the_builder_refused_without_changing_details(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The reason reaches the summary, the remediation and the ledger; the code does not move."""
+    import graphite.doctor_probes as probes
+    from graphite.incident_ledger import read_incident_entries, repo_ledger_dir
+
+    monkeypatch.setattr(probes, "_MCP_MANIFEST_CACHE", None)
+    status = next(s for s, t in probes._MCP_BUILDER_REFUSALS.items() if t == "dependency_missing")
+
+    def refusing_runner(*args: object, **kwargs: object) -> probes.ProbeProcessResult:
+        raise probes.ProbeProcessError("nonzero", returncode=status, elapsed_seconds=0.5)
+
+    check = probes.probe_mcp(tmp_path, _builder_runner=refusing_runner)
+
+    phrase, remediation = probes._MCP_REFUSAL_REPORTS["dependency_missing"]
+    assert check.status == "degraded"
+    assert check.details == {"code": "probe_failed"}
+    assert check.summary == f"The MCP deep probe probe_failed: {phrase}."
+    assert tuple(check.remediation) == remediation
+    entries, _ = read_incident_entries(repo_ledger_dir(tmp_path))
+    refused = [e for e in entries if e.get("code") == "deep_mcp_manifest_refused"]
+    assert len(refused) == 1
+    detail = refused[0]["detail"]
+    assert detail.startswith("reason=dependency_missing | ")
+    assert f"returncode={status}" in detail and "elapsed_s=0.5" in detail
+    # A new fingerprint on purpose: the old `probe_failed` one may sit acked.
+    assert not [e for e in entries if e.get("code") == "deep_mcp_probe_failed"]
+
+
+def test_mcp_deep_probe_records_the_type_of_an_unclassified_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A bug in the probe used to look exactly like a refusal; now the ledger can tell."""
+    import graphite.doctor_probes as probes
+    from graphite.incident_ledger import read_incident_entries, repo_ledger_dir
+
+    monkeypatch.setattr(probes, "_MCP_MANIFEST_CACHE", None)
+
+    def broken_runner(*args: object, **kwargs: object) -> probes.ProbeProcessResult:
+        raise RuntimeError("a defect in the probe, not a refusal")
+
+    check = probes.probe_mcp(tmp_path, _builder_runner=broken_runner)
+
+    assert check.details == {"code": "probe_failed"}
+    assert check.summary == "The MCP deep probe probe_failed."
+    entries, _ = read_incident_entries(repo_ledger_dir(tmp_path))
+    failed = [e for e in entries if e.get("code") == "deep_mcp_probe_failed"]
+    assert len(failed) == 1
+    assert failed[0]["detail"].startswith("reason=RuntimeError | ")
+    # The exception's MESSAGE never reaches the ledger, only its type.
+    assert "defect" not in failed[0]["detail"]
 
 
 def test_a_directories_identity_survives_moving_times_but_a_files_does_not(

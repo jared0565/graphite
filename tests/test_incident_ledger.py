@@ -70,6 +70,83 @@ def test_reopen_after_resolve(tmp_path, monkeypatch):
     assert view.state == "open" and view.count == 2
 
 
+def _ticking_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    import graphite.incident_ledger as il
+
+    seconds = iter(range(10, 60))
+    monkeypatch.setattr(il, "_now", lambda: f"2026-07-25T10:00:{next(seconds):02d}Z")
+
+
+def test_recurred_since_ack_names_an_ack_followed_by_an_occurrence(tmp_path, monkeypatch):
+    """An ack never re-opens, so this is the only place a recurrence shows."""
+    from graphite.incident_ledger import recurred_since_ack
+
+    _ticking_clock(monkeypatch)
+    recurred = _record(tmp_path, subject="src/recurred.py")
+    quiet = _record(tmp_path, subject="src/quiet.py")
+    append_lifecycle(tmp_path, recurred, "ack", note="seen")
+    append_lifecycle(tmp_path, quiet, "ack", note="seen")
+    _record(tmp_path, subject="src/recurred.py")
+
+    entries = read_incident_entries(tmp_path)[0]
+    assert recurred_since_ack(entries) == frozenset({recurred})
+    # Unchanged semantics: both are still acked.
+    assert {v.state for v in fold_incidents(entries)} == {"acked"}
+
+
+def test_recurred_since_ack_ignores_resolves_and_never_triaged_incidents(tmp_path, monkeypatch):
+    """A resolve already re-opens on recurrence, and an untriaged one is open."""
+    from graphite.incident_ledger import recurred_since_ack
+
+    _ticking_clock(monkeypatch)
+    reopened = _record(tmp_path, subject="src/reopened.py")
+    acked_then_resolved = _record(tmp_path, subject="src/resolved.py")
+    _record(tmp_path, subject="src/untriaged.py")
+    append_lifecycle(tmp_path, reopened, "resolve")
+    append_lifecycle(tmp_path, acked_then_resolved, "ack")
+    append_lifecycle(tmp_path, acked_then_resolved, "resolve")
+    _record(tmp_path, subject="src/reopened.py")
+    _record(tmp_path, subject="src/resolved.py")
+    _record(tmp_path, subject="src/untriaged.py")
+
+    assert recurred_since_ack(read_incident_entries(tmp_path)[0]) == frozenset()
+
+
+def test_doctor_says_when_an_acked_incident_recurred_without_degrading(tmp_path, monkeypatch):
+    from graphite.config import Config
+    from graphite.doctor import run_doctor
+
+    _ticking_clock(monkeypatch)
+    ledger = repo_ledger_dir(tmp_path)
+    fp = _record(ledger, subject="src/flaky.py")
+    append_lifecycle(ledger, fp, "ack", note="seen once")
+    _record(ledger, subject="src/flaky.py")
+
+    report = run_doctor(tmp_path, cfg=Config(cache_dir=tmp_path / ".cache"), daemon_base=tmp_path)
+    incidents = {c["code"]: c for c in report["checks"]}["incidents"]
+
+    assert incidents["summary"] == "0 open / 1 acked, 1 recurred since ack"
+    assert incidents["status"] == "ready"
+    assert incidents["details"] == {"top_open": []}
+    assert any(fp in line and "src/flaky.py" in line and "x2" in line for line in incidents["remediation"])
+
+
+def test_doctor_incident_summary_unchanged_when_nothing_recurred(tmp_path, monkeypatch):
+    from graphite.config import Config
+    from graphite.doctor import run_doctor
+
+    _ticking_clock(monkeypatch)
+    ledger = repo_ledger_dir(tmp_path)
+    fp = _record(ledger, subject="src/once.py")
+    append_lifecycle(ledger, fp, "ack", note="seen once")
+
+    report = run_doctor(tmp_path, cfg=Config(cache_dir=tmp_path / ".cache"), daemon_base=tmp_path)
+    incidents = {c["code"]: c for c in report["checks"]}["incidents"]
+
+    assert incidents["summary"] == "0 open / 1 acked"
+    assert list(incidents["remediation"]) == []
+
+
 def test_lifecycle_unknown_fingerprint_refused(tmp_path):
     assert append_lifecycle(tmp_path, "deadbeefdeadbeef", "ack") is False
     entries, _ = read_incident_entries(tmp_path)

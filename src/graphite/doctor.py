@@ -621,25 +621,44 @@ def check_llm_config(cfg: Config) -> DoctorCheck:
 
 
 def _incidents_check(root: Path) -> DoctorCheck:
-    from .incident_ledger import fold_incidents, read_incident_entries, repo_ledger_dir
+    from .incident_ledger import (
+        fold_incidents,
+        read_incident_entries,
+        recurred_since_ack,
+        repo_ledger_dir,
+    )
 
     entries, skipped = read_incident_entries(repo_ledger_dir(root))
     views = [v for v in fold_incidents(entries) if v.state != "resolved"]
     open_views = [v for v in views if v.state == "open"]
     top = [f"{v.fingerprint} {v.code} {v.subject} x{v.count}" for v in open_views[:10]]
     summary = f"{len(open_views)} open / {len(views) - len(open_views)} acked"
+    # Reported, not escalated: the status still turns only on open incidents,
+    # because an ack is the operator's decision. What changes is that a
+    # recurrence after it is SAID -- before, it raised a count and nothing else.
+    recurred = recurred_since_ack(entries)
+    recurred_views = [v for v in views if v.state == "acked" and v.fingerprint in recurred]
+    if recurred_views:
+        summary += f", {len(recurred_views)} recurred since ack"
     if skipped:
         summary += f", {skipped} corrupt line(s)"
     status: DoctorStatus = "degraded" if open_views else "ready"
+    remediation: tuple[str, ...] = ()
+    if open_views:
+        remediation += ("graphite incidents list", "graphite incidents ack <fingerprint> -m NOTE")
+    if recurred_views:
+        remediation += tuple(
+            f"recurred since ack: {v.fingerprint} {v.code} {v.subject} x{v.count}, last {v.last_seen}"
+            for v in recurred_views[:10]
+        )
+        remediation += ("An ack does not re-open on recurrence; read the incident again.",)
     return DoctorCheck(
         code="incidents",
         label="Incident ledger",
         status=status,
         summary=summary,
         details={"top_open": top},
-        remediation=("graphite incidents list", "graphite incidents ack <fingerprint> -m NOTE")
-        if open_views
-        else (),
+        remediation=remediation,
     )
 
 

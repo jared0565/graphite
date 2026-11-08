@@ -99,6 +99,74 @@ def identity_matches(stat, identity, require_directory):
         return [stat.st_dev, stat.st_ino] == identity[:2]
     return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns] == identity
 '''
+#: Why the manifest builder refused, carried as the exit status it refused with.
+#:
+#: The child's streams never cross into this process (see `ProbeProcessError`),
+#: so every refusal used to arrive as a bare `nonzero` and surface as
+#: `probe_failed` with every diagnostic field empty. That is how a probe that
+#: refused on every install with mcp beside graphite went unnoticed for months.
+#: A status is a number, so it may cross where the streams may not, and it is
+#: decoded here onto this fixed vocabulary -- nothing the child writes reaches a
+#: report. Classes split only where the remedy differs. 70 is the unclassified
+#: refusal and the child's excepthook status; it has no entry on purpose.
+_MCP_REFUSAL_UNCLASSIFIED = "unclassified"
+_MCP_BUILDER_REFUSALS: Mapping[int, str] = {
+    71: "installation_mismatch",
+    72: "environment_in_repository",
+    73: "dependency_missing",
+    74: "dependency_duplicated",
+}
+#: The same table as names the builder bootstrap raises with. Generated rather
+#: than written out, so the child's statuses cannot drift from the decoder's.
+_MCP_REFUSAL_STATUSES = "".join(
+    f"REFUSED_{token.upper()} = {status}\n" for status, token in _MCP_BUILDER_REFUSALS.items()
+)
+#: What each refusal means to the operator: the phrase that ends the summary,
+#: then the remediation lines. Human wording, not a stable surface; the check's
+#: `details` stay `{"code": "probe_failed"}` for every refusal.
+_MCP_REFUSAL_REPORTS: Mapping[str, tuple[str, tuple[str, ...]]] = {
+    "dependency_missing": (
+        "a dependency of the MCP server has no installed copy where the probe looks",
+        (
+            "The probe stopped before starting the server: mcp, networkx or one of "
+            "their requirements is not installed on this interpreter's package paths.",
+            'Install the MCP extra into this interpreter: python -m pip install "graphite-code[mcp]"',
+        ),
+    ),
+    "dependency_duplicated": (
+        "a dependency of the MCP server is installed more than once",
+        (
+            "The probe stopped before starting the server: a distribution the server "
+            "needs is installed in two package directories, so it cannot tell which "
+            "copy the server would import.",
+            "Remove the extra copy; python -m pip list -v shows where each one is installed.",
+        ),
+    ),
+    "environment_in_repository": (
+        "installed packages were found inside the repository being checked",
+        (
+            "The probe stopped before starting the server: a package directory on "
+            "this interpreter's path lies inside the repository and holds installed "
+            "distributions -- usually a virtual environment created inside the clone.",
+            "Move the environment outside the repository.",
+        ),
+    ),
+    "installation_mismatch": (
+        "graphite's installation changed, or is not laid out as the probe verifies",
+        (
+            "The probe stopped before starting the server: the files it bound to "
+            "changed while it ran, or graphite is not installed where it was loaded from.",
+            "Run doctor again; if this repeats, reinstall graphite.",
+        ),
+    ),
+    _MCP_REFUSAL_UNCLASSIFIED: (
+        "the dependency manifest was refused for a reason the probe does not classify",
+        (
+            "The probe stopped before starting the server.",
+            "graphite incidents list records the refusal with its exit status.",
+        ),
+    ),
+}
 
 _MCP_MANIFEST_BUILDER_BOOTSTRAP = """\
 import os
@@ -108,7 +176,7 @@ import sys
 from importlib.machinery import PathFinder
 
 sys.excepthook = lambda *_: os._exit(70)
-""" + _MCP_IDENTITY_MATCHER + """\
+""" + _MCP_IDENTITY_MATCHER + _MCP_REFUSAL_STATUSES + """\
 def validate_binding(raw, require_directory):
     if not isinstance(raw, dict) or set(raw) != {"canonical", "identity", "lexical"}:
         raise SystemExit(70)
@@ -126,12 +194,12 @@ def validate_binding(raw, require_directory):
     ):
         raise SystemExit(70)
     if lexical.resolve(strict=True) != canonical or canonical.resolve(strict=True) != canonical:
-        raise SystemExit(70)
+        raise SystemExit(REFUSED_INSTALLATION_MISMATCH)
     stat = canonical.stat()
     if not identity_matches(stat, identity, require_directory):
-        raise SystemExit(70)
+        raise SystemExit(REFUSED_INSTALLATION_MISMATCH)
     if canonical.is_dir() != require_directory:
-        raise SystemExit(70)
+        raise SystemExit(REFUSED_INSTALLATION_MISMATCH)
     return lexical, canonical
 def overlaps(left, right):
     try:
@@ -180,7 +248,7 @@ if (
     or expected_doctor.parent != trusted / "graphite"
     or expected_mcp.parent != trusted / "graphite"
 ):
-    raise SystemExit(70)
+    raise SystemExit(REFUSED_INSTALLATION_MISMATCH)
 stdlib_path = list(sys.path)
 graphite_spec = PathFinder.find_spec("graphite", [str(trusted)])
 if (
@@ -191,7 +259,7 @@ if (
     or [pathlib.Path(item).resolve(strict=True) for item in graphite_spec.submodule_search_locations]
     != [expected_init.parent]
 ):
-    raise SystemExit(70)
+    raise SystemExit(REFUSED_INSTALLATION_MISMATCH)
 doctor_spec = PathFinder.find_spec(
     "graphite.doctor_probes", list(graphite_spec.submodule_search_locations)
 )
@@ -200,11 +268,11 @@ if (
     or doctor_spec.origin is None
     or pathlib.Path(doctor_spec.origin).resolve(strict=True) != expected_doctor
 ):
-    raise SystemExit(70)
+    raise SystemExit(REFUSED_INSTALLATION_MISMATCH)
 sys.path[:] = [str(trusted), *stdlib_path]
 from graphite import doctor_probes
 if pathlib.Path(doctor_probes.__file__).resolve(strict=True) != expected_doctor:
-    raise SystemExit(70)
+    raise SystemExit(REFUSED_INSTALLATION_MISMATCH)
 cached_payload = sys.stdin.buffer.read()
 raw_metadata_roots = json.loads(sys.argv[3])
 if not isinstance(raw_metadata_roots, list) or len(raw_metadata_roots) > 64:
@@ -231,18 +299,23 @@ for raw in raw_metadata_roots:
         continue
     if overlaps(root, selected):
         if any(doctor_probes.metadata.Distribution.discover(path=[str(lexical)])):
-            raise SystemExit(70)
+            raise SystemExit(REFUSED_ENVIRONMENT_IN_REPOSITORY)
         continue
     normalized = os.path.normcase(str(root))
     if normalized in seen_roots:
         raise SystemExit(70)
     seen_roots.add(normalized)
     metadata_roots.append(lexical)
-if cached_payload:
-    manifest = json.loads(cached_payload.decode("utf-8"))
-    manifest = doctor_probes._validate_mcp_manifest(manifest, selected)
-else:
-    manifest = doctor_probes._mcp_import_manifest(selected, tuple(metadata_roots))
+try:
+    if cached_payload:
+        manifest = json.loads(cached_payload.decode("utf-8"))
+        manifest = doctor_probes._validate_mcp_manifest(manifest, selected)
+    else:
+        manifest = doctor_probes._mcp_import_manifest(selected, tuple(metadata_roots))
+except doctor_probes._McpDependencyMissing:
+    raise SystemExit(REFUSED_DEPENDENCY_MISSING) from None
+except doctor_probes._McpDependencyDuplicated:
+    raise SystemExit(REFUSED_DEPENDENCY_DUPLICATED) from None
 envelope = {
     "bindings": {
         "doctor": doctor_binding,
@@ -858,7 +931,9 @@ def _stream_excerpt(raw: object, *, limit: int = _PROBE_DIAGNOSTIC_STREAM_CHARS,
     return f"{text[:limit]}...[{dropped} more chars]"
 
 
-def _record_probe_diagnostics(root: Path, failure: str, result: object = None) -> None:
+def _record_probe_diagnostics(
+    root: Path, failure: str, result: object = None, *, reason: str | None = None
+) -> None:
     """Record what a failing probe knew, so the next occurrence explains itself.
 
     `DoctorCheck.details` deliberately stays `{"code": ...}`: callers assert
@@ -866,12 +941,17 @@ def _record_probe_diagnostics(root: Path, failure: str, result: object = None) -
     stderr should not travel. The repo incident ledger is local and bounded, so
     that is where the evidence goes.
 
+    `reason` leads the detail when the caller knows WHY -- a refusal class, or
+    the type of an exception nothing classified. Only ever this module's own
+    vocabulary or a class name, never text a child produced.
+
     Swallows everything. Diagnostics are a convenience; a probe that failed
     because its own logging failed would be worse than the opacity this fixes.
     """
     try:
         detail = " | ".join(
             (
+                *((f"reason={reason}",) if reason is not None else ()),
                 f"returncode={getattr(result, 'returncode', '<none>')}",
                 # Transport-side evidence, and the only evidence there IS when
                 # the transport raised rather than returned (graphite#51).
@@ -953,6 +1033,26 @@ def _degraded_probe(code: str, label: str, failure: str) -> DoctorCheck:
         "degraded",
         f"The {label} deep probe {failure}.",
         {"code": failure},
+    )
+
+
+def _manifest_refused_probe(refusal: str) -> DoctorCheck:
+    """`probe_failed`, as before, but saying why the builder refused.
+
+    The code is unchanged -- `doctor --json` is a stable surface and callers
+    assert `details` exactly -- so the reason travels in the summary and the
+    remediation, which are human wording.
+    """
+    phrase, remediation = _MCP_REFUSAL_REPORTS.get(
+        refusal, _MCP_REFUSAL_REPORTS[_MCP_REFUSAL_UNCLASSIFIED]
+    )
+    return DoctorCheck(
+        "deep_mcp",
+        "MCP",
+        "degraded",
+        f"The MCP deep probe probe_failed: {phrase}.",
+        {"code": "probe_failed"},
+        remediation,
     )
 
 
@@ -1353,6 +1453,37 @@ def _declared_distribution_name(distribution: metadata.Distribution) -> str | No
     return meta["Name"] if "Name" in meta else None
 
 
+class _McpDependencyMissing(ValueError):
+    """A distribution in the MCP closure has no copy on the metadata roots.
+
+    A `ValueError`, as the bare raise it replaces was, so every caller that
+    already treats a closure failure as a refusal still does. The builder child
+    catches it by type to exit with the status that says which refusal it was.
+    """
+
+
+class _McpDependencyDuplicated(ValueError):
+    """A distribution in the MCP closure has more than one copy on the roots.
+
+    Refused rather than resolved by path order: the probe cannot know that the
+    copy it would pin is the one the real server imports.
+    """
+
+
+class _McpManifestRefused(ValueError):
+    """The manifest builder child refused, decoded to the parent's vocabulary.
+
+    `refusal` is only ever a key of `_MCP_REFUSAL_REPORTS`, chosen by this
+    process from the child's exit status. `transport` is the error the runner
+    raised, kept so its counts and timings reach the incident ledger.
+    """
+
+    def __init__(self, refusal: str, transport: ProbeProcessError) -> None:
+        super().__init__(refusal)
+        self.refusal = refusal if refusal in _MCP_REFUSAL_REPORTS else _MCP_REFUSAL_UNCLASSIFIED
+        self.transport = transport
+
+
 def _mcp_distribution_closure(
     metadata_roots: tuple[Path, ...] | None = None,
 ) -> dict[str, metadata.Distribution]:
@@ -1401,8 +1532,10 @@ def _mcp_distribution_closure(
             distribution = metadata.distribution(requested)
         else:
             candidates = discovered.get(normalized, [])
-            if len(candidates) != 1:
-                raise ValueError
+            if not candidates:
+                raise _McpDependencyMissing
+            if len(candidates) > 1:
+                raise _McpDependencyDuplicated
             distribution = candidates[0]
         declared_name = _declared_distribution_name(distribution)
         if not isinstance(declared_name, str) or _normalized_distribution_name(declared_name) != normalized:
@@ -1748,7 +1881,10 @@ def _build_mcp_manifest_bounded(
                 with _MCP_MANIFEST_CACHE_LOCK:
                     if _MCP_MANIFEST_CACHE == (cache_key, cached_payload):
                         _MCP_MANIFEST_CACHE = None
-            raise ValueError from None
+            # A status the table does not name -- 70, a crash, or a runner that
+            # reported none -- is a refusal still, just an unclassified one.
+            refusal = _MCP_BUILDER_REFUSALS.get(exc.returncode or 0, _MCP_REFUSAL_UNCLASSIFIED)
+            raise _McpManifestRefused(refusal, exc) from None
         raise
     if len(result.stdout) + len(result.stderr) > _MCP_OUTPUT_LIMIT_BYTES:
         raise ProbeProcessError("output_limit")
@@ -1988,8 +2124,17 @@ def probe_mcp(
         # carried as a number.
         _record_probe_diagnostics(root, exc.code, exc)
         return _degraded_probe("deep_mcp", "MCP", exc.code)
-    except Exception:
-        _record_probe_diagnostics(root, "probe_failed")
+    except _McpManifestRefused as exc:
+        # Its own incident code, not `probe_failed`: that fingerprint was acked
+        # long ago, and an ack never re-opens, so a refusal recorded under it
+        # would only raise a count nobody reads.
+        _record_probe_diagnostics(root, "manifest_refused", exc.transport, reason=exc.refusal)
+        return _manifest_refused_probe(exc.refusal)
+    except Exception as exc:
+        # Still unexplained to the reader, but no longer to the ledger: the type
+        # separates a parent-side refusal (ValueError, OSError) from a bug in
+        # this probe, which used to look exactly like one.
+        _record_probe_diagnostics(root, "probe_failed", reason=type(exc).__name__)
         return _degraded_probe("deep_mcp", "MCP", "probe_failed")
 
     try:

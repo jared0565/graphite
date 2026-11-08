@@ -59,6 +59,16 @@ def test_error_carries_only_numeric_observations() -> None:
     assert ProbeProcessError("timeout", os_error="1").os_error is None  # type: ignore[arg-type]
 
 
+def test_error_carries_the_exit_status_as_a_number_and_never_in_the_message() -> None:
+    """The status names WHICH refusal a bootstrap made; it is safe as a number."""
+    error = ProbeProcessError("nonzero", returncode=73)
+    assert error.returncode == 73
+    assert str(error) == "probe process failed: nonzero"
+    assert ProbeProcessError("nonzero").returncode is None
+    assert ProbeProcessError("nonzero", returncode=True).returncode is None
+    assert ProbeProcessError("nonzero", returncode="73").returncode is None  # type: ignore[arg-type]
+
+
 def test_error_reports_a_failed_cleanup_beside_the_code_not_instead_of_it() -> None:
     error = ProbeProcessError("nonzero", cleanup_failed=True)
     assert (error.code, error.cleanup_failed) == ("nonzero", True)
@@ -213,6 +223,8 @@ def test_run_raises_nonzero_when_checked_and_returns_it_when_not(tmp_path: Path)
     with pytest.raises(ProbeProcessError) as info:
         run_bounded_process(argv, cwd=tmp_path, timeout_seconds=30)
     assert info.value.code == "nonzero"
+    # The status crosses on the raise too, which is what lets a refusal say why.
+    assert info.value.returncode == 3
     assert run_bounded_process(argv, cwd=tmp_path, timeout_seconds=30, check=False).returncode == 3
 
 

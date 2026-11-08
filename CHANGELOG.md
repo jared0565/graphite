@@ -24,16 +24,40 @@ interpreter's package-metadata roots. It skipped the root that holds graphite
 itself — an exemption meant only for graphite probing its own checkout, whose
 source sits inside the repository being probed. pip's usual layout puts
 graphite, `mcp` and `networkx` in one site-packages, and there skipping that
-root left `mcp` and `networkx` with no installed copy at all. The probe refused before the server ever started, and
-said `probe_failed` with nothing to explain it. The MCP server itself was
-never affected. The test suite runs from the source tree, where the
-dependencies live elsewhere, so it never saw this.
+root left `mcp` and `networkx` with no installed copy at all. The probe
+refused before the server ever started, and said `probe_failed` with nothing
+to explain it. The MCP server itself was never affected. The test suite runs
+from the source tree, where the dependencies live elsewhere, so it never saw
+this — and nothing exercised an installed wheel's MCP server either. CI now
+installs every commit's wheel with the `mcp` extra and requires the deep
+probe to read `ready` from it.
 
 The exemption now applies only where it was meant to: the root holding
 graphite is skipped only when it lies inside the selected repository.
 Anywhere else it is read like any other root. One consequence follows from
 the rule every other root already obeys: a dependency installed both there
 and in another root now has two candidates, and the probe refuses it.
+
+**A deep MCP probe that refuses now says why.** Every refusal the probe made
+while building its dependency manifest used to read `probe_failed`, with each
+diagnostic field in the incident ledger `<none>` — which is how the failure
+above went unnoticed. The report now names the cause and the remedy: a
+dependency of the MCP server is not installed, is installed twice, an
+environment with installed packages sits inside the repository being checked,
+or graphite's installation changed while the probe ran. `details` still read
+`{"code": "probe_failed"}`; the reason is in the summary and the remediation.
+The ledger records each refusal as `deep_mcp_manifest_refused` with the reason
+and the builder's exit status, a failure nothing classified records its
+exception type, and a `deep_mcp_nonzero` incident now carries the child's exit
+status instead of `returncode=<none>`. Nothing the probe's child process
+writes reaches a report: the reason crosses as an exit status and is named by
+graphite itself.
+
+**`doctor` says when an acknowledged incident has happened again.** An ack
+never re-opens an incident — only a resolve does — so an incident that kept
+recurring after it was acked showed nothing but a rising count. The incident
+check's summary now ends `, N recurred since ack`, and its remediation lists
+them. The check's status is unchanged: it still turns only on open incidents.
 
 ## [1.9.2] — 2026-11-05
 

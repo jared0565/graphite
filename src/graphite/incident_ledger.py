@@ -183,6 +183,32 @@ class IncidentView:
         }
 
 
+def recurred_since_ack(entries: list[dict[str, Any]]) -> frozenset[str]:
+    """Fingerprints whose latest triage is an ack, seen again after it.
+
+    An ack never re-opens: only a resolve does (`fold_incidents`). So an
+    incident that keeps happening after it was acked shows nothing but a rising
+    count, and acks were written in the belief that a recurrence would re-open
+    them. Measured on this repository's own ledger: three acked incidents had
+    recurred unseen, one of them 41 times. Same ordering and comparison as
+    `fold_incidents`, so the two cannot disagree about what came after what.
+    """
+    last_occurrence: dict[str, str] = {}
+    last_triage: dict[str, tuple[str, str]] = {}
+    for e in entries:
+        fp = str(e["fingerprint"])
+        ts = str(e.get("ts", ""))
+        if e.get("kind") == "occurrence":
+            last_occurrence[fp] = ts
+        else:
+            last_triage[fp] = (str(e["kind"]), ts)
+    return frozenset(
+        fp
+        for fp, (kind, ts) in last_triage.items()
+        if kind == "ack" and last_occurrence.get(fp, "") > ts
+    )
+
+
 def fold_incidents(entries: list[dict[str, Any]]) -> list[IncidentView]:
     """Group chronologically-ordered entries into per-fingerprint views."""
     slots: dict[str, dict[str, Any]] = {}
