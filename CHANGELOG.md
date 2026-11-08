@@ -13,7 +13,12 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
-## [Unreleased]
+## [1.9.4] — 2026-11-08
+
+A patch release: one fix, and no change to any command, option, exit code,
+entry point or published schema. Which folders a command or an agent session
+registers with the daemon is not a stable surface (`docs/compatibility.md`),
+and `graphite activate` is unchanged.
 
 ### Fixed
 
