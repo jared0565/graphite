@@ -5,6 +5,7 @@ own build children are excluded, or activation would renew itself forever.
 """
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,10 @@ import pytest
 from graphite import activation
 from graphite.config import Config
 from graphite.daemon import _build_command
+
+
+def _git_init(directory: Path) -> None:
+    subprocess.run(["git", "init", "--quiet", str(directory)], check=True, capture_output=True)
 
 
 def test_daemon_build_children_run_with_the_suppression_flag(tmp_path: Path) -> None:
@@ -98,24 +103,26 @@ def test_backstop_ignores_graphite_scratch_workspaces(
 
     Opportunistic marking is conservative; explicit activation (`graphite
     activate`, agent hooks) is trusted and still honoured -- see the test below.
-    """
-    import tempfile
 
+    The workspace is a git checkout, which the backstop WOULD register: only the
+    prefix rule stands between it and a marker, so this fails if that rule goes.
+
+    It lives under `tmp_path`, never `tempfile.mkdtemp`: the test runs inside
+    it, and removing a directory that is still the working directory fails on
+    Windows. `rmtree(..., ignore_errors=True)` hid that, and every run left an
+    empty `graphite-doctor-*` directory in the system temp dir.
+    """
     from graphite.cli import main
 
-    scratch = Path(tempfile.mkdtemp(prefix="graphite-doctor-"))
-    try:
-        (scratch / "src").mkdir()
-        (scratch / "src" / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
-        monkeypatch.chdir(scratch)
+    scratch = tmp_path / "graphite-doctor-probe"
+    (scratch / "src").mkdir(parents=True)
+    (scratch / "src" / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    _git_init(scratch)
+    monkeypatch.chdir(scratch)
 
-        main(["build", "."])
+    main(["build", "."])
 
-        assert activation.read_active() == []
-    finally:
-        import shutil
-
-        shutil.rmtree(scratch, ignore_errors=True)
+    assert activation.read_active() == []
 
 
 def test_explicit_activation_of_a_temp_path_is_still_honoured(tmp_path: Path) -> None:
