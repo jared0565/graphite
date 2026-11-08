@@ -400,14 +400,48 @@ jobs:
         # GitHub runs `shell: bash` as `bash -eo pipefail`, so a non-zero
         # doctor would abort the step before the report is even printed;
         # the status is captured explicitly instead.
+        #
+        # A FAILED DOWNLOAD IS RETRIED; nothing else is. `doctor --fix`
+        # fetches gitleaks from GitHub's release-download path, and on
+        # 2026-11-08 that path failed intermittently for hours while the API
+        # served the same files: every attempt of this step spent about 66 s,
+        # then printed `could not download gitleaks: The read operation timed
+        # out` and gitleaks MISSING. Two PR runs failed here and passed on a
+        # rerun about five minutes later (11:32 -> 11:37Z, 10:50 -> 10:56Z).
+        # The tag run failed four reruns in a row across 13 minutes, which a
+        # retry inside one job cannot ride out. So this re-runs `doctor --fix`
+        # after 30, 60, 120 and 180 s (five attempts, about 11 minutes)
+        # ONLY while a BLOCK-tier tool is missing AND doctor said it could not
+        # download one. Any other missing tool fails on the first attempt,
+        # as before. If aramid rewords that message, the retry stops firing
+        # and the step fails exactly as it did before this retry existed.
+        # Every retry is a ::warning::, so a run that went green on a later
+        # attempt still says so in its summary. A download that half-landed
+        # and reads as present is caught downstream: both gates run
+        # `--strict` and assert gitleaks in `tools_ran` with nothing degraded.
         run: |
-          status=0
-          aramid doctor --fix > doctor.txt 2>&1 || status=$?
-          echo "doctor exit status: $status"
-          cat doctor.txt
-          if grep -qE '^\s+MISSING\s+(gitleaks|semgrep|ruff|pip-audit|tests|interpreter)\b' doctor.txt; then
-            echo "::error::a BLOCK-tier tool is missing on the runner"; exit 1
-          fi
+          missing='^\s+MISSING\s+(gitleaks|semgrep|ruff|pip-audit|tests|interpreter)\b'
+          delays=(30 60 120 180)
+          attempt=1
+          while :; do
+            status=0
+            aramid doctor --fix > doctor.txt 2>&1 || status=$?
+            echo "doctor attempt $attempt exit status: $status"
+            cat doctor.txt
+            if ! grep -qE "$missing" doctor.txt; then
+              break
+            fi
+            if ! grep -q 'could not download' doctor.txt; then
+              echo "::error::a BLOCK-tier tool is missing on the runner"; exit 1
+            fi
+            if [ "$attempt" -gt "${#delays[@]}" ]; then
+              echo "::error::a BLOCK-tier tool is missing on the runner (download failed on all $attempt attempts)"; exit 1
+            fi
+            delay="${delays[$((attempt - 1))]}"
+            echo "::warning::doctor --fix could not download a BLOCK-tier tool (attempt $attempt); retrying in ${delay}s"
+            sleep "$delay"
+            attempt=$((attempt + 1))
+          done
       - name: Pre-commit gate (gitleaks, ruff security rules, shadow)
         shell: bash
         run: |
