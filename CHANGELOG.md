@@ -36,9 +36,13 @@ A home directory is the same case.
 
 Such a folder now registers only where graphite is set up: it has a graph,
 or the `GRAPHITE.md` that `init` writes. A drive or filesystem root never
-does. A checkout's root still registers itself, set up or not, which is how
-a fresh clone gets its first graph. A folder below a checkout's root still
-registers nothing.
+does, not even one holding `.git`, since a stray `.git` there is still the
+whole drive; `trusted_root` already refuses such a root for the same reason.
+The price: a repository whose root really is a drive root no longer
+registers from a command or a session, and is registered with
+`graphite activate` instead. A checkout's root anywhere else still registers
+itself, set up or not, which is how a fresh clone gets its first graph. A
+folder below a checkout's root still registers nothing.
 
 The agent hooks follow the same rule from one shared definition. A session's
 `cwd` follows a `cd` in the shell, and `Stop` renews the marker every turn,

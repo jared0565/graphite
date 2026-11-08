@@ -686,6 +686,20 @@ def test_a_drive_or_filesystem_root_never_registers(monkeypatch: pytest.MonkeyPa
     assert ingest.activation_root(tmp_path) == tmp_path
 
 
+def test_a_drive_or_filesystem_root_holding_git_never_registers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A stray `.git` at a drive root is still the whole drive. Every directory
+    is made to read as a checkout's root, so only the order of the root rule
+    -- asked before the git-root branch -- can refuse the anchor. The control
+    is a checkout's root that is not a drive root: it still registers."""
+    monkeypatch.setattr(ingest, "enclosing_git_root", lambda path: path)
+    anchor = Path(tmp_path.anchor)
+
+    assert ingest.activation_root(anchor) is None
+    assert ingest.activation_root(tmp_path) == tmp_path
+
+
 def test_the_hooks_register_nothing_in_a_folder_of_no_repository_not_set_up(tmp_path: Path) -> None:
     """The same rule on the hook path: a session's `cwd` follows a `cd`, and
     `Stop` renews its marker every turn."""

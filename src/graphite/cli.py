@@ -3705,11 +3705,12 @@ def main(argv: list[str] | None = None) -> int:
     #
     # What is registered is the REPOSITORY the command is typed in, not the
     # directory (#81), and `ingest.activation_root` decides it for this path
-    # and for `agent_hooks._activate` alike: a checkout's root; nothing for a
+    # and for `agent_hooks._activate` alike: never a drive or filesystem root,
+    # not even one holding `.git`; otherwise a checkout's root; nothing for a
     # folder below a root, where no build can run; and a folder in no
-    # repository only where graphite is set up there, never a drive or
-    # filesystem root. Registering any folder a command ran in put a whole
-    # drive under supervision when a command was typed at its root.
+    # repository only where graphite is set up there. Registering any folder
+    # a command ran in put a whole drive under supervision when a command was
+    # typed at its root.
     if args.command not in _ACTIVATION_EXEMPT_COMMANDS and not _is_scratch_workspace(Path.cwd()):
         opened = activation_root(Path.cwd())
         if opened is not None:
