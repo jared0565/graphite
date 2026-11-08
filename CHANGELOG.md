@@ -13,6 +13,42 @@ machine-checkable identity; the version is for humans.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 
+## [Unreleased]
+
+### Fixed
+
+**A command or agent session in a folder that is in no repository no longer
+puts that folder under daemon supervision unless graphite is set up there,
+and a drive or filesystem root never.** The CLI registers the repository a
+command is typed in, so agents graphite cannot hook still get their
+repository supervised. For a folder in no Git repository at all, it
+registered the folder itself, whatever it was. A command typed in a drive
+root, which is where release deploy steps run to keep a checkout off
+`sys.path`, put the whole drive under supervision. Every build of it then
+timed out after the daemon's 240-second limit and was retried, for the hour
+until the marker expired. One machine's records show it four times, each on
+a release day:
+- three episodes ran for about an hour, with 17, 14 and 14 timed-out builds;
+- the fourth, caused by commands run from the drive root after a deploy, was
+  cut short at 4 when its marker was removed.
+
+A home directory is the same case.
+
+Such a folder now registers only where graphite is set up: it has a graph,
+or the `GRAPHITE.md` that `init` writes. A drive or filesystem root never
+does. A checkout's root still registers itself, set up or not, which is how
+a fresh clone gets its first graph. A folder below a checkout's root still
+registers nothing.
+
+The agent hooks follow the same rule from one shared definition. A session's
+`cwd` follows a `cd` in the shell, and `Stop` renews the marker every turn,
+so a session that wandered to a drive root would keep the drive supervised
+for as long as it stayed there. `graphite activate` names its path and is
+still believed as given.
+
+In a folder outside any repository that has no graph yet, the `build` that
+makes the first graph registers nothing, and the next command does.
+
 ## [1.9.3] — 2026-11-08
 
 A patch release: three fixes, and no change to any command, option, exit

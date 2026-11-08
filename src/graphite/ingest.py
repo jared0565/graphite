@@ -248,6 +248,9 @@ def repository_root(directory: Path) -> Path:
     is asked last: the hooks ask for the root at every tool call.
 
     Never raises: a directory that cannot be read stands for itself.
+
+    This answers where a session or command READS. What it may REGISTER with
+    the daemon is narrower, and `activation_root` decides that.
     """
     try:
         top = enclosing_git_root(directory)
@@ -258,6 +261,39 @@ def repository_root(directory: Path) -> Path:
     except OSError:
         pass
     return directory
+
+
+def activation_root(directory: Path) -> Path | None:
+    """The directory a session or command in `directory` registers as open, or
+    None for nothing.
+
+    Asked by the two paths that INFER activation from where they run: the
+    CLI's backstop and the agent hooks. `graphite activate` names its path and
+    is believed as given, so it does not ask.
+
+    - A checkout's root registers itself, set up or not. That is how a fresh
+      clone gets its first graph.
+    - A folder below a checkout's root registers nothing. No build can run
+      there (#80, #81), so the daemon would fail on the marker at every cycle.
+    - A folder in no repository registers itself only where graphite is set
+      up there (a graph, or `GRAPHITE.md`), and a drive or filesystem root
+      never does. Registering whatever folder a command ran in handed the
+      daemon that folder to build: a command typed in a drive root put the
+      whole drive under supervision, and every build of it timed out until
+      the marker expired an hour later. A home directory is the same case.
+
+    Never raises: a directory that cannot be read registers nothing.
+    """
+    try:
+        root = repository_root(directory)
+        top = enclosing_git_root(root)
+        if top is not None:
+            return root if top == root else None
+        if root.parent == root or _resolved(root).parent == _resolved(root):
+            return None
+        return root if _is_set_up(root) else None
+    except OSError:
+        return None
 
 
 def _git_ls_files(

@@ -23,7 +23,7 @@ from .graph import edge_relations
 from .graph_io import load_validated_graph_bundle
 from .health import _edge_language, is_placeholder, persisted_resolution
 from .incident_ledger import record_incident, repo_ledger_dir
-from .ingest import enclosing_git_root, repository_root
+from .ingest import activation_root, repository_root
 from .query import _CALL_RELATIONS
 
 SESSION_CONTRACT = (
@@ -77,18 +77,24 @@ def _activate(root: Path) -> None:
     """Register this repo as open, so the daemon supervises it and leaves the
     rest of the machine alone.
 
-    A directory below a checkout's root is never registered. No build can run
-    there (`ingest` refuses it), so the daemon would fail on it at every
-    discovery cycle for as long as the marker lived.
+    What is registered is `ingest.activation_root`'s answer, the rule the
+    CLI's backstop uses too. A directory below a checkout's root is never
+    registered: no build can run there, so the daemon would fail on it at
+    every discovery cycle for as long as the marker lived. A folder in no
+    repository is registered only where graphite is set up there, and a drive
+    or filesystem root never is. The payload's `cwd` follows a `cd` in the
+    shell and `Stop` renews the marker every turn, so a session that wandered
+    to a drive root would otherwise keep the whole drive under supervision.
 
     Guarded separately from the caller's own try/except: activation is
     bookkeeping, and this module is fail-open by contract -- a broken registry
     must never cost the agent its session context or its graph-first reminder.
     """
     try:
-        if enclosing_git_root(root) not in (None, root):
+        opened = activation_root(root)
+        if opened is None:
             return
-        mark_active(root, "claude")
+        mark_active(opened, "claude")
     except Exception:
         return
 

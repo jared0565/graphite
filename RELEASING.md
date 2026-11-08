@@ -437,6 +437,15 @@ readback. Until 1.9.3 the readback stopped at the version, so an MCP probe that 
 on every run with mcp beside graphite shipped unseen in every wheel from 0.3.0, the first
 one deployed, through 1.9.2.
 
+Run every `graphite` command of a readback from a repository, as `python -P -m graphite`
+so the working directory cannot shadow the package. The `python -c` checks above are the
+only part to run from a neutral directory. Through 1.9.3 a `graphite` command typed in a
+folder that is in no repository registered that folder as open: typed in a drive root --
+where deploy steps run to keep the checkout off `sys.path` -- it put the whole drive under
+daemon supervision, and every build of it timed out until the marker expired an hour
+later. A release with the fix no longer does that, but the installed version during a
+deploy is the old one, so the rule holds for the readback either way.
+
 Prove a rollback path in a throwaway virtual environment before relying on it,
 and prove the return as well. An untested recovery step is not a recovery step.
 
